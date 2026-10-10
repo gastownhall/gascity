@@ -88,10 +88,13 @@ type factsSite struct {
 
 // The keys of a legacy drain's basis: the incarnation, the operator's intent
 // and the operator's requests. Not the drain's own lifecycle writes, nor the
-// counters and markers the controller keeps while it drains.
+// counters and markers the controller keeps while it drains. Not held_until:
+// an agent's heartbeat writes it alone, and must not void a drain (#3994);
+// an operator's hold is told by sleep_intent=user-hold, which a suspend
+// writes beside it.
 var drainBasisKeys = []string{
 	"generation", "instance_token",
-	"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at", "sleep_reason",
+	"sleep_intent", "wait_hold", "quarantined_until", "suspended_at", "sleep_reason",
 	"wake_request", "restart_requested",
 }
 
@@ -115,11 +118,11 @@ var factsSites = map[FactsSite]factsSite{
 	},
 	FactsLegacyStopPending: {
 		Only:   drainBasisKeys,
-		Reason: "a drain stops the incarnation it began on, for the operator intent and requests it began under: a resume that consumed the hold, a suspend, a wake or restart request, or a new incarnation voids it (SR3-1, SR2-1); the drain's own state, drain_at and the controller's counters and markers move while it runs and do not",
+		Reason: "a drain stops the incarnation it began on, for the operator intent and requests it began under: a resume that consumed the hold, a suspend, a wake or restart request, or a new incarnation voids it (SR3-1, SR2-1); the drain's own state, drain_at, an agent's heartbeat and the controller's counters and markers move while it runs and do not",
 	},
 	FactsLegacyDrainStop: {
-		Only:   append([]string{"state", "state_reason"}, drainBasisKeys...),
-		Reason: "the async stop and the escalation kill a row still stop-pending on the basis its mark landed on",
+		Only:   []string{"state", "state_reason", "generation", "instance_token"},
+		Reason: "the async stop and the escalation kill the incarnation that is still stop-pending; the mark already judged the operator's intent, and a resume cannot take a stop-pending row out (ErrSessionStopping)",
 	},
 	FactsLegacyResetEvict: {
 		Only:   []string{"continuation_reset_pending", "reset_committed_at"},
@@ -131,11 +134,13 @@ var factsSites = map[FactsSite]factsSite{
 func (s FactsSite) Match(fresh, expect Facts) bool { return len(s.Moved(fresh, expect)) == 0 }
 
 // Moved names what keeps fresh from being expect as site compares them: the
-// keys whose values differ, and "state" when the site wants another state.
+// keys whose values differ, and "state" when the site wants another state or
+// (NoWake) fresh is live where expect was not.
 func (s FactsSite) Moved(fresh, expect Facts) []string {
 	e := factsSites[s]
 	var moved []string
-	if len(e.States) > 0 && !slices.Contains(e.States, strings.TrimSpace(fresh.get("state"))) {
+	if len(e.States) > 0 && !slices.Contains(e.States, strings.TrimSpace(fresh.get("state"))) ||
+		e.NoWake && liveMetadataState(fresh.get("state")) && !liveMetadataState(expect.get("state")) {
 		moved = append(moved, "state")
 	}
 	f, x := fresh.under(e), expect.under(e)

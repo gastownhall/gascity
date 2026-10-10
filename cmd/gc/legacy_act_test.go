@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,8 +99,8 @@ func TestDrainAckControlCaseMarksStopPending(t *testing.T) {
 // TestDrainAckStaleSnapshotOverAConsumedHoldIsRefused is SR3-1: the tick
 // decided on a snapshot read before an operator's resume consumed the hold.
 // The stop-pending mark must not land over the resumed row, whether the
-// drain is the controller's (its basis) or the agent's own ack (the tick's
-// snapshot).
+// controller still tracks its drain (decided on the drain's basis) or lost
+// the tracker entry, a controller restart (decided on the tick's snapshot).
 func TestDrainAckStaleSnapshotOverAConsumedHoldIsRefused(t *testing.T) {
 	for _, tracked := range []bool{true, false} {
 		env, snapshot, work, dops := heldDrainAckFixture(t, tracked)
@@ -206,17 +208,37 @@ func TestBeginIdleRespawnDrainIfIdleDecidesOnItsRow(t *testing.T) {
 
 // TestDrainTimeoutOverAConsumedHoldIsRefused is the two-tick race on the
 // drain's timeout kill: the tick reads the resumed row, but the kill executes
-// against the drain's basis, so it refuses and the void drain is dropped.
+// against the drain's basis, so it refuses and the void drain is dropped with
+// its reconciler-owned ack; a following tick stops nothing. An agent's own
+// ack outlives the void drain.
 func TestDrainTimeoutOverAConsumedHoldIsRefused(t *testing.T) {
-	env, snapshot, _, _ := heldDrainAckFixture(t, true)
-	operatorResume(t, env, snapshot.ID)
-	env.clk.Advance(2 * time.Minute) // past the drain's deadline
-	advanceSessionDrainsWithSessionsTraced("", env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
-		return env.sessionInfo(id), id == snapshot.ID
-	}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
-	assertNotStopPending(t, env, snapshot.ID)
-	if env.dt.get(snapshot.ID) != nil {
-		t.Fatal("the void drain is still tracked")
+	for _, agent := range []bool{false, true} {
+		env, snapshot, work, _ := heldDrainAckFixture(t, true)
+		if agent {
+			agentAck(t, env)
+		}
+		operatorResume(t, env, snapshot.ID)
+		env.clk.Advance(2 * time.Minute) // past the drain's deadline
+		advanceSessionDrainsWithSessionsTraced("", env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
+			return env.sessionInfo(id), id == snapshot.ID
+		}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
+		assertNotStopPending(t, env, snapshot.ID)
+		if env.dt.get(snapshot.ID) != nil {
+			t.Fatalf("agent %v: the void drain is still tracked", agent)
+		}
+		ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK")
+		if agent {
+			if ack != "1" {
+				t.Fatal("the void drain erased the agent's own ack")
+			}
+			continue
+		}
+		if ack == "1" {
+			t.Fatal("the void drain's ack is still set")
+		}
+		// The next tick reads the provider's ack through the production drain ops.
+		reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, newDrainOps(env.sp))
+		assertNotStopPending(t, env, snapshot.ID)
 	}
 }
 
@@ -302,5 +324,110 @@ func TestDrainAckOverANewIncarnationIsRefused(t *testing.T) {
 		if isDrainAckStopPendingInfo(env.sessionInfo(snapshot.ID)) || env.sp.CountCalls("Stop", "worker") != 0 {
 			t.Fatalf("tracked %v: row %v, stops %d; want the new incarnation unmarked and unstopped", tracked, mustGetBead(t, env.store, snapshot.ID).Metadata, env.sp.CountCalls("Stop", "worker"))
 		}
+	}
+}
+
+// agentAck turns the fixture's ack into the agent's own: `gc runtime
+// drain-ack` through the production drain ops, which overwrite the source.
+func agentAck(t *testing.T, env *reconcilerTestEnv) drainOps {
+	t.Helper()
+	dops := newDrainOps(env.sp)
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatal(err)
+	}
+	return dops
+}
+
+// heartbeat is `gc runtime heartbeat`: the agent's held_until.
+func heartbeat(t *testing.T, env *reconcilerTestEnv) {
+	t.Helper()
+	var stderr strings.Builder
+	if rc := doRuntimeHeartbeat(env.store, time.Hour, "worker", "worker", false, io.Discard, &stderr); rc != 0 {
+		t.Fatalf("heartbeat rc %d: %s", rc, stderr.String())
+	}
+}
+
+func assertStopPending(t *testing.T, env *reconcilerTestEnv, id string) {
+	t.Helper()
+	if !isDrainAckStopPendingInfo(env.sessionInfo(id)) {
+		t.Fatalf("row %v; stderr %q; want stop-pending", mustGetBead(t, env.store, id).Metadata, env.stderr.String())
+	}
+}
+
+// TestAgentDrainAckIsDecidedOnTheCurrentRow: an agent's own ack over a drain
+// the controller still tracks is the agent's decision, made on the row as it
+// is now. A heartbeat or a wake request that moved the row since the
+// controller's drain began neither voids nor erases it: the row is marked.
+func TestAgentDrainAckIsDecidedOnTheCurrentRow(t *testing.T) {
+	for name, move := range map[string]func(t *testing.T, env *reconcilerTestEnv, id string){
+		"heartbeat": func(t *testing.T, env *reconcilerTestEnv, _ string) { heartbeat(t, env) },
+		"wake request": func(t *testing.T, env *reconcilerTestEnv, id string) {
+			if err := sessionFrontDoor(env.store).ApplyPatch(id, sessionpkg.MetadataPatch{"wake_request": "explicit"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env, snapshot, work, _ := drainAckFixture(t, true, false)
+			dops := agentAck(t, env)
+			move(t, env, snapshot.ID)
+			reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)
+			assertStopPending(t, env, snapshot.ID)
+			source, _ := env.sp.GetMeta("worker", reconcilerDrainAckSourceKey)
+			if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" || source != drainAckSourceAgentValue {
+				t.Fatalf("ack %q source %q; want the agent's ack kept", ack, source)
+			}
+		})
+	}
+}
+
+// TestDrainMidDrainHeartbeatAndSuspend: the controller's drain rests on the
+// operator's intent, not on held_until. A heartbeat mid-drain (held_until
+// alone, #3994) leaves the drain to stop the row; an operator's suspend
+// mid-drain voids it.
+func TestDrainMidDrainHeartbeatAndSuspend(t *testing.T) {
+	env, snapshot, work, dops := drainAckFixture(t, true, false)
+	heartbeat(t, env)
+	reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)
+	assertStopPending(t, env, snapshot.ID)
+
+	env, snapshot, work, dops = drainAckFixture(t, true, false)
+	if err := sessionFrontDoor(env.store).OperatorSuspend(snapshot.ID, env.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)
+	if isDrainAckStopPendingInfo(env.sessionInfo(snapshot.ID)) || env.dt.get(snapshot.ID) != nil {
+		t.Fatalf("row %v, drain %+v; want the suspend to void the drain", mustGetBead(t, env.store, snapshot.ID).Metadata, env.dt.get(snapshot.ID))
+	}
+}
+
+// TestIdleRespawnOverAnIdleStopPendingIntentKeepsItsBasis: a respawn that
+// begins while the row still carries the idle drain's idle-stop-pending
+// intent clears it in its own write, so the tick's later clear does not
+// void the respawn's basis.
+func TestIdleRespawnOverAnIdleStopPendingIntentKeepsItsBasis(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now().UTC()}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "w", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: "w", Generation: "1", SleepIntent: "idle-stop-pending", DetachedAt: clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)}
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "60s", Capability: runtime.SessionSleepCapabilityFull, Duration: time.Minute}
+	eval := wakeEvaluation{Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy, AssignedWorkBeadID: "work-1"}
+	sessFront := idleRespawnUnitStore(t, info)
+	if err := sessFront.ApplyPatch(info.ID, sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}); err != nil {
+		t.Fatal(err)
+	}
+	dt := newDrainTracker()
+	probe := dt.startIdleProbe(info.ID)
+	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
+	if began, _, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk); err != nil || !began {
+		t.Fatalf("begin = %v, %v; want begun", began, err)
+	}
+	if err := sessFront.ApplyPatch(info.ID, sessionpkg.MetadataPatch{"sleep_intent": ""}); err != nil { // the tick's clear
+		t.Fatal(err)
+	}
+	if holds, err := sessFront.Holds(dt.get(info.ID).basis); err != nil || !holds {
+		t.Fatalf("the respawn's basis (sleep_intent %q) does not hold after the tick's clear: %v", dt.get(info.ID).basis.Info().SleepIntent, err)
 	}
 }

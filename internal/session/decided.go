@@ -116,8 +116,11 @@ func (r CommitResult) String() string {
 // attempts. A store without conditional writes is read, matched and written,
 // with the window between the read and the write left open.
 func (s *Store) Commit(d Decided, patch MetadataPatch) (CommitResult, error) {
-	if d.info.ID == "" {
+	switch {
+	case d.info.ID == "":
 		return 0, errors.New("session: commit of a zero decision")
+	case len(patch) == 0:
+		return 0, errors.New("session: commit of an empty patch")
 	}
 	return s.commitIf(d.info.ID, patch, nil, startCommitMaxAttempts, s.freshBead, func(b beads.Bead) bool {
 		return d.Match(infoFromPersistedBead(b))

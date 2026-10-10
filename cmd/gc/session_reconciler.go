@@ -195,14 +195,15 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 // (write-returns-Info, Step 6d), so the two callers assign it directly, and
 // the decision the async stop executes against.
 //
-// The mark is decided on the drain's basis when the controller began the
-// drain (drainState.basis), and on info otherwise (an agent's own ack, or a
-// drain the tracker lost). A tick decides on its snapshot, but the mark lands
+// The mark is decided on the drain's basis when the ack is the controller's
+// own and the controller still tracks its drain (drainState.basis), and on
+// info otherwise (an agent's own ack, or a drain the tracker lost). A tick decides on its snapshot, but the mark lands
 // only while the row still carries the deciding facts, so a stale snapshot's
 // decision never executes: an operator's resume that consumed the hold the
 // drain began under refuses it (SR3-1), on this tick or a later one (SR2-1).
-// A tracked drain whose basis moved is void: its reconciler-owned ack and
-// tracker entry are cleared and the runtime left up. On a deferral or a
+// A controller drain whose basis moved is void: its reconciler-owned ack
+// and tracker entry are cleared and the runtime left up. An agent's ack is
+// never cleared here. On a deferral or a
 // refusal the input Info is returned unchanged with a false ok, so the caller
 // skips the fold and the stop.
 func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps, dt *drainTracker, clk clock.Clock) (sessionpkg.Info, sessionpkg.Decided, bool) {
@@ -216,8 +217,10 @@ func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps,
 	if name == "" {
 		name = info.ID
 	}
+	// The controller's drain basis decides only the controller's own ack. An
+	// agent's ack is the agent's decision, made on the row as it is now.
 	d, tracked := sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), false
-	if dt != nil {
+	if _, owned := reconcilerDrainAckMatchesSessionInfo(info, act.sp, name); owned && dt != nil {
 		if ds := dt.get(info.ID); ds != nil {
 			d, tracked = ds.basis, true
 		}
@@ -6976,6 +6979,11 @@ func beginIdleRespawnDrainIfIdle(
 	patch := sessionpkg.MetadataPatch{
 		idleRespawnAttemptsMetadataKey: "1",
 		idleRespawnBeadIDMetadataKey:   strings.TrimSpace(eval.AssignedWorkBeadID),
+	}
+	if info.SleepIntent == "idle-stop-pending" {
+		// The tick clears the idle intent after this (clearIdleStopPending):
+		// clear it here, so the drain's basis is the row the tick leaves.
+		patch["sleep_intent"] = ""
 	}
 	if sessFront == nil {
 		return false, nil, errors.New("session store is unavailable")

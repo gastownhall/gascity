@@ -854,8 +854,10 @@ func advanceSessionDrainsWithSessionsTraced(
 					// Session was re-woken by a different incarnation, or the
 					// row left the basis the drain began on (a resume, a
 					// suspend, a request). This drain is stale — cancel it.
+					// Only the controller's own ack goes with it; an agent's
+					// ack is the agent's decision.
 					dt.clearIdleProbe(id)
-					if ds.ackSet {
+					if _, owned := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ds.ackSet && owned {
 						_ = clearReconcilerDrainAckMetadata(sp, name)
 					}
 					dt.remove(id)

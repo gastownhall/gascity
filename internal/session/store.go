@@ -198,7 +198,7 @@ func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatc
 // revision; a fence lost to another writer re-reads, up to attempts times.
 func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
-		return CommitMoved, nil
+		return 0, nil // nothing to write
 	}
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {

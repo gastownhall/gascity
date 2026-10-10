@@ -91,6 +91,8 @@ func TestDecidedMatch(t *testing.T) {
 		{site: FactsLegacyStopPending, move: map[string]string{"suspended_at": "2026-01-01T00:00:00Z"}},
 		{site: FactsLegacyStopPending, move: map[string]string{"sleep_reason": "user-hold"}},
 		{site: FactsLegacyStopPending, move: map[string]string{"wake_request": "1"}},
+		// An agent's heartbeat writes held_until alone (#3994).
+		{site: FactsLegacyStopPending, move: map[string]string{"held_until": "2099-01-01T00:00:00Z"}, wantMatch: true},
 		{site: FactsLegacyStopPending, move: map[string]string{"restart_requested": "true"}},
 		// The drain's own writes, and what the controller keeps while it drains.
 		{site: FactsLegacyStopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "drain_at": "x"}, wantMatch: true},
@@ -101,7 +103,9 @@ func TestDecidedMatch(t *testing.T) {
 		{site: FactsLegacyDrainStop, decided: stopPending, move: stopPending, wantMatch: true},
 		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateActive)}},
 		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": "idle"}},
-		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "sleep_intent": "user-hold"}},
+		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "sleep_intent": "user-hold"}, wantMatch: true},
+		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "generation": "3"}},
+		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "instance_token": "tok-2"}},
 		{site: FactsLegacyDrainStop, decided: stopPending, move: map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason, "drain_at": "y"}, wantMatch: true},
 
 		{site: FactsLegacyResetEvict, wantMatch: true},
@@ -136,6 +140,21 @@ func TestDecidedMatch(t *testing.T) {
 	}
 }
 
+// TestFactsSiteMatchHonoursNoWake: a NoWake site refuses a row decided
+// dormant that is live now in F2's Facts form too.
+func TestFactsSiteMatchHonoursNoWake(t *testing.T) {
+	asleep := FactsOf(map[string]string{"generation": "1", "state": string(StateAsleep)})
+	for _, c := range []struct {
+		state string
+		match bool
+	}{{string(StateActive), false}, {string(StateSuspended), true}} {
+		fresh := FactsOf(map[string]string{"generation": "1", "state": c.state})
+		if got := FactsLegacyKill.Match(fresh, asleep); got != c.match {
+			t.Errorf("decided asleep, fresh %s: Match = %v, want %v", c.state, got, c.match)
+		}
+	}
+}
+
 // TestCommitRefusesAStaleStopPendingOverAConsumedHold is SR3-1 at the store:
 // a drain begun on a held row marks stop-pending only while the hold stands.
 // An operator's resume consumed it after the decision's read, so the mark
@@ -166,6 +185,9 @@ func TestCommitRefusesAStaleStopPendingOverAConsumedHold(t *testing.T) {
 			// consume another process wrote is seen without a cache refresh.
 			if res != CommitMoved {
 				t.Fatalf("Commit = %v over a consumed hold, want moved", res)
+			}
+			if holds, err := front.Holds(d); err != nil || holds {
+				t.Fatalf("Holds = %v, %v over a consumed hold, want false: Holds reads live", holds, err)
 			}
 			got, err := backing.Get(created.ID)
 			if err != nil {
@@ -203,6 +225,9 @@ func TestCommitResults(t *testing.T) {
 			}
 			if _, err := front.Commit(Decided{}, patch); err == nil {
 				t.Fatal("a zero Decided committed")
+			}
+			if _, err := front.Commit(d, nil); err == nil {
+				t.Fatal("an empty patch committed")
 			}
 			if err := backing.Close(row.ID); err != nil {
 				t.Fatal(err)

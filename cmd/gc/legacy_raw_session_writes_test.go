@@ -19,26 +19,56 @@ import (
 // may not exceed, and must be lowered to when a file's count falls.
 const legacyRawSessionWritesBaseline = "testdata/legacy_raw_session_writes.golden"
 
-// rawSessionWriteVerbs are the raw row writes R8 replaces with Commit. The
-// session-only verbs count when their patch cannot be resolved; the generic
-// bead writes, which work beads share, count only when a key they write
-// resolves to a premise key.
-var rawSessionWriteVerbs = map[string]bool{
-	"ApplyPatch": true, "ApplyPatchInfo": true, "SetMarker": true, "applyOptimistic": true,
-	"SetMetadataBatch": false, "SetMetadata": false,
+// rawWriteVerb is a raw row write: where its patch (or key) is, and whether
+// an unresolved patch counts (a session-only verb) or only a resolved premise
+// key does (the generic bead writes, which work beads share).
+type rawWriteVerb struct {
+	patch       int
+	sessionOnly bool
 }
 
-// TestLegacyRawSessionWrites is R8's ratchet: per production file in cmd/gc
-// and internal/session, the raw writes of a premise key (Field.InPremise)
-// that do not go through Commit. A patch's keys are its map literal's, a
-// string key's, or its builder's (the registry's writer and clear sites by
-// function name). The count may only fall: a new raw premise write fails,
-// and a removed one must lower the baseline.
+// rawSessionWriteVerbs are the raw row writes R8 replaces with Commit, and
+// the wrappers that forward a caller's patch to one. A function that forwards
+// its caller's patch to a verb here must be listed itself.
+var rawSessionWriteVerbs = map[string]rawWriteVerb{
+	"ApplyPatch": {1, true}, "ApplyPatchInfo": {1, true}, "SetMarker": {1, true},
+	"ApplyKeepingUserHold": {1, true},
+	"applyStore":           {2, true}, "applySleepOptimistic": {2, true},
+	"setMetaBatch": {2, true}, "writeSessionMetadata": {2, true},
+	"setMeta": {2, true}, "setMetadataValue": {1, true},
+	"SetMetadataBatch": {1, false}, "SetMetadata": {1, false}, "setWaitTerminalState": {1, false},
+}
+
+// rawWriteKeyVerbs take one key, not a patch.
+var rawWriteKeyVerbs = []string{"SetMarker", "SetMetadata", "setMeta", "setMetadataValue"}
+
+// rawWriteFenced are the fenced primitives: they write only on a fresh read
+// that matched, at its revision. The verb a body forwards its patch to is the
+// fallback for a store without conditional writes, the documented residual.
+var rawWriteFenced = map[string]string{
+	"commitIf":                    "Store.Commit's and ApplyPatchIfLifecycleUnchanged's loop",
+	"CommitStartedIfCurrentUnder": "the start commit (v5 S2)",
+	"applyPatchIfClosed":          "writes only a row still closed",
+}
+
+// rawWriteScanDirs are the legacy and operator packages the ratchet scans.
+var rawWriteScanDirs = []string{"cmd/gc", "internal/session", "internal/api"}
+
+// TestLegacyRawSessionWrites is R8's ratchet: per production file in the
+// legacy and operator packages, the raw writes of a premise key
+// (Field.InPremise) that do not go through Commit. A patch's keys are its map
+// literal's, a string key's, or its builder's (the registry's writer and
+// clear sites by function name). Keys match by name, without types, so a
+// work or wait bead write of a same-named key counts too. A wrapper's own
+// forwarding write is not
+// counted, its callers' writes are; an unlisted wrapper fails. The count may
+// only fall: a new raw premise write fails, and a removed one must lower the
+// baseline.
 func TestLegacyRawSessionWrites(t *testing.T) {
 	root := repoRootForLint(t)
 	files := map[string]*ast.File{}
 	fset := token.NewFileSet()
-	for _, dir := range []string{"cmd/gc", "internal/session"} {
+	for _, dir := range rawWriteScanDirs {
 		paths, err := filepath.Glob(filepath.Join(root, dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)
@@ -58,22 +88,37 @@ func TestLegacyRawSessionWrites(t *testing.T) {
 	builders := builderKeys()
 	got := map[string]int{}
 	for rel, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			_, listed := rawSessionWriteVerbs[fn.Name.Name]
+			_, fenced := rawWriteFenced[fn.Name.Name]
+			params := paramNames(fn)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name := calleeName(call.Fun)
+				verb, isVerb := rawSessionWriteVerbs[name]
+				if !isVerb || len(call.Args) <= verb.patch {
+					return true // not a row write: Info.ApplyPatch folds a snapshot
+				}
+				if id, ok := ast.Unparen(call.Args[verb.patch]).(*ast.Ident); ok && params[id.Name] {
+					if !listed && !fenced {
+						t.Errorf("%s: %s forwards its caller's patch to %s: list it in rawSessionWriteVerbs", rel, fn.Name.Name, name)
+					}
+					return true // a wrapper's forward: its callers' writes are counted
+				}
+				keys, resolved := patchKeys(call.Args[verb.patch], name, consts, builders)
+				if slices.ContainsFunc(keys, premiseKey) || (!resolved && verb.sessionOnly) {
+					got[rel]++
+				}
 				return true
-			}
-			verb := calleeName(call.Fun)
-			sessionOnly, isVerb := rawSessionWriteVerbs[verb]
-			if !isVerb || len(call.Args) <= patchArg(verb) {
-				return true // not a row write: Info.ApplyPatch folds a snapshot
-			}
-			keys, resolved := patchKeys(call, verb, consts, builders)
-			if slices.ContainsFunc(keys, premiseKey) || (!resolved && sessionOnly) {
-				got[rel]++
-			}
-			return true
-		})
+			})
+		}
 	}
 
 	want := readRawWritesBaseline(t)
@@ -119,18 +164,21 @@ func calleeName(fun ast.Expr) string {
 	return ""
 }
 
-// patchArg is the index of a write's patch (or key) after the row's ID.
-func patchArg(verb string) int {
-	if verb == "applyOptimistic" {
-		return 2 // (id, front, patch)
+// paramNames are fn's parameter names.
+func paramNames(fn *ast.FuncDecl) map[string]bool {
+	out := map[string]bool{}
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			out[name.Name] = true
+		}
 	}
-	return 1
+	return out
 }
 
-// patchKeys resolves the keys a raw write writes, and whether it could.
-func patchKeys(call *ast.CallExpr, verb string, consts map[string]string, builders map[string][]string) ([]string, bool) {
-	arg := call.Args[patchArg(verb)]
-	if verb == "SetMarker" || verb == "SetMetadata" {
+// patchKeys resolves the keys a raw write's patch (or key) arg writes, and
+// whether it could.
+func patchKeys(arg ast.Expr, verb string, consts map[string]string, builders map[string][]string) ([]string, bool) {
+	if slices.Contains(rawWriteKeyVerbs, verb) {
 		k, ok := stringValue(arg, consts)
 		return []string{k}, ok
 	}
