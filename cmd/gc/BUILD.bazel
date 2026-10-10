@@ -1057,6 +1057,7 @@ go_test(
         "cmd_hook_claim_collapsed_identity_test.go",
         "cmd_hook_claim_drain_pending_test.go",
         "cmd_hook_claim_hold_label_test.go",
+        "cmd_hook_claim_input_done_test.go",
         "cmd_hook_claim_metadata_test.go",
         "cmd_hook_claim_receipt_ownership_test.go",
         "cmd_hook_claim_runid_test.go",
