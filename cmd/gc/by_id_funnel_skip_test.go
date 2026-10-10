@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -52,18 +53,18 @@ func (r *recordingSourceRunner) listings() []string {
 	return out
 }
 
-// funnelSkipCity is a converged whole-split city whose binding holds one
-// migration-preserved, work-shaped relic. stranded additionally leaves an
-// infrastructure bead in the work store after the cutover, so the boot gate
-// REFUSES the city (the maintainer-city shape). The work store the gate reads
-// is an in-memory store; the binding is the production sqlite opener.
-func funnelSkipCity(t *testing.T, stranded bool) (cityPath string, relic beads.Bead) {
+// migratedFunnelSkipCity is a converged whole-split city whose binding holds
+// one migration-preserved, work-shaped relic, as the migration leaves it:
+// nothing has served the split yet, so it carries no served-binding note. The
+// work store the gate reads is source, an in-memory store; the binding is the
+// production sqlite opener.
+func migratedFunnelSkipCity(t *testing.T) (cityPath string, relic beads.Bead, source beads.Store) {
 	t.Helper()
 	bindingRoot := filepath.Join(t.TempDir(), "store")
 	cityPath = oneShotCLICity(t, bindingRoot)
 	captureCLIStorageStderr(t)
 	stubInfraControllerPing(t, 0)
-	source := stubInfraMigrationSource(t)
+	source = stubInfraMigrationSource(t)
 	relic = mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
 	if bdIDIsClassReserved(relic.ID) {
 		t.Fatalf("the fixture relic %q carries a reserved prefix; it cannot exercise the residence probe", relic.ID)
@@ -76,10 +77,25 @@ func funnelSkipCity(t *testing.T, stranded bool) (cityPath string, relic beads.B
 	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
 		t.Fatalf("the fixture city did not converge (%s): %s", report.Outcome, log.String())
 	}
+	resetCLIStorageRoutes(t)
+	return cityPath, relic, source
+}
+
+// funnelSkipCity is migratedFunnelSkipCity once its split has been served, so
+// it carries the served-binding note every served city has. stranded then
+// leaves an infrastructure bead in the work store, so the boot gate REFUSES the
+// city from there on (the maintainer-city shape).
+func funnelSkipCity(t *testing.T, stranded bool) (cityPath string, relic beads.Bead) {
+	t.Helper()
+	cityPath, relic, source := migratedFunnelSkipCity(t)
+	cliStorageRoutes(cityPath)
+	if _, present, err := readBornSplitServedNote(cityPath); err != nil || !present {
+		t.Fatalf("serving the fixture city left no served-binding note (present=%v): %v", present, err)
+	}
+	resetCLIStorageRoutes(t)
 	if stranded {
 		mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
 	}
-	resetCLIStorageRoutes(t)
 	return cityPath, relic
 }
 
@@ -160,6 +176,12 @@ const (
 // once free to skip, and once with the funnel already resolved (which turns the
 // skip off, so the answer is the one the verdict produces). The two must agree
 // on exit code, handling and output — the skip may only ever save the listing.
+// The boot gate's own stderr is compared too, against what the funnel prints
+// on its own in a fresh process: its diagnostics and refusal on a refused city,
+// nothing on a served one. A read that enters the funnel must print exactly
+// that and a skipped read nothing, so that boot output is the one thing a skip
+// may drop. The refused rows must show that trade at least once, or the
+// comparison saw nothing to compare.
 //
 // The ids cover every answer the door has: a twin-free work id (passthrough
 // everywhere), the binding-resident relic (served from the binding, or denied
@@ -193,36 +215,11 @@ func TestByIDFunnelSkipChangesNoAnswer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath, relic := funnelSkipCity(t, tc.stranded)
 			const collected = "gc-collected1"
-			target := bindingTargetOf(t, cityPath)
-			switch tc.manifest {
-			case skipManifestRead:
-				delivered, _, err := readInfraCopyManifest(target)
-				if err != nil {
-					t.Fatalf("reading the copy manifest: %v", err)
-				}
-				ids := make([]string, 0, len(delivered)+1)
-				for id := range delivered {
-					ids = append(ids, id)
-				}
-				if err := writeInfraCopyManifest(target, append(ids, collected)); err != nil {
-					t.Fatalf("recording the collected id in the copy manifest: %v", err)
-				}
-			case skipManifestMissing:
-				if err := os.Remove(target.ManifestPath()); err != nil {
-					t.Fatalf("removing the copy manifest: %v", err)
-				}
-			case skipManifestUnreadable:
-				if err := os.Remove(target.ManifestPath()); err != nil {
-					t.Fatalf("removing the copy manifest: %v", err)
-				}
-				if err := os.Mkdir(target.ManifestPath(), 0o700); err != nil {
-					t.Fatalf("putting a directory where the copy manifest belongs: %v", err)
-				}
-				if _, _, err := readInfraCopyManifest(target); err == nil {
-					t.Fatal("the unreadable-manifest fixture read cleanly; it would exercise the per-id rule, not the fallback")
-				}
-			}
+			shapeFunnelSkipManifest(t, bindingTargetOf(t, cityPath), tc.manifest, collected)
 			maySkip := tc.manifest == skipManifestRead
+			bootStderr := captureCLIStorageStderr(t)
+			funnelBoot, refused := funnelBootStderr(t, cityPath, bootStderr)
+			droppedBoot := false
 			for _, row := range []struct {
 				argv    []string
 				maySkip bool
@@ -236,24 +233,104 @@ func TestByIDFunnelSkipChangesNoAnswer(t *testing.T) {
 				{argv: []string{"close", "gc-work1", "gc-work2"}, maySkip: maySkip},
 				{argv: []string{"close", "gc-work1", relic.ID}},
 			} {
-				freshByIDProcess(t)
-				skipCode, skipHandled, skipOut := routeByIDForTest(cityPath, row.argv)
-				skipped := !cliStorageRoutesResolved(cityPath)
-
-				freshByIDProcess(t)
-				cliStorageRoutes(cityPath)
-				gateCode, gateHandled, gateOut := routeByIDForTest(cityPath, row.argv)
-
-				if skipCode != gateCode || skipHandled != gateHandled || skipOut != gateOut {
-					t.Errorf("%v: skip-free door answered (code=%d handled=%v out=%q), the verdict answers (code=%d handled=%v out=%q)",
-						row.argv, skipCode, skipHandled, skipOut, gateCode, gateHandled, gateOut)
-				}
+				skipped := compareFunnelSkipRow(t, cityPath, row.argv, bootStderr, funnelBoot)
 				if skipped != row.maySkip {
 					t.Errorf("%v: skipped the funnel = %v, want %v", row.argv, skipped, row.maySkip)
 				}
+				droppedBoot = droppedBoot || (skipped && refused)
+			}
+			if refused && maySkip && !droppedBoot {
+				t.Error("no skipped read on the refused city dropped the funnel's boot output, so the stderr rows compared nothing")
 			}
 		})
 	}
+}
+
+// shapeFunnelSkipManifest leaves the binding's copy manifest in the shape an
+// equivalence case runs on. A read manifest also records collected, an id the
+// binding does not hold, as delivered.
+func shapeFunnelSkipManifest(t *testing.T, target infraBindingTarget, shape funnelSkipManifest, collected string) {
+	t.Helper()
+	switch shape {
+	case skipManifestRead:
+		delivered, _, err := readInfraCopyManifest(target)
+		if err != nil {
+			t.Fatalf("reading the copy manifest: %v", err)
+		}
+		ids := make([]string, 0, len(delivered)+1)
+		for id := range delivered {
+			ids = append(ids, id)
+		}
+		if err := writeInfraCopyManifest(target, append(ids, collected)); err != nil {
+			t.Fatalf("recording the collected id in the copy manifest: %v", err)
+		}
+	case skipManifestMissing:
+		if err := os.Remove(target.ManifestPath()); err != nil {
+			t.Fatalf("removing the copy manifest: %v", err)
+		}
+	case skipManifestUnreadable:
+		if err := os.Remove(target.ManifestPath()); err != nil {
+			t.Fatalf("removing the copy manifest: %v", err)
+		}
+		if err := os.Mkdir(target.ManifestPath(), 0o700); err != nil {
+			t.Fatalf("putting a directory where the copy manifest belongs: %v", err)
+		}
+		if _, _, err := readInfraCopyManifest(target); err == nil {
+			t.Fatal("the unreadable-manifest fixture read cleanly; it would exercise the per-id rule, not the fallback")
+		}
+	}
+}
+
+// funnelBootStderr resolves the funnel in a fresh process and returns what its
+// boot gate printed to bootStderr, and whether it refused the city. It must
+// print exactly when it refuses.
+func funnelBootStderr(t *testing.T, cityPath string, bootStderr *bytes.Buffer) (out string, refused bool) {
+	t.Helper()
+	freshByIDProcess(t)
+	bootStderr.Reset()
+	sessions, _ := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions)
+	_, refused = sessions.(refusedClassStore)
+	out = bootStderr.String()
+	if (out != "") != refused {
+		t.Fatalf("the funnel's own boot stderr is %q (refused=%v); want boot output exactly when it refuses", out, refused)
+	}
+	return out, refused
+}
+
+// compareFunnelSkipRow asks the door for argv twice from a fresh process: once
+// free to skip, and once with the funnel already resolved. It reports whether
+// the first read skipped the funnel. The two answers must agree; the boot
+// gate's stderr must be funnelBoot, the funnel's own boot output, on the
+// verdict's read and on an unskipped one, and nothing on a skipped one.
+func compareFunnelSkipRow(t *testing.T, cityPath string, argv []string, bootStderr *bytes.Buffer, funnelBoot string) (skipped bool) {
+	t.Helper()
+	freshByIDProcess(t)
+	bootStderr.Reset()
+	skipCode, skipHandled, skipOut := routeByIDForTest(cityPath, argv)
+	skipped = !cliStorageRoutesResolved(cityPath)
+	skipBoot := bootStderr.String()
+
+	freshByIDProcess(t)
+	bootStderr.Reset()
+	cliStorageRoutes(cityPath)
+	gateCode, gateHandled, gateOut := routeByIDForTest(cityPath, argv)
+	gateBoot := bootStderr.String()
+
+	if skipCode != gateCode || skipHandled != gateHandled || skipOut != gateOut {
+		t.Errorf("%v: skip-free door answered (code=%d handled=%v out=%q), the verdict answers (code=%d handled=%v out=%q)",
+			argv, skipCode, skipHandled, skipOut, gateCode, gateHandled, gateOut)
+	}
+	if gateBoot != funnelBoot {
+		t.Errorf("%v: boot stderr through the verdict = %q, want the funnel's own %q", argv, gateBoot, funnelBoot)
+	}
+	wantBoot := funnelBoot
+	if skipped {
+		wantBoot = ""
+	}
+	if skipBoot != wantBoot {
+		t.Errorf("%v: boot stderr = %q, want %q (skipped the funnel = %v)", argv, skipBoot, wantBoot, skipped)
+	}
+	return skipped
 }
 
 // TestByIDFunnelSkipNeverReadsABindingFaultAsAbsence pins the verdict the skip
@@ -306,10 +383,6 @@ func TestByIDFunnelSkipTakesTheVerdictWhenTheConfigNoLongerNamesTheBinding(t *te
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath, relic := funnelSkipCity(t, false)
-			// Serve the split once, as the controller's boot does, so the
-			// served-binding note records the history a revert is held by.
-			cliStorageRoutes(cityPath)
-			freshByIDProcess(t)
 			if tc.toml == "" {
 				writeOneShotCityTOML(t, cityPath, "")
 				if _, held := revertHoldingNote(storageSplitNone, cityPath); !held {
@@ -360,6 +433,93 @@ func TestByIDFunnelSkipTakesTheVerdictWhenTheConfigNoLongerNamesTheBinding(t *te
 	}
 }
 
+// TestByIDFunnelSkipWaitsForTheServedBindingNote pins the one write the skip
+// would otherwise starve. A split nothing has served since its cutover has no
+// served-binding note, and the funnel is the note's only writer. Were twin-free
+// reads to skip it there, the note would never be written, and the holds that
+// read it would pass: here, a city rolled back to work by the runbook, whose
+// cleared note the operator has removed, would read as one that never split
+// and be served from the work store with no refusal.
+//
+// So the first twin-free read takes the funnel, which writes the note; the next
+// one skips; and the rollback that follows is held: a read of the relic the
+// binding holds enters the funnel, which refuses on the served-binding note.
+func TestByIDFunnelSkipWaitsForTheServedBindingNote(t *testing.T) {
+	cityPath, relic, _ := migratedFunnelSkipCity(t)
+	bootStderr := captureCLIStorageStderr(t)
+	if _, present, err := readBornSplitServedNote(cityPath); err != nil || present {
+		t.Fatalf("the migrated fixture already carries a served-binding note (present=%v, err=%v); it would not exercise the first read", present, err)
+	}
+
+	argv := []string{"show", "gc-work1", "--json"}
+	freshByIDProcess(t)
+	if code, handled, out := routeByIDForTest(cityPath, argv); code != 0 || handled {
+		t.Fatalf("%v before the first serve = (code=%d handled=%v out=%q), want the passthrough", argv, code, handled, out)
+	}
+	if !cliStorageRoutesResolved(cityPath) {
+		t.Error("a twin-free read skipped the funnel on a split with no served-binding note; the funnel is the note's only writer")
+	}
+	if _, present, err := readBornSplitServedNote(cityPath); err != nil || !present {
+		t.Fatalf("the first twin-free read left no served-binding note (present=%v): %v", present, err)
+	}
+
+	freshByIDProcess(t)
+	if code, handled, out := routeByIDForTest(cityPath, argv); code != 0 || handled {
+		t.Fatalf("%v once served = (code=%d handled=%v out=%q), want the passthrough", argv, code, handled, out)
+	}
+	if cliStorageRoutesResolved(cityPath) {
+		t.Error("a twin-free read took the funnel on a split whose served-binding note is on disk")
+	}
+
+	// The runbook's rollback: the classes back on work, the backup restored,
+	// and the cleared note removed as the operator's attestation. The hold
+	// reads notes, not rows, so only the attestation is modeled.
+	writeOneShotCityTOML(t, cityPath, "")
+	if err := os.Remove(infraClearedNotePath(cityPath)); err != nil {
+		t.Fatalf("removing the cleared note: %v", err)
+	}
+	if blocked, held := revertHoldingNote(storageSplitNone, cityPath); !held || blocked.ServedNotePath != bornSplitServedNotePath(cityPath) {
+		t.Fatalf("the rollback is held=%v by %q; the served-binding note must be its only hold", held, blocked.ServedNotePath)
+	}
+	freshByIDProcess(t)
+	bootStderr.Reset()
+	routeByIDForTest(cityPath, []string{"show", relic.ID, "--json"})
+	if !cliStorageRoutesResolved(cityPath) || !strings.Contains(bootStderr.String(), bornSplitServedNotePath(cityPath)) {
+		t.Fatalf("the rollback's read of the binding's relic did not take the funnel and print its served-binding note refusal: funnel resolved=%v, boot stderr=%q",
+			cliStorageRoutesResolved(cityPath), bootStderr.String())
+	}
+}
+
+// TestByIDFunnelSkipTakesTheFunnelWhenTheServedBindingNoteWillNotRead pins the
+// unreadable arm of servedBindingNoteIsOnDisk. A note that exists but will not
+// read still holds the city, and the funnel's hold is what says so. A
+// twin-free read must therefore take the funnel, and its stderr must name the
+// note. Skipping would answer the same and drop that report.
+func TestByIDFunnelSkipTakesTheFunnelWhenTheServedBindingNoteWillNotRead(t *testing.T) {
+	cityPath, _ := funnelSkipCity(t, false)
+	bootStderr := captureCLIStorageStderr(t)
+	notePath := bornSplitServedNotePath(cityPath)
+	if err := os.Remove(notePath); err != nil {
+		t.Fatalf("removing the served-binding note: %v", err)
+	}
+	if err := os.Mkdir(notePath, 0o755); err != nil {
+		t.Fatalf("putting a directory at the served-binding note's path: %v", err)
+	}
+	if _, _, err := readBornSplitServedNote(cityPath); err == nil {
+		t.Fatal("a directory at the note's path reads cleanly; the fixture would not exercise an unreadable note")
+	}
+
+	argv := []string{"show", "gc-work1", "--json"}
+	freshByIDProcess(t)
+	if code, handled, out := routeByIDForTest(cityPath, argv); code != 0 || handled {
+		t.Fatalf("%v with an unreadable note = (code=%d handled=%v out=%q), want the passthrough", argv, code, handled, out)
+	}
+	if !cliStorageRoutesResolved(cityPath) || !strings.Contains(bootStderr.String(), notePath) {
+		t.Fatalf("a twin-free read on a city whose served-binding note will not read did not take the funnel and print the note's hold: funnel resolved=%v, boot stderr=%q",
+			cliStorageRoutesResolved(cityPath), bootStderr.String())
+	}
+}
+
 // TestByIDFunnelSkipNeverOpensABindingTheFunnelHolds pins the second-handle
 // rule. Once the funnel is resolved in this process it may hold the binding
 // open (a served city), and the skip's census would open a second handle on
@@ -390,6 +550,35 @@ func TestByIDFunnelSkipTakesOneCensusForABulkArgv(t *testing.T) {
 	}
 	if *plans != 1 {
 		t.Fatalf("the census resolved %d storage plans for one argv; want 1 (one binding open for every id)", *plans)
+	}
+}
+
+// TestByIDDoorCostOnAServedSplit pins what one `gc bd show` pays on a served
+// split, counted in storage plan resolutions (each is a registry built to open
+// the binding). A twin-free id pays the census alone and skips the funnel: one.
+// The binding-resident relic pays the census, then the funnel, which resolves
+// the plan again to open the binding it serves from: two. The by-id read the
+// funnel plans adds none, because a served city takes no relic proof.
+func TestByIDDoorCostOnAServedSplit(t *testing.T) {
+	cityPath, relic := funnelSkipCity(t, false)
+	plans := countStoragePlanResolutions(t)
+	for _, row := range []struct {
+		id     string
+		plans  int
+		funnel bool
+	}{
+		{id: "gc-work1", plans: 1, funnel: false},
+		{id: relic.ID, plans: 2, funnel: true},
+	} {
+		freshByIDProcess(t)
+		*plans = 0
+		routeByIDForTest(cityPath, []string{"show", row.id, "--json"})
+		if *plans != row.plans {
+			t.Errorf("gc bd show %s on a served split resolved %d storage plan(s), want %d", row.id, *plans, row.plans)
+		}
+		if got := cliStorageRoutesResolved(cityPath); got != row.funnel {
+			t.Errorf("gc bd show %s on a served split resolved the funnel = %v, want %v", row.id, got, row.funnel)
+		}
 	}
 }
 
@@ -425,8 +614,9 @@ func bindingTargetOf(t *testing.T, cityPath string) infraBindingTarget {
 }
 
 // routeByIDForTest runs the door and folds its output into one comparable
-// string. The funnel's own refusal goes to cliStorageStderr, which the fixture
-// captures, so what is compared here is exactly the door's answer.
+// string. The funnel's boot output goes to cliStorageStderr, which the fixture
+// captures and a row that compares it captures separately, so what is folded
+// here is exactly the door's answer.
 func routeByIDForTest(cityPath string, argv []string) (int, bool, string) {
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", argv, &stdout, &stderr)

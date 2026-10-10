@@ -224,8 +224,9 @@ func schemaCompatNotConsultedCheck(blocker PreflightCheckResult) PreflightCheckR
 // identityNotConsultedCheck reports identity_match for a scope blocker already
 // FAILed: the metadata-only half (is project_id present?) is still evaluated,
 // because it needs no dial and names a real repair, but the database is not
-// asked for its _project_id. Like the bd-context stand-ins it WARNs, so it can
-// move neither the gate nor the fallback reason off the earlier FAIL.
+// asked for its _project_id. It WARNs when project_id is present and FAILs
+// exactly as checkIdentityMatch does when it is missing; neither state can move
+// the gate or the fallback reason off the blocker's FAIL, which comes first.
 func identityNotConsultedCheck(metadata preflightMetadata, blocker PreflightCheckResult) PreflightCheckResult {
 	details := PreflightDetails{MetadataProjectID: metadata.ProjectID}
 	if metadata.ProjectID == "" {

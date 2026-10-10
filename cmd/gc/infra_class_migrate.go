@@ -1560,10 +1560,11 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 
 // infraBindingResidentIDs is the binding's whole id set, both tiers and closed
 // rows included: the "have" side of the containment check. It asks for the ids
-// alone when the store can answer that (beads.ResidentIDLister), because the
-// check needs nothing else and the binding is the city's largest store — on the
-// measured city a hydrated list was ~15 s of every relocated CLI command's boot
-// gate. A store that cannot answer it is listed exactly as before.
+// alone through beads.ResidentIDs, which answers for a bare sqlite engine only,
+// because the check needs nothing else and the binding is the city's largest
+// store — on the measured city a hydrated list was ~15 s of every relocated CLI
+// command's boot gate. Any other store, a wrapped one included, is listed in
+// full.
 func infraBindingResidentIDs(destination beads.Store) (map[string]bool, error) {
 	if ids, ok, err := beads.ResidentIDs(destination); ok || err != nil {
 		if err != nil {

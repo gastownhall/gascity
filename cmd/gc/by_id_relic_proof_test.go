@@ -327,13 +327,15 @@ func TestRefusedCityThatCannotOpenItsBindingFallsThrough(t *testing.T) {
 }
 
 // TestServedCityPaysNothingForTheRelicProof is the healthy control, and it is
-// the cost bound as well as the behavior one.
+// the cost bound for the relic proof downstream of the funnel: the by-id read
+// cliByIDBindingOwner plans with the funnel already open. What the door pays
+// before the funnel is TestByIDDoorCostOnAServedSplit's.
 //
 // The proof exists for a city whose boot REFUSED. A served city's bindings were
 // censused live when the funnel opened them, so a second read could prove
-// nothing the first did not — and taking one would put an engine open on the
-// by-id path of every converged city. Zero plan resolutions is the only shape
-// that rules that out.
+// nothing the first did not — and taking one would put a second engine open on
+// the by-id path of every converged city. Zero plan resolutions is the only
+// shape that rules that out.
 func TestServedCityPaysNothingForTheRelicProof(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	relic, binding := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
@@ -354,7 +356,7 @@ func TestServedCityPaysNothingForTheRelicProof(t *testing.T) {
 		t.Errorf("the owner is %p, want the class binding %p", owner.Store, binding)
 	}
 	if *resolutions != 0 {
-		t.Errorf("a served city resolved %d storage plan(s) on the by-id path; the relic proof is for a REFUSED city, and a served one must not pay an engine open per command", *resolutions)
+		t.Errorf("a served city resolved %d storage plan(s) in cliByIDBindingOwner with its funnel already open; the relic proof downstream of the funnel is for a REFUSED city, and a served one must not pay a second engine open per command", *resolutions)
 	}
 }
 

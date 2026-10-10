@@ -240,10 +240,11 @@ type metadataBackendVerdict struct {
 //	backend in the native set        preflight (probes decide eligibility)
 //	any other backend                BdStore, gate metadata_backend, no probes
 //
-// G6 seam: a remote (HTTP) backend is served natively through its own opener
-// and must NOT reach the BdStore arm — under native_transport=auto it requires
-// native. It gets its own route and arm here, ahead of the default, together
-// with the matching rule in decideNativeTransport.
+// G6 seam: a remote (HTTP) backend is to be served natively through its own
+// opener and must NOT reach the BdStore arm — under native_transport=auto it
+// will require native. When G6 lands, a remote backend gets its own route and
+// arm here, ahead of the default, together with the matching rule in
+// decideNativeTransport; today it does not exist.
 func decideMetadataBackend(scopeRoot string) metadataBackendVerdict {
 	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadataPath)

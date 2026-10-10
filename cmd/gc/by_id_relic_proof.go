@@ -32,24 +32,38 @@ package main
 //
 // # What it costs, and who pays
 //
-// Only a refused city reaches any of it. residencyTopologyForCity has already
-// answered by the time the gate below is consulted, and a served city's
-// Topology.Refused is nil, so it resolves no plan, opens no engine and takes no
-// read — TestServedCityPaysNothingForTheRelicProof counts the plan resolutions
-// and requires zero. A refused city pays one engine open and one by-id Get of
-// the binding (plus, on a miss, one read of the copy manifest), on the by-id
-// path only. It used to pay a full closed-inclusive list of the binding: on the
-// measured city that was ~134k rows hydrated from a 2 GB database, ~20 s per
-// `gc bd show`, to answer a question about one id.
+// The census is one config load, one plan resolution (two for a provider whose
+// layout this build does not own, which is asked where it serves from), one
+// engine open, one by-id Get of the binding per id and at most one read of the
+// copy manifest, on the by-id path only. A city with no split pays the config
+// load alone. Two callers take it:
 //
-// The memo below makes that ONE read per (city, id) for the callers this door
-// actually has: one-shot cobra commands that resolve by-id sequentially. It is
-// not a single-flight — provenTwinRefsForID releases the memo lock across the
-// read — so two concurrent by-id callers on the same refused city would each
-// take the read, and each would open its own handle on the binding root. That
-// is the second-handle hazard named below, and what rules it out today is the
-// absence of such a caller, not the memo. A parallel by-id caller has to bring
-// a single-flight (or a sync.Once entry) with it: ga-nzxob.
+//   - the by-id door, BEFORE the funnel ("The same census answers before the
+//     funnel" below). When the skip holds, the door pays the census and, on a
+//     split, one read of the served-binding note — nothing else. Any other
+//     answer enters the funnel, which on a served city resolves the plan again
+//     to open the binding — on the built-in engine, two plan resolutions in
+//     all, pinned by TestByIDDoorCostOnAServedSplit — and on a refused city
+//     reads the proof back from the memo.
+//   - byIDResidencyTopology, for the by-id read the funnel then plans, and only
+//     on a refused city. residencyTopologyForCity has already answered by
+//     then, and a served city's Topology.Refused is nil, so there it resolves
+//     no plan, opens no engine and takes no read —
+//     TestServedCityPaysNothingForTheRelicProof counts the plan resolutions
+//     and requires zero.
+//
+// The census does not list the binding: a full closed-inclusive list on the
+// measured city was ~134k rows hydrated from a 2 GB database, ~20 s per `gc bd
+// show`, to answer a question about one id.
+//
+// The memo below makes the census ONE read per (city, id) for the callers this
+// door actually has: one-shot cobra commands that resolve by-id sequentially.
+// It is not a single-flight — provenTwinRefsForID releases the memo lock across
+// the read — so two concurrent by-id callers on the same city would each take
+// the read, and each would open its own handle on the binding root. That is the
+// second-handle hazard named below, and what rules it out today is the absence
+// of such a caller, not the memo. A parallel by-id caller has to bring a
+// single-flight (or a sync.Once entry) with it: ga-nzxob.
 //
 // # Who the denial reaches
 //
@@ -104,16 +118,60 @@ package main
 //
 // So bdByIDAnswerIsThePassthroughForEveryVerdict takes the census first and
 // skips the funnel when every subject is non-reserved and twinNone or
-// twinNoSplit. Every other answer — a reserved id, a binding hit, a binding
+// twinNoSplit, and — for twinNone — the city's served-binding note is already
+// on disk (below). Every other answer — a reserved id, a binding hit, a binding
 // Get fault, a manifest-delivered id, a binding-wide relic with no readable
 // manifest, any undecided read — enters the funnel exactly as before, and the
 // refused path then reads the proof from the memo this census filled rather
 // than opening the binding a second time. The denial is unchanged: it is
 // computed by the same function, for the same ids, from the same reads.
 //
-// What the skip drops is the funnel's side output, never an answer: the boot
-// refusal it prints once to stderr, and a served city's served-binding note,
-// which the controller's own boot writes.
+// # The skip waits for the served-binding note
+//
+// Skipping the funnel skips its writes too, and one of them is load-bearing.
+// On a split it serves, the boot gate records the served-binding note once the
+// binding has opened (recordServedBinding), and nothing outside the funnel
+// writes it: the controller's boot and every one-shot command reach it the
+// same way. The note is the city's record that it served the split, and every
+// later re-point is held against it: to another binding, provider or
+// location, or back to work. A migrated city's revert is held first by the
+// cleared note its migration wrote (revertHoldingNote), but the runbook's
+// rollback ends with the operator removing that note, and a city born on the
+// split never had one. From there the served-binding note is the revert's only
+// hold, and without it a city pointed back at work reads as one that never
+// split — here, twinNoSplit — and is served from the work store with no
+// refusal. A city nothing has booted since its cutover has no served-binding
+// note yet, and by-id reads that skipped the funnel would keep it absent.
+//
+// So twinNone skips only once the note is on disk and reads cleanly
+// (servedBindingNoteIsOnDisk). Until then the door takes the funnel: a served
+// city writes its note on that first entry and skips from the next command on.
+// A refused city's funnel writes no note, so a refused city without one takes
+// the funnel on every by-id read, and reads its proof back from this census's
+// memo. Once a readable note is there, the funnel has nothing left to write to
+// it: an equal note is not rewritten, and one naming another binding, provider
+// or location is a hold the funnel refuses on before anything opens. A note
+// that will not read is not "on disk" here, so the door takes the funnel and
+// its hold reports the note. twinNoSplit waits for nothing: on a city with no
+// split the funnel serves no binding and writes no note.
+//
+// The skip asks only whether the note exists, not what it names, so it does not
+// apply that hold itself. A whole split re-pointed to another binding, provider
+// or location that is already on disk, with the old note left in place, is a
+// city the hold refuses. Its note is on disk, so its twin-free reads skip the
+// funnel and drop the refusal like any refused city's (below). The answer is
+// still the verdict's: the refused path judges the id against the binding the
+// config now names, which is the binding this census read. What is lost is the
+// hold's warning, which names the note whose removal attests the re-point.
+// Taking the funnel on a note that names another target is tracked as
+// ga-squbia.
+//
+// What the skip still drops is stderr: what the funnel prints once per process
+// on a city whose boot refuses, the gate's diagnostics and then its refusal.
+// Every `gc bd` is its own process, so a skipped read there prints neither. Its
+// exit code and output are the verdict's, and every command that enters the
+// funnel still prints both. TestByIDFunnelSkipChangesNoAnswer pins that this
+// boot output is the only thing a skip changes.
 //
 // # The absent case is the tolerant one
 //
@@ -189,7 +247,9 @@ func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, 
 //
 // false is always safe: it sends the caller into the funnel, which is the
 // path every answer took before. It is returned for a reserved id, an empty id
-// set, a census that proved a twin or could not decide, and for the two states
+// set, a census that proved a twin or could not decide, a split whose
+// served-binding note is not on disk yet (the funnel is the note's only writer:
+// "The skip waits for the served-binding note" above), and for the two states
 // in which this process already holds the city's routes (a resolved funnel, or
 // a controller's registration) — there the census would open a second handle
 // on a binding root that is already open, and the routes answer cheaply anyway.
@@ -208,12 +268,27 @@ func bdByIDAnswerIsThePassthroughForEveryVerdict(cityPath string, ids []string) 
 	if cliStorageRoutesResolved(cityPath) {
 		return false
 	}
+	onASplit := false
 	for _, proof := range byIDTwinProofsFor(cityPath, ids) {
 		if proof.verdict != twinNone && proof.verdict != twinNoSplit {
 			return false
 		}
+		onASplit = onASplit || proof.verdict == twinNone
 	}
-	return true
+	// twinNone is a split's answer, and that split's served-binding note has
+	// one writer, the funnel this would skip.
+	return !onASplit || servedBindingNoteIsOnDisk(cityPath)
+}
+
+// servedBindingNoteIsOnDisk reports whether this city's served-binding note
+// exists and reads cleanly. A note that will not read is not on disk for the
+// funnel skip: the door then takes the funnel, whose hold reports the note.
+// What the note names is not compared with the configured target. The funnel's
+// hold makes that comparison and the skip does not ("The skip waits for the
+// served-binding note" above).
+func servedBindingNoteIsOnDisk(cityPath string) bool {
+	_, present, err := readBornSplitServedNote(cityPath)
+	return err == nil && present
 }
 
 // provenTwinRefsForID opens the binding this city is configured for and
@@ -333,12 +408,14 @@ func byIDTwinProofsFor(cityPath string, ids []string) map[string]byIDTwinProof {
 //
 // Every early return before the open is either twinNoSplit (every class on
 // work and no note says the city ever served a split, so no binding can hold a
-// preserved id) or twinUndecided, and
-// they are deliberately silent. A refused city has already had its refusal
-// printed once by the one-shot gate, and the reasons a binding cannot be
-// reopened here are the reasons it was refused in the first place; reporting
-// them again would put a second copy of the same sentence on every by-id read
-// of an unconverged city.
+// preserved id) or twinUndecided, and they are deliberately silent. Reporting
+// is the funnel's job, and every twinUndecided meets it: the skip takes the
+// funnel on one, and the refused path asks only after the funnel has run. The
+// reasons a binding cannot be reopened here are the reasons the boot gate
+// refuses it, so printing them here as well would put a second copy of the
+// same sentence on every by-id read of an unconverged city. A read that skips
+// the funnel prints none of the funnel's boot output; that trade is the last
+// paragraph of "The skip waits for the served-binding note" above.
 //
 // The config is loaded without the revision snapshot, for the funnel's reason
 // (cliStorageRoutesLoad): nothing here reads config.Revision(), and the
@@ -467,16 +544,25 @@ func bindingsTwinProof(bindings []storeref.ClassBinding, id string, manifest map
 //     the binding holds ANY id outside its reserved namespaces. Without that,
 //     a collected relic on a pre-manifest city is served from its frozen copy.
 //
-// recover-stranded edge: it copies stranded beads into the binding with their
-// ids preserved and does not add them to the manifest. While the binding holds
-// them, the Get below denies them; once the binding's GC collects one, the
-// per-id rule lets its work-store row (the pre-recovery copy) be read again.
-// That copy was the authoritative one until the recovery, so the exposure is a
-// closed-and-collected wisp or mail row reading as its pre-recovery state.
+// `gc storage recover-stranded` is covered by the same two arms: it copies
+// stranded beads into the binding with their ids preserved and, once its
+// equality stage has proven them, extends the manifest with them, so a
+// recovered id the binding later collects is still denied by the manifest. The
+// one gap is a run that fails after copying: its rows are in the binding but
+// not in the manifest until the next run folds them in, and if the binding's
+// GC collects one in between, the per-id rule lets its work-store row (the
+// pre-recovery copy) be read again. The boot refuses that city until the
+// repair is re-run. Tracked as ga-07kiu4.
 //
-// A Get that fails for any reason other than absence is a failure to decide,
-// and is reported as one: the binding is treated as owning id, so the read is
-// DENIED (an error naming the binding) rather than handed to the work ledger.
+// A Get that fails for any reason other than absence is a failure to decide:
+// the binding is treated as owning id, so the read is DENIED rather than
+// handed to the work ledger. The denial does not carry the Get's error. On a
+// refused city the door renders the denial as a relic proof: the binding's
+// standing refusal, storeref.ErrProvenRelicRefusal and withProvenRelicRemedy's
+// remedy. The fault itself appears nowhere in that message. On a served city
+// the denial only sends the skip to the funnel, and the door's own read of the
+// binding reports a fault verbatim. Carrying the fault to the refused path is
+// tracked as ga-b43fe5.
 func bindingGivesIDATwin(b storeref.ClassBinding, id string, manifest map[string]bool, manifestRead bool) bool {
 	return bindingTwinVerdict(b, id, manifest, manifestRead) == twinDeny
 }

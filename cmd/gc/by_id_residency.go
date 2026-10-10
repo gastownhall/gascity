@@ -233,7 +233,7 @@ func withProvenRelicRemedy(owner storeref.Owner, err error) (storeref.Owner, err
 	if err == nil || !errors.Is(err, storeref.ErrProvenRelicRefusal) {
 		return owner, err
 	}
-	return owner, fmt.Errorf("%w. This id was carried into the class binding, so the work store holds only its frozen pre-migration copy, which is not served. Converge the configured [storage] split and this id resolves from the binding again; `gc storage status` and `gc doctor` report what is outstanding", err)
+	return owner, fmt.Errorf("%w. This id was carried into the class binding, or with no copy manifest to read cannot be told from one that was, so the work store's row for it is treated as its frozen pre-migration copy, which is not served. Converge the configured [storage] split and this id resolves from the binding again; `gc storage status` and `gc doctor` report what is outstanding", err)
 }
 
 // beadForOwner returns the row the owner names, reading it only when the
