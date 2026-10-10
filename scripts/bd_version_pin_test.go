@@ -64,13 +64,30 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatal("go.mod missing a version pin for github.com/steveyegge/beads")
 	}
 	goModPin := goModMatch[1]
-	if pseudo := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(goModPin); pseudo != nil {
+	pseudo := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(goModPin)
+	if pseudo != nil {
 		if got, want := pseudo[1], bdCurrentRef[:12]; got != want {
 			t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
 		}
 	} else if goModPin != bdCurrent {
 		t.Fatalf("go.mod pins github.com/steveyegge/beads to the tag %q but deps.env BD_CURRENT_VERSION = %q; a tag pin must name the same release the current matrix cell builds",
 			goModPin, bdCurrent)
+	}
+
+	// BD_CURRENT_SOURCE_VERSION is the version the source at BD_CURRENT_REF
+	// declares, which the agent image stamps onto the bd it builds there
+	// (TestAgentImageRebuildsBDAndGCWithPatchedGRPC) and so the version that
+	// bd reports. A tag's source declares its own release, so under a tag pin
+	// it must be BD_CURRENT_VERSION. It may differ only under a pseudo-version
+	// pin: beads cuts releases on release branches, so a main commit declares
+	// the previous release (1.3.0) while the archive cell is a newer tarball.
+	bdCurrentSource := env["BD_CURRENT_SOURCE_VERSION"]
+	if !regexp.MustCompile(`^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrentSource) {
+		t.Fatalf("deps.env BD_CURRENT_SOURCE_VERSION = %q, want the v-prefixed version cmd/bd/version.go declares at BD_CURRENT_REF", bdCurrentSource)
+	}
+	if pseudo == nil && bdCurrentSource != bdCurrent {
+		t.Fatalf("deps.env BD_CURRENT_SOURCE_VERSION = %q but BD_CURRENT_VERSION = %q under the tag pin %q; a release tag's source declares that release, so the two may differ only while go.mod pins a pseudo-version",
+			bdCurrentSource, bdCurrent, goModPin)
 	}
 	// The integration suite installs bd from whatever go.mod names and pins the
 	// expected version in its own literal, so a bump that misses that literal
@@ -152,6 +169,28 @@ func TestBDVersionPins(t *testing.T) {
 	if deps.CompareVersions(freshProviderFloor, bdCurrent) > 0 {
 		t.Fatalf("bdFreshProviderMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could initialize a fresh provider-owned scope",
 			freshProviderFloor, bdCurrent)
+	}
+
+	// No gc bd version gate may refuse the bd the pinned source builds. The
+	// agent image's bd (and a bd built from BD_CURRENT_REF by hand) reports
+	// BD_CURRENT_SOURCE_VERSION, which under a beads main pin is BELOW
+	// BD_CURRENT_VERSION, so the checks against BD_CURRENT_VERSION above do
+	// not cover it. Every floor gc compares a bd's reported version against
+	// is listed here.
+	recomputeBlockedFloor := extractGoStringConst(t, root, "internal/beads/bdstore_blocked_repair.go", "RecomputeBlockedMinBDVersion")
+	if recomputeBlockedFloor == "" {
+		t.Fatal("internal/beads/bdstore_blocked_repair.go missing RecomputeBlockedMinBDVersion const")
+	}
+	for _, floor := range []struct{ name, value string }{
+		{"bdMinVersion", bdMin},
+		{"bdReadyProjectionMinVersion", readyFloor},
+		{"bdFreshProviderMinVersion", freshProviderFloor},
+		{"RecomputeBlockedMinBDVersion", recomputeBlockedFloor},
+	} {
+		if deps.CompareVersions(floor.value, bdCurrentSource) > 0 {
+			t.Fatalf("%s (%q) is newer than deps.env BD_CURRENT_SOURCE_VERSION (%q); gc would refuse or degrade the bd the pinned beads source builds",
+				floor.name, floor.value, bdCurrentSource)
+		}
 	}
 
 	// The bd_compatibility config enum is the operator-facing mirror of the two
