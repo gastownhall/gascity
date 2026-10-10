@@ -13,8 +13,12 @@ go_library(
 
 go_test(
     name = "loopbackport_test",
-    srcs = ["loopbackport_test.go"],
+    srcs = [
+        "loopbackport_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":loopbackport"],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
