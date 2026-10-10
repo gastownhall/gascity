@@ -303,6 +303,22 @@ BeadsConfig holds bead store settings.
 | `proxied_idle_timeout` | string |  | `30m` | ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt child stay up with no connections before bd retires them; the next bd command restarts them. Go duration; "0" means never. A finite value must be at least 1m. Empty uses the default, 30m. It applies to scopes gc initializes (gc init, gc rig add, gc beads city migrate-proxied); bd cannot change an existing scope's value, and gc doctor reports drift. Overridden per rig by beads_proxied_idle_timeout and by the GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable. |
 | `native_transport` | string |  | `auto` | NativeTransport selects whether this city's bead stores may open the native Dolt store at all: "off" (this city's stores never open natively; always BdStore, the bd CLI subprocess — logged once at boot) or "auto" (default: native when preflight-eligible, today's behavior). Empty defaults to "auto". Any other value (including "require", which belongs to conditional_writes/guarded_release, not this switch) fails config load. A running city keeps the stores it holds open on the value it read at boot until it restarts; every other open, by a gc command or for a single tick, reads the current value. GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for "off" that overrides every city's value for one release. Enum: `auto`, `off` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `resilience` | BeadsResilienceConfig |  |  | Resilience configures the transport circuit breaker that guards bd subprocess and store operations ([beads.resilience]). |
+
+## BeadsResilienceConfig
+
+BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the breaker. Defaults to true. |
+| `consecutive_failures` | integer |  | `3` | ConsecutiveFailures is how many consecutive transport-class failures trip the breaker. Defaults to 3. |
+| `open_base` | string |  | `1s` | OpenBase is the initial open-state backoff cap as a duration string. Defaults to "1s". |
+| `open_max` | string |  | `60s` | OpenMax caps the open-state backoff as a duration string. Defaults to "60s". |
+| `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
+| `max_inflight_per_scope` | integer |  | `4` | MaxInflightPerScope bounds concurrent bd subprocesses per scope. The admission semaphore blocks the (n+1)th bd call for a scope until one in flight returns, capping the subprocess amplifier (plan item 1.9). Defaults to 4. Non-positive disables the per-scope cap. |
+| `max_inflight_global` | integer |  | `16` | MaxInflightGlobal bounds concurrent bd subprocesses across all scopes in the city. Defaults to 16. Non-positive disables the global cap. |
+| `max_admission_wait` | string |  | `30s` | MaxAdmissionWait bounds how long the admission semaphore waits for a free slot before failing fast, as a duration string. When the caps are saturated by bd subprocesses wedged on a backend transport timeout, a bounded wait prevents reconcile fan-out from blocking the controller tick indefinitely: an admission that cannot be granted within this window fails like an open breaker (typed ErrStoreUnavailable, zero subprocesses). Defaults to "30s". A non-positive value (e.g. "0s") restores the pre-bound behavior of blocking forever. |
 
 ## ChatSessionsConfig
 
