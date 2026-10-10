@@ -70,6 +70,7 @@ go_library(
         "//internal/beadmeta",
         "//internal/builtinpacks",
         "//internal/citylayout",
+        "//internal/clock",
         "//internal/fsys",
         "//internal/git",
         "//internal/orders",

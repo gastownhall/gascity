@@ -13,7 +13,8 @@ import (
 // MemStore write of an unregistered key from production code fails the test
 // (GuardSessionKeys), and cmd/gc's flow and clear-site tests run the declared
 // sites. A Site with Pending is a contract site not yet built or doing its
-// job, on the bead that owns it. Nothing reads this table in production.
+// job, on the bead that owns it. In production only Facts reads it: a v2
+// premise compares the keys it classes in the premise (facts.go).
 
 // FieldClass is what a key means to a decision.
 type FieldClass uint8
@@ -160,11 +161,14 @@ var (
 		"S2's adopt commit clears the wake request (D7)")
 	v2Accrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
 		"S3/S5 accrue a failed or dying start (SESS-537/538)")
-	opCreate     = op(srcManager, "Manager.createBeadOnly")
-	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
-	waitHold     = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
-	sleepPolicy  = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
-	leaseAcquire = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord").pending("mc-x9ygp",
+	opCreate = op(srcManager, "Manager.createBeadOnly")
+	// opConsumeHold is an operator's resume consuming a user hold (#7424's
+	// interim D8 consume; D8 B's lease-fenced consume replaces it).
+	opConsumeHold = op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")
+	legacyCreate  = legacy(srcBeads, "syncCreateMetadata")
+	waitHold      = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
+	sleepPolicy   = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
+	leaseAcquire  = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord").pending("mc-x9ygp",
 		"L1b's starters, legacy and v2, take the lease (until then nothing in a mode calls it)")
 )
 
@@ -232,12 +236,11 @@ var observed = []struct {
 	{legacy(srcTransition, "RestartRequestPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash"}},
 	{legacy(srcTransition, "RetireNamedSessionPatch"), false, []string{"pending_create_claim", "pending_create_started_at", "state", "state_reason"}},
 	{op(srcManager, "Manager.createBeadOnly"), false, []string{"continuation_epoch", "instance_token", "pending_create_claim", "pending_create_started_at", "provider", "resume_command", "resume_flag", "resume_style", "session_id_flag", "session_origin", "state", "work_dir"}},
-	{op(srcManager, "Manager.suspend"), false, []string{"sleep_reason", "slept_at", "state"}},
+	{op(srcManager, "Manager.suspend"), false, []string{"held_until", "sleep_intent", "sleep_reason", "slept_at", "state"}},
 	{op(srcManager, "Manager.suspend"), true, []string{"wake_request", "wake_requested_at"}},
 	{op("internal/session/store.go", "Store.SetState"), false, []string{"state", "state_reason"}},
 	{op(srcWaitStore, "Store.wakeSessionFromBead"), false, []string{"churn_count", "held_until", "quarantined_until", "sleep_intent", "wait_hold", "wake_attempts", "wake_refused_event_at"}},
 	{v2("cmd/gc/allocator_create_named.go", "reopenNamed"), true, []string{RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey}},
-	{op(srcManager, "Manager.Archive"), false, []string{"archived_at", "continuity_eligible", "pending_create_claim", "pending_create_started_at", "state", "state_reason"}},
 }
 
 func withObserved(fields []Field) []Field {
@@ -270,11 +273,11 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session.go", "managedSuspendPatch")), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"))},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(op(srcTransition, "OperatorSuspendPatch")), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
 	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session.go", "managedSuspendPatch"), legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold)},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(op(srcTransition, "OperatorSuspendPatch"), legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.suspend"))},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.suspend")), Clears: sites(opConsumeHold)},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
@@ -297,8 +300,8 @@ var registry = slices.Concat([]Field{
 	// Counters.
 	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
-	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only Manager.Reactivate writes it, and nothing calls that"},
-	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only Manager.Quarantine writes it, and nothing calls that"},
+	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
+	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
 	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
 
 	// Markers.

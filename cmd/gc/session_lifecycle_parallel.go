@@ -983,6 +983,10 @@ func prepareStartCandidate(
 // cityPath. workDirResolver resolves the task work dir; dispatchSources read the
 // session's trigger bead for opt_* pins when it holds no claimed work, and the
 // zero value reads the session store only, for a same-store trigger stamp.
+// errStartUserHeld refuses a legacy start whose locked re-read shows an
+// operator's user hold (sleep_intent=user-hold).
+var errStartUserHeld = errors.New("an operator holds the session (user-hold); start skipped")
+
 func prepareStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -1011,6 +1015,11 @@ func prepareStartCandidateForCity(
 			current, persisted, err := sessFront.GetPersistedResponse(id)
 			if err != nil {
 				return err
+			}
+			// An operator's suspend that landed since the snapshot wins: the
+			// controller never starts a row the operator holds.
+			if sessionpkg.HoldsInfo(current, clk.Now()).In&sessionpkg.HoldUser != 0 {
+				return errStartUserHeld
 			}
 			// preWakeCommit persists its PreWakePatch through the front door and returns
 			// the batch; folding it onto the freshly re-read Info keeps the twin

@@ -50,6 +50,11 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	if got1.State != session.StateSuspended {
 		t.Errorf("s1 state = %q, want suspended", got1.State)
 	}
+	// The idle auto-suspend is not an operator's: it writes no hold, so the
+	// session's next wake reason resumes it (mc-esqo7).
+	if raw, _ := store.Get(s1.ID); raw.Metadata["held_until"] != "" || raw.Metadata["sleep_intent"] != "" {
+		t.Errorf("s1 held_until=%q sleep_intent=%q, want no hold", raw.Metadata["held_until"], raw.Metadata["sleep_intent"])
+	}
 
 	// s2 should still be active (idle 1m < 30m timeout).
 	got2, err := mgr.Get(s2.ID)

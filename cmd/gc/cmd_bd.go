@@ -1019,22 +1019,55 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return cityTarget, nil
 	}
 
-	cityPrefix := config.EffectiveHQPrefix(cfg)
-	if cityPrefix != "" {
+	// Bead-ID auto-detect accepts a candidate store only when the id actually
+	// exists there, which costs a full bd round trip per probe. A probe can only
+	// matter when some outcome differs from another, so when every candidate
+	// store AND the store the rest of the chain would pick are the same store,
+	// the answer is that store whatever the probes say — and the passthrough
+	// below is the one bd invocation the command pays.
+	candidates := bdScopeProbeCandidates(cfg, cityTarget, cityPath, args)
+	fallback, gcRigDiscarded, fallbackErr := bdScopeFallbackTarget(cfg, cityPath, cityTarget, args)
+	if len(candidates) > 0 && fallbackErr == nil && gcRigDiscarded == "" && bdScopeCandidatesAgree(candidates, fallback) {
+		return fallback, nil
+	}
+	for _, c := range candidates {
+		if bdBeadExists(cityPath, cfg, c.target, c.id) {
+			return c.target, nil
+		}
+	}
+	if fallbackErr != nil {
+		return execStoreTarget{}, fallbackErr
+	}
+	if gcRigDiscarded != "" {
+		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(fallback)) //nolint:errcheck // best-effort stderr
+	}
+	return fallback, nil
+}
+
+// bdScopeProbe is one bead-ID auto-detect candidate: the store id would route
+// to if it exists there.
+type bdScopeProbe struct {
+	id     string
+	target execStoreTarget
+}
+
+// bdScopeProbeCandidates lists, in probe order, the stores bead-ID auto-detect
+// would try: first every city-prefixed id against the city store (so a city
+// source bead resolves to the city even from a rig cwd), then every
+// rig-prefixed id against its bound rig. Hyphenated flag values and other
+// non-ID args only become candidates; they are accepted later only when the
+// bead exists, which keeps them from silently retargeting the command.
+// Unbound rigs are skipped so they are not aliased to the city store.
+func bdScopeProbeCandidates(cfg *config.City, cityTarget execStoreTarget, cityPath string, args []string) []bdScopeProbe {
+	var candidates []bdScopeProbe
+	if cityPrefix := config.EffectiveHQPrefix(cfg); cityPrefix != "" {
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "-") || beadPrefix(cfg, arg) != cityPrefix {
 				continue
 			}
-			if bdBeadExists(cityPath, cfg, cityTarget, arg) {
-				return cityTarget, nil
-			}
+			candidates = append(candidates, bdScopeProbe{id: arg, target: cityTarget})
 		}
 	}
-
-	// Auto-detect from bead IDs in args, but only accept candidates that
-	// actually exist in the resolved rig store. This keeps hyphenated flag
-	// values and other non-ID args from silently retargeting the command.
-	// Unbound rigs are skipped so we don't alias them to the city store.
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			continue
@@ -1043,62 +1076,72 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 			if strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
-			target := bdRigScopeTarget(cityPath, rig)
-			if bdBeadExists(cityPath, cfg, target, arg) {
-				return target, nil
-			}
+			candidates = append(candidates, bdScopeProbe{id: arg, target: bdRigScopeTarget(cityPath, rig)})
 		}
 	}
+	return candidates
+}
 
-	// Honor -C / --directory passed to bd: if it names a path inside a
-	// registered rig, use that rig's store. This lets `gc bd create -C
-	// /path/to/packs-rig ...` route to the packs rig even when GC_RIG
-	// or cwd point elsewhere. The flag stays in bdArgs so bd itself still
-	// sees it and changes directory accordingly.
+// bdScopeCandidatesAgree reports whether every candidate routes to fallback,
+// in which case no existence probe can change the resolved store.
+func bdScopeCandidatesAgree(candidates []bdScopeProbe, fallback execStoreTarget) bool {
+	for _, c := range candidates {
+		if c.target != fallback {
+			return false
+		}
+	}
+	return true
+}
+
+// bdScopeFallbackTarget is the store resolveBdScopeTarget picks when no
+// bead-ID candidate exists. It has no side effects: the GC_RIG discard is
+// returned rather than printed, so a caller that resolved via a candidate
+// never emits it.
+//
+// Honor -C / --directory passed to bd: if it names a path inside a registered
+// rig, use that rig's store. This lets `gc bd create -C /path/to/packs-rig ...`
+// route to the packs rig even when GC_RIG or cwd point elsewhere. The flag
+// stays in bdArgs so bd itself still sees it and changes directory
+// accordingly.
+//
+// Then honor GC_RIG env (set by the controller on every rig agent). This is a
+// weaker signal than an explicit flag or a bead-prefix hit, but a stronger
+// default than cwd: the controller sets GC_RIG reliably, while cwd detection
+// fails for polecat worktrees (they live under .gc/worktrees/, not the
+// configured rig path). Priority: explicit --rig > bead-prefix detect > -C >
+// GC_RIG env > cwd > city.
+//
+// A GC_RIG naming an unknown or unbound rig is not an error, unlike the same
+// value via --rig: falling through to cwd/city keeps cross-city queries
+// working from rig agents whose GC_RIG names a rig this city does not bind.
+// But the discard must not be silent, so it is reported back to the caller
+// to warn about, naming the store actually answered.
+func bdScopeFallbackTarget(cfg *config.City, cityPath string, cityTarget execStoreTarget, args []string) (execStoreTarget, string, error) {
 	if cdDir := extractBdDirectoryFlag(args); cdDir != "" {
 		if rig, ok, err := resolveRigForDir(cfg, cityPath, cdDir); err != nil {
-			return execStoreTarget{}, err
+			return execStoreTarget{}, "", err
 		} else if ok {
-			return bdRigScopeTarget(cityPath, rig), nil
+			return bdRigScopeTarget(cityPath, rig), "", nil
 		}
 	}
 
-	// Honor GC_RIG env (set by the controller on every rig agent) when no
-	// explicit --rig flag was given and no bead-ID in the args matched a
-	// specific store. This is a weaker signal than an explicit flag or a
-	// bead-prefix hit, but a stronger default than cwd: the controller sets
-	// GC_RIG reliably, while cwd detection fails for polecat worktrees (they
-	// live under .gc/worktrees/, not the configured rig path).
-	// Priority: explicit --rig > bead-prefix detect > GC_RIG env > cwd > city.
 	gcRigDiscarded := ""
 	if gcRig := strings.TrimSpace(os.Getenv("GC_RIG")); gcRig != "" {
 		if rig, ok := rigByName(cfg, gcRig); ok && strings.TrimSpace(rig.Path) != "" {
-			return bdRigScopeTarget(cityPath, rig), nil
+			return bdRigScopeTarget(cityPath, rig), "", nil
 		}
-		// GC_RIG names an unknown or unbound rig. Unlike an explicit --rig
-		// (which exits 1 on the identical value), we do not error: falling
-		// through to cwd/city keeps cross-city queries working from rig agents
-		// whose GC_RIG names a rig this city does not bind. But the discard
-		// must not be silent — a stale or typo'd GC_RIG would otherwise
-		// redirect a query to a different store than the operator intended with
-		// no diagnostic, while the same value via --rig fails loudly. Record it
-		// and warn below, naming the store actually answered.
 		gcRigDiscarded = gcRig
 	}
 
 	target := cityTarget
 	if rig, ok, err := bdRigFromCwd(cfg, cityPath); err != nil {
-		return execStoreTarget{}, err
+		return execStoreTarget{}, "", err
 	} else if ok {
 		// resolveRigForDir already skips unbound rigs, so rig.Path is
 		// guaranteed non-empty here.
 		target = bdRigScopeTarget(cityPath, rig)
 	}
-
-	if gcRigDiscarded != "" {
-		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
-	}
-	return target, nil
+	return target, gcRigDiscarded, nil
 }
 
 // bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose

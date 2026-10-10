@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -214,7 +215,7 @@ func TestTxLockScope(t *testing.T) {
 		return nil
 	}
 	callErr := errors.New("start failed")
-	first := called(section{Decide: func(v txView) txStep {
+	first := called(callStart, section{Decide: func(v txView) txStep {
 		s := mark(txKeyA)(v)
 		s.Write["state"] = "creating"
 		s.Pass = "prepared"
@@ -264,7 +265,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 	latch := new(writeLatch)
 	k.on(seamAfterRowRead, func() { latch.abandon() }) // the executor gives up here
 	ran := false
-	call := called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran = true; return nil, nil })
+	call := called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran = true; return nil, nil })
 	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{call}}, latch); ran || s.Outcome != settledFailed {
 		t.Fatalf("settlement %+v (called %t), want no call after the abandonment", s, ran)
 	}
@@ -276,7 +277,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 	clk := newFakePlannerClock(plannerT0)
 	x, posted := fakeClockExecutor(clk)
 	inCall, release := make(chan struct{}), make(chan struct{})
-	slow := called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) {
+	slow := called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) {
 		close(inCall)
 		<-release
 		return nil, nil
@@ -307,7 +308,7 @@ func TestTxCallIsGatedLikeAWrite(t *testing.T) {
 // event; the section after a Call reads since that section began.
 func TestTxCallKeepsFactsAndTheNextSectionReadsAfterIt(t *testing.T) {
 	k := newTxKit(t)
-	sec := called(section{Decide: func(v txView) txStep {
+	sec := called(callStop, section{Decide: func(v txView) txStep {
 		s := mark(txKeyA)(v)
 		s.Facts.Events = []events.Event{{Type: "landed"}}
 		return s
@@ -319,7 +320,7 @@ func TestTxCallKeepsFactsAndTheNextSectionReadsAfterIt(t *testing.T) {
 	clk := k.p.Clock.(*fakePlannerClock)
 	t0 := clk.Now()
 	spec := effectSpec{needs: needs{Runtime: true}, sections: []section{
-		called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { clk.Advance(time.Minute); return nil, nil }),
+		called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { clk.Advance(time.Minute); return nil, nil }),
 		{Decide: func(txView) txStep { return txStep{} }},
 	}}
 	k.run(context.Background(), spec)
@@ -354,11 +355,13 @@ func TestTxVerdicts(t *testing.T) {
 	}
 }
 
-// Kills S2's own-token rule checking too much or too little (review pins):
-// after the effect's own write and its Call it ignores a hold, and refuses
-// another token, a closed row, and `gc session kill`'s fence (asleep, the
-// same token) landed during the Call; with no own write before it, it
-// refuses even a row in S2's states (another writer's wake since the pass).
+// Kills S2's own-token rule checking too much or too little (review pins,
+// the F2 ruling: the registry's FactsCommit site): after the effect's own
+// write and its start Call it ignores an agent's heartbeat hold and the keys
+// the started runtime writes, and refuses an operator suspend, another
+// token, a closed row, and `gc session kill`'s fence (asleep, the same
+// token) landed during the Call; with no own write before it, it refuses
+// even a row in S2's states (another writer's wake since the pass).
 func TestTxPremiseOwnToken(t *testing.T) {
 	kill := session.KillPendingPatch(gatherNow)
 	for _, c := range []struct {
@@ -366,7 +369,9 @@ func TestTxPremiseOwnToken(t *testing.T) {
 		outside func(k *txKit)
 		lands   bool
 	}{
-		{"a hold", func(k *txKit) { k.outside("held_until", rowAt(time.Hour)) }, true},
+		{"an agent's heartbeat hold", func(k *txKit) { k.outside("held_until", rowAt(time.Hour)) }, true},
+		{"the started runtime's session key", func(k *txKit) { k.outside("session_key", "k-2") }, true},
+		{"an operator suspend", func(k *txKit) { k.outside("state", "suspended", "suspended_at", rowAt(0)) }, false},
 		{"another token", func(k *txKit) { k.outside("instance_token", "tok-other") }, false},
 		{"closed", func(k *txKit) {
 			if err := k.backing.Close("gc-1"); err != nil {
@@ -381,7 +386,7 @@ func TestTxPremiseOwnToken(t *testing.T) {
 	} {
 		k := newTxKit(t)
 		k.on(seamAfterCall, func() { c.outside(k) }) // out of process, during the Start
-		preWake := called(section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "creating"}} }},
+		preWake := called(callStart, section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "creating"}} }},
 			func(context.Context, txCaps, any) (any, error) { return nil, nil })
 		commit := section{Premise: premiseOwnToken, Decide: mark(txKeyA)}
 		s := k.run(context.Background(), effectSpec{needs: needs{NameLock: true}, sections: []section{preWake, commit}})
@@ -599,6 +604,71 @@ func TestTxPremise(t *testing.T) {
 	}}
 	if s := k.run(context.Background(), two); s.Outcome != settledLanded || k.meta(txKeyB) != "1" {
 		t.Fatalf("after a landed section: settlement %+v, b=%q; want the second to expect the first's row", s, k.meta(txKeyB))
+	}
+}
+
+// Kills a premise that compares other keys than the registry's (F2): a key
+// of each premise class moved since the pass refuses, one outside the
+// session codec (a stop request) included; an advisory, a baseline or a
+// lease key does not; an assignment identity key refuses only an effect
+// that reads the row's work; after a start Call the keys the started
+// runtime writes (session.FactsAfterStart: its session key and claim) do
+// not, while a lifecycle key, detached_at or the current bead still do;
+// after a stop Call, a start's included, the full premise holds. A refusal
+// names the key that moved.
+func TestTxPremiseComparesTheRegistryFacts(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		kv      []string
+		work    bool
+		calls   []callKind // the Calls before the section, if any
+		refuses bool
+	}{
+		{"lifecycle", []string{"state_reason", "x"}, false, nil, true},
+		{"operator intent", []string{"held_until", rowAt(time.Hour)}, false, nil, true},
+		{"request", []string{"restart_requested", "true"}, false, nil, true},
+		{"stop request", []string{"drain_intent_reason", "idle"}, false, nil, true},
+		{"counter", []string{"wake_attempts", "3"}, false, nil, true},
+		{"marker", []string{"detached_at", rowAt(0)}, false, nil, true},
+		{"advisory", []string{"synced_at", rowAt(0)}, false, nil, false},
+		{"baseline", []string{"started_provision_hash", "h"}, false, nil, false},
+		{"lease", []string{session.RuntimeLeaseEpochKey, "7", session.RuntimeLeaseHolderKey, "other"}, false, nil, false},
+		{"assignment identity, no work read", []string{"alias", "a2"}, false, nil, false},
+		{"assignment identity, work read", []string{"alias", "a2"}, true, nil, true},
+		{"after a start: its session key", []string{"session_key", "k2"}, false, []callKind{callStart}, false},
+		{"after a start: detached_at", []string{"detached_at", rowAt(0)}, false, []callKind{callStart}, true},
+		{"after a start: the current bead", []string{session.CurrentBeadIDKey, "b-1"}, false, []callKind{callStart}, true},
+		{"after a start: the current claim", []string{beadmeta.CurrentClaimBeadIDMetadataKey, "b-1"}, false, []callKind{callStart}, false},
+		{"after a start: lifecycle", []string{"state_reason", "x"}, false, []callKind{callStart}, true},
+		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, true},
+		{"after a stop: detached_at", []string{"detached_at", rowAt(0)}, false, []callKind{callStop}, true},
+		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, true},
+	} {
+		k := newTxKit(t)
+		spec := effectSpec{sections: []section{{Decide: mark(txKeyA)}}}
+		if c.work {
+			spec.needs.Legs = legWork
+		}
+		if len(c.calls) > 0 {
+			spec = effectSpec{needs: needs{NameLock: true}}
+			for i, kind := range c.calls {
+				spec.sections = append(spec.sections, called(kind, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { return nil, nil }))
+				if i < len(c.calls)-1 {
+					k.on(seamAfterCall, func() {})
+				}
+			}
+			spec.sections = append(spec.sections, section{Decide: mark(txKeyA)})
+			k.on(seamAfterCall, func() { k.outside(c.kv...) })
+		} else {
+			k.outside(c.kv...)
+		}
+		s := k.run(context.Background(), spec)
+		if refused := s.Cause == causePremise && k.meta(txKeyA) == ""; refused != c.refuses {
+			t.Errorf("%s: settlement %+v, %s=%q; want refused on the premise %t", c.name, s, txKeyA, k.meta(txKeyA), c.refuses)
+		}
+		if c.refuses && (!errors.Is(s.Err, errPremiseMoved) || !strings.Contains(s.Err.Error(), c.kv[0])) {
+			t.Errorf("%s: refusal error %v, want it to name %s", c.name, s.Err, c.kv[0])
+		}
 	}
 }
 
@@ -981,7 +1051,7 @@ func TestAroundCapsAreScoped(t *testing.T) {
 func TestTxOnExitResolvesEveryExit(t *testing.T) {
 	admit := func(got *[]settlement) section {
 		pre := section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"state": "creating"}} }}
-		return called(pre, func(_ context.Context, c txCaps, _ any) (any, error) {
+		return called(callStart, pre, func(_ context.Context, c txCaps, _ any) (any, error) {
 			c.onExit(func(final settlement) { *got = append(*got, final) })
 			return nil, nil
 		})
@@ -1054,7 +1124,7 @@ func TestTxReadStoresNeedsForProbeResetAndCallSeam(t *testing.T) {
 
 // callOnly is a section that writes nothing and calls ran.
 func callOnly(ran func()) section {
-	return called(section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran(); return nil, nil })
+	return called(callStop, section{Decide: func(txView) txStep { return txStep{} }}, func(context.Context, txCaps, any) (any, error) { ran(); return nil, nil })
 }
 
 // panickingList is a store whose list reads panic.
@@ -1171,7 +1241,7 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 func TestTxOnExitRunsEveryFinalizer(t *testing.T) {
 	k := newTxKit(t)
 	var order []int
-	sec := called(section{Decide: func(txView) txStep { return txStep{} }}, func(_ context.Context, c txCaps, _ any) (any, error) {
+	sec := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(_ context.Context, c txCaps, _ any) (any, error) {
 		c.onExit(func(settlement) { order = append(order, 1) }) // the ticket, registered first
 		c.onExit(func(settlement) { order = append(order, 2); panic("a later finalizer") })
 		c.onExit(func(settlement) { order = append(order, 3) })

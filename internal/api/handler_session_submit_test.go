@@ -310,7 +310,7 @@ func TestHandleSessionSubmitWithoutResumeLeavesStartToController(t *testing.T) {
 				t.Fatalf("Suspend: %v", err)
 			}
 			if !tc.held {
-				if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "suspended_at": ""}); err != nil {
+				if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -417,7 +417,7 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp).Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
-	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "suspended_at": ""}); err != nil {
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {
 		t.Fatal(err)
 	}
 	startsBefore := fs.sp.CountCalls("Start", info.SessionName)

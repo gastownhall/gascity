@@ -173,6 +173,47 @@ func ClearWakeRequestPatch() MetadataPatch {
 	return MetadataPatch{"wake_request": "", "wake_requested_at": ""}
 }
 
+// IndefiniteHoldDuration is the "suspended indefinitely" held_until horizon:
+// 100 years is effectively forever without risking time arithmetic overflow.
+const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
+
+// OperatorSuspendPatch is the one shape of an operator's suspend (`gc session
+// suspend`, managed or not, and POST /v0/session/{id}/suspend): an indefinite
+// held_until explained by sleep_intent=user-hold, state=suspended stamped now,
+// and the pending wake cleared as newer intent (D7). The intent is what tells
+// the hold from a `gc runtime heartbeat` keep-alive, which writes held_until
+// alone.
+func OperatorSuspendPatch(now time.Time) MetadataPatch {
+	patch := ClearWakeRequestPatch()
+	patch["held_until"] = now.Add(IndefiniteHoldDuration).UTC().Format(time.RFC3339)
+	patch["sleep_intent"] = string(SleepReasonUserHold)
+	patch["state"] = string(StateSuspended)
+	patch["suspended_at"] = now.UTC().Format(time.RFC3339)
+	patch["slept_at"] = ""
+	patch["sleep_reason"] = ""
+	return patch
+}
+
+// KeepUserHold is patch as written over fresh: when fresh carries an
+// operator's sleep_intent=user-hold, the intent stays, so a sleep decided from
+// an older read (a drain completion, a timer stop, a city stop) never turns
+// the operator's indefinite held_until into a heartbeat hold. The patch
+// carries fresh's value, so a caller folding it onto an older snapshot sees
+// the hold too; write it fenced on fresh's revision, or it could revive a
+// hold cleared since.
+func KeepUserHold(fresh Info, patch MetadataPatch) MetadataPatch {
+	// HoldUser reads no timer, so the clock does not matter here.
+	if _, ok := patch["sleep_intent"]; !ok || HoldsInfo(fresh, time.Time{}).In&HoldUser == 0 {
+		return patch
+	}
+	kept := make(MetadataPatch, len(patch))
+	for k, v := range patch {
+		kept[k] = v
+	}
+	kept["sleep_intent"] = string(SleepReasonUserHold)
+	return kept
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{

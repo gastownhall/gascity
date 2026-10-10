@@ -247,6 +247,7 @@ go_library(
         "dispatch_execution_emit.go",
         "dispatch_runtime.go",
         "doctor_backlog_depth.go",
+        "doctor_bd_read_memo.go",
         "doctor_census_owner_liveness.go",
         "doctor_codex_hooks.go",
         "doctor_executor_identity_residue_check.go",
@@ -758,6 +759,21 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# gc linked with test hooks (internal/clock.testHooks): the only binary in
+# which GC_TEST_BACKSTOP_SPEEDUP divides the controller's backstop cadences.
+# testonly, manual, and visible only to the acceptance rows that use it;
+# scripts/cmd_gc_testhooks_test.go keeps the stamp out of every other link
+# and out of the release config.
+# keep
+go_binary(
+    name = "gc_testhooks",
+    testonly = True,
+    embed = [":gc_lib"],
+    tags = ["manual"],
+    visibility = ["//test/acceptance:__pkg__"],
+    x_defs = {"github.com/gastownhall/gascity/internal/clock.testHooks": "enabled"},
+)
+
 # Two gc links that differ only in their stamped build commit (what the
 # release build's -ldflags "-X main.commit=..." sets), for the supervisor
 # binary-drift tests in //test/integration (start_drift_test.go). Those tests
@@ -911,6 +927,7 @@ go_test(
         "builtin_packs_for_test_test.go",
         "builtin_readiness_cost_bench_test.go",
         "by_id_binding_owner_test.go",
+        "by_id_funnel_skip_test.go",
         "by_id_relic_proof_test.go",
         "by_id_store_route_test.go",
         "cache_notification_test.go",
@@ -958,6 +975,7 @@ go_test(
         "cmd_bd_by_id_rig_test.go",
         "cmd_bd_by_id_test.go",
         "cmd_bd_show_watch_test.go",
+        "cmd_bd_single_exec_test.go",
         "cmd_bd_store_bridge_test.go",
         "cmd_bd_test.go",
         "cmd_bd_update_force_test.go",
@@ -1194,6 +1212,7 @@ go_test(
         "dispatch_session_provider_lazy_test.go",
         "doctor_backlog_depth_ready_error_test.go",
         "doctor_backlog_depth_test.go",
+        "doctor_bd_read_memo_test.go",
         "doctor_census_owner_liveness_test.go",
         "doctor_codex_hooks_test.go",
         "doctor_executor_identity_residue_check_test.go",
@@ -1520,6 +1539,7 @@ go_test(
         "reconcile_session_effects_test.go",
         "reconcile_session_fence_test.go",
         "reconcile_session_namelock_test.go",
+        "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_scenarios_test.go",
@@ -1571,6 +1591,7 @@ go_test(
         "runtime_lease_optout_test.go",
         "runtime_lease_reopen_test.go",
         "runtime_observation_cache_test.go",
+        "runtime_profiles_matrix_test.go",
         "runtime_registry_test.go",
         "runtime_token_fence_test.go",
         "scale_from_zero_named_no_scalecheck_test.go",
@@ -1682,11 +1703,13 @@ go_test(
         "session_refresh_async_gate_test.go",
         "session_resolve_test.go",
         "session_resume_policy_test.go",
+        "session_resume_user_hold_test.go",
         "session_rollback_pending_create_atomic_test.go",
         "session_scaffold_staging_test.go",
         "session_sleep_test.go",
         "session_sleep_wake_override_test.go",
         "session_state_helpers_test.go",
+        "session_suspend_sticks_test.go",
         "session_target_test.go",
         "session_template_overrides_test.go",
         "session_template_start_test.go",
@@ -1859,7 +1882,10 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    shard_count = 15,
+    # No single test runs long (the longest ~10 s); the slowest shard follows
+    # the shard count. At 15 the unit lane's slowest shard ran 40-67 s after
+    # the ~90 s compile-and-link chain; 20 brings it to ~33 s.
+    shard_count = 20,
     deps = [
         "//:gascity",
         "//examples/bd",

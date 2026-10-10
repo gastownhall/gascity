@@ -1514,7 +1514,7 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, workdirutil.ValidateAncestorWorktreesNotStale)
 }
 
 // resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
@@ -1522,10 +1522,13 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 // pure path computation for a plan whose effect runs the check before it
 // writes the path.
 func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, nil)
 }
 
-func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
+// configuredWorkDirPath resolves the work dir path, checking it with
+// validate when set: only resolveConfiguredWorkDirPath names the check, so a
+// pure caller never reaches it.
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate func(string) error) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
@@ -1541,8 +1544,8 @@ func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.A
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if validate {
-		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+	if validate != nil {
+		if err := validate(workDir); err != nil {
 			return "", err
 		}
 	}

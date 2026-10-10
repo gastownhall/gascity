@@ -58,7 +58,7 @@ const (
 func (m *Manager) queueByPolicy(meta map[string]string, sessName string, policy ResumePolicy) bool {
 	running := m.sp.IsRunning(sessName)
 	switch policy {
-	case ResumeOperator:
+	case ResumeOperator, resumeReplacing:
 		return false
 	case ResumeViaController:
 		return !running || HoldVerdict(meta, running, m.now())

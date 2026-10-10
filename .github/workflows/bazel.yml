@@ -233,9 +233,16 @@ jobs:
           # runs this step with) keeps the backslash of an escaped brace in a
           # ${var/pat/rep} replacement.
           fresh=""
-          if [ "$FRESH" = "true" ]; then fresh=" --config=fresh"; fi
+          realtime=""
+          if [ "$FRESH" = "true" ]; then
+            fresh=" --config=fresh"
+            # Plus the timer-bound acceptance tests at their real timers
+            # (test/acceptance/BUILD.bazel REALTIME_TESTS): PR and push runs
+            # shorten their quiescence window and idle timeout.
+            realtime=" //test/acceptance:acceptance_realtime_tests"
+          fi
           unit='{"lane":"unit","cmd":"test --config=ci --keep_going //...'"$fresh"'"}'
-          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$fresh"'"}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$realtime$fresh"'"}'
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
           integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test'"$fresh"'","evidence-only":true}'

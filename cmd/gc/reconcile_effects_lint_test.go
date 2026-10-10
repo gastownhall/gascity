@@ -35,14 +35,14 @@ import (
 //   - the runtime stops that skip the destructive fence (v5 O2).
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
-	"Sleep", "BeginDrainAckStopPending", "RequestRestart", "ResetConfigDrift", "SetWaitHold", "RecordCurrentBead",
+	"Sleep", "SetWaitHold", "RecordCurrentBead",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CloseWithTerminalPatch",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder", "CloseWithTerminalPatchUnder",
 	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
-	"WakeSession", "RequestWakeUnlessHeld", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
+	"WakeSession", "RequestWakeUnlessHeld", "OperatorSuspend", "ApplyKeepingUserHold", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",

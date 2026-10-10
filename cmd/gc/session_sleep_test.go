@@ -1050,7 +1050,9 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
-		Title: "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "worker",
 		Metadata: map[string]string{
 			"session_name":             "worker",
 			"state":                    "active",
@@ -1064,7 +1066,7 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !recoverPendingIdleSleepInfo(seedSessionInfo(session), sessionFrontDoor(store), false, clk) {
+	if recoverPendingIdleSleepInfo(seedSessionInfo(session), sessionFrontDoor(store), false, clk) == nil {
 		t.Fatal("expected pending idle sleep to recover")
 	}
 	got, err := store.Get(session.ID)
