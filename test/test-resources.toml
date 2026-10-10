@@ -442,11 +442,11 @@ expires = "2026-10-31"
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
-owner = "TestCacheZstdProbe"
+owner = "TestCacheProbes"
 resources = ["http_test_server"]
 owner_bead = "ga-cp3hwi"
-invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
-resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
+invariant = "the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
