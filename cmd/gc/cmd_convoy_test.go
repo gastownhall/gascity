@@ -1350,6 +1350,69 @@ func TestHasLabel(t *testing.T) {
 
 // --- gc convoy autoclose ---
 
+func TestConvoyAutocloseStoreRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		cwd  string
+		want string
+	}{
+		{
+			name: "no env falls back to cwd",
+			cwd:  "/work/dir",
+			want: "/work/dir",
+		},
+		{
+			name: "GC_STORE_ROOT wins outright, absolute",
+			env:  map[string]string{"GC_STORE_ROOT": "/store/root"},
+			cwd:  "/work/dir",
+			want: "/store/root",
+		},
+		{
+			name: "GC_STORE_ROOT relative is joined against cwd",
+			env:  map[string]string{"GC_STORE_ROOT": "rel/root"},
+			cwd:  "/work/dir",
+			want: "/work/dir/rel/root",
+		},
+		{
+			name: "BEADS_DIR absolute resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads"},
+			cwd:  "/work/dir",
+			want: "/city/root",
+		},
+		{
+			// filepath.Dir on a trailing-slash path does not strip the final
+			// element the way a shell's dirname would, so an unclean BEADS_DIR
+			// must not silently resolve to itself instead of its parent.
+			name: "BEADS_DIR absolute with a trailing slash still resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads/"},
+			cwd:  "/work/dir",
+			want: "/city/root",
+		},
+		{
+			name: "BEADS_DIR relative is joined against cwd before taking its parent",
+			env:  map[string]string{"BEADS_DIR": ".beads"},
+			cwd:  "/work/dir",
+			want: "/work/dir",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"GC_STORE_ROOT", "BEADS_DIR"} {
+				t.Setenv(k, "")
+				_ = os.Unsetenv(k)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			got := convoyAutocloseStoreRoot(tc.cwd)
+			if got != tc.want {
+				t.Fatalf("convoyAutocloseStoreRoot(%q) with env %v = %q, want %q", tc.cwd, tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConvoyAutocloseHappyPath(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})    // gc-1

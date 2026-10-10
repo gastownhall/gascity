@@ -7,34 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 const nativeDoltStoreActor = "gascity"
 
-// nativeDoltOpenReadyStatuses lists the upstream bd statuses Ready() queries
-// GetReadyWork for. This must match IsReadyCandidateForTier's contract of
-// "open status ... and no future defer_until": only StatusOpen (bd's own
-// status-category table marks it the sole "active" category status) and
-// StatusDeferred (kept only because IsDeferred independently re-checks
-// DeferUntil, so an expired deferral must still resurface) belong here.
-// blocked/hooked are bd's "wip" category and pinned is "frozen" — bd's own
-// ready semantics already exclude them, and Gas City has no analogous
-// re-check for them the way it does for deferred, so querying for them let
-// dependency-blocked beads erase their status to "open" via mapBdStatus and
-// pass IsReadyCandidateForTier's status gate. See ga-3mv5d3 bead notes for
-// the full investigation.
-var nativeDoltOpenReadyStatuses = []beadslib.Status{
-	beadslib.StatusOpen,
-	beadslib.StatusDeferred,
-}
+// The per-status ready loop this file used to run is gone with the raw
+// GetReadyWork door; issueops.Reader publishes no status and workapi's builder
+// stamps open for every caller. NativeDoltStore.Ready carries what became of
+// each of its two passes, ga-3mv5d3's investigation included.
 
 var (
 	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
@@ -85,10 +72,6 @@ func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 	return d + time.Duration(len(plan.Nodes)+len(plan.Edges))*perItem
 }
 
-func nativeDoltCleanupContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), bdCommandTimeout)
-}
-
 // ProcessEnvSnapshotExcludingNativeDoltOpen returns a process environment
 // snapshot after any in-flight native Dolt open has restored scoped BEADS_* env.
 func ProcessEnvSnapshotExcludingNativeDoltOpen() []string {
@@ -135,9 +118,37 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // open environment while nativeDoltOpenEnvMu is already held. The lock-aware
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
+// BDAllowRemoteMigrateEnvKey is projected from env as well, so the linked
+// library sees it only when the caller decided it.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
-	return withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	restoreScoped, err := withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	if err != nil {
+		return nil, err
+	}
+	restoreRemoteMigrate, err := withProjectedOpenEnvLocked(bdRemoteMigrateOpenEnvKeys, env, "")
+	if err != nil {
+		restoreScoped()
+		return nil, err
+	}
+	return func() {
+		restoreRemoteMigrate()
+		restoreScoped()
+	}, nil
 }
+
+// BDAllowRemoteMigrateEnvKey is the beads library's opt-in for letting a
+// writable open migrate a shared or remote database's schema forward. A direct
+// native open takes it only from the env its caller passes, never from the
+// ambient process environment: gc sets it for a city that opted in through
+// beads.allow_schema_behind_migrate, the opt-in the native-store preflight
+// requires before it passes a database whose schema is behind the library's.
+// The proxied lane decides this key itself (proxiedOnlyOpenEnvKeys).
+const BDAllowRemoteMigrateEnvKey = "BD_ALLOW_REMOTE_MIGRATE"
+
+// bdRemoteMigrateOpenEnvKeys is the projection list for
+// BDAllowRemoteMigrateEnvKey. It stays out of nativeDoltOpenEnvKeys, which
+// lists the BEADS_ keys a direct open decides.
+var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey}
 
 // withProjectedOpenEnvLocked is the projection itself, parameterised by the key
 // list it decides.
@@ -300,7 +311,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		prefix, err = nativeReadIssuePrefix(ctx, storage)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -316,7 +327,8 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 // configuration decides how the workspace is served — so an inherited variable
 // naming another database, another directory, or a credential command must not
 // be able to re-point it. Passing an empty scoped environment is not enough:
-// that clears only the variables gc itself projects.
+// that clears only the variables gc itself projects. BDAllowRemoteMigrateEnvKey
+// is withheld too, so an inherited unlock never migrates the workspace.
 func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	return newNativeDoltStoreAtWithoutAmbientEnv(ctx, scopeRoot, "", opts...)
 }
@@ -451,10 +463,6 @@ type NativeDoltStore struct {
 	// should demote to the bd leaf in seconds rather than hold a caller
 	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
-	// afterMetadataMergeRead, when set, runs after each read that starts a
-	// metadata merge attempt, before its checked write. Only tests set it, to
-	// land a competing write in the window the compare-and-swap protects.
-	afterMetadataMergeRead func(id string)
 
 	// readOnlyReason, when non-empty, latches this handle read-only: every
 	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches
@@ -552,6 +560,7 @@ func WithNativeDoltStoreReservedIDPrefixes(prefixes ...string) NativeDoltStoreOp
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
+	_ ConditionalAssigneeTransferer = (*NativeDoltStore)(nil)
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
@@ -641,6 +650,24 @@ func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Conte
 // Dolt-backed ledger mints under.
 const nativeIssuePrefixConfigKey = "issue_prefix"
 
+// nativeReadIssuePrefix reads the configured issue prefix through the
+// issueops.WorkspaceConfig role rather than the raw storage.GetConfig
+// primitive the G3 port retired: WorkspaceConfig.GetSetting answers an unset
+// key as "" with a nil error (never beads.ErrConfigNotFound or similar), the
+// same contract the raw primitive gave every one of this function's three
+// call sites, so this is a direct substitution rather than a behavior change.
+func nativeReadIssuePrefix(ctx context.Context, storage beadslib.Storage) (string, error) {
+	settings, err := storage.WorkspaceConfig()
+	if err != nil {
+		return "", err
+	}
+	result, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: nativeIssuePrefixConfigKey})
+	if err != nil {
+		return "", err
+	}
+	return result.Value, nil
+}
+
 // openNativeStorage projects the scoped Dolt env, opens the best-available
 // native storage, and (when readPrefix) reads the configured issue prefix while
 // the env is still projected. It is shared by the initial open and the
@@ -661,7 +688,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		prefix, err = nativeReadIssuePrefix(ctx, storage)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -1173,6 +1200,36 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 
 // ApplyGraphPlanWithStorage creates a bead graph atomically in the selected
 // storage tier through the native beads storage layer.
+//
+// At or under issueops.MaxApplyBatchItems, it composes the whole plan into
+// ONE issueops.BatchApplier request — never chunked, because this route's
+// entire value over a sequence of ordinary writes is that it lands as a
+// single transaction. BatchApplier's own end gate re-validates every dep_add
+// item against the parent-child closure the whole request produced after
+// every item lands, raising *issueops.DependencyHierarchyConflictError or
+// issueops.ErrDependencyCycle.
+//
+// issueops.MaxApplyBatchItems is BatchApplier's own cap, not a wire limit, so
+// it binds a local (embedded) backend exactly as it binds a served one. A
+// plan over the cap therefore cannot go through BatchApplier at all, on any
+// backend — but a LOCAL backend still has a second atomic route: its own
+// beadslib.RunInTransaction, which this method drives by hand
+// (applyGraphPlanOverCapInTransaction) exactly as the pre-BatchApplier
+// implementation did. A served backend has no transaction to retry against —
+// RunInTransaction refuses it with a typed *beadslib.ErrUnsupported before the
+// callback ever runs — and that refusal is where *GraphApplyTooLargeError
+// belongs: there genuinely is no atomic path left for a plan this large on
+// that backend.
+//
+// The two routes do NOT refuse alike. The split counts the composed request's
+// items (creates, edges, parent links and deferred assignments together), not
+// nodes, so whether a plan is batch-sized depends on its whole shape. A
+// hierarchy conflict on the batch route is the role's typed
+// *issueops.DependencyHierarchyConflictError or issueops.ErrDependencyCycle.
+// On the over-cap route it is an untyped error from
+// applyGraphPlanOverCapInTransaction's pairwise parent/edge check, or whatever
+// the transaction's own dependency write raises. A caller cannot classify a
+// refused plan by those types without knowing which side of the cap it fell on.
 func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return nil, err
@@ -1188,6 +1245,11 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 		return nil, fmt.Errorf("native graph apply: %w", err)
 	}
 
+	req, err := nativeGraphApplyBatchRequest(plan, s.actor, ephemeral, noHistory)
+	if err != nil {
+		return nil, fmt.Errorf("native graph apply: %w", err)
+	}
+
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return nil, err
@@ -1200,13 +1262,61 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 	ctx, cancel := context.WithTimeout(parent, nativeGraphApplyDeadline(plan))
 	defer cancel()
 
+	if len(req.Items) <= issueops.MaxApplyBatchItems {
+		applier, err := storage.BatchApplier()
+		if err != nil {
+			return nil, fmt.Errorf("native graph apply: %w", err)
+		}
+		applyResult, err := applier.ApplyBatch(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("native graph apply: %w", err)
+		}
+		result := &GraphApplyResult{IDs: applyResult.Keys}
+		if err := ValidateGraphApplyResult(plan, result); err != nil {
+			return nil, fmt.Errorf("native graph apply: %w", err)
+		}
+		return result, nil
+	}
+
+	result, entered, err := s.applyGraphPlanOverCapInTransaction(ctx, storage, plan, ephemeral, noHistory)
+	if err == nil {
+		if verr := ValidateGraphApplyResult(plan, result); verr != nil {
+			return nil, fmt.Errorf("native graph apply: %w", verr)
+		}
+		return result, nil
+	}
+	var unsupported *beadslib.ErrUnsupported
+	if !entered && errors.As(err, &unsupported) {
+		// No transaction was ever opened — ask, don't handshake — so this
+		// backend has no atomic route left for a plan this large at all.
+		return nil, fmt.Errorf("native graph apply: %w", &GraphApplyTooLargeError{Items: len(req.Items), Max: issueops.MaxApplyBatchItems})
+	}
+	return nil, fmt.Errorf("native graph apply: %w", err)
+}
+
+// applyGraphPlanOverCapInTransaction is the over-cap fallback for a LOCAL
+// (embedded) backend: it drives the same plan by hand through
+// beadslib.RunInTransaction instead of issueops.BatchApplier, exactly as this
+// store did before the at-or-under-cap path moved onto BatchApplier. Every
+// tx.* call below is a LOCAL FALLBACK call: it lives only on this route,
+// reached only after BatchApplier's own cap has already ruled out the batch
+// path for this plan.
+//
+// entered reports whether the RunInTransaction callback ran at all, the same
+// distinction Tx() draws: a refusal raised AFTER the callback ran is a FAILED
+// transaction (the callback may have partially written), never a signal that
+// this backend lacks transactions; only a refusal raised before entry means
+// "no transaction route here."
+func (s *NativeDoltStore) applyGraphPlanOverCapInTransaction(ctx context.Context, storage beadslib.Storage, plan *GraphApplyPlan, ephemeral, noHistory bool) (result *GraphApplyResult, entered bool, err error) {
 	keyToID := make(map[string]string, len(plan.Nodes))
 	commitMsg := plan.CommitMessage
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("gc: graph-apply %d nodes", len(plan.Nodes))
 	}
 
-	if err := storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+	err = storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		entered = true
+
 		issues := make([]*beadslib.Issue, 0, len(plan.Nodes))
 		pendingAssignees := make(map[int]string)
 
@@ -1245,6 +1355,9 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			issues = append(issues, issue)
 		}
 
+		// local fallback: tx.CreateIssues mints every id for this transaction
+		// in one call, bypassing issueops.BatchApplier entirely (its CreateItem
+		// is what this route exists to avoid).
 		if err := tx.CreateIssues(ctx, issues, s.actor); err != nil {
 			return fmt.Errorf("batch create: %w", err)
 		}
@@ -1264,6 +1377,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			if err != nil {
 				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
 			}
+			// local fallback: the map-based tx.UpdateIssue splices resolved
+			// metadata refs the same way the native route always has; it skips
+			// the role's metadata-key validation on purpose, the same documented
+			// asymmetry Tx() relies on (TestNativeDoltStoreMetadataKeyRuleSplitsByRoute).
 			if err := tx.UpdateIssue(ctx, issues[i].ID, map[string]interface{}{"metadata": raw}, s.actor); err != nil {
 				return fmt.Errorf("node %q: updating metadata refs: %w", node.Key, err)
 			}
@@ -1289,6 +1406,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 				Type:        depType,
 				Metadata:    edge.Metadata,
 			}
+			// local fallback: tx.AddDependency, the pre-BatchApplier route's own
+			// end gate — the manual parentDepPairs check above is this route's
+			// substitute for BatchApplier's hierarchy-closure re-validation,
+			// since nothing else re-checks a hand-run transaction's edges.
 			if err := tx.AddDependency(ctx, dep, s.actor); err != nil {
 				return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
 			}
@@ -1307,27 +1428,26 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 				DependsOnID: parentID,
 				Type:        beadslib.DepParentChild,
 			}
+			// local fallback: see tx.AddDependency comment above.
 			if err := tx.AddDependency(ctx, dep, s.actor); err != nil {
 				return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
 			}
 		}
 
 		for i, assignee := range pendingAssignees {
+			// local fallback: deferred post-create assignment, in place of
+			// BatchApplier's UpdateItem pass over AssignAfterCreate nodes.
 			if err := tx.UpdateIssue(ctx, issues[i].ID, map[string]interface{}{"assignee": assignee}, s.actor); err != nil {
 				return fmt.Errorf("node %q: setting assignee: %w", plan.Nodes[i].Key, err)
 			}
 		}
 
 		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("native graph apply: %w", err)
+	})
+	if err != nil {
+		return nil, entered, err
 	}
-
-	result := &GraphApplyResult{IDs: keyToID}
-	if err := ValidateGraphApplyResult(plan, result); err != nil {
-		return nil, fmt.Errorf("native graph apply: %w", err)
-	}
-	return result, nil
+	return &GraphApplyResult{IDs: keyToID}, entered, nil
 }
 
 // SupportsEphemeralGraphApply reports whether this store can apply a whole
@@ -1336,11 +1456,11 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 	return true
 }
 
-// Create persists a new bead through the upstream beads storage layer. An
-// explicit id is honored verbatim, provided it carries one of the store's
-// reserved namespaces when the store is fenced
-// (WithNativeDoltStoreReservedIDPrefixes).
+// Create persists a new bead through the upstream issue-operations facade. The
+// facade commits the issue and every edge in one transaction, so a partial
+// create can no longer be observed and needs no compensation.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	return s.create(b, false)
 }
 
@@ -1381,6 +1501,10 @@ func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
+	request, err := nativeCreateRequestFromIssue(s.actor, issue)
+	if err != nil {
+		return Bead{}, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return Bead{}, err
@@ -1388,56 +1512,103 @@ func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	pendingDependencies := cloneNativeDependencies(issue.Dependencies)
-	if err := s.validateCreatedDependencies(ctx, storage, issue.ID, pendingDependencies); err != nil {
-		return Bead{}, err
-	}
-	if err := storage.CreateIssue(ctx, issue, s.actor); err != nil {
-		return Bead{}, err
-	}
-	createdDependencies, err := s.persistCreatedDependencies(ctx, storage, issue.ID, pendingDependencies)
+	ops, err := storage.IssueLifecycle()
 	if err != nil {
-		cleanupCtx, cleanupCancel := nativeDoltCleanupContext()
-		cleanupErr := s.compensateFailedCreate(cleanupCtx, storage, issue.ID, createdDependencies)
-		cleanupCancel()
-		if cleanupErr != nil {
-			return Bead{}, errors.Join(err, cleanupErr)
-		}
-		return Bead{}, err
+		return Bead{}, nativeStoreError(issue.ID, err)
 	}
-	issue.Dependencies = createdDependencies
-	return beadFromNativeIssue(issue)
+	result, err := ops.Create(ctx, request)
+	if err != nil {
+		return Bead{}, nativeStoreError(issue.ID, err)
+	}
+	return beadFromNativeIssue(result.Issue)
 }
 
-// Get retrieves a bead by ID from the upstream beads storage layer.
-func (s *NativeDoltStore) Get(id string) (Bead, error) {
-	var out Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
-			IDs:                 []string{id},
-			IncludeDependencies: true,
-		})
-		if err != nil {
-			return nativeStoreError(id, err)
+// nativeCreateRequestFromIssue moves a bead's dependency edges off the issue and
+// onto the facade request, which is where the facade takes them: a create whose
+// issue still carries edges is refused outright.
+//
+// The parent edge stays an ordinary parent-child entry in Dependencies rather
+// than moving to CreateRequest.ParentID. Both produce the same edge, but
+// ParentID also switches ID minting to the hierarchical "<parent>.N" scheme,
+// which would silently change the IDs Gas City mints for every child bead.
+func nativeCreateRequestFromIssue(actor string, issue *beadslib.Issue) (issueops.CreateRequest, error) {
+	dependencies := issue.Dependencies
+	issue.Dependencies = nil
+	request := issueops.CreateRequest{
+		Actor: actor,
+		Issue: issue,
+		// The storage-layer create this replaced skipped prefix validation for
+		// an explicit ID, and Gas City mints several prefixes (gc-, gcg-, gcs-)
+		// against one store. Without this an explicit off-prefix ID that used
+		// to create fine is refused with ErrPrefixMismatch.
+		ForceIDPrefix: true,
+	}
+	for _, dependency := range dependencies {
+		if dependency == nil {
+			continue
 		}
-		for _, issue := range issues {
-			if issue != nil && issue.ID == id {
-				bead, err := beadFromNativeIssue(issue)
-				if err != nil {
-					return err
-				}
-				out = bead
-				return nil
-			}
+		target := strings.TrimSpace(dependency.DependsOnID)
+		if target == "" {
+			return issueops.CreateRequest{}, fmt.Errorf("creating bead %q: dependency depends_on_id is empty", issue.ID)
 		}
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	})
-	return out, err
+		source := strings.TrimSpace(dependency.IssueID)
+		switch {
+		case source == "" || source == issue.ID:
+			request.Dependencies = append(request.Dependencies, issueops.CreateDependency{
+				TargetID: target,
+				Type:     dependency.Type,
+			})
+		case target == issue.ID:
+			request.Dependencies = append(request.Dependencies, issueops.CreateDependency{
+				TargetID: source,
+				Type:     dependency.Type,
+				Reverse:  true,
+			})
+		default:
+			return issueops.CreateRequest{}, fmt.Errorf("creating bead %q: dependency %q -> %q names neither end of the new bead", issue.ID, source, target)
+		}
+	}
+	return request, nil
 }
 
-// Update modifies an existing bead through the upstream beads storage layer.
+// Update modifies an existing bead through the upstream issue-operations facade.
+//
+// The facade route and the Store.Tx route do not validate the same things, and
+// the split does not run in one direction. The facade route is stricter about
+// the patch: it validates metadata keys (see beadmeta.ValidKey), requires a
+// non-empty title, bounds priority to 0-4, and reports ErrNotFound for a
+// no-field update against a missing bead (updateOnce reads the row itself
+// rather than send the facade an empty patch) — the map-based Tx write accepts
+// all four. The Tx route is stricter about the close policy: a status write that
+// crosses into the done category is refused there while children are open, and
+// the override that would waive it (beads' "_force_close_policy" update-map key)
+// has no exported spelling for the map path, so Store.Tx cannot express it.
+// Update waives that policy here because the storage-layer write it replaced
+// applied none, and a molecule root routinely closes over open children.
+// Treat Store.Tx as unsupported for a done-crossing status write until beads
+// exports the override; use Close, or the standalone Update, instead.
+//
+// Update is NOT atomic when ParentID names a foreign row. The facade cannot
+// resolve that parent, so the other fields commit through it first and the
+// parent edge is rewritten afterward in a write of its own (see
+// rewriteExternalParent). A failure between the two returns its error with the
+// new fields written and the old parent edge still standing, at worst beside
+// the new one, and replaying the Update converges because both writes are
+// idempotent.
+//
+// Only two of Update's writes label their Dolt history entry. The plain door
+// sends the facade no Provenance, so that entry carries the facade's default
+// ("bd: update <id>"). The batch door a force member takes passes "gc: update
+// <id>", and the edge rewrite a foreign ParentID takes labels its transaction
+// "gc: update bead <id>" where the backing has one (see rewriteExternalParent);
+// without one, the edge roles record their own default labels.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
+	patch, err := nativeIssuePatchFromUpdateOpts(opts)
+	if err != nil {
 		return err
 	}
 	storage, release, err := s.acquireStorage()
@@ -1445,27 +1616,206 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 		return err
 	}
 	defer release()
-	// Retry a lost serialization race rather than surfacing it to the caller:
-	// a concurrent writer to the same bead store is normal (the supervisor,
-	// the reconciler and an operator request all write during city startup),
-	// and without this an ordinary conflict fails the write permanently and
-	// reaches the API as a 500.
-	err = retryOnNativeDoltSerializationConflict(func() error {
+
+	// The patch is pure, so only the write needs replaying.
+	return retryOnNativeDoltSerializationConflict(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
-			return s.applyUpdateInTx(ctx, tx, id, opts)
-		})
+		return s.updateOnce(ctx, storage, id, patch, opts)
 	})
+}
+
+// updateOnce performs one complete update attempt, so a replay re-picks the
+// door from the same fields rather than reusing an earlier decision.
+func (s *NativeDoltStore) updateOnce(ctx context.Context, storage beadslib.Storage, id string, patch issueops.IssuePatch, opts UpdateOpts) error {
+	// A reparent onto (or off of) a foreign id is a weak reference this store
+	// cannot resolve -- see validateUpdateParent's doc comment, which states the
+	// same rule for the Store.Tx route. The facade's Update role resolves
+	// ParentID like any other local write and refuses a target it cannot find,
+	// so a foreign value has to come OUT of the patch before it reaches either
+	// door below, and go in afterward as an edge rewrite of its own.
+	var externalParentID string
+	hasExternalParent := false
+	if opts.ParentID != nil && !nativeParentIsLocal(id, *opts.ParentID, s.idPrefix) {
+		hasExternalParent = true
+		externalParentID = *opts.ParentID
+		patch.ParentID = issueops.Field[string]{}
+	}
+	if nativeIssuePatchIsEmpty(patch) {
+		// Nothing is left for the facade: a no-field update, or a pure reparent
+		// whose foreign parent came out above. The served wire refuses an empty
+		// patch outright, where the in-process role answers one with a row read
+		// and no write. That read is all a no-field update reports — ErrNotFound
+		// for a missing bead, as MemStore does — so it is made here instead, and
+		// it stops a missing bead before the edge rewrite writes anything.
+		current, err := storage.GetIssue(ctx, id)
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if current == nil {
+			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		}
+	} else if err := s.updateOnceThroughFacade(ctx, storage, id, patch, opts); err != nil {
+		return err
+	}
+	if hasExternalParent {
+		return s.rewriteExternalParent(ctx, storage, id, externalParentID)
+	}
+	return nil
+}
+
+// rewriteExternalParent replaces id's parent-child edge with one to parentID,
+// or clears it when parentID is empty, for a parent nativeParentIsLocal has
+// already called foreign.
+//
+// The rewrite is two edge writes, the old edge out and the new one in, and the
+// bead must never be left between them: nothing reports a bead that lost its
+// parent, so the molecule or convoy just stops listing it. Where the backing
+// has a transaction, both writes run in it and a failure rolls both back.
+// Where it has none, updateParentThroughEditor orders them so that a failure
+// between the two leaves a second parent edge standing, never no edge at all.
+//
+// It is a write of its own rather than part of the facade's. The facade opens
+// its own transaction and takes no extra edge into it. Routing the whole
+// Update through the Store.Tx body instead would hand a foreign-parent update
+// that route's validation (see Update's doc comment), so the same fields would
+// be accepted or refused depending on whether the parent happened to be
+// foreign. The cost lands only on an update that carries other fields too.
+// Those commit first, so a field the facade refuses stops the update before
+// any edge is touched, and a failed rewrite returns its error with the new
+// fields written and the old parent intact; replaying the update converges
+// because both writes are idempotent. A pure reparent, which is what convoy
+// membership and molecule attach send, leaves the facade no field to patch, so
+// updateOnce dials it nothing and the edge rewrite is its only write.
+func (s *NativeDoltStore) rewriteExternalParent(ctx context.Context, storage beadslib.Storage, id, parentID string) error {
+	err := runInNativeTransaction(ctx, storage, fmt.Sprintf("gc: update bead %s", id), func(tx beadslib.Transaction) error {
+		return s.updateParentInTransaction(ctx, tx, id, parentID)
+	}, func() error {
+		return s.updateParentThroughEditor(ctx, storage, id, parentID)
+	})
+	return nativeStoreError(id, err)
+}
+
+// updateOnceThroughFacade carries out the facade-role write updateOnce picked
+// a door for, once any foreign ParentID has already been taken out of patch.
+func (s *NativeDoltStore) updateOnceThroughFacade(ctx context.Context, storage beadslib.Storage, id string, patch issueops.IssuePatch, opts UpdateOpts) error {
+	// Store.Update is the low-level projection verb: the storage-layer write it
+	// replaced applied no claim fence and no close policy, and the callers that
+	// need those guards (ReleaseIfCurrent, the dispatcher's compare-and-set
+	// claims) enforce them a layer up. So an assignee or status edit waives the
+	// corresponding guard — and WHICH DOOR CARRIES THAT WAIVER IS NOT THE SAME
+	// ON EVERY BACKEND.
+	//
+	// updateIssue publishes neither force member: the http client refuses
+	// ForceAssigneeTransfer and ForceClosePolicy outright
+	// (W-UpdateRequest.ForceAssigneeTransfer, W-UpdateRequest.ForceClosePolicy).
+	// The APPLY item publishes both. So a patch that needs a waiver goes
+	// through a single-item batch, and one that does not goes through the plain
+	// door carrying no force member at all — which is what lets an ordinary
+	// title edit cross the wire, where an unconditional force refused it.
+	//
+	// The split is decided by the FIELDS rather than by retrying a refusal,
+	// because the two doors disagree in the other direction too: the apply
+	// patch refuses ParentID (W-ApplyPatch.ParentID) where updateIssue
+	// publishes it. A reparent alone therefore stays on the plain door. A patch
+	// that reparents AND edits assignee or status can be served by neither over
+	// the wire; it takes the batch door and refuses there, naming the member.
+	if opts.Assignee != nil || opts.Status != nil {
+		return s.updateThroughBatch(ctx, storage, id, patch, opts)
+	}
+	ops, err := storage.IssueLifecycle()
 	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	if _, err := ops.Update(ctx, issueops.UpdateRequest{
+		Actor:   s.actor,
+		IssueID: id,
+		Patch:   patch,
+	}); err != nil {
 		return nativeStoreError(id, err)
 	}
 	return nil
 }
 
-// applyUpdateInTx applies an Update against an open beadslib transaction. It is
-// shared by the standalone Update (one op, one commit) and the multi-write
-// Store.Tx path (many ops, one commit) so both routes have identical semantics.
+// updateThroughBatch applies one patch as a single-item batch so it can carry
+// the force members updateIssue does not publish. Both forces stay conditioned
+// on the field that arms the corresponding guard, because
+// ForceAssigneeTransfer without an assignee edit is a hard validation error
+// rather than a no-op.
+func (s *NativeDoltStore) updateThroughBatch(ctx context.Context, storage beadslib.Storage, id string, patch issueops.IssuePatch, opts UpdateOpts) error {
+	applier, err := storage.BatchApplier()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	if _, err := applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor: s.actor,
+		Items: []issueops.ApplyItem{{
+			Kind: issueops.ItemUpdate,
+			Update: &issueops.UpdateItem{
+				Target:                issueops.Ref{ID: id},
+				Patch:                 patch,
+				ForceAssigneeTransfer: opts.Assignee != nil,
+				ForceClosePolicy:      opts.Status != nil,
+			},
+		}},
+		Provenance: "gc: update " + id,
+	}); err != nil {
+		return nativeStoreError(id, err)
+	}
+	return nil
+}
+
+// nativeIssuePatchFromUpdateOpts maps Gas City update options onto the facade's
+// issue patch. Metadata keys merge rather than replace, matching the
+// read-modify-write the storage-layer path performed.
+func nativeIssuePatchFromUpdateOpts(opts UpdateOpts) (issueops.IssuePatch, error) {
+	var patch issueops.IssuePatch
+	if opts.Title != nil {
+		patch.Title = issueops.Field[string]{Set: true, Value: *opts.Title}
+	}
+	if opts.Status != nil {
+		patch.Status = issueops.Field[issueops.Status]{Set: true, Value: issueops.Status(*opts.Status)}
+	}
+	if opts.Type != nil {
+		patch.IssueType = issueops.Field[issueops.IssueType]{Set: true, Value: issueops.IssueType(*opts.Type)}
+	}
+	if opts.Priority != nil {
+		patch.Priority = issueops.Field[int]{Set: true, Value: *opts.Priority}
+	}
+	if opts.Description != nil {
+		patch.Description = issueops.Field[string]{Set: true, Value: *opts.Description}
+	}
+	if opts.Assignee != nil {
+		patch.Assignee = issueops.Field[string]{Set: true, Value: *opts.Assignee}
+	}
+	if opts.ParentID != nil {
+		patch.ParentID = issueops.Field[string]{Set: true, Value: *opts.ParentID}
+	}
+	patch.Labels.Add = append([]string(nil), opts.Labels...)
+	patch.Labels.Remove = append([]string(nil), opts.RemoveLabels...)
+	if len(opts.Metadata) > 0 {
+		patch.Metadata.Set = make(map[string]json.RawMessage, len(opts.Metadata))
+		for key, value := range opts.Metadata {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return issueops.IssuePatch{}, fmt.Errorf("marshaling metadata value for %q: %w", key, err)
+			}
+			patch.Metadata.Set[key] = raw
+		}
+	}
+	return patch, nil
+}
+
+// applyUpdateInTx applies an Update against an open beadslib transaction. Its two
+// callers each need a transaction the facade's own per-operation one cannot be:
+// the multi-write Store.Tx path (nativeDoltTx.Update) coalesces several writes
+// into one commit, and updateLabelsIfMatch checks the row version in the same
+// transaction that writes the labels.
+//
+// This route is not the unvalidated one. It skips the facade's patch validation
+// (metadata keys, title, priority) but enforces the close policy the facade
+// route waives — see the Update doc comment for the whole asymmetry. An
+// UpdateIfMatch that carries labels inherits it exactly as Store.Tx does.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
 	if opts.ParentID != nil {
 		if err := s.validateUpdateParent(ctx, tx, id, *opts.ParentID); err != nil {
@@ -1576,11 +1926,62 @@ func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Trans
 	return beadFromNativeIssue(issue)
 }
 
-// ReleaseIfCurrent clears an in-progress assignment only when the bead still
-// has the expected assignee inside one native Dolt transaction.
+// ReleaseIfCurrent clears an assignment only while the bead still has the
+// expected assignee.
+//
+// It routes through issueops.Releaser rather than the hand-composed
+// read-check-write it used to run inside RunInTransaction, for the reason
+// every other re-point in this package has: RunInTransaction is off the v0
+// served surface, so the hand-composed version was a hard failure on any store
+// reached over the wire. The role is a required member of the Storage
+// contract, and its guard is evaluated inside the releasing transaction, so
+// the atomicity the old shape built by hand is the role's own promise.
+//
+// ExpectedAssignee is ALWAYS supplied, and that is the whole method. A nil
+// expectation selects the role's unconditional path, whose ownership fence's
+// subject is the ACTOR — and gc's actor is the city, never the holder — so a
+// nil expectation would release a claim this front door was told to leave
+// alone. An empty holder is therefore not a release at all: it dials nothing
+// and reports "not released", which is also what the role would say about it
+// (a row nobody holds is ErrNotClaimed).
+//
+// A CONDITIONAL REFUSAL IS A VALUE, NOT AN ERROR, which is this front door's
+// contract and the reason the mapping is not a pass-through. The role refuses
+// with a typed sentinel for each of the four ways a conditional release can
+// fail to happen — a different holder, no claim, a status that accepts no
+// release, a bead that is gone — and every one of them is the same fact to a
+// reconciler: the claim is not ours to give back. Everything else travels,
+// because a transport failure reported as "not released" would leave a caller
+// believing a claim is still held.
+//
+// TWO THINGS THE ROLE DOES THAT THE HAND-BUILT VERSION DID NOT, both improvements
+// and both worth knowing:
+//
+//   - THE HOLDER COMPARISON IS SEPARATOR-INSENSITIVE. A run of ".", "_" or "-"
+//     matches any other such run, so "agent-a", "agent_a" and "agent.a" are one
+//     holder where the old byte-exact comparison saw three. gc composes its
+//     expectation from an assignee a read gave it, so this widens nothing gc
+//     asks for; it forgives a caller that reached the same identity through a
+//     layer that spells separators differently. Nothing else is forgiven — the
+//     value is neither trimmed nor case-folded.
+//   - THE RELEASE DROPS THE LEASE AND REMINTS THE ROW VERSION. The old
+//     two-field status/assignee write left the lease row behind and moved no
+//     version, so a concurrent reclaim could silently merge with it.
+//
+// TWO FAMILY DIVERGENCES THIS OPENED, both recorded on
+// ConditionalAssignmentReleaser in beads.go rather than here, because they are
+// facts about the store FAMILY and not about this implementation: the role
+// releases from open as well as in_progress where MemStore, SQLiteStore and
+// the pre-role version of this method released only from in_progress; and an
+// empty expected holder over an in_progress row with an empty assignee is
+// (false, nil) here where MemStore answers true. Neither is pinned by a
+// conformance suite today.
 func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return false, err
+	}
+	if expectedAssignee == "" {
+		return false, nil
 	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
@@ -1589,35 +1990,177 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	defer release()
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
-	released := false
-	err = storage.RunInTransaction(ctx, fmt.Sprintf("gc: release bead %s if current", id), func(tx beadslib.Transaction) error {
-		issue, err := tx.GetIssue(ctx, id)
-		if err != nil {
-			err = nativeStoreError(id, err)
-			if errors.Is(err, ErrNotFound) {
-				return nil
-			}
-			return err
-		}
-		if issue == nil || issue.Status != beadslib.StatusInProgress || issue.Assignee != expectedAssignee {
-			return nil
-		}
-		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{
-			"status":   "open",
-			"assignee": "",
-		}, s.actor); err != nil {
-			return nativeStoreError(id, err)
-		}
-		released = true
-		return nil
+	releaser, err := storage.Releaser()
+	if err != nil {
+		return false, nativeStoreError(id, err)
+	}
+	result, err := releaser.Release(ctx, issueops.ReleaseRequest{
+		Actor:            s.actor,
+		IssueID:          id,
+		ExpectedAssignee: &expectedAssignee,
 	})
 	if err != nil {
-		return false, err
+		if nativeReleaseRefused(err) {
+			return false, nil
+		}
+		return false, nativeStoreError(id, err)
 	}
-	return released, nil
+	return result.Changed, nil
 }
 
-// Close sets a bead's status to closed through the upstream beads storage layer.
+// nativeReleaseRefused reports the refusals that mean "this claim was not ours
+// to give back". Each is a fact about the row rather than a failure to reach
+// it, and this front door reports all four as a false verdict.
+func nativeReleaseRefused(err error) bool {
+	return errors.Is(err, issueops.ErrAssigneeMismatch) ||
+		errors.Is(err, issueops.ErrNotClaimed) ||
+		errors.Is(err, issueops.ErrNotReleasable) ||
+		errors.Is(err, issueops.ErrNotFound)
+}
+
+// Claim atomically claims a bead for assignee through issueops.Claimer. It
+// routes through the role rather than a hand-composed read-check-write for the
+// same reason ReleaseIfCurrent does: the role is the required, wire-served
+// member of the Storage contract, and its CAS plus retry-on-commit-conflict
+// are the role's own promise rather than something this front door has to
+// rebuild.
+//
+// The (Bead, bool, error) idiom matches SQLiteStore.Claim and BdStore.Claim: a
+// conflict — someone else holds the bead, or its status is not claimable — is
+// reported as ok=false with a nil error, never as an error value, because a
+// losing claim attempt is an expected, non-exceptional outcome every caller
+// of this capability already treats as a value (claim_class_route.go,
+// class_store_emit.go). issueops.ErrAlreadyClaimed and issueops.ErrNotClaimable
+// (and the *issueops.ClaimConflictError that wraps either one over the wire)
+// are both folded into that false verdict by nativeClaimConflict.
+//
+// A MISSING BEAD IS ErrNotFound, NOT A CONFLICT — this is the one place Claim
+// deliberately parts ways with ReleaseIfCurrent, which folds a not-found row
+// into its own false-verdict idiom because "nobody holds it" is the same fact
+// release already reports for an unclaimed row. A claim has no equivalent
+// benign reading of "the bead does not exist": it is a caller error every
+// other Store.Claim implementation already surfaces as an error (see
+// SQLiteStore.Claim, BdStore.Claim), so this front door does too, via the
+// ordinary nativeStoreError not-found translation every other role accessor
+// in this file uses.
+//
+// A WISP ID GETS A NAMED REFUSAL, ErrWispNotClaimable, NOT A BARE ErrNotFound.
+// issueops.Claimer's CAS addresses only the issues table, so the claimer
+// reports a wisp id with the same ErrNotFound sentinel it uses for an id that
+// does not exist anywhere. The two are not the same fact for a caller: "this
+// id is a wisp, no front door serving this role can ever claim it" calls for
+// a different response (log it once and move on) than "this id does not
+// exist" (a caller bug or a stale reference worth surfacing loudly).
+//
+// Telling them apart takes a second read. When the claimer's error resolves
+// to issueops.ErrNotFound, nativeClaimTargetIsWisp asks the reader role for
+// id; unlike the claimer, the reader resolves the wisp table too
+// (issueops.Reader.Get: "A miss — for both the issue and the wisp table — is
+// ErrNotFound"). Claim reports ErrWispNotClaimable only when that read returns
+// a row carrying the wisp-plane marker (Ephemeral or NoHistory). The two reads
+// are not atomic, so the verdict describes the row the second read observed:
+// an ordinary issue created or promoted between them carries no marker and
+// keeps the claimer's ErrNotFound. A miss or a failed read keeps it too, so
+// the disambiguating read never manufactures a wisp refusal. Either way the
+// window is benign: the claim wrote nothing, and the caller's next attempt
+// sees the current row.
+//
+// THE DISAMBIGUATING READ GOES THROUGH THE storage HANDLE AND ctx CLAIM
+// ALREADY HOLDS, NEVER THROUGH s.Get. Claim still holds s.mu.RLock here
+// (acquireStorage above, released only on return via the deferred release()).
+// s.Get funnels through withReadRetry, which re-takes s.mu via
+// acquireStorageGen and, on a transient read error, reconnects via
+// s.mu.Lock() — both of which are a second, nested lock request from the SAME
+// goroutine that already holds the outer RLock. Go's sync.RWMutex is not
+// reentrant and gives a blocked Lock() writer priority over new readers, so
+// either shape self-deadlocks the goroutine permanently: a pending writer (a
+// reconnect swap or CloseStore racing in from elsewhere) blocks the nested
+// RLock forever behind itself, and a transient failure on the disambiguating
+// read alone reaches reconnect's s.mu.Lock() while this same goroutine's outer
+// RLock is still held, which can never be granted. Reading directly off the
+// storage and ctx Claim already has avoids taking s.mu a second time at all,
+// so neither shape can occur; a transient error here keeps the claimer's
+// ErrNotFound (see the paragraph above) rather than opening a retry/reconnect
+// path.
+func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, false, err
+	}
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: empty assignee", id)
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return Bead{}, false, err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	claimer, err := storage.IssueClaimer()
+	if err != nil {
+		return Bead{}, false, nativeStoreError(id, err)
+	}
+	result, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: assignee, IssueID: id})
+	if err != nil {
+		if nativeClaimConflict(err) {
+			return Bead{}, false, nil
+		}
+		if errors.Is(err, issueops.ErrNotFound) {
+			if nativeClaimTargetIsWisp(ctx, storage, id) {
+				return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
+			}
+		}
+		return Bead{}, false, nativeStoreError(id, err)
+	}
+	if result.Issue == nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: claim role returned no issue", id)
+	}
+	bead, err := beadFromNativeIssue(result.Issue)
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	return bead, true, nil
+}
+
+// nativeClaimTargetIsWisp asks the reader role for id using the storage handle
+// and ctx Claim already holds, and reports whether it read a row carrying the
+// wisp-plane marker: Ephemeral or NoHistory, the flags the beads library infers
+// a stored row's plane from. It deliberately does NOT go through
+// s.Get/s.withReadRetry: see the "THE DISAMBIGUATING READ" paragraph on
+// Claim's doc comment above for why a second, nested acquisition of s.mu from
+// the same goroutine self-deadlocks. Any failure here (including one that
+// would ordinarily reconnect and retry) reports false, so Claim keeps the
+// claimer's ErrNotFound rather than guessing.
+func nativeClaimTargetIsWisp(ctx context.Context, storage beadslib.Storage, id string) bool {
+	reader, err := storage.IssueReader()
+	if err != nil {
+		return false
+	}
+	details, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	return err == nil && details != nil && (details.Ephemeral || details.NoHistory)
+}
+
+// ErrWispNotClaimable names the refusal Claim reports for an id that exists
+// only in the wisp plane: see the WISP ID note on Claim above for why this is
+// distinguished from a bare ErrNotFound.
+var ErrWispNotClaimable = errors.New("wisp not claimable through this role")
+
+// nativeClaimConflict reports the refusals that mean "this claim was not won"
+// — a different actor already holds the bead, or its status is not eligible
+// to be claimed from. Both issueops.ErrAlreadyClaimed and
+// issueops.ErrNotClaimable match through errors.Is whether err is the bare
+// sentinel or a *issueops.ClaimConflictError wrapping it (ClaimConflictError
+// unwraps to its Err field), which is how the http client reconstructs a 409.
+// Neither is issueops.ErrNotFound: see the not-found note on Claim above.
+func nativeClaimConflict(err error) bool {
+	return errors.Is(err, issueops.ErrAlreadyClaimed) ||
+		errors.Is(err, issueops.ErrNotClaimable)
+}
+
+// Close sets a bead's status to closed through the upstream issue-operations
+// facade. The close reason is still read from the bead's own metadata, which is
+// where Gas City stamps it before closing.
 func (s *NativeDoltStore) Close(id string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
@@ -1635,57 +2178,42 @@ func (s *NativeDoltStore) Close(id string) error {
 	})
 }
 
-// closeOnce performs one complete close attempt, read included. A retry calls
-// this whole operation rather than just the write, so every attempt decides
-// from freshly read state.
-//
-// Replaying the write is safe because a serialization conflict guarantees the
-// write did not land, and because every CloseIssue path commits exactly once.
-// There are three such paths and they do not share a mechanism, so the property
-// is stated per branch rather than asserted for "both backends":
-//
-//   - dolt.DoltStore, permanent bead: withRetryTx/withWriteTx (issues.go
-//     CloseIssue).
-//   - dolt.DoltStore, active wisp: CloseIssue branches to closeWisp, which uses
-//     a bare BeginTx/Commit with a deferred Rollback and deliberately no
-//     withRetryTx. Its own comment says not to add one, which is precisely why
-//     the retry belongs out here: that path has no internal retry at all.
-//   - embeddeddolt.EmbeddedDoltStore: one withConn transaction.
-//
-// Single-commit is the whole argument, so contrast it with a real two-commit
-// caller rather than a guessed one: beadslib's RunInTransaction commits the
-// regular tx and the ignored tx separately and can fail after the first landed,
-// which is why its callers cannot simply replay. SetMetadataBatch is NOT such a
-// caller despite the shape of its name; it calls storage.UpdateIssue directly,
-// which branches the same three ways Close does: permanent Dolt under
-// withRetryTx, active wisps through updateWisp's bare BeginTx/Commit, and
-// embedded under withConn. Close has no two-commit window on any branch.
-//
-// The re-read is what makes an attempt correct in the presence of OTHER
-// writers, which is a live case rather than a hypothetical: the retry sleeps
-// between attempts, so a concurrent actor can close the bead in that gap. The
-// short-circuit returns nil instead of issuing a redundant CloseIssue, and
-// recomputing the reason per attempt keeps it consistent with the state the
-// attempt actually observed.
+// closeOnce performs one complete close attempt, read included, so a retry
+// decides from freshly read state instead of replaying a stale one.
 func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storage, id string) error {
-	current, err := storage.GetIssue(ctx, id)
+	reader, err := storage.IssueReader()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		return nativeReadNotFound(id, err)
 	}
+	// A replay re-reads, so a bead another actor closed during the backoff
+	// must not be closed again.
 	if current.Status == beadslib.StatusClosed {
 		return nil
 	}
-	reason := nativeCloseReasonFromIssue(current)
-	if err := storage.CloseIssue(ctx, id, reason, s.actor, ""); err != nil {
+	ops, err := storage.IssueLifecycle()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	// Force keeps the storage-layer close's policy-free semantics: the caller
+	// that decided to close is the orchestrator, and a molecule root routinely
+	// closes with children still open.
+	if _, err := ops.Close(ctx, issueops.CloseRequest{
+		Actor:   s.actor,
+		IssueID: id,
+		Reason:  nativeCloseReasonFromIssue(&current.Issue),
+		Force:   true,
+	}); err != nil {
 		return nativeStoreError(id, err)
 	}
 	return nil
 }
 
-// Reopen sets a closed bead's status back to open.
+// Reopen sets a closed bead's status back to open through the upstream
+// issue-operations facade.
 func (s *NativeDoltStore) Reopen(id string) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
@@ -1703,39 +2231,91 @@ func (s *NativeDoltStore) Reopen(id string) error {
 	})
 }
 
-// reopenOnce is closeOnce's mirror and is safe to replay for the same reason:
-// a serialization conflict means the write did not land, and the re-read
-// short-circuits an already-open bead. The two short-circuits are separate
-// lines testing separate statuses, so each is proven by its own test rather
-// than by symmetry with the other.
-//
-// The empty reason below is load-bearing, not incidental. beadslib's
-// ReopenIssue performs UpdateIssue and then, ONLY when reason is non-empty, a
-// separate AddComment in its own transaction. Passing a real reason would
-// therefore split this into two independent writes and reintroduce exactly the
-// window this function does not otherwise have: if the update commits and the
-// comment conflicts, the replay re-reads, sees StatusOpen, short-circuits, and
-// the comment is silently dropped. Anything that starts passing a reason has to
-// move the comment inside the retried unit or make its loss explicit.
+// reopenOnce performs one complete reopen attempt, read included, so the
+// already-open short-circuit reflects the state this attempt observed.
 func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Storage, id string) error {
-	current, err := storage.GetIssue(ctx, id)
+	reader, err := storage.IssueReader()
 	if err != nil {
 		return nativeStoreError(id, err)
 	}
-	if current == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		return nativeReadNotFound(id, err)
 	}
 	if current.Status == beadslib.StatusOpen {
 		return nil
 	}
-	return nativeStoreError(id, storage.ReopenIssue(ctx, id, "", s.actor))
+	ops, err := storage.IssueLifecycle()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	_, err = ops.Reopen(ctx, issueops.ReopenRequest{Actor: s.actor, IssueID: id})
+	return nativeStoreError(id, err)
 }
 
-// CloseAll closes multiple beads and sets metadata on each newly closed bead.
+// CloseAll closes multiple beads and sets metadata on each bead it is given.
+//
+// The batch route is the one it takes; see native_dolt_store_batch_close.go for
+// what it costs and what it preserves — including that the metadata stamp
+// reaches a bead that is ALREADY CLOSED, on either route. A caller that must
+// leave a finished bead's metadata alone drops its closed ids before calling,
+// as the workflow skip and delete paths do.
+//
+// The per-bead route below it is the fallback for a backing that cannot apply a
+// batch, and the route is decided by ASKING rather than by a capability
+// handshake, exactly as Tx decides its own: such a backend says so and writes
+// nothing. batchRouteUnavailable is what recognizes that answer — see its own
+// doc.
+//
+// `closed > 0` is that fallback's safety fence, the `entered` of Tx's. A
+// refusal is a fact about the backing, so it arrives on the first chunk or not
+// at all; a refusal raised AFTER a chunk has landed is something else, and
+// re-walking the whole input under the loop would report only what the
+// remaining chunks closed.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		noteSessionKeysByID(s.Get, id, metadata)
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return 0, err
 	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	closed, err := s.closeAllAsBatch(ids, metadata)
+	if err == nil {
+		return closed, nil
+	}
+	if closed > 0 || !batchRouteUnavailable(err) {
+		return closed, err
+	}
+	return s.closeAllOneAtATime(ids, metadata)
+}
+
+// closeAllOneAtATime closes each bead with its own read and its own writes.
+//
+// The metadata stamp and the close are a CHAIN: gc puts close_reason into that
+// metadata and the close carries the reason. So the second write needs a value
+// the first one wrote, and this loop used to recover it with a follow-up read —
+// Close's own GetIssue, dialed on top of the status read the loop already
+// makes, to fetch back what the update had just committed.
+//
+// That read is gone. The lifecycle role answers a write with its post-state
+// snapshot, and issueops.UpdateResult.Issue is the member it rides on — the
+// same one that carries the post-write RowVersion a guarded chain composes its
+// next ExpectedVersion from. Reading the reason
+// there is also the more correct of the two: it is the state the write
+// committed, where a re-read is whatever the row holds by the time it lands.
+//
+// The no-metadata arm keeps Close's own read, because there is no chain in it:
+// nothing in the call wrote a reason, so the row is the only place one can come
+// from and that read is the only one Close makes.
+//
+// An already-closed row is stamped and not re-closed, which is what the batch
+// route does to it (see "THE STAMP REACHES ALREADY-CLOSED ROWS" there): the
+// same call must not rewrite a closed bead's metadata only when the backing
+// can batch.
+func (s *NativeDoltStore) closeAllOneAtATime(ids []string, metadata map[string]string) (int, error) {
 	closed := 0
 	for _, id := range ids {
 		current, err := s.Get(id)
@@ -1743,14 +2323,19 @@ func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (in
 			return closed, err
 		}
 		if current.Status == "closed" {
-			continue
-		}
-		if len(metadata) > 0 {
 			if err := s.SetMetadataBatch(id, metadata); err != nil {
 				return closed, err
 			}
+			continue
 		}
-		if err := s.Close(id); err != nil {
+		if len(metadata) == 0 {
+			if err := s.Close(id); err != nil {
+				return closed, err
+			}
+			closed++
+			continue
+		}
+		if err := s.stampAndClose(id, metadata); err != nil {
 			return closed, err
 		}
 		closed++
@@ -1758,37 +2343,95 @@ func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (in
 	return closed, nil
 }
 
-// List returns beads matching the query.
-func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
-	if !query.HasFilter() && !query.AllowScan {
-		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
-	}
-	var out []Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		filter := nativeIssueFilterFromListQuery(query)
-		issues, err := storage.SearchIssues(ctx, "", filter)
-		if err != nil {
-			return err
-		}
-		beads := make([]Bead, 0, len(issues))
-		for _, issue := range issues {
-			bead, err := beadFromNativeIssue(issue)
-			if err != nil {
-				if isNativeIssueMetadataParseError(err) {
-					continue
-				}
-				return err
-			}
-			beads = append(beads, bead)
-		}
-		s.noteRows(len(issues))
-		out = ApplyListQuery(beads, query)
-		return nil
-	})
+// stampAndClose merges metadata onto a bead and closes it, taking the close
+// reason from the update's own post-state answer.
+//
+// Both writes share one storage acquisition and one lifecycle accessor, which
+// is what makes the pair a chain rather than two unrelated calls that happen to
+// run in order. Each write replays its own serialization conflict, on a fresh
+// operation context per attempt, and never the other's: a conflicted stamp
+// committed nothing, so it replays exactly as SetMetadataBatch replays the same
+// merge, and a conflicted close follows a stamp that did commit.
+//
+// A backend that answers no post-state issue is violating the role contract
+// (every leg — create, update, close, reopen — is held to hydrating its
+// result's post-state Issue), and the fallback for it re-reads rather than
+// closing on a reason nothing produced. Closing on the pre-write value would
+// be the one wrong answer available here: it is a real string that looks like
+// a reason, and it is the reason this call was told to replace.
+//
+// THE FALLBACK RE-READS ON THE HELD HANDLE, and must, which is why it is spelled
+// out here instead of delegating to Close. acquireStorage hands back
+// s.mu.RUnlock as its release, so this whole body runs under a READ lock, and
+// Close acquires that same lock again. Go's RWMutex forbids recursive read
+// locking: a writer arriving between the two — the reconnect handle swap, or
+// CloseStore — parks in front of the inner RLock and all three deadlock. The
+// path is unreachable while both pinned legs hydrate, but it exists precisely
+// for the backend that does not, and hanging is a worse answer than the one it
+// was written to give. nativeBatchTx.Close reads on its held handle for the
+// same reason.
+func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) error {
+	patch, err := nativeIssuePatchFromUpdateOpts(UpdateOpts{Metadata: metadata})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return out, nil
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+	ops, err := storage.IssueLifecycle()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	var updated issueops.UpdateResult
+	if err := retryOnNativeDoltSerializationConflict(func() error {
+		attemptCtx, attemptCancel := nativeDoltOperationContext(context.TODO())
+		defer attemptCancel()
+		var attemptErr error
+		updated, attemptErr = ops.Update(attemptCtx, issueops.UpdateRequest{
+			Actor:   s.actor,
+			IssueID: id,
+			Patch:   patch,
+		})
+		return attemptErr
+	}); err != nil {
+		return nativeStoreError(id, err)
+	}
+	closing := updated.Issue
+	if closing == nil {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		reader, err := storage.IssueReader()
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		current, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+		if err != nil {
+			return nativeReadNotFound(id, err)
+		}
+		closing = &current.Issue
+	}
+	// Force keeps the storage-layer close's policy-free semantics, exactly as
+	// Close does: a molecule root routinely closes with children still open.
+	//
+	// The close replays alone. The stamp above it already committed, so replaying
+	// the pair would re-run a write that won its race to recover one that lost.
+	reason := nativeCloseReasonFromIssue(closing)
+	if err := retryOnNativeDoltSerializationConflict(func() error {
+		attemptCtx, attemptCancel := nativeDoltOperationContext(context.TODO())
+		defer attemptCancel()
+		_, err := ops.Close(attemptCtx, issueops.CloseRequest{
+			Actor:   s.actor,
+			IssueID: id,
+			Reason:  reason,
+			Force:   true,
+		})
+		return err
+	}); err != nil {
+		return nativeStoreError(id, err)
+	}
+	return nil
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
@@ -1803,240 +2446,14 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 	return s.List(query)
 }
 
-// Ready returns open, unblocked actionable beads.
-func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
-	q := readyQueryFromArgs(queries)
-	var out []Bead
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		var beads []Bead
-		seen := make(map[string]bool)
-		now := time.Now().UTC()
-		// One GetReadyWork call covers every open-class backing status via
-		// WorkFilter.Statuses. The previous one-call-per-status loop re-paid
-		// the deferred-parents pre-query, the wisp arm, and the transaction
-		// round trips seven times per Ready() (sr-5rz: ~30-70ms per call on
-		// a live server-mode store). The backing Limit stays 0 because the
-		// gc-side post-filter below (tier, excluded types/labels, defer)
-		// discards rows the store cannot, so a server-side limit could
-		// under-fill the result.
-		filter := beadslib.WorkFilter{Statuses: nativeDoltOpenReadyStatuses}
-		if q.TierMode == TierBoth || q.TierMode == TierWisps {
-			filter.IncludeEphemeral = true
-		}
-		if q.Assignee != "" {
-			filter.Assignee = &q.Assignee
-		}
-		issues, err := storage.GetReadyWork(ctx, filter)
-		if err != nil {
-			return err
-		}
-		for _, issue := range issues {
-			// The StatusDeferred branch exists so an expired time-bound
-			// deferral (defer_until in the past) can resurface. An issue
-			// with no defer_until at all was never time-bound — it's bd
-			// defer's status-based indefinite deferral — and must stay
-			// hidden. beadFromNativeIssue now records that case as
-			// Bead.IndefinitelyDeferred and IsDeferred honors it, so the
-			// readiness filter already excludes such a row; this skip keeps
-			// it from being materialized at all. The per-status loop keyed
-			// this on the filter status it was querying for; with the whole
-			// set in one call the row's own raw status is the equivalent
-			// discriminator.
-			if issue.Status == beadslib.StatusDeferred && issue.DeferUntil == nil {
-				continue
-			}
-			bead, err := beadFromNativeIssue(issue)
-			if err != nil {
-				return err
-			}
-			if !IsReadyCandidateForTier(bead, now, q.TierMode) || seen[bead.ID] {
-				continue
-			}
-			seen[bead.ID] = true
-			beads = append(beads, bead)
-		}
-		// Work-outcome filtering must see the full candidate set before the
-		// limit is applied — a candidate near the front of issues can be
-		// vetoed below, and truncating first would under-fill the result
-		// instead of backfilling from the candidates that would have been
-		// skipped by an early break (mirrors BdStore.Ready's candidates-then-
-		// filter-then-limit order).
-		beads, err = s.filterReadyByWorkOutcome(ctx, storage, beads)
-		if err != nil {
-			return err
-		}
-		if q.Limit > 0 && len(beads) > q.Limit {
-			beads = beads[:q.Limit]
-		}
-		out = beads
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// filterReadyByWorkOutcome removes candidates whose blocking dependencies are
-// closed but recorded gc.work_outcome=blocked. GetReadyWork's own readiness
-// check only looks at status==closed, so it does not know that a
-// blocked-outcome close should not satisfy a blocking dependency (ga-a7v0ex).
-//
-// This is a NARROW override on top of an already-authoritative verdict, not
-// a from-scratch recompute of blocking status — see BdStore.filterReadyByWorkOutcome
-// for the full rationale, which applies identically here.
-//
-// It takes the caller's already-open ctx/storage directly instead of calling
-// s.DepList/s.List (each of which reacquire s.withReadRetry's lock): this
-// method runs INSIDE Ready's withReadRetry closure, so nesting another
-// withReadRetry call would risk a sync.RWMutex RLock reentrancy hazard.
-//
-// The read is batched when the storage can batch it: one source-keyed edge
-// read for every candidate (GetDependencyRecordsForIssues) and one issue read
-// for the distinct ready-blocking targets (GetIssuesByIDs), the same two-step
-// shape as BdStore's mirror. Per candidate, GetDependenciesWithMetadata is
-// exactly those two reads for one id, so the batched pair sees the same rows
-// — and a frontier of N candidates costs two storage API calls instead of N
-// (each one a round trip on a served store), which over a network link
-// exhausted the whole read-retry budget every controller tick (#6491). A
-// storage without the batched edge read takes the per-candidate path
-// unchanged.
-func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
-	if len(candidates) == 0 {
-		return candidates, nil
-	}
-	if batch, ok := storage.(nativeDependencyRecordsBatchReader); ok {
-		return filterReadyByWorkOutcomeBatched(ctx, batch, storage, candidates)
-	}
-	result := make([]Bead, 0, len(candidates))
-	for _, c := range candidates {
-		blockers, err := storage.GetDependenciesWithMetadata(ctx, c.ID)
-		if err != nil {
-			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: %w", c.ID, err)
-		}
-		blocked := false
-		for _, dep := range blockers {
-			if dep == nil || !IsReadyBlockingDependencyType(string(dep.DependencyType)) {
-				continue
-			}
-			depMetadata, err := metadataMapFromNative(dep.Metadata)
-			if err != nil {
-				return nil, fmt.Errorf("checking blocking dependency outcomes for %s: parsing blocker %s metadata: %w", c.ID, dep.ID, err)
-			}
-			// Narrow veto, deliberately NOT DependencySatisfied: a
-			// candidate is here because GetReadyWork already cleared its
-			// gating, which is richer than "the target is closed" (a pinned
-			// blocker satisfies a blocks edge, and a waits-for edge gates on
-			// the spawner's children rather than the spawner's own status).
-			// Applying the full predicate would re-block both of those. Only
-			// the closed-and-blocked case — invisible to the store's own
-			// check — may override that verdict.
-			if string(dep.Status) == "closed" && depMetadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked {
-				blocked = true
-				break
-			}
-		}
-		if !blocked {
-			result = append(result, c)
-		}
-	}
-	return result, nil
-}
-
-// nativeDependencyRecordsBatchReader is the source-keyed batched edge read
-// every Dolt-backed beadslib storage offers (storage.DependencyQueryStore,
-// promoted through the DoltStorage decorator contract) but the base
-// beadslib.Storage does not name, so it is reached by capability probe.
-type nativeDependencyRecordsBatchReader interface {
-	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*beadslib.Dependency, error)
-}
-
-// filterReadyByWorkOutcomeBatched is filterReadyByWorkOutcome's veto over two
-// batched reads. The RULE is the per-candidate path's: only a ready-blocking
-// edge whose target is closed with gc.work_outcome=blocked removes a
-// candidate, and a target the issue read does not return (the per-candidate
-// read skips it too) is no evidence of blocking. The error contract differs
-// in two ways: only ready-blocking targets are hydrated, so a non-blocking
-// target's row is never read and can never fail; and a storage-level failure
-// of either batched read (the edge read's wisp/permanent partition included)
-// fails the whole filter rather than one candidate's read.
-//
-// The result does not depend on edge order. The batched edge read is sorted
-// by the store and the per-candidate read is not, so a veto that stopped at
-// the first closed-and-blocked target — and parsed a malformed target's
-// metadata only when it sorted before that one — would let the two paths
-// disagree. Every fetched ready-blocking target's metadata is therefore
-// parsed exactly once up front, and a malformed one is reported against the
-// first candidate (in candidate order) that references it, choosing the
-// lowest target id when that candidate references more than one.
-func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependencyRecordsBatchReader, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
-	ids := make([]string, 0, len(candidates))
-	for _, c := range candidates {
-		ids = append(ids, c.ID)
-	}
-	edges, err := batch.GetDependencyRecordsForIssues(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("checking blocking dependency outcomes: reading dependency edges: %w", err)
-	}
-	var blockerIDs []string
-	seen := make(map[string]bool)
-	for _, id := range ids {
-		for _, dep := range edges[id] {
-			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) || seen[dep.DependsOnID] {
-				continue
-			}
-			seen[dep.DependsOnID] = true
-			blockerIDs = append(blockerIDs, dep.DependsOnID)
-		}
-	}
-	if len(blockerIDs) == 0 {
-		return candidates, nil
-	}
-	blockers, err := storage.GetIssuesByIDs(ctx, blockerIDs)
-	if err != nil {
-		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
-	}
-	// One parse per fetched target: vetoes records the closed-and-blocked
-	// verdict, malformed records the parse failure for the report below.
-	vetoes := make(map[string]bool, len(blockers))
-	malformed := make(map[string]error)
-	for _, b := range blockers {
-		if b == nil {
-			continue
-		}
-		metadata, err := metadataMapFromNative(b.Metadata)
-		if err != nil {
-			malformed[b.ID] = err
-			continue
-		}
-		vetoes[b.ID] = string(b.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
-	}
-	result := make([]Bead, 0, len(candidates))
-	for _, c := range candidates {
-		blocked := false
-		badBlocker := ""
-		for _, dep := range edges[c.ID] {
-			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) {
-				continue
-			}
-			if _, bad := malformed[dep.DependsOnID]; bad && (badBlocker == "" || dep.DependsOnID < badBlocker) {
-				badBlocker = dep.DependsOnID
-			}
-			if vetoes[dep.DependsOnID] {
-				blocked = true
-			}
-		}
-		if badBlocker != "" {
-			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: parsing blocker %s metadata: %w", c.ID, badBlocker, malformed[badBlocker])
-		}
-		if !blocked {
-			result = append(result, c)
-		}
-	}
-	return result, nil
-}
-
 // Children returns all beads whose parent-child dependency points at parentID.
+//
+// It stays a composition of List rather than a door of its own: the parent walk
+// is one of the two SearchIssues shapes a served store still answers, but the
+// seam decision is one path per read and List is that path. The role's ParentID
+// is a RECURSIVE descendant filter where gc means direct children, so the
+// backing answer is a superset and ListQuery.Matches cuts it to the exact set —
+// which is what it did for the raw filter's parent predicate too.
 func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	return s.List(ListQuery{
 		ParentID:      parentID,
@@ -2136,6 +2553,53 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
+// SetMetadataBatch sets multiple metadata keys on a bead and leaves every other
+// key as the row holds it. The store reads nothing before it writes: the facade
+// merges the keys against the row inside its own write transaction. Another
+// writer's commit can therefore land only inside that transaction, where Dolt's
+// commit-time merge either combines the two edits or refuses the later
+// transaction with a serialization conflict, which is replayed here. The
+// real-store proofs are
+// TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate and
+// TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop.
+func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	noteSessionKeysByID(s.Get, id, kvs)
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
+	if len(kvs) == 0 {
+		return nil
+	}
+	patch, err := nativeIssuePatchFromUpdateOpts(UpdateOpts{Metadata: kvs})
+	if err != nil {
+		return err
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	// The facade merges the keys inside the write transaction, so a replay
+	// cannot clobber a competing writer's keys the way a stale read would.
+	return retryOnNativeDoltSerializationConflict(func() error {
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		ops, err := storage.IssueLifecycle()
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		if _, err := ops.Update(ctx, issueops.UpdateRequest{
+			Actor:   s.actor,
+			IssueID: id,
+			Patch:   patch,
+		}); err != nil {
+			return nativeStoreError(id, err)
+		}
+		return nil
+	})
+}
+
 const (
 	nativeWriteAttempts     = 3
 	nativeWriteRetryBackoff = 25 * time.Millisecond
@@ -2171,21 +2635,6 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 	return retryNativeDoltWrite(attempt, isNativeDoltSerializationConflict)
 }
 
-// retryOnNativeDoltMergeRace re-runs a checked read-merge-write attempt when a
-// concurrent writer preempted it: either the backend reported a serialization
-// conflict (the attempt's write never committed) or the compare-and-swap
-// refused with ErrVersionMismatch (the row changed after the attempt's read).
-// Both mean the attempt must read again and merge onto the committed row, so
-// both are retried with the budget retryOnNativeDoltSerializationConflict
-// applies; every other error is returned on the first try, as there. A version
-// mismatch is retried here and only here: for the conditional writers
-// (UpdateIfMatch and its siblings) it is the caller's fence and propagates.
-func retryOnNativeDoltMergeRace(attempt func() error) error {
-	return retryNativeDoltWrite(attempt, func(err error) bool {
-		return isNativeDoltSerializationConflict(err) || errors.Is(err, beadslib.ErrVersionMismatch)
-	})
-}
-
 // retryNativeDoltWrite runs attempt up to nativeWriteAttempts times, sleeping a
 // growing nativeWriteRetryBackoff after each error retryable accepts. The first
 // error retryable rejects, and the last attempt's error, are returned as they
@@ -2200,90 +2649,6 @@ func retryNativeDoltWrite(attempt func() error, retryable func(error) bool) erro
 		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
 	}
 	return err
-}
-
-// SetMetadataBatch sets multiple metadata keys on a bead.
-//
-// The merge is a read-modify-write of the whole metadata map, so the write is a
-// compare-and-swap on the row version the read returned: an update that commits
-// between the read and the write makes the swap refuse, and the whole
-// read-merge-write runs again against the committed row instead of replacing it
-// with the stale map. An unchecked write-back cannot see that anything changed
-// and silently undoes the other writer's keys — a fence activation was lost
-// that way to a one-key stamp.
-func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if err := s.readOnlyGuard(); err != nil {
-		return err
-	}
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	// lastRead is the row version the final attempt's read returned, the
-	// version its refused swap expected.
-	var lastRead int64
-	err = retryOnNativeDoltMergeRace(func() error {
-		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		defer cancel()
-		return s.setMetadataBatchOnce(ctx, storage, id, kvs, &lastRead)
-	})
-	if errors.Is(err, beadslib.ErrVersionMismatch) {
-		// Every attempt lost its swap to a concurrent writer: contention, not
-		// a broken bead. Wrapping the exhaustion type lets callers that
-		// classify errors (dispatch's ClassifyControllerError, the drain
-		// reservation retry) re-enter instead of failing the work, while
-		// errors.Is(err, ErrVersionMismatch) still holds.
-		return fmt.Errorf("%w: %w", &CASRetriesExhaustedError{
-			ID:           id,
-			Key:          metadataBatchKeyList(kvs),
-			Attempts:     nativeWriteAttempts,
-			LastRevision: lastRead,
-		}, err)
-	}
-	return err
-}
-
-// metadataBatchKeyList names the keys of a metadata batch, sorted, for error
-// messages.
-func metadataBatchKeyList(kvs map[string]string) string {
-	keys := make([]string, 0, len(kvs))
-	for k := range kvs {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return strings.Join(keys, ",")
-}
-
-// setMetadataBatchOnce performs one complete metadata read-merge-write attempt:
-// it reads the bead, merges kvs into the map it read, and writes the merged map
-// back only while the bead still carries the row version that read returned. A
-// retry must call this whole operation again so metadata committed by the
-// competing writer is merged rather than overwritten from a stale read.
-//
-// readVersion receives the row version the read returned, for the caller's
-// exhaustion report.
-func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string, readVersion *int64) error {
-	issue, err := storage.GetIssue(ctx, id)
-	if err != nil {
-		return nativeStoreError(id, err)
-	}
-	if issue == nil {
-		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-	}
-	if s.afterMetadataMergeRead != nil {
-		s.afterMetadataMergeRead(id)
-	}
-	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
-	if err != nil {
-		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	expected := issue.RowVersion
-	*readVersion = expected
-	return nativeStoreError(id, storage.UpdateIssueChecked(ctx, id, map[string]interface{}{"metadata": raw}, s.actor, beadslib.UpdateIssueOptions{
-		ExpectedVersion: &expected,
-	}))
 }
 
 // isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
@@ -2347,9 +2712,46 @@ func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
 	if strings.TrimSpace(commitMsg) == "" {
 		commitMsg = "gc: tx"
 	}
-	return storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+	// RunInTransaction, not BatchApplier, has to stay the PRIMARY path: the
+	// native map-based tx.UpdateIssue this route runs skips the role's
+	// metadata-key validation on purpose
+	// (TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this as a
+	// deliberate, if surprising, asymmetry against the validated
+	// Store.Update/SetMetadataBatch routes — Create and the map-based
+	// Store.Tx write accept a key every later standalone write refuses,
+	// which is why internal/dispatch drops such keys itself,
+	// beadmeta.CopyUserKeys). Trying issueops.BatchApplier's validated
+	// UpdateItem FIRST would silently tighten that contract for every
+	// backend that has a working native transaction, not just the served
+	// backend that genuinely needs the batch route. So BatchApplier stays
+	// the FALLBACK, reached only on this route's own refusal.
+	return runInNativeTransaction(ctx, storage, commitMsg, func(tx beadslib.Transaction) error {
 		return fn(&nativeDoltTx{store: s, ctx: ctx, tx: tx})
+	}, func() error {
+		return s.runTxAsBatch(ctx, storage, commitMsg, fn)
 	})
+}
+
+// runInNativeTransaction runs body inside one storage transaction, or runs
+// fallback instead when the backing has no transaction to offer.
+//
+// The route is decided by ASKING, not by a capability handshake, because the
+// question has an authoritative answer that costs nothing: a backend with no
+// transaction refuses RunInTransaction with a typed *beadslib.ErrUnsupported
+// and never invokes the callback. `entered` is what makes the fallback safe —
+// a refusal raised after body ran is a failed transaction, not an unsupported
+// one, and running fallback after it would double the writes.
+func runInNativeTransaction(ctx context.Context, storage beadslib.Storage, commitMsg string, body func(beadslib.Transaction) error, fallback func() error) error {
+	entered := false
+	err := storage.RunInTransaction(ctx, commitMsg, func(tx beadslib.Transaction) error {
+		entered = true
+		return body(tx)
+	})
+	var unsupported *beadslib.ErrUnsupported
+	if err != nil && !entered && errors.As(err, &unsupported) {
+		return fallback()
+	}
+	return err
 }
 
 // AtomicTx reports that Tx is backed by a native Dolt transaction that rolls
@@ -2366,6 +2768,7 @@ type nativeDoltTx struct {
 }
 
 func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	return t.store.applyCreateInTx(t.ctx, t.tx, b)
 }
 
@@ -2377,6 +2780,10 @@ func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) > 0 && sessionKeyHook.Load() != nil {
+		issue, _ := t.tx.GetIssue(t.ctx, id) // read inside the transaction it writes in
+		noteNativeSessionKeys(issue, kvs)
+	}
 	return t.store.applySetMetadataBatchInTx(t.ctx, t.tx, id, kvs)
 }
 
@@ -2384,253 +2791,30 @@ func (t *nativeDoltTx) Close(id string) error {
 	return t.store.applyCloseInTx(t.ctx, t.tx, id)
 }
 
-// Delete permanently removes a bead from the upstream beads storage layer.
-func (s *NativeDoltStore) Delete(id string) error {
-	if err := s.readOnlyGuard(); err != nil {
-		return err
+// noteNativeSessionKeys reports kvs when issue is a session row's, read where
+// the write already holds the row.
+func noteNativeSessionKeys(issue *beadslib.Issue, kvs map[string]string) {
+	if issue == nil || sessionKeyHook.Load() == nil {
+		return
 	}
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
+	if b, err := beadFromNativeIssue(issue); err == nil {
+		noteSessionKeys(b, kvs)
 	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	if err := nativeStoreError(id, storage.DeleteIssue(ctx, id)); err != nil {
-		return err
-	}
-	if sidecarErr := s.localStrings.DeleteBead(id); sidecarErr != nil {
-		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, sidecarErr)
-	}
-	return nil
-}
-
-// Ping verifies that the upstream storage is reachable.
-//
-// It goes through withReadRetry like every other read on this store, and that
-// is load-bearing rather than tidy (council B-F2). A Ping that reached
-// acquireStorage directly sat outside BOTH mechanisms the proxied lane depends
-// on:
-//
-//   - It did not honor poolStale. The guard tick's re-pin is adoptPin plus
-//     markPoolStale, and the property the root-move row asserts is that no read
-//     is served from the old generation before the mark is honored. A Ping is a
-//     read, and it was served from the old generation's pool — so on the H7
-//     root-move shape, where the old socket is still alive and serving the MOVED
-//     database, `gc doctor` pinged the moved database, got a clean answer, and
-//     reported the scope healthy after the tick already knew the generation had
-//     changed.
-//   - Its failures were never classified. proxiedReadVerdict and
-//     proxiedReadBudgetVerdict are reached only from withReadRetry, so a Ping
-//     against a dead proxy returned a raw driver error, ProxiedStore.Ping's
-//     classifyReadError found no verdict, and a handle every other read would
-//     have demoted stayed "native".
-//
-// It is also the lane's most-repeated read: P2-09 re-points ProxiedStore.Ping
-// at this method so doctor's per-scope health check costs zero forks, where
-// before PR2 it was BdStore.Ping — a `bd list --limit 0` carrying bd's own
-// transient-read recovery. Swapping a hardened read for an unhardened one on
-// that path is the trade this fixes.
-//
-// # The lane gate, and why Ping needs its own (council pr2 D-F1)
-//
-// Both reasons above are about the PROXIED lane, and routing Ping through
-// withReadRetry unconditionally reintroduced on Ping the exact flag-off
-// regression the lane gate on rungs 2 and 3 exists to prevent. Rung 7's
-// substring table contains "dial tcp" and "connection refused" and applies on
-// BOTH lanes, so a failing Ping on a direct/hosted handle became
-// nativeReadTransient → reconnect → the injected reopen hook, which re-resolves
-// the managed env with recovery enabled and can restart a city's Dolt server —
-// looping on a context.Background()-derived 90s budget no caller deadline can
-// cancel. On main a Ping was one acquireStorage plus one GetStatistics and
-// returned on the first pass.
-//
-// Three shipping callers are built on that fail-fast:
-// waitForRigStoreAccessible (cmd/gc/cmd_rig.go) and
-// waitForBeadsScopeReadyAfterRecovery (cmd/gc/beads_provider_lifecycle.go) both
-// poll `Ping(); if time.Now().After(deadline) { ... }; sleep(250ms)` — the
-// deadline is checked AFTER the ping, so one failing iteration would cost up to
-// 90s and hundreds of managed-Dolt restart attempts — and internal/doctor's
-// BeadsStoreCheck would block 90s past --check-timeout, per scope. The second
-// loop returns early for proxied scopes, so it is the flag-off lane by
-// construction.
-//
-// So the ROUTING is gated, the same way the classifier's rungs are. A direct or
-// hosted handle takes main's path verbatim; poolStale is only ever marked by the
-// proxied guard tick, and proxiedReadVerdict is a no-op off the proxied lane, so
-// the direct lane gives up nothing by skipping the wrapper.
-func (s *NativeDoltStore) Ping() error {
-	if s.readLane() == directNativeLane {
-		storage, release, err := s.acquireStorage()
-		if err != nil {
-			return err
-		}
-		defer release()
-		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		defer cancel()
-		return s.pingUpstreamRead(ctx, storage)
-	}
-	return s.withReadRetry(s.pingUpstreamRead)
-}
-
-// pingUpstreamRead is the one upstream call a Ping makes.
-//
-// There used to be a test seam in front of it, on the stated ground that
-// GetStatistics returns a type from beads' INTERNAL package and so no
-// in-process fixture could implement it. That was false (council pr2 E-I2):
-// beads v1.3.0 exports the type as backend.Statistics
-// (github.com/steveyegge/beads/backend, types.go:43), and a fixture implements
-// GetStatistics with it. So the tests drive this line itself, on both lanes,
-// and production carries no substitution hook.
-func (s *NativeDoltStore) pingUpstreamRead(ctx context.Context, storage beadslib.Storage) error {
-	_, err := storage.GetStatistics(ctx)
-	return err
-}
-
-// DepAdd records a dependency between two beads.
-func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
-	if err := s.readOnlyGuard(); err != nil {
-		return err
-	}
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return nativeStoreError(issueID, storage.AddDependency(ctx, &beadslib.Dependency{
-		IssueID:     issueID,
-		DependsOnID: dependsOnID,
-		Type:        beadslib.DependencyType(depType),
-	}, s.actor))
-}
-
-// DepRemove removes a dependency between two beads.
-func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
-	if err := s.readOnlyGuard(); err != nil {
-		return err
-	}
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	return nativeStoreError(issueID, storage.RemoveDependency(ctx, issueID, dependsOnID, s.actor))
-}
-
-// DepList returns dependencies for a bead.
-func (s *NativeDoltStore) DepList(id, direction string) ([]Dep, error) {
-	var out []Dep
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		deps, err := s.depList(ctx, storage, id, direction)
-		if err != nil {
-			return err
-		}
-		out = deps
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage, id, direction string) ([]Dep, error) {
-	if direction == "up" {
-		issues, err := storage.GetDependentsWithMetadata(ctx, id)
-		if err != nil {
-			return nil, nativeStoreError(id, err)
-		}
-		deps := make([]Dep, 0, len(issues))
-		for _, issue := range issues {
-			deps = append(deps, Dep{
-				IssueID:     issue.ID,
-				DependsOnID: id,
-				Type:        string(issue.DependencyType),
-			})
-		}
-		return deps, nil
-	}
-	issues, err := storage.GetDependenciesWithMetadata(ctx, id)
-	if err != nil {
-		return nil, nativeStoreError(id, err)
-	}
-	deps := make([]Dep, 0, len(issues))
-	for _, issue := range issues {
-		deps = append(deps, Dep{
-			IssueID:     id,
-			DependsOnID: issue.ID,
-			Type:        string(issue.DependencyType),
-		})
-	}
-	return deps, nil
-}
-
-// DepMetadata returns the opaque payload stored on one dependency edge.
-//
-// The Dep wire model carries only the pair and the type, so until this existed
-// nothing in Gas City could ask a Dolt-backed store whether an edge had a
-// payload at all — which is how the infra-class migration came to copy edges
-// and silently drop theirs. The contract is SQLiteStore.DepMetadata's, to the
-// letter, because the two are read through one interface: a missing edge and an
-// empty payload both answer carried=false, since SQLite declines to persist an
-// empty payload and reporting a difference here would name a loss the
-// destination cannot suffer.
-//
-// A pair can hold more than one row (one per dep type) and the first CARRYING
-// row wins here. That is not what the SQLite reader does: its query is an
-// unordered single-row read on (issue_id, depends_on_id), so it reports
-// whichever dep-type row the engine hands back, carrying or not. The two agree
-// on every pair holding one row — which is every pair anything in this tree
-// writes today — and diverge only on a multi-row pair where some rows carry and
-// some do not. Left divergent on purpose and tracked as ga-fvh4q: making them
-// agree means deciding which row's payload IS the pair's, and that belongs to
-// the graph model rather than to either leaf.
-//
-// The read is target-keyed because of what the root surface exposes.
-// GetDependencyRecords is the direct source-keyed read, but it lives on the
-// Transaction interface and is not re-exported; DependentQuerier is, so the
-// read is target-keyed and filtered back down to the source here. Cost is
-// therefore O(dependents of dependsOnID) per call, and the infra-class copy
-// asks up to three times per edge (refusal, copy, verification) — fine at
-// infra-class sizes, and not something to reach for on a work-store sweep.
-func (s *NativeDoltStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
-	var (
-		metadata string
-		carried  bool
-	)
-	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		querier, ok := beadslib.AsDependentQuerier(storage)
-		if !ok {
-			return fmt.Errorf("reading dependency metadata %s -> %s: backing storage exposes no dependency-record read", issueID, dependsOnID)
-		}
-		records, err := querier.GetDependentRecordsForIssues(ctx, []string{dependsOnID})
-		if err != nil {
-			return nativeStoreError(issueID, err)
-		}
-		metadata, carried = "", false
-		for _, dep := range records[dependsOnID] {
-			if dep == nil || dep.IssueID != issueID || !DepMetadataCarries(dep.Metadata) {
-				continue
-			}
-			metadata, carried = dep.Metadata, true
-			return nil
-		}
-		return nil
-	})
-	if err != nil {
-		return "", false, err
-	}
-	return metadata, carried, nil
 }
 
 type nativeIssueGetter interface {
 	GetIssue(context.Context, string) (*beadslib.Issue, error)
 }
 
+// nativeUpdates and validateUpdateParent below are called ONLY from
+// applyUpdateInTx (native_dolt_store.go), itself called only from
+// nativeDoltTx.Update inside Store.Tx's RunInTransaction callback -- grep
+// confirms no other call site hands either function a bare storage handle.
+// Their storage.GetIssue is therefore a TRANSACTION read, not a plain one:
+// local fallback, kept raw on purpose, because beadslib.Transaction (unlike
+// beadslib.Storage) publishes no role accessors at all -- no IssueReader(),
+// no IssueLifecycle() -- so there is no Reader.Get door open inside an open
+// transaction for either function to take instead.
 func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssueGetter, id string, opts UpdateOpts) (map[string]interface{}, error) {
 	updates := make(map[string]interface{})
 	if opts.Title != nil {
@@ -2659,6 +2843,7 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		if issue == nil {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
+		noteNativeSessionKeys(issue, opts.Metadata)
 		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
@@ -2677,6 +2862,10 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 // to agree here — a store that admits a cross-store parent and then refuses to
 // write the same value back is worse than one that refuses both, because the
 // refusal only appears on the reparent, long after the shape was accepted.
+//
+// Called only from applyUpdateInTx with tx as storage: see nativeUpdates'
+// doc comment just above for why that keeps this a local-fallback
+// transaction read rather than a Reader.Get port.
 func (s *NativeDoltStore) validateUpdateParent(ctx context.Context, storage nativeIssueGetter, id, parentID string) error {
 	if strings.TrimSpace(parentID) == "" {
 		return nil
@@ -2731,139 +2920,73 @@ func (s *NativeDoltStore) updateParentInTransaction(ctx context.Context, tx bead
 	return nil
 }
 
-func (s *NativeDoltStore) persistCreatedDependencies(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) ([]*beadslib.Dependency, error) {
-	if len(deps) == 0 {
-		return nil, nil
+// updateParentThroughEditor is updateParentInTransaction's twin for a backing
+// with no transaction, which is the served wire's shape: it asserts id's edge
+// to parentID, if parentID names one, and then clears id's other parent-child
+// edges. Only rewriteExternalParent calls it, and only after
+// nativeParentIsLocal has already said parentID is not a row this store
+// resolves -- so unlike updateParentInTransaction, there is no
+// local-existence check to run first.
+//
+// With nothing to roll back, the ORDER is the guarantee. The new edge goes in
+// before any old one comes out, so a failure between the writes leaves a
+// second parent edge a reader can see, where the reverse order left a bead
+// with no parent and nothing to say so. Asserting an edge that already exists
+// is a no-op upstream, which is why the sweep has to spare the edge to
+// parentID: removing it would undo the assertion that just ran. The sweep
+// also skips an edge of any other type, because RemoveDependency deletes the
+// id pair whatever its type.
+//
+// EdgeReader and DependencyEditor are the facade's own front doors for this —
+// the same pair DepAdd, DepRemove and DepList's DOWN leg already ride — so the
+// edge write takes the same role path over a served city that every other
+// graph mutation does.
+func (s *NativeDoltStore) updateParentThroughEditor(ctx context.Context, storage beadslib.Storage, id, parentID string) error {
+	reader, err := storage.EdgeReader()
+	if err != nil {
+		return nativeStoreError(id, err)
 	}
-	if strings.TrimSpace(issueID) == "" {
-		return nil, fmt.Errorf("persisting native create dependencies: upstream create did not assign an issue ID")
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{
+		IDs:   []string{id},
+		Types: []issueops.DependencyType{issueops.DepParentChild},
+	})
+	if err != nil {
+		return nativeStoreError(id, err)
 	}
-	created := make([]*beadslib.Dependency, 0, len(deps))
-	for _, dep := range deps {
-		if dep == nil {
+	editor, err := storage.DependencyEditor()
+	if err != nil {
+		return nativeStoreError(id, err)
+	}
+	if parentID != "" {
+		if _, err := editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
+			Actor: s.actor,
+			Edges: []issueops.DependencyEdge{{
+				IssueID:     id,
+				DependsOnID: parentID,
+				Type:        issueops.DepParentChild,
+			}},
+		}); err != nil {
+			return nativeStoreError(id, err)
+		}
+	}
+	for _, anchor := range result.Anchors {
+		if anchor.ID != id || anchor.Missing {
 			continue
 		}
-		persisted := *dep
-		if strings.TrimSpace(persisted.IssueID) == "" {
-			persisted.IssueID = issueID
-		}
-		if err := storage.AddDependency(ctx, &persisted, s.actor); err != nil {
-			return created, fmt.Errorf("persisting native create dependency %q -> %q: %w", persisted.IssueID, persisted.DependsOnID, nativeStoreError(persisted.IssueID, err))
-		}
-		depCopy := persisted
-		created = append(created, &depCopy)
-	}
-	return created, nil
-}
-
-func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
-	for _, dep := range deps {
-		if dep == nil {
-			continue
-		}
-		targetID := strings.TrimSpace(dep.DependsOnID)
-		if targetID == "" {
-			return fmt.Errorf("validating native create dependency for %q: depends_on_id is empty", issueID)
-		}
-		// A parent-child edge is nativeIssueFromBead's rendering of
-		// Bead.ParentID, which is a WEAK reference for every id this store
-		// could not have minted (see beads.Bead.ParentID): a split city
-		// routinely hangs a graph-class molecule's steps off a work-class bead
-		// in another ledger, and this store cannot see that row. Resolving it
-		// refuses the create with a not-found naming a bead that exists.
-		//
-		// Deliberately narrower than "skip every parent-child edge". Inside its
-		// OWN namespace this store CAN see the row, and refusing here is the
-		// only place it can refuse without writing: the upstream library
-		// resolves a same-namespace dependency target itself, after the issue
-		// is committed, so skipping would turn a clean refusal into a create
-		// followed by a compensating delete. Every id this skip lets through
-		// under a PREFIXED child is one the library already classifies as
-		// external (isCrossPrefixDep compares the CHILD's prefix to the
-		// target's), so nothing skipped there is resolved post-commit. The
-		// one shape it would still resolve is a dashless parent under a
-		// dashless child — ExtractPrefix reads both as "", so the library
-		// calls them same-namespace; on a mint the library sees the child's
-		// final minted id, not the empty one this check gets. The converse
-		// stopped holding when the store's prefix entered the question below:
-		// a parent inside this store's namespace, under a foreign-prefixed
-		// child, is external to the library and is still refused here, in
-		// front of the write.
-		//
-		// The namespace question is asked about the STORE here, not about
-		// issueID: on a mint the child has no id yet, and the cross-prefix rule
-		// the other dependency kinds use would then skip a parent this store
-		// owns — which is the one parent it can refuse before writing.
-		if dep.Type == beadslib.DepParentChild {
-			local, err := s.parentIsLocalForCreate(ctx, storage, issueID, targetID)
-			if err != nil {
-				return err
-			}
-			if !local {
+		for _, edge := range anchor.Edges {
+			if edge == nil || edge.Type != issueops.DepParentChild || edge.DependsOnID == parentID {
 				continue
 			}
-		} else if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
-			continue
-		}
-		issue, err := storage.GetIssue(ctx, targetID)
-		if err != nil {
-			return fmt.Errorf("validating native create dependency %q -> %q: %w", issueID, targetID, nativeStoreError(targetID, err))
-		}
-		if issue == nil {
-			return fmt.Errorf("validating native create dependency %q -> %q: bead %q: %w", issueID, targetID, targetID, ErrNotFound)
+			if _, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
+				Actor:       s.actor,
+				IssueID:     id,
+				DependsOnID: edge.DependsOnID,
+			}); err != nil {
+				return nativeStoreError(id, err)
+			}
 		}
 	}
 	return nil
-}
-
-// parentIsLocalForCreate answers nativeParentIsLocal's question on the create
-// path, where the child's id may not exist yet.
-//
-// A minted child lands in the namespace this store mints under, so that is the
-// namespace the answer has to be about. Every production open already knows it
-// — openNativeStorage reads issue_prefix while the scoped env is projected — and
-// a store constructed without one asks the storage layer, rather than
-// answering "foreign" for every parent, when the child's id names no
-// namespace either. Answering foreign there is what let Create admit a
-// dangling parent inside this store's own namespace while Update, which
-// sees the child's real id, refused the same value.
-//
-// The fallback reaches no further than that. A foreign-prefixed child on a
-// prefix-less store is still judged against the CHILD's prefix, so the two
-// arms can still disagree on that shape — but only a handle built without
-// an open reaches it, since every production open caches the prefix, and
-// an empty one there means the ledger declares no namespace at all. Closing
-// the residual needs storage plumbed through the update arms too; ga-0fmv4
-// tracks it.
-func (s *NativeDoltStore) parentIsLocalForCreate(ctx context.Context, storage beadslib.Storage, issueID, parentID string) (bool, error) {
-	prefix := s.idPrefix
-	if prefix == "" && beadIDPrefix(issueID) == "" {
-		configured, err := storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
-		if err != nil {
-			return false, fmt.Errorf("reading native issue prefix: %w", err)
-		}
-		prefix = normalizeIDPrefix(configured)
-	}
-	return nativeParentIsLocal(issueID, parentID, prefix), nil
-}
-
-func (s *NativeDoltStore) compensateFailedCreate(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
-	if strings.TrimSpace(issueID) == "" {
-		return nil
-	}
-	var errs []error
-	for _, dep := range deps {
-		if dep == nil {
-			continue
-		}
-		if err := storage.RemoveDependency(ctx, issueID, dep.DependsOnID, s.actor); err != nil {
-			errs = append(errs, fmt.Errorf("removing partial native dependency %q -> %q: %w", issueID, dep.DependsOnID, nativeStoreError(issueID, err)))
-		}
-	}
-	if err := storage.DeleteIssue(ctx, issueID); err != nil {
-		errs = append(errs, fmt.Errorf("deleting partial native issue %q: %w", issueID, nativeStoreError(issueID, err)))
-	}
-	return errors.Join(errs...)
 }
 
 func nativeCloseReasonFromIssue(issue *beadslib.Issue) string {
@@ -2875,18 +2998,6 @@ func nativeCloseReasonFromIssue(issue *beadslib.Issue) string {
 		return ""
 	}
 	return strings.TrimSpace(metadata["close_reason"])
-}
-
-func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bool {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
-		return false
-	}
-	sourcePrefix := beadIDPrefix(issueID)
-	if sourcePrefix == "" {
-		sourcePrefix = normalizeIDPrefix(storePrefix)
-	}
-	targetPrefix := beadIDPrefix(targetID)
-	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
 }
 
 // nativeParentIsLocal reports whether a parent id names a row THIS store would
@@ -2936,10 +3047,27 @@ func nativeGraphApplyDependencyType(depType string) beadslib.DependencyType {
 	return beadslib.DependencyType(depType)
 }
 
+// The four helpers below are used ONLY by
+// applyGraphPlanOverCapInTransaction, the over-cap local-backend fallback
+// that drives a graph-apply plan by hand through beadslib.RunInTransaction
+// instead of issueops.BatchApplier. BatchApplier re-validates every dep_add
+// item against the parent-child closure it builds itself once every item has
+// landed, raising *issueops.DependencyHierarchyConflictError or
+// issueops.ErrDependencyCycle; a hand-run transaction has no such end gate,
+// so this pairwise check is this route's own substitute for it.
+
+// nativeGraphApplyCycleRelevantDependencyType reports whether depType can
+// form a cycle with a parent-child edge the way DepBlocks and
+// DepConditionalBlocks can — the two ordering-sensitive types this pairwise
+// check cares about.
 func nativeGraphApplyCycleRelevantDependencyType(depType beadslib.DependencyType) bool {
 	return depType == beadslib.DepBlocks || depType == beadslib.DepConditionalBlocks
 }
 
+// nativeGraphApplyParentDepPairs collects every (child, parent) id pair this
+// plan's node-level ParentKey/ParentID links will create, keyed the same way
+// nativeGraphApplyDepPairKey keys an edge, so the edge loop below can detect a
+// plan edge that duplicates or reverses one of them.
 func nativeGraphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]string) map[string]bool {
 	pairs := make(map[string]bool)
 	for _, node := range nodes {
@@ -2955,10 +3083,16 @@ func nativeGraphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]s
 	return pairs
 }
 
+// nativeGraphApplyDepPairKey keys a directed (issueID, dependsOnID) pair for
+// nativeGraphApplyParentDepPairs' set.
 func nativeGraphApplyDepPairKey(issueID, dependsOnID string) string {
 	return issueID + "\x00" + dependsOnID
 }
 
+// nativeGraphApplyResolveRef resolves one edge endpoint to a concrete id,
+// preferring an explicit id over a key: an id names a row structurally
+// (possibly one outside this plan entirely, e.g. an "external:" reference),
+// while a key only ever reaches into this same plan's keyToID map.
 func nativeGraphApplyResolveRef(key, id string, keyToID map[string]string) string {
 	if id != "" {
 		return id
@@ -2967,6 +3101,150 @@ func nativeGraphApplyResolveRef(key, id string, keyToID map[string]string) strin
 		return keyToID[key]
 	}
 	return ""
+}
+
+// nativeGraphApplyRef resolves one edge endpoint to an issueops.Ref,
+// preferring an explicit id over a key exactly as the pre-BatchApplier
+// implementation's nativeGraphApplyResolveRef did: an id names a row
+// structurally (possibly one outside this plan entirely, e.g. an
+// "external:" reference), while a key only ever reaches into this same plan.
+func nativeGraphApplyRef(key, id string) issueops.Ref {
+	if id != "" {
+		return issueops.Ref{ID: id}
+	}
+	return issueops.Ref{Key: key}
+}
+
+// nativeGraphApplyParentRef resolves a node's parent link, when it has one,
+// preferring ParentKey over ParentID — the same precedence the
+// pre-BatchApplier implementation gave the two fields.
+func nativeGraphApplyParentRef(node GraphApplyNode) (issueops.Ref, bool) {
+	if node.ParentKey != "" {
+		return issueops.Ref{Key: node.ParentKey}, true
+	}
+	if node.ParentID != "" {
+		return issueops.Ref{ID: node.ParentID}, true
+	}
+	return issueops.Ref{}, false
+}
+
+// nativeGraphApplyBatchRequest builds the single issueops.ApplyBatchRequest a
+// graph-apply plan expands to. It is PURE — no storage, no context — so its
+// item count can be checked against issueops.MaxApplyBatchItems before any
+// backend is touched.
+//
+// Item order:
+//
+//  1. One CreateItem per node, in plan order, carrying MetadataRefs directly
+//     from node.MetadataRefs — the splice BatchApplier performs as its
+//     documented second write, in place of the manual tx.UpdateIssue
+//     metadata-ref pass this replaces.
+//  2. One DepAddItem per plan edge.
+//  3. One DepAddItem per node that names a parent, of type parent-child —
+//     PARENT-ON-CREATE's one spelling, in place of the old implicit
+//     node.ParentID/ParentKey handling.
+//  4. One UpdateItem per node with AssignAfterCreate set and a non-empty
+//     Assignee, patching Assignee — in place of the old deferred
+//     pendingAssignees pass.
+//
+// Every CreateItem precedes every item that can reference it by key, which is
+// what Ref's backward-only resolution requires; plan.Nodes' own relative
+// order among themselves does not matter for this, since ALL creates land
+// before any edge, parent link or assignment update regardless of which node
+// produced which.
+func nativeGraphApplyBatchRequest(plan *GraphApplyPlan, actor string, ephemeral, noHistory bool) (issueops.ApplyBatchRequest, error) {
+	items := make([]issueops.ApplyItem, 0, 2*len(plan.Nodes)+len(plan.Edges))
+
+	for _, node := range plan.Nodes {
+		metadata, err := metadataRawFromMap(node.Metadata)
+		if err != nil {
+			return issueops.ApplyBatchRequest{}, fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
+		}
+		issueType := beadslib.IssueType(node.Type)
+		if issueType == "" {
+			issueType = beadslib.TypeTask
+		}
+		priority := 2
+		if node.Priority != nil {
+			priority = *node.Priority
+		}
+		issue := &issueops.Issue{
+			Title:       node.Title,
+			Description: node.Description,
+			Status:      beadslib.StatusOpen,
+			Priority:    priority,
+			IssueType:   issueType,
+			Sender:      node.From,
+			Labels:      append([]string(nil), node.Labels...),
+			Metadata:    metadata,
+			Ephemeral:   ephemeral,
+			NoHistory:   noHistory,
+		}
+		if node.Assignee != "" && !node.AssignAfterCreate {
+			issue.Assignee = node.Assignee
+		}
+
+		create := &issueops.CreateItem{Key: node.Key, Issue: issue}
+		if len(node.MetadataRefs) > 0 {
+			refs := make(map[string]issueops.Ref, len(node.MetadataRefs))
+			for metaKey, refKey := range node.MetadataRefs {
+				refs[metaKey] = issueops.Ref{Key: refKey}
+			}
+			create.MetadataRefs = refs
+		}
+		items = append(items, issueops.ApplyItem{Kind: issueops.ItemCreate, Create: create})
+	}
+
+	for _, edge := range plan.Edges {
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemDepAdd,
+			DepAdd: &issueops.DepAddItem{
+				Source:   nativeGraphApplyRef(edge.FromKey, edge.FromID),
+				Target:   nativeGraphApplyRef(edge.ToKey, edge.ToID),
+				Type:     nativeGraphApplyDependencyType(edge.Type),
+				Metadata: edge.Metadata,
+			},
+		})
+	}
+
+	for _, node := range plan.Nodes {
+		parentRef, ok := nativeGraphApplyParentRef(node)
+		if !ok {
+			continue
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemDepAdd,
+			DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: node.Key},
+				Target: parentRef,
+				Type:   beadslib.DepParentChild,
+			},
+		})
+	}
+
+	for _, node := range plan.Nodes {
+		if !node.AssignAfterCreate || node.Assignee == "" {
+			continue
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemUpdate,
+			Update: &issueops.UpdateItem{
+				Target: issueops.Ref{Key: node.Key},
+				Patch:  issueops.IssuePatch{Assignee: issueops.Field[string]{Set: true, Value: node.Assignee}},
+			},
+		})
+	}
+
+	provenance := plan.CommitMessage
+	if provenance == "" {
+		provenance = fmt.Sprintf("gc: graph-apply %d nodes", len(plan.Nodes))
+	}
+
+	return issueops.ApplyBatchRequest{
+		Actor:      actor,
+		Items:      items,
+		Provenance: provenance,
+	}, nil
 }
 
 func cloneNativeDependencies(deps []*beadslib.Dependency) []*beadslib.Dependency {
@@ -3006,6 +3284,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		CloseReason: b.CloseReason,
 		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
@@ -3072,6 +3351,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:            issue.Ephemeral,
 		NoHistory:            issue.NoHistory,
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
+		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             issue.RowVersion,
 	}
@@ -3117,6 +3397,13 @@ func nativePriorityFromIssue(issue *beadslib.Issue) *int {
 // A backing limit is exact only when the backing's ordering and tie-break match
 // the query's client-side semantics; the guards below keep every shape whose
 // exact result needs client-side work from truncating the page early.
+//
+// It serves the RAW filter below, which after the read re-point has exactly one
+// caller left: Count, which still dials CountIssues. The listing's own limit
+// decision is nativeListLimitPushdown, and the two are not the same question —
+// this one asks whether the backing's ORDER can cut an exact prefix, and that
+// one also has to ask whether the backing's SET is the query's, because the
+// role's request cannot carry the status, type or tier predicates.
 func nativeCreatedLimitPushdown(query ListQuery) int {
 	if query.Limit <= 0 {
 		return 0
@@ -3165,6 +3452,15 @@ func nativeCreatedLimitPushdown(query ListQuery) int {
 	}
 }
 
+// nativeIssueFilterFromListQuery renders a ListQuery as the RAW storage filter.
+//
+// The listing no longer uses it — List builds an issueops.ListRequest and the
+// role builds the filter itself — so its one remaining caller is Count, which
+// still dials the raw CountIssues. It stays a faithful rendering of the query
+// rather than a mirror of the role's request on purpose: the count's own
+// re-point is a separate slice, blocked on issueops.CountRequest having no
+// ExcludeStatus and no IncludeClosed, and until then this is what "everything
+// not closed" is spelled as.
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	var sortBy string
 	var sortDesc bool
@@ -3309,15 +3605,26 @@ func metadataMapFromNative(raw json.RawMessage) (map[string]string, error) {
 	}
 	metadata := make(map[string]string, len(values))
 	for k, v := range values {
-		if s, ok := v.(string); ok {
-			metadata[k] = s
-			continue
-		}
-		raw, err := json.Marshal(v)
+		text, err := metadataValueText(v)
 		if err != nil {
 			return nil, fmt.Errorf("marshaling metadata value %q: %w", k, err)
 		}
-		metadata[k] = string(raw)
+		metadata[k] = text
 	}
 	return metadata, nil
+}
+
+// metadataValueText renders one decoded metadata value the way the
+// string-valued Store projection shows it: a JSON string as its own text, and
+// anything else as its JSON re-encoding (so a stored null reads as "null" and a
+// stored 1.50 as "1.5").
+func metadataValueText(value interface{}) (string, error) {
+	if s, ok := value.(string); ok {
+		return s, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }

@@ -7,42 +7,38 @@ import (
 	"io"
 	"maps"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // The allocator's create effects (CONTRACT §7, C1.9, C1.10): the only writer
-// of new session rows under v2. The pass decides and reserves a create entry
-// in the intent ledger; an effect then issues the entry, runs legacy's fenced
-// create from an effect-local view (createPoolSessionBeadWithGuardedAliasUsingLock),
-// and settles the entry with the marker the census will show (AM1). Effects
-// write only the new row and never probe a provider: the pass decided
-// singleton occupancy from the observation cache (C7.3).
-//
-// Unwired in this slice: P3-5b reserves the entries and builds the plans,
-// P3-7 submits them after each pass and shuts the executor down with the
-// runtime. Named-session creates run on the same executor
+// of new session rows under v2. The planner records an in-flight create entry
+// and mints the plan's instance token at submit; the effect runs on the
+// session executor (createEffect, D-21), runs legacy's fenced create from an
+// effect-local view (createPoolSessionBeadWithGuardedAliasUsingLock), and
+// returns one settlement (CONTRACT v5 P1, P3, P5, C1). The settlement is its
+// only output: it mutates no planner state. Effects write only the new row
+// and never probe a provider: the pass decided singleton occupancy from the
+// observation cache (C7.3). Named-session creates run the same way
 // (allocator_create_named.go).
 
-// createEffectParallelism bounds concurrent create effects, as legacy bounds
-// its planned creates (POOL-053, C1.10).
-const createEffectParallelism = poolRealizeParallelism
-
 // createPlan is one fresh pool or dependency-floor row, or one configured
-// named session (Named), the allocator admitted under the create entry
-// EntryID. The entry, not the plan, carries the instance token: the effect
-// reads it when it issues the entry, so the row's token and the ledger
-// marker cannot diverge.
+// named session (Named), that admission let through. ID names the plan in
+// logs and its settlement. The planner mints Token at submit and records it
+// in the plan's in-flight entry, so the row's token and the entry's cannot
+// diverge (S-8); Seq is the entry's submit, which the settlement echoes;
+// ConfigRev is the revision the plan was decided under.
 type createPlan struct {
-	EntryID           string
+	ID                string
+	Seq               uint64
+	Token             string
+	ConfigRev         string
 	Template          string
 	QualifiedInstance string
 	Slot              int
@@ -52,18 +48,42 @@ type createPlan struct {
 	// the spec and stamps the work dir before it writes the row.
 	Metadata     map[string]string
 	WorktreeSpec *worktree.Spec
+	// WorkBeadID is the request's trigger work, which the in-flight entry
+	// reserves until the census shows the row (inFlightStandIns).
+	WorkBeadID string
 	// Named is set for a configured named session's create or reopen; the
 	// pool fields above are then unused.
 	Named *namedCreatePlan
 }
 
 // identity is the create identity the plan materializes: the key of its
-// create backoff record (AM-N8).
+// in-flight entry and of its refusal record (AM-N8).
 func (p createPlan) identity() createIdentity {
 	if p.Named != nil {
 		return createIdentity{Template: p.Named.Template, QualifiedInstance: p.Named.Identity, Named: true}
 	}
 	return createIdentity{Template: p.Template, QualifiedInstance: p.QualifiedInstance, Slot: p.Slot}
+}
+
+// createIdentity is the identity a create plan materializes. Create
+// backoff records key on it (AM-N8): a row key does not exist until the
+// create lands.
+type createIdentity struct {
+	Template          string
+	QualifiedInstance string
+	// Slot is the plan's pool slot. It is not part of the key; agentIn reads
+	// it to re-derive the identity from config.
+	Slot int
+	// Named marks a configured named session's create: QualifiedInstance is
+	// its identity, and Template its backing template.
+	Named bool
+}
+
+func (c createIdentity) key() string {
+	if c.Named {
+		return "named:" + c.QualifiedInstance
+	}
+	return c.Template + "/" + c.QualifiedInstance
 }
 
 // agentIn returns the agent cfg configures for c: c's template has one, and
@@ -91,10 +111,10 @@ func (c createIdentity) agentIn(cfg *config.City) (*config.Agent, error) {
 }
 
 // createPlanOf adapts a planner create plan (selectOrPlanPoolSessionBead, or
-// the dependency floor's) to the create entry entryID.
-func createPlanOf(entryID, template string, p poolSessionCreatePlan) createPlan {
+// the dependency floor's) to the create plan id.
+func createPlanOf(id, template string, p poolSessionCreatePlan) createPlan {
 	return createPlan{
-		EntryID:           entryID,
+		ID:                id,
 		Template:          template,
 		QualifiedInstance: p.qualifiedInstance,
 		Slot:              p.slot,
@@ -118,7 +138,8 @@ func createPlanOf(entryID, template string, p poolSessionCreatePlan) createPlan 
 // closed store refuses before it writes (createWriteRefused).
 type createPass struct {
 	cfg *config.City
-	// sp answers transport capability checks only; no effect probes it.
+	// sp answers transport capability checks; no effect probes it, except
+	// that a named AdoptLive stamps the adopted runtime's identity (LL5).
 	sp                runtime.Provider
 	store             beads.Store
 	rigStores         map[string]beads.Store
@@ -126,54 +147,47 @@ type createPass struct {
 	planning          []session.Info
 }
 
-// createEffectHost is what the executor needs from the v2 runtime.
+// newCreatePass is the create inputs of the pass that gathered w: its
+// config and provider, the stores the census read, and its canonical rows.
+func newCreatePass(w *World) *createPass {
+	p := &createPass{store: w.SessionsStore, rigStores: w.RigStores, suspendedRigPaths: w.SuspendedRigPaths}
+	if w.Env != nil {
+		p.cfg, p.sp = w.Env.Cfg, w.Env.SP
+	}
+	if w.Census != nil {
+		for _, row := range w.Census.Canonical() {
+			p.planning = append(p.planning, row.Info)
+		}
+	}
+	return p
+}
+
+// createEffectHost is what a create effect needs from the v2 runtime.
 type createEffectHost struct {
 	cityPath string
 	cityName string
 	lookPath config.LookPathFunc
-	ledger   *intentLedger
-	// enqueue wakes the allocator on every settle (C5.12) and the new row's
-	// session key on a commit.
-	enqueue v2Enqueuer
 	// withLocks takes the city identifier locks; nil means
 	// session.WithCitySessionIdentifierLocks.
 	withLocks poolSessionIdentifierLockFunc
 	// verify is worktree.Verify unless a test injects one.
 	verify func(worktree.Spec) (worktree.Report, error)
-	// backoff is the backoff table the planner reads. It is required: a
-	// private table would hide every refusal from the planner.
-	backoff *backoffTable
-	now     func() time.Time
-	stderr  io.Writer
+	now    func() time.Time
+	stderr io.Writer
 }
 
-// createEffects is the executor: at most createEffectParallelism effects run
-// at once, on workers that exit when the queue drains.
+// createEffects runs create effects. It holds no queue and no workers:
+// each create is one effect kind on the session executor (D-21), which
+// bounds, deadlines and joins it like every other effect (createEffect).
 type createEffects struct {
 	host createEffectHost
-
-	mu      sync.Mutex
-	queue   []createJob
-	workers int
-	stopped bool
-	wg      sync.WaitGroup
 }
 
-type createJob struct {
-	pass *createPass
-	plan createPlan
-}
-
-// newCreateEffects builds the executor. It refuses a host without the
-// ledger, the shared backoff table or the city path: with no city path the
-// identifier locks would fence this process only (C7.1 tier 2).
+// newCreateEffects builds the runner. It refuses a host without the city
+// path: with none the identifier locks would fence this process only (C7.1
+// tier 2).
 func newCreateEffects(h createEffectHost) (*createEffects, error) {
-	switch {
-	case h.ledger == nil:
-		return nil, errors.New("create effects: no intent ledger")
-	case h.backoff == nil:
-		return nil, errors.New("create effects: no backoff table")
-	case strings.TrimSpace(h.cityPath) == "":
+	if strings.TrimSpace(h.cityPath) == "" {
 		return nil, errors.New("create effects: no city path for the identifier locks")
 	}
 	if h.withLocks == nil {
@@ -191,67 +205,39 @@ func newCreateEffects(h createEffectHost) (*createEffects, error) {
 	return &createEffects{host: h}, nil
 }
 
-// submit queues pass's plans. It refuses them once shutdown began: their
-// entries stay reserved, never issued.
-func (x *createEffects) submit(pass *createPass, plans ...createPlan) bool {
-	x.mu.Lock()
-	defer x.mu.Unlock()
-	if x.stopped {
-		return false
+// errCreateAbandoned: the effect's context ended before its write, so it
+// wrote nothing. The executor settled it at the deadline already (P3).
+var errCreateAbandoned = errors.New("create effect: context ended before the write")
+
+// beginWrite is the create's last check, under the identifier locks just
+// before its write: the context, then the transaction's latch (begin), so an
+// effect abandoned at its deadline never writes.
+func (p *createProgress) beginWrite(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil && p.begin != nil {
+		err = p.begin(ctx)
 	}
-	for _, p := range plans {
-		x.queue = append(x.queue, createJob{pass: pass, plan: p})
+	if err != nil {
+		return fmt.Errorf("%w: %w", errCreateAbandoned, err)
 	}
-	for range plans {
-		if x.workers >= createEffectParallelism {
-			break
-		}
-		x.workers++
-		x.wg.Add(1)
-		go x.work()
-	}
-	return true
+	p.writing = true
+	return nil
 }
 
-// shutdown stops admission, drops the queued plans, and waits for the
-// effects in flight until ctx ends (C1.8). It holds no lock while it waits.
-// A create that lands after shutdown began is durable, and the next process
-// counts its row as in flight (C5.14).
-func (x *createEffects) shutdown(ctx context.Context) error {
-	x.mu.Lock()
-	x.stopped, x.queue = true, nil
-	x.mu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		x.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
+// afterWrite runs the after-write seam once the row write landed; its
+// error is an ambiguous write, as a panic there is.
+func (p *createProgress) afterWrite(ctx context.Context, rowID string) error {
+	if p.wrote == nil {
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
-}
-
-func (x *createEffects) work() {
-	defer x.wg.Done()
-	for {
-		x.mu.Lock()
-		if x.stopped || len(x.queue) == 0 {
-			x.workers--
-			x.mu.Unlock()
-			return
-		}
-		job := x.queue[0]
-		x.queue = x.queue[1:]
-		x.mu.Unlock()
-		x.run(job)
+	if err := p.wrote(ctx); err != nil {
+		return poolCreateWriteError{err: err, rowID: rowID, landed: true}
 	}
+	return nil
 }
 
 // Create effect stages. A no-write failure names the stage it failed in as
-// its create backoff's cause (ineligible:create-refused:<cause>).
+// its refusal's cause (ineligible:create-refused:<cause>).
 const (
 	createStageStalePlan = "stale-plan" // the plan's template or identity left config
 	createStageWorktree  = "worktree"   // the plan's worktree evidence failed verification
@@ -261,33 +247,33 @@ const (
 	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
 	createStagePanic     = "panic"      // a panic before the write
 	createStageResolve   = "resolve"    // a named create's read-only template resolution
-	// createStageWrite: an ambiguous write the census proved never landed
-	// (C5.4(3)); recorded by the allocator, and it stalls like fence-read.
-	createStageWrite = "write"
+	createStageNoWriter  = "no-writer"  // a named reopen whose store resolves no conditional writer (v5 C2)
 )
 
 // createProgress is how far one effect got: the stage a no-write failure
-// names, and whether the row write began, and on which row when known.
+// names, whether the row write began, and on which row when known; the
+// closed row a named create reopens; and the worktree verdict, when the plan
+// carried evidence.
 type createProgress struct {
-	stage   string
-	writing bool
-	rowID   string
+	stage    string
+	begin    func(context.Context) error // the transaction's write begin, or nil
+	wrote    func(context.Context) error // its after-write seam, or nil
+	writing  bool
+	rowID    string
+	retarget string
+	work     *workVerdict
 }
 
-// run is one create effect. It performs no effect unless it wins the
-// reserved → issued CAS (C5.1); after that every return, panic included,
-// settles the entry (C5.6, C1.7). A panic before the row write wrote
-// nothing; from the write on, the row may exist, so it settles as ambiguous.
-func (x *createEffects) run(job createJob) {
-	p := job.plan
-	token, configRev, ok := x.host.ledger.IssueCreate(p.EntryID)
-	if !ok {
-		return // released first: the allocator re-decides
-	}
+// run is one create effect. Every return, panic included, settles it once
+// (P3, P6). A panic before the row write wrote nothing; from the write on,
+// the row may exist, so it settles as ambiguous. A plan without its token
+// refuses before anything: a minted token would never match the entry's.
+// begin is txCaps.beginWrite and wrote txCaps.afterWrite; nil skips them.
+func (x *createEffects) run(ctx context.Context, pass *createPass, p createPlan, begin, wrote func(context.Context) error) (s createSettlement) {
 	var (
 		info session.Info
 		err  error
-		prog = createProgress{stage: createStagePrepare}
+		prog = createProgress{stage: createStagePrepare, begin: begin, wrote: wrote}
 	)
 	defer func() {
 		if r := recover(); r != nil {
@@ -298,25 +284,35 @@ func (x *createEffects) run(job createJob) {
 				prog.stage = createStagePanic
 			}
 		}
-		x.settle(p, token, configRev, prog.stage, info, err)
+		s = x.settle(p, prog, info, err)
 	}()
-	if p.Named != nil {
-		info, err = x.createNamed(job.pass, p, token, &prog)
+	if p.Token == "" {
+		err = fmt.Errorf("create plan %s has no instance token", p.ID)
 		return
 	}
-	cfgAgent, err := p.identity().agentIn(job.pass.cfg)
+	if p.Named != nil {
+		info, err = x.createNamed(ctx, pass, p, &prog)
+		return
+	}
+	cfgAgent, err := p.identity().agentIn(pass.cfg)
 	if err != nil {
 		prog.stage = createStageStalePlan
 		return
 	}
 	prog.stage = createStageWorktree
-	metadata, err := x.verifiedMetadata(p)
+	metadata, err := x.verifiedMetadata(p, &prog)
 	if err != nil {
 		return
 	}
 	prog.stage = createStagePrepare
-	view := x.view(job.pass, token)
-	view.beforeWrite = func(id string) { prog.writing, prog.rowID = true, id }
+	view := x.view(pass, p.Token)
+	view.beforeWrite = func(id string) error {
+		if err := prog.beginWrite(ctx); err != nil {
+			return err
+		}
+		prog.rowID = id
+		return nil
+	}
 	locks := func(cityPath string, identifiers []string, fn func() error) error {
 		prog.stage = createStageLock
 		return x.host.withLocks(cityPath, identifiers, func() error {
@@ -324,24 +320,26 @@ func (x *createEffects) run(job createJob) {
 			return fn()
 		})
 	}
-	info, err = createPoolSessionBeadWithGuardedAliasUsingLock(view, cfgAgent, p.Template, p.QualifiedInstance, p.Slot, metadata, locks)
+	if info, err = createPoolSessionBeadWithGuardedAliasUsingLock(view, cfgAgent, p.Template, p.QualifiedInstance, p.Slot, metadata, locks); err == nil {
+		err = prog.afterWrite(ctx, info.ID)
+	}
+	return // the deferred settle sets s
 }
 
 // verifiedMetadata verifies the plan's worktree evidence and stamps the
 // verified work dir as poolTriggerMetadata does outside planOnly (POOL-055,
-// #34). A failure writes nothing and records a work backoff, so the planner
-// stops binding the work while the same evidence stands (C6.5(a)).
-func (x *createEffects) verifiedMetadata(p createPlan) (map[string]string, error) {
+// #34). It reports the verdict in the settlement: on a failure, which writes
+// nothing, the planner stops binding the work while the same evidence stands
+// (C6.5(a)); on a success, it forgets an earlier refusal.
+func (x *createEffects) verifiedMetadata(p createPlan, prog *createProgress) (map[string]string, error) {
 	if p.WorktreeSpec == nil {
 		return p.Metadata, nil
 	}
-	key := workBackoffKey(p.WorktreeSpec.BeadID)
 	report, err := x.host.verify(*p.WorktreeSpec)
+	prog.work = &workVerdict{BeadID: p.WorktreeSpec.BeadID, Fingerprint: specFingerprint(*p.WorktreeSpec), Refused: err != nil}
 	if err != nil {
-		x.host.backoff.Refuse(key, x.host.now(), time.Time{}, createStageWorktree, specFingerprint(*p.WorktreeSpec))
 		return nil, fmt.Errorf("%w: verification failed: %w", errPoolTriggerWorktreeEvidence, err)
 	}
-	x.host.backoff.Succeed(key)
 	metadata := make(map[string]string, len(p.Metadata)+2)
 	maps.Copy(metadata, p.Metadata)
 	if report.Path != "" {
@@ -352,7 +350,7 @@ func (x *createEffects) verifiedMetadata(p createPlan) (map[string]string, error
 }
 
 // view is the effect-local view of the guarded create: no runtime probe, and
-// no primary snapshot, since the ledger entry represents the row until the
+// no primary snapshot, since the in-flight entry represents the row until the
 // census shows it.
 func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 	cfg := pass.cfg
@@ -374,61 +372,75 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 	}
 }
 
-// settle records the effect's outcome and wakes the allocator (C5.12). A
-// create commits with its row ID and token, and resets its identity's create
-// backoff. An error from the write itself is ambiguous, since the row may
-// exist: it commits as ambiguous with the token (and the row ID, when known)
-// as its marker, and a read started after the settle decides (C5.4(3)); an
-// ambiguous named reopen also wakes its row's session key, since a Tx reopen
-// raises no event on the binding. A row write the store refused
-// (createWriteRefused), and any other error, wrote nothing: the entry fails,
-// and its identity gets a create backoff (AM-N8) under configRev, the
-// ConfigRev the entry was reserved under, except for failed worktree
-// evidence, whose work backoff throttles the work item rather than the slot.
-// A pool create's cause is "fence" only when the locked checks proved its
-// name taken; any other failure under the locks (a failed live re-census or
-// alias query, a refused write) is "fence-read", which stalls the request
-// where "fence" moves it to the next slot (F3).
-//
-// The backoff moves before the ledger, so no pass sees the settle without
-// it. A panic after them (a wake or log sink) is recovered: the entry is
-// settled, and the worker lives on.
-func (x *createEffects) settle(p createPlan, token, configRev, stage string, info session.Info, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			x.logf("allocator: settling create %s: panic: %v\n", p.EntryID, r)
-		}
-	}()
-	var (
-		written poolCreateWriteError
-		keys    []reconcilekey.Key
-	)
+// createSettlement is one create effect's settlement. The planner applies it
+// to its in-flight map (createSettlement.settlement), then to its backoff
+// table (P1): a landed create resets Identity's record; a
+// non-empty Stage refuses Identity with cause Stage under ConfigRev (AM-N8);
+// Work refuses or resets the work item's record (C6.5(a)).
+type createSettlement struct {
+	ID        string
+	Seq       uint64
+	Identity  string // createIdentity.key
+	Token     string
+	ConfigRev string
+	// Stage is the cause of a no-write failure's refusal, empty for a landed
+	// or ambiguous create and for failed worktree evidence, which throttles
+	// the work item rather than the slot. A pool create's cause is "fence"
+	// only when the locked checks proved its name taken; any other failure
+	// under the locks (a failed live re-census or alias query, a refused
+	// write) is "fence-read", which stalls the request where "fence" moves it
+	// to the next slot (F3).
+	Stage string
+	RowID string
+	// Landed: the row was written. Ambiguous: the write call failed after it
+	// may have landed, so the row may exist (P5).
+	Landed    bool
+	Ambiguous bool
+	// RetargetRowID is the closed row a named create reopens (AM-N2).
+	RetargetRowID string
+	Work          *workVerdict
+	Err           error
+	At            time.Time
+}
+
+// workVerdict is a plan's worktree verification: Fingerprint is the
+// evidence's (specFingerprint).
+type workVerdict struct {
+	BeadID      string
+	Fingerprint string
+	Refused     bool
+}
+
+// settle builds the effect's settlement and logs a failure. A create commits
+// with its row ID and token. An error from the write itself is ambiguous,
+// since the row may exist: it settles with the token (and the row ID, when
+// known). A row write the store refused (createWriteRefused), a write the
+// effect abandoned at its deadline, and any other error, wrote nothing.
+func (x *createEffects) settle(p createPlan, prog createProgress, info session.Info, err error) createSettlement {
+	s := createSettlement{
+		ID: p.ID, Seq: p.Seq, Identity: p.identity().key(), Token: p.Token, ConfigRev: p.ConfigRev,
+		RetargetRowID: prog.retarget, Work: prog.work, Err: err, At: x.host.now(),
+	}
+	var written poolCreateWriteError
 	switch {
 	case err == nil:
-		x.host.backoff.Succeed(createBackoffKey(p.identity().key()))
-		x.host.ledger.CommitCreate(p.EntryID, false, ledgerMarker{RowID: info.ID, InstanceToken: token})
-		x.wake(reconcilekey.Session(info.ID))
-		return
+		s.Landed, s.RowID = true, info.ID
 	case errors.As(err, &written) && (written.landed || !createWriteRefused(err)):
-		x.host.ledger.CommitCreate(p.EntryID, true, ledgerMarker{RowID: written.rowID, InstanceToken: token})
-		if p.Named != nil && written.rowID != "" {
-			keys = append(keys, reconcilekey.Session(written.rowID))
-		}
-	case stage == createStageWorktree:
-		x.host.ledger.Fail(p.EntryID, false, ledgerMarker{})
+		s.Ambiguous, s.RowID = true, written.rowID
+	case errors.Is(err, errCreateAbandoned), prog.stage == createStageWorktree:
+	case prog.stage == createStageFence && p.Named == nil && !errors.Is(err, errPoolSessionNameUnavailable):
+		s.Stage = createStageFenceRead
 	default:
-		if stage == createStageFence && p.Named == nil && !errors.Is(err, errPoolSessionNameUnavailable) {
-			stage = createStageFenceRead
+		s.Stage = prog.stage
+	}
+	if err != nil {
+		subject := p.QualifiedInstance
+		if p.Named != nil {
+			subject = p.Named.Identity
 		}
-		x.host.backoff.Refuse(createBackoffKey(p.identity().key()), x.host.now(), time.Time{}, stage, configRev)
-		x.host.ledger.Fail(p.EntryID, false, ledgerMarker{})
+		x.logf("allocator: create %s for %q: %v\n", p.ID, subject, err)
 	}
-	subject := p.Template
-	if p.Named != nil {
-		subject = p.Named.Identity
-	}
-	x.logf("allocator: create %s for %q: %v\n", p.EntryID, subject, err)
-	x.wake(keys...)
+	return s
 }
 
 // createWriteRefused reports a write error that proves the store wrote
@@ -444,15 +456,9 @@ func createWriteRefused(err error) bool {
 		errors.Is(err, beads.ErrStoreClosed) || errors.Is(err, beads.ErrSQLiteBusyExhausted)
 }
 
-// logf reports to stderr. A panicking writer is ignored: it must not kill a
-// worker.
+// logf reports to stderr. A panicking writer is ignored: it must not turn a
+// settled create into a panic.
 func (x *createEffects) logf(format string, args ...any) {
 	defer func() { _ = recover() }()
 	fmt.Fprintf(x.host.stderr, format, args...) //nolint:errcheck
-}
-
-func (x *createEffects) wake(keys ...reconcilekey.Key) {
-	if x.host.enqueue != nil {
-		x.host.enqueue("create", append([]reconcilekey.Key{reconcilekey.Allocator()}, keys...)...)
-	}
 }

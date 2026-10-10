@@ -175,7 +175,7 @@ func (e *restartRequestTestEnv) reconcileWithNamedDemand(sessions []beads.Bead, 
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	_ = reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(),
-		"",
+		e.city,
 		snap.OpenForReconcile(),
 		snap,
 		e.desiredState,

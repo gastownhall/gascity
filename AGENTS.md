@@ -43,17 +43,18 @@ next to that code; read the matching file before changing it.
 
 ## How work flows here
 
-- **GitHub Issues is the public tracker, and every pull request links a
-  documented issue.** The issue carries the context reviewers and future
-  readers need: for a bug, the reproduction, impact, and evidence; for a
-  change, the motivation, impact, risk, and verification plan. File it before
-  or alongside the pull request; it does not need maintainer approval first.
-  The pull request says `Closes #<issue>` and shows end-to-end evidence that
-  the change works. See `CONTRIBUTING.md`.
-- **Agents:** if no issue exists for your change, file one using the bug or
-  feature form fields, filling each from evidence and answering
-  `NOT_ENOUGH_INFO` where the evidence runs out, then link it from the pull
-  request.
+- **GitHub Issues is the public tracker; use an issue when it adds
+  context.** Open or link one for a user-visible bug, a behavior or design
+  change that needs discussion, or work that spans several pull requests:
+  the issue carries the reproduction, impact, and evidence for a bug, or the
+  motivation, risk, and verification plan for a change. A small,
+  self-explanatory fix (a typo, a flake, a refactor, a CI or docs tweak) can
+  go straight to a pull request whose description covers the why. Every pull
+  request shows end-to-end evidence that the change works; when an issue
+  exists, the pull request says `Closes #<issue>`. See `CONTRIBUTING.md`.
+- **Agents:** when you do file an issue, use the bug or feature form fields,
+  fill each from evidence, and answer `NOT_ENOUGH_INFO` where the evidence
+  runs out.
 - Branch from `main` (`fix/*`, `feat/*`, `refactor/*`, `docs/*`), use
   Conventional Commits, and push to your branch — never to `main`.
 - A fix that changes an invariant or boundary updates the owning `AGENTS.md`
@@ -244,42 +245,57 @@ becoming more useful as models improve — it becomes LESS useful instead.
 
 ## Build and test
 
-- `TESTING.md` — testing philosophy, tier boundaries, and sharded local
-  runners. Read before writing any test. For broad local sweeps, prefer the
-  documented shard targets (`make test-fast-parallel`,
-  `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
-  `make test-local-full-parallel`) over raw `go test`.
-- **Bazel runs side by side** with `go build` / `make`, which stay
-  authoritative. Prefer `bazel test //pkg/...` for repeated build+test cycles
-  (remote-cached). After changing imports or adding packages run
-  `make bazel-sync` and commit the result — the `BUILD files are in sync` CI
-  gate fails otherwise. Never commit machine-specific endpoints; they belong
-  in `.bazelrc.local`. Details: `engdocs/bazel-quickstart.md`.
-- **Optional shared cache (opt-in).** `--config=fork-cache` reads the
-  project's anonymous, read-only Bazel cache, so results CI already computed
-  are hits and nothing is uploaded. It is off by default; when setting up a
-  dev environment, ask your human before adding `build --config=fork-cache`
-  to `.bazelrc.local`.
+**Bazel is the build and test system; `bazel test` is what CI gates on**
+(`.github/workflows/bazel.yml`). Plain `go test` is a quick inner-loop
+convenience only: it skips nogo lint/vet, formatting, generated-artifact
+and policy targets, and a green `go test` is not evidence a change passes CI.
+
+| Tier | Command (`make` alias) |
+|---|---|
+| Unit + nogo + format + generated + policy | `bazel test //...` (`make test`) |
+| One package while iterating | `bazel test //internal/config:config_test` |
+| Acceptance (Tier A) | `bazel test --config=acceptance //test/acceptance:acceptance_test` (`make test-acceptance`) |
+| Integration-tagged packages (gating) | `bazel test --config=integration //test:integration_packages` |
+| `test/integration` (evidence-only in CI) | `bazel test --config=integration //test/integration:integration_test` |
+| Docs sync | `bazel test //test/docsync:docsync_test` (`make check-docs`) |
+
+- **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
+  plain `bazel test` executes remotely; never run whole-repo `go test`
+  fan-out on shared hosts. Contributors use `--config=fork-cache` (anonymous
+  read-only cache, local execution of misses); maintainers with an rbe-west
+  client certificate use `--config=remote-exec` (ask your human before
+  adding either to `.bazelrc.local`). Details: TESTING.md
+  "Bazel cache tiers" and `engdocs/bazel-quickstart.md`.
+- **BUILD files.** After changing imports or adding packages or files, run
+  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
+  fails otherwise. Never commit machine-specific endpoints; they belong in
+  `.bazelrc.local`.
+- **Go-native twins** (`make test-go`, `make check-go`, `make
+  test-acceptance-go`, `make test-integration-go`, `make test-fast-parallel`)
+  exist for offline work and hosts Bazel does not serve (macOS jobs).
 - **Never run `go clean -cache`** — it corrupts shared build caches.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
   or `TMPDIR`.
 - **Git hooks:** `make setup` installs `.githooks` as `core.hooksPath`;
-  `make check-hooks` verifies it. Beads' installer can silently take the path
-  over and skip every gate — see "Git hook ownership" in `CONTRIBUTING.md`.
+  `make check-hooks` verifies it. Pre-commit runs nogo on staged packages;
+  pre-push runs `bazel test //...` and says loudly when it falls back to
+  `go test`. Beads' installer can silently take the path over and skip every
+  gate — see "Git hook ownership" in `CONTRIBUTING.md`.
 
 ## Code quality gates
 
 Before considering any task complete:
 
-- Fast unit baseline passes (`make test`, or `make test-fast-parallel` on
-  machines where sharding is useful)
-- Broader process/integration coverage uses the sharded targets documented in
-  `TESTING.md` instead of one monolithic `go test ./...` sweep
-- `go vet ./...` clean
+- `make check` passes (`bazel test //...` plus the shell guards; nogo is
+  lint and vet)
+- Acceptance or integration behavior changed: the matching `--config` tier
+  above passes
 - `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
   and has run for the staged change
-- `make dashboard-ci` passes and the dashboard serves locally for any change
+- `make dashboard-check` passes (the dashboard's Bazel targets: typecheck,
+  Vitest, build, and drift checks, which `bazel test //...` also runs) and the
+  dashboard serves locally (a manual `npm run preview` step) for any change
   touching the API, the OpenAPI spec, or the dashboard
   (`internal/api/AGENTS.md`)
 - Every exported function has a doc comment

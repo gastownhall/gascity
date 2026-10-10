@@ -551,9 +551,6 @@ func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDCon
 	if ctx.BDVersion == "" {
 		ctx.BDVersion = "1.0.4"
 	}
-	if ctx.SchemaVersion == 0 {
-		ctx.SchemaVersion = 1
-	}
 	return contract.PreflightChecker{
 		FS:                  files,
 		Provider:            "bd",
@@ -563,6 +560,11 @@ func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDCon
 		},
 		DatabaseProjectID: func(string) (string, bool, error) {
 			return "gc-local", true, nil
+		},
+		SchemaLatestVersion:        1,
+		SchemaLatestIgnoredVersion: 1,
+		DatabaseSchemaCursors: func(string) (contract.PreflightSchemaCursors, bool, error) {
+			return contract.PreflightSchemaCursors{Main: 1, Ignored: 1, IgnoredChecked: true}, true, nil
 		},
 	}
 }

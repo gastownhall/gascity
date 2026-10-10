@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -46,27 +47,31 @@ import (
 // turns a stale source fresh.
 //
 // After publishing, the pass starts its due steps, each on its own goroutine
-// under a deadline, one run in flight per step, counted by the gate, so a
-// slow step never delays the reads. The one step today is legacy's
-// demand-pass repairs (POOL-019/020), at most once a minute from the end of
+// under a deadline, one run in flight per step, so a slow step never delays
+// the reads. The first step is legacy's demand-pass repairs
+// (POOL-019/020), at most once a minute from the end of
 // the last run, in legacy order over every leg: the session stamp, the
 // control-dispatcher route repair (which emits control.dispatcher_scope_gap
 // itself), and the four migration repairs. The four stay in the lane by owner
 // decision (2026-10-05): ops step G′'s counts were never taken, and the doctor
 // --fix move is re-measured after cutover. Those writes run only under v2;
-// legacy keeps them in its tick, so the two never both run. P3-9 and P4.1d
-// add their steps here.
+// legacy keeps them in its tick, so the two never both run. The planner
+// runtime adds C8's waits, nudges and orphan-release steps
+// (reconcile_steps_*.go). A closed wait dependency runs the waits step alone,
+// without reading the legs (GUAR-010).
 //
-// While the city is suspended a pass neither reads nor writes, as legacy's
-// demand pass returns before any of it (POOL-001); the last recording stays
-// published and ages out.
+// The lane always reads, suspended city or not (CONTRACT v5 R4), so a
+// suspended city's drains keep their work reads. Only its steps keep
+// legacy's suspension gate: while the city is suspended a pass starts none,
+// as legacy's demand pass returns before its repairs (POOL-001). The lane
+// serves only v2.
 //
 // The lane is paced at the patrol interval and woken by key-less socket and
 // API pokes (a CLI writer such as gc sling pokes key-less), a supervisor
 // reload, a store swap after the barrier, a resume, a create that wrote a row
 // on a lane-fed leg, and a read that ended after its pass published.
 //
-// Unwired in this slice: P3-7 starts it, sets its gate, wires its wakes and
+// Unwired in this slice: P3-7 starts it, wires its wakes and
 // joins it before closing the stores.
 
 const (
@@ -100,6 +105,8 @@ const (
 	sourceDemand      sourceKind = iota // sourcePayload.Leg
 	sourceClosedNamed                   // sourcePayload.ClosedNamed
 	sourceScaleCheck                    // sourcePayload.ScaleCheck
+	// sourceNone is a step's legs when it reads no recorded leg.
+	sourceNone sourceKind = -1
 )
 
 // sourceKey names one source: its kind and the store behind the policy front
@@ -266,6 +273,11 @@ type externalReadsEnv struct {
 	// Sessions is the open session census the stamp and the assigned-work
 	// canonicalization read; nil leaves both inert, as in legacy.
 	Sessions *sessionBeadSnapshot
+	// SP, Nudges and WorkStore are C8's steps': the provider nudges go
+	// through, the nudges-class store and the city work store.
+	SP        runtime.Provider
+	Nudges    beads.NudgesStore
+	WorkStore beads.Store
 }
 
 // laneStep is work a pass starts after it publishes, at most once per every
@@ -294,10 +306,7 @@ type externalReadsLane struct {
 	events   events.Recorder
 	stderr   io.Writer
 	now      func() time.Time
-	// gate, when set, lets the reload barrier and the worker FS gate hold
-	// passes; a held pass declines and does not pace the next wake. It counts
-	// the steps a pass starts until they end.
-	gate             *laneGate
+
 	sourceDeadline   time.Duration
 	scaleCheckBudget time.Duration
 	runner           ScaleCheckRunner
@@ -315,6 +324,18 @@ type externalReadsLane struct {
 
 	// seq belongs to the lane goroutine.
 	seq uint64
+
+	// wantReads is set by a wake and wantSteps by a closed wait dependency;
+	// a woken pass with only wantSteps runs the waits step alone.
+	wantReads, wantSteps atomic.Bool
+	waitsStep            *laneStep
+	// readyWaits (I10) and waitDeps, the dependencies of pending deps waits,
+	// are the waits step's last run's; each is replaced, never mutated.
+	readyWaits, waitDeps atomic.Pointer[map[string]bool]
+	// summary is the planner's last allocation (S-14), and stalled its
+	// execution-stalled inbox; set with the pool steps.
+	summary func() *allocSummary
+	stalled func(executionStalledRequest)
 }
 
 // sourceRead is one read in flight.
@@ -345,6 +366,11 @@ func newExternalReadsLane(interval time.Duration, env func() (externalReadsEnv, 
 // wake asks for a pass. Non-blocking; wakes that wait out the duty cycle
 // join the one pass that follows.
 func (l *externalReadsLane) wake() {
+	l.wantReads.Store(true)
+	l.signal()
+}
+
+func (l *externalReadsLane) signal() {
 	select {
 	case l.wakeCh <- struct{}{}:
 	default:
@@ -356,14 +382,21 @@ func (l *externalReadsLane) recording() *externalReadsRecording { return l.rec.L
 
 // start runs the lane until ctx ends and returns a channel closed when it
 // has. The first pass runs at once: until a recording exists every lane-fed
-// leg reads partial. A pass that declines (held, suspended city, no env,
-// shutdown) does not pace the next wake. start may run again once the
+// leg reads partial. A pass that declines (held, no env, shutdown) does not
+// pace the next wake. start may run again once the
 // channel closed.
 func (l *externalReadsLane) start(ctx context.Context) <-chan struct{} {
 	l.wake()
-	return startGatedPacedLane(ctx, l.interval, externalReadsMinGap, l.wakeCh, func(bool) bool {
+	return startGatedPacedLane(ctx, l.interval, externalReadsMinGap, l.wakeCh, func(woken bool) bool {
+		reads, steps := l.wantReads.Swap(false), l.wantSteps.Swap(false)
 		ran := false
-		panicked := l.safeTick(func() { ran = l.pass(ctx) }, externalReadsSafeTickTrigger)
+		panicked := l.safeTick(func() {
+			if woken && steps && !reads {
+				ran = l.stepsOnly(ctx)
+			} else {
+				ran = l.pass(ctx)
+			}
+		}, externalReadsSafeTickTrigger)
 		return ran || panicked
 	})
 }
@@ -385,15 +418,10 @@ func (l *externalReadsLane) join(ctx context.Context) error {
 }
 
 // pass publishes the reads that ended after the last publish, reads the
-// sources, publishes, then starts the steps that are due. It reports whether
-// it ran.
+// sources, publishes, then starts the steps that are due unless the city is
+// suspended (POOL-001; like legacy, an unreadable suspension file reads as
+// the zero state). It reports whether it ran.
 func (l *externalReadsLane) pass(ctx context.Context) bool {
-	if l.gate != nil {
-		if !l.gate.enter() {
-			return false
-		}
-		defer l.gate.exit()
-	}
 	env, ok := l.passEnv(ctx)
 	if !ok {
 		return false
@@ -406,8 +434,37 @@ func (l *externalReadsLane) pass(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	l.startSteps(ctx, env, l.publish(published))
+	rec := l.publish(published)
+	if !effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
+		l.startSteps(ctx, env, rec, nil)
+	}
 	return true
+}
+
+// stepsOnly is a pass that reads no leg and publishes nothing: it starts the
+// waits step at once, interval or not, unless it is running or the city is
+// suspended (GUAR-010). It reports whether it ran.
+func (l *externalReadsLane) stepsOnly(ctx context.Context) bool {
+	if l.waitsStep == nil {
+		return false
+	}
+	env, ok := l.passEnv(ctx)
+	if !ok {
+		return false
+	}
+	if !effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
+		l.startSteps(ctx, env, l.rec.Load(), l.waitsStep)
+	}
+	return true
+}
+
+// dependencyClosed runs the waits step alone when id is a dependency of a
+// pending deps wait (GUAR-010). It never blocks.
+func (l *externalReadsLane) dependencyClosed(id string) {
+	if deps := l.waitDeps.Load(); deps != nil && (*deps)[id] {
+		l.wantSteps.Store(true)
+		l.signal()
+	}
 }
 
 // publish publishes sources as the next recording and wakes the allocator on
@@ -431,10 +488,7 @@ func (l *externalReadsLane) lateEnded() bool {
 }
 
 // passEnv returns the environment a pass runs against, and false when the
-// pass must not run: shutdown has begun, the env cannot be built, or the city
-// is suspended (legacy's demand pass returns before any read or repair,
-// POOL-001). Like legacy, an unreadable suspension file reads as the zero
-// state.
+// pass must not run: shutdown has begun, or the env cannot be built.
 func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool) {
 	if ctx.Err() != nil {
 		return externalReadsEnv{}, false
@@ -442,9 +496,6 @@ func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool
 	env, err := l.env()
 	if err != nil {
 		fmt.Fprintf(l.stderr, "external reads: %v\n", err) //nolint:errcheck
-		return externalReadsEnv{}, false
-	}
-	if effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
 		return externalReadsEnv{}, false
 	}
 	return env, true
@@ -637,30 +688,26 @@ func externalReadLegs(env externalReadsEnv, stderr io.Writer) (demand []classSto
 
 // startSteps starts each due step on its own goroutine: one not already
 // running, whose interval since its last run ended is up, and whose legs read
-// fine in rec. The gate counts each run until it ends.
-func (l *externalReadsLane) startSteps(ctx context.Context, env externalReadsEnv, rec *externalReadsRecording) {
+// fine in rec; or, when only is set, only that one unless it is running.
+func (l *externalReadsLane) startSteps(ctx context.Context, env externalReadsEnv, rec *externalReadsRecording, only *laneStep) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, step := range l.steps {
-		if step.running || (!step.last.IsZero() && now.Sub(step.last) < step.every) || rec.failing(step.legs) {
+		due := only == nil && (step.last.IsZero() || now.Sub(step.last) >= step.every) && !rec.failing(step.legs)
+		if step.running || (!due && step != only) {
 			continue
 		}
 		step.running = true
-		done := func() {}
-		if l.gate != nil {
-			done = l.gate.spawn()
-		}
 		l.wg.Add(1)
-		go l.runStep(ctx, env, step, done)
+		go l.runStep(ctx, env, step)
 	}
 }
 
 // runStep runs step once under the step deadline. A panic is reported and
 // counts as a run, so a broken step is not retried every pass.
-func (l *externalReadsLane) runStep(ctx context.Context, env externalReadsEnv, step *laneStep, done func()) {
+func (l *externalReadsLane) runStep(ctx context.Context, env externalReadsEnv, step *laneStep) {
 	defer l.wg.Done()
-	defer done()
 	stepCtx, cancel := context.WithTimeout(ctx, externalReadsStepDeadline)
 	defer cancel()
 	if _, err := guardedRead(func() (struct{}, error) { step.run(stepCtx, env); return struct{}{}, nil }); err != nil {

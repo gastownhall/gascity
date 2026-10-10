@@ -79,8 +79,10 @@ blocker and an agent owns the dependent.
 
 **Event contract.** Triggers on `bead.closed`. This is the event the close
 transition actually emits — a closed bead only emits `bead.updated` on a later
-metadata edit — so the order fires once, exactly on the transition that
-unblocks dependents. For each closed bead it resolves dependents via:
+metadata edit — so the order fires on the transition that unblocks dependents.
+Delivery is at least once: one close can reach the bus twice (from the closing
+process and from the controller's cache), which the per-pair dedup below
+absorbs. For each closed bead it resolves dependents via:
 
 ```
 gc bd dep list <blocker> --direction=up --type=blocks --json

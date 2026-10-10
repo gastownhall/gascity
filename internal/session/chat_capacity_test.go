@@ -34,7 +34,7 @@ func seedResumableACPSession(t *testing.T, startErr func(sessName string) error)
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := &routeRecordingFake{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	b, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -128,7 +128,7 @@ func TestEnsureRunningRuntimeOnly_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *t
 func TestEnsureRunning_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *testing.T) {
 	mgr, sp, store, id, sessName := seedResumableACPSession(t, capacityRefusal)
 
-	err := mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 
 	assertCapacityRefusalKeptConversation(t, err, sp, store, id, sessName)
 }

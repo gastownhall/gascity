@@ -69,13 +69,14 @@ func TestManagerRefusesKillFencedSession(t *testing.T) {
 			return m.Attach(context.Background(), id, "claude --resume", runtime.Config{})
 		}},
 		{name: "send", call: func(m *Manager, id string) error {
-			return m.Send(context.Background(), id, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+			_, err := m.Send(context.Background(), id, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			return err
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
-			mgr := NewManagerWithOptions(store, sp)
+			mgr := newTestManager(t, store, sp)
 			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 			if err != nil {
 				t.Fatalf("CreateSession: %v", err)

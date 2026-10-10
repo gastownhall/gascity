@@ -5,11 +5,13 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "composite_forward.go",
         "control_socket.go",
         "dialog.go",
         "dialog_midsession.go",
         "envsecret.go",
         "fake.go",
+        "fake_profile.go",
         "fingerprint.go",
         "fingerprint_partition.go",
         "import_trust.go",
@@ -27,6 +29,7 @@ go_library(
         "seam_adapter.go",
         "session_events.go",
         "session_events_merge.go",
+        "session_object.go",
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
@@ -44,6 +47,7 @@ go_test(
         "beacon_test.go",
         "capacity_test.go",
         "carrier_test.go",
+        "composite_forwarding_test.go",
         "dialog_midsession_test.go",
         "dialog_model_switch_test.go",
         "dialog_test.go",
@@ -51,6 +55,7 @@ go_test(
         "dialog_trust_selection_test.go",
         "envsecret_test.go",
         "fake_conformance_test.go",
+        "fake_profile_test.go",
         "fake_test.go",
         "fingerprint_breakdown_v1_test.go",
         "fingerprint_config_env_test.go",
@@ -59,6 +64,7 @@ go_test(
         "fingerprint_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",
+        "liveness_present_test.go",
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",
@@ -83,9 +89,17 @@ go_test(
     ),
     embed = [":runtime"],
     deps = [
+        "//internal/runtime/acp",
         "//internal/runtime/auto",
+        "//internal/runtime/exec",
+        "//internal/runtime/herdr",
         "//internal/runtime/hybrid",
+        "//internal/runtime/k8s",
         "//internal/runtime/runtimetest",
+        "//internal/runtime/ssh",
+        "//internal/runtime/subprocess",
+        "//internal/runtime/t3bridge",
+        "//internal/runtime/tmux",
         "//internal/testenv",
     ],
 )
@@ -107,6 +121,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

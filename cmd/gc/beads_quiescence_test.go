@@ -82,6 +82,59 @@ func TestBeadsQuiescenceRetiresASuspendedCityOnceItHasDrained(t *testing.T) {
 	}
 }
 
+// A quiescent city retires its pairs only once the controller's asynchronous
+// store work has finished. An autoclose run dispatched before the city went
+// quiescent is still issuing bd reads: retired under it, the pair would be
+// restarted by its next read and stay up until the next retire
+// (acceptance: TestProxiedSuspensionIsQuiescenceSuspendedCity, whose
+// shortened window caught a drained wisp's autoclose reads after the stop).
+func TestBeadsQuiescenceRetiresOnlyAfterInFlightStoreWorkFinishes(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "1")
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+
+	end := cr.cs.beginStoreWork()
+	for i := 0; i < 3; i++ {
+		if !cr.enterBeadsQuiescenceIfDue(context.Background()) {
+			t.Fatal("a suspended city with nothing running is not quiescent")
+		}
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops while an autoclose run was in flight = %q, want none", ops)
+	}
+
+	end()
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops on the first tick with no store work in flight = %q, want none yet", ops)
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the store work finished", ops)
+	}
+}
+
+// Store work is counted from dispatch, not from when its goroutine starts, so
+// a run queued just before the city goes quiescent holds the retire too.
+func TestTrackStoreWorkCountsFromDispatch(t *testing.T) {
+	cs := &controllerState{}
+	if cs.storeWorkInFlight() {
+		t.Fatal("store work in flight on a new controller state")
+	}
+	run := cs.trackStoreWork(func() {})
+	if !cs.storeWorkInFlight() {
+		t.Fatal("dispatched store work is not counted until it runs")
+	}
+	run()
+	if cs.storeWorkInFlight() {
+		t.Fatal("store work still counted after it finished")
+	}
+	var nilState *controllerState
+	if nilState.storeWorkInFlight() {
+		t.Fatal("a nil controller state reports store work in flight")
+	}
+}
+
 // A suspended rig's pair is stopped once its sessions have drained, and only
 // then.
 func TestRetireSuspendedRigScopeAfterItsSessionsDrain(t *testing.T) {

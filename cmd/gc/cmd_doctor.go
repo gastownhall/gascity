@@ -269,6 +269,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		managedDoltDataDir = layout.DataDir
 	}
 
+	var reconcilerCheck *sessionReconcilerDoctorCheck
+
 	// Core checks — always run.
 	register(&doctor.CityStructureCheck{})
 	register(&doctor.CityConfigCheck{})
@@ -294,7 +296,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
-		register(newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv))
+		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
+		register(reconcilerCheck)
 		// Rollout gates section: one advisory line per registered gate (value +
 		// origin + notices). Never blocks the exit code.
 		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
@@ -446,6 +449,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
+			if !cityStoreStopped {
+				reconcilerCheck.capabilities = func() ([]v2StoreCapability, error) {
+					store, err := storeFactory(cityPath)
+					if err != nil {
+						return nil, err
+					}
+					routes := cliStorageRoutes(cityPath)
+					return v2ClassStoreCapabilities(resolveSessionStore(routes, store, cfg, cityPath, nil), resolveGraphStore(routes, store, cfg, cityPath, nil), true), nil
+				}
+			}
 			registerCityStoreCheck(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newBacklogDepthCheck(cityPath, storeFactory))
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
@@ -626,6 +639,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// an abandoned check writes only to its own private buffer. A future caller
 	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	// Identical bd reads are shared across this run's checks; see bdReadMemo.
+	defer installDoctorBdReadMemo(d, cityPath)()
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
@@ -671,7 +686,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {
-		return reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+		reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+		return 1
 	}
 	for _, check := range selected {
 		d.Register(check)
@@ -735,8 +751,8 @@ type doctorBlockingFailure struct {
 // and tells the caller what it could have asked for. Running the names that did
 // match would be worse than erroring: a caller filtering doctor output by name
 // reads a short result set as a clean one, so a single typo would report health
-// nobody measured.
-func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) int {
+// nobody measured. The caller exits 1.
+func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) {
 	names := doctor.CheckNames(registered)
 	message := unknownDoctorChecksMessage(unmatched, names)
 	if jsonOut {
@@ -754,14 +770,13 @@ func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, js
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
-		return 1
+		return
 	}
 	fmt.Fprintf(stderr, "gc doctor: %s\n", message)                                //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "checks registered in this workspace (%d):\n", len(names)) //nolint:errcheck // best-effort stderr
 	for _, name := range names {
 		fmt.Fprintf(stderr, "  %s\n", name) //nolint:errcheck // best-effort stderr
 	}
-	return 1
 }
 
 func unknownDoctorChecksMessage(unmatched, registered []string) string {
@@ -1096,11 +1111,13 @@ func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 // run, so the dozen-odd store-backed checks share one store per scope instead
 // of each opening its own.
 //
-// A doctor run is a read-only snapshot of a city that is not being mutated
-// underneath it, and no check closes the store it is handed, so reusing the
-// handle is the same object lifetime the checks already assume. What it saves
-// is the open: on a bd-backed scope that is a version probe, a config read and
-// a custom-types read per check, all of them subprocesses.
+// No check closes the store it is handed, so reusing the handle is the same
+// object lifetime the checks already assume. What it saves is the open: on a
+// bd-backed scope that is a version probe, a config read and a custom-types
+// read per check, all of them subprocesses. A shared bd-backed handle also
+// shares its bd runner, which a doctor run memoizes (see bdReadMemo), so a
+// check repeating an earlier check's read may get that earlier answer rather
+// than a live re-read.
 //
 // Failures are memoized too. A store that could not be opened will not open on
 // the next check either, and re-attempting it once per check is how one

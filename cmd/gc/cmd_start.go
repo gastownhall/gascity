@@ -1058,6 +1058,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
 	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
+	// The one-shot pass reads work through the same legs a controller does: the
+	// work store it opened, not the sessions store it leads with (censusWorkLeg,
+	// mc-3ixn3.16). It registers them for its own run, as a controller does.
+	if _, served := registeredResidencyEntry(cityPath); !served && cityPath != "" {
+		routes := cliStorageRoutes(cityPath)
+		registerResidencyRoutes(cityPath, routes, func() beads.Store { return oneShotStore })
+		defer unregisterResidencyRoutes(cityPath, routes)
+	}
 
 	// One-shot bead reconciliation: same code path as the daemon.
 	sessionQueryPartial := false
@@ -1514,7 +1522,7 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, workdirutil.ValidateAncestorWorktreesNotStale)
 }
 
 // resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
@@ -1522,10 +1530,13 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 // pure path computation for a plan whose effect runs the check before it
 // writes the path.
 func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, nil)
 }
 
-func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
+// configuredWorkDirPath resolves the work dir path, checking it with
+// validate when set: only resolveConfiguredWorkDirPath names the check, so a
+// pure caller never reaches it.
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate func(string) error) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
@@ -1541,8 +1552,8 @@ func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.A
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if validate {
-		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+	if validate != nil {
+		if err := validate(workDir); err != nil {
 			return "", err
 		}
 	}

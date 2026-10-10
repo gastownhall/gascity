@@ -2203,7 +2203,13 @@ func convoyAutocloseStoreRoot(cwd string) string {
 		if !filepath.IsAbs(beadsDir) {
 			beadsDir = filepath.Join(cwd, beadsDir)
 		}
-		return filepath.Clean(filepath.Dir(beadsDir))
+		// Clean beadsDir BEFORE taking Dir: filepath.Dir on a trailing-slash
+		// path (e.g. "/root/.beads/") does not strip the final element the
+		// way a shell's dirname would, so an uncleaned beadsDir yields
+		// beadsDir itself instead of its parent. filepath.Join above already
+		// cleans the relative-path case; Clean here also covers an
+		// already-absolute BEADS_DIR passed in with a trailing slash.
+		return filepath.Dir(filepath.Clean(beadsDir))
 	}
 	return cwd
 }

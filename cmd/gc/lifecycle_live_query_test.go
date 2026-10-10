@@ -185,12 +185,12 @@ func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {
 	}
 
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
 	}
 	if hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStore() = true, want false after external open-work reassignment")
+		t.Fatal("sessionHasOpenAssignedWorkInStoreByIdentifiers() = true, want false after external open-work reassignment")
 	}
 }
 
@@ -237,12 +237,12 @@ func TestSessionHasOpenAssignedWorkInStore_UsesCachedWispOwnership(t *testing.T)
 	backing.setFail(true)
 
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
 	}
 	if !hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStore() = false, want cached wisp ownership to count")
+		t.Fatal("sessionHasOpenAssignedWorkInStoreByIdentifiers() = false, want cached wisp ownership to count")
 	}
 }
 
@@ -266,12 +266,12 @@ func TestSessionHasOpenAssignedWorkInStore_FallsBackToLiveForCachedWispMiss(t *t
 	}
 
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
 	}
 	if !hasAssignedWork {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore() = false, want live wisp %s after cached miss", wisp.ID)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers() = false, want live wisp %s after cached miss", wisp.ID)
 	}
 }
 

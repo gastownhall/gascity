@@ -1312,8 +1312,9 @@ session_id_flag = "--session-id"
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("handle.Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
 	}
 
 	start := sp.LastStartConfig(info.SessionName)

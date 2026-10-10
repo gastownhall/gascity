@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -109,7 +110,7 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -182,6 +183,7 @@ func TestSessionHandleStateReusesDerivedActivityAcrossPolls(t *testing.T) {
 	requestFactory := func() *Factory {
 		t.Helper()
 		factory, err := NewFactory(FactoryConfig{
+			CityPath:     t.TempDir(),
 			Store:        store,
 			Provider:     sp,
 			SearchPaths:  []string{searchBase},
@@ -1161,8 +1163,9 @@ func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testi
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start(second): %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach(second): %v", err)
 	}
 
 	secondStart := lastCall(sp.Calls, "Start")
@@ -1234,8 +1237,9 @@ func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCach
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start(second): %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach(second): %v", err)
 	}
 
 	secondStart := lastCall(sp.Calls, "Start")
@@ -1329,6 +1333,7 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	})
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1415,6 +1420,7 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 		t.Fatalf("Start: %v", err)
 	}
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1432,6 +1438,73 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 	}
 	if sp.IsRunning("legacy-worker") {
 		t.Fatal("legacy-worker should be stopped after CloseDetailed")
+	}
+}
+
+// TestRuntimeHandleTeardownAbsorbsOnlySessionGone pins Stop, Kill and Close as
+// cleanup paths: tmux Provider.Stop reports a missing server as ErrNoServer —
+// joined with the same answer from the pre-kill pane capture when the server
+// is already down — and a session behind a downed server is already gone, so
+// each operation must report success. A stop failure that is not "the session
+// is gone" may leave the session running and must still reach the caller, even
+// when it is joined with a downed-server answer — without those control rows,
+// a blanket swallow would pass just as well.
+func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
+	realFailure := errors.New("permission denied")
+	ops := []struct {
+		name string
+		run  func(*RuntimeHandle, context.Context) error
+	}{
+		{name: "Stop", run: (*RuntimeHandle).Stop},
+		{name: "Kill", run: (*RuntimeHandle).Kill},
+		{name: "Close", run: (*RuntimeHandle).Close},
+	}
+	stops := []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session legacy-worker: %w", tmux.ErrNoServer)},
+		{name: "downed server at capture and kill", stopErr: errors.Join(fmt.Errorf("observing pane before process snapshot: %w", tmux.ErrNoServer), tmux.ErrNoServer)},
+		{name: "real failure", stopErr: realFailure, wantErr: realFailure},
+		{name: "real failure beside a downed server", stopErr: errors.Join(realFailure, tmux.ErrNoServer), wantErr: realFailure},
+	}
+	for _, op := range ops {
+		for _, stop := range stops {
+			t.Run(op.name+"/"+stop.name, func(t *testing.T) {
+				sp := runtime.NewFake()
+				if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				sp.StopErrors["legacy-worker"] = stop.stopErr
+				handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+					CityPath:     t.TempDir(),
+					Provider:     sp,
+					SessionName:  "legacy-worker",
+					ProviderName: "stub",
+				})
+				if err != nil {
+					t.Fatalf("NewRuntimeHandle: %v", err)
+				}
+
+				err = op.run(handle, context.Background())
+				if stop.wantErr == nil && err != nil {
+					t.Fatalf("%s against %s: %v, want nil", op.name, stop.name, err)
+				}
+				if stop.wantErr != nil && !errors.Is(err, stop.wantErr) {
+					t.Fatalf("%s against %s = %v, want %v", op.name, stop.name, err, stop.wantErr)
+				}
+				var sawStop bool
+				for _, call := range sp.Calls {
+					if call.Method == "Stop" && call.Name == "legacy-worker" {
+						sawStop = true
+					}
+				}
+				if !sawStop {
+					t.Fatalf("%s returned without asking the provider to stop the session", op.name)
+				}
+			})
+		}
 	}
 }
 
@@ -1685,6 +1758,7 @@ func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 	sp := runtime.NewFake()
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -2348,8 +2422,9 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start(second): %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach(second): %v", err)
 	}
 	if len(sp.Calls) < 3 {
 		t.Fatalf("runtime calls = %#v, want second Start after Stop", sp.Calls)
@@ -2366,7 +2441,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(
 		context.Background(), sessionpkg.CreateOptions{Template: "probe", Title: "Probe", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "legacy-agent", Env: nil, Resume: sessionpkg.ProviderResume{
@@ -2400,8 +2475,9 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
 	start := firstCall(sp.Calls, "Start")
 	if start == nil {
@@ -2439,7 +2515,7 @@ func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder e
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:  manager,
 		Recorder: recorder,

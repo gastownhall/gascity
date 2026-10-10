@@ -372,6 +372,34 @@ func ResolveGCPath(env *Env) (string, error) {
 	return gcPath, nil
 }
 
+// VerifyPathGC reports an error unless the gc that env's PATH finds is the
+// binary under test, the one RunGC runs. gc's exec orders and pack scripts run
+// bare `gc` through PATH: with no gc there they exit 127, and with another gc
+// first they run that one, while every RunGC call still runs the binary under
+// test.
+func VerifyPathGC(env *Env) error {
+	want, err := ResolveGCPath(env)
+	if err != nil {
+		return err
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		return fmt.Errorf("binary under test: %w", err)
+	}
+	got := findInPath(env.Get("PATH"), "gc")
+	if got == "" {
+		return fmt.Errorf("no gc on PATH, so exec orders cannot run the binary under test %s", want)
+	}
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		return fmt.Errorf("gc on PATH: %w", err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		return fmt.Errorf("the gc on PATH is %s, not the binary under test %s", got, want)
+	}
+	return nil
+}
+
 func findInPath(pathEnv, name string) string {
 	for _, dir := range strings.Split(pathEnv, ":") {
 		p := filepath.Join(dir, name)

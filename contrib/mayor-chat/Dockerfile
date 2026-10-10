@@ -15,7 +15,7 @@
 # at runtime. Use GC_DOCKER_HOME_MOUNT or your own volume mounts to
 # provide them. Never bake credentials into the image.
 
-FROM node:20-slim
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 ARG CLAUDE_CODE_VERSION=2.1.101
 
@@ -30,9 +30,9 @@ WORKDIR /app
 # Install Claude Code globally (used as subprocess by Agent SDK).
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-# Install project dependencies.
-COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+# Install project dependencies exactly as locked in package-lock.json.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # Copy app files.
 COPY chat.mjs transport.mjs ./

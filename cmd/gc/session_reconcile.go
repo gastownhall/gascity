@@ -207,6 +207,17 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 // derives as strings.TrimSpace(pending_create_claim) == "true" — identical to the
 // raw read), and keeps the literal "creating" state compare the original uses.
 func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	return sessionStartRequested(i, staleCreatingStateInfo(i, clk))
+}
+
+// sessionStartRequestedAt is sessionStartRequestedInfo at now; past the
+// creating compare, staleCreatingStateInfo is pendingCreateAttemptStale.
+func sessionStartRequestedAt(i sessionpkg.Info, now time.Time) bool {
+	return sessionStartRequested(i, pendingCreateAttemptStaleAt(i, now))
+}
+
+// sessionStartRequested composes the stale-creating answer.
+func sessionStartRequested(i sessionpkg.Info, staleCreating bool) bool {
 	if strings.TrimSpace(i.MetadataState) == string(sessionpkg.StateStartPending) {
 		return true
 	}
@@ -216,7 +227,7 @@ func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if strings.TrimSpace(i.MetadataState) != "creating" {
 		return false
 	}
-	return !staleCreatingStateInfo(i, clk)
+	return !staleCreating
 }
 
 // staleCreatingStateTimeout bounds how long a state=creating bead may sit
@@ -1128,7 +1139,11 @@ func pendingCreateAttemptStaleInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if clk == nil {
 		return false
 	}
-	now := clk.Now()
+	return pendingCreateAttemptStaleAt(i, clk.Now())
+}
+
+// pendingCreateAttemptStaleAt is pendingCreateAttemptStaleInfo at now.
+func pendingCreateAttemptStaleAt(i sessionpkg.Info, now time.Time) bool {
 	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}

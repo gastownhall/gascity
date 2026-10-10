@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // recordingLeaf wraps a Store and records the name of every method called
@@ -762,7 +764,7 @@ func TestProxiedStoreCloseStoreReleasesBothLeaves(t *testing.T) {
 
 // TestProxiedStoreCountAndDepListBatchRouteToTheReadLeaf covers the two optional
 // read capabilities whose answers differ by leaf: only the native leaf can Count,
-// and only the bd leaf has a batched dep read.
+// and the batched dep read is the native leaf's own while it serves.
 func TestProxiedStoreCountAndDepListBatchRouteToTheReadLeaf(t *testing.T) {
 	store, _, _ := newSplitFixture(t)
 	if _, err := store.Create(Bead{Title: "counted", Type: "task"}); err != nil {
@@ -776,7 +778,7 @@ func TestProxiedStoreCountAndDepListBatchRouteToTheReadLeaf(t *testing.T) {
 		t.Fatalf("Count = %d, want 1", n)
 	}
 
-	t.Run("DepListBatch falls back through the wrapper", func(t *testing.T) {
+	t.Run("DepListBatch answers through the native leaf's batch", func(t *testing.T) {
 		batch, err := store.DepListBatch([]string{"prx-1"})
 		if err != nil {
 			t.Fatalf("DepListBatch: %v", err)
@@ -790,6 +792,87 @@ func TestProxiedStoreCountAndDepListBatchRouteToTheReadLeaf(t *testing.T) {
 		store.standDown(NewSchemaSkewVerdictError(ProxiedSkewLaneMain, ProxiedSkewDirAhead, "demoted"))
 		if _, err := store.Count(context.Background(), ListQuery{AllowScan: true}); !errors.Is(err, ErrCountUnsupported) {
 			t.Fatalf("Count on a demoted store = %v, want ErrCountUnsupported so callers fall back to List", err)
+		}
+	})
+}
+
+// TestProxiedStoreDepListBatchGuardsEveryIDBeforeTheNativeBatch pins the batch
+// the native leaf gained, at the wrapper, where H5's guard has to cover it.
+//
+// The wrapper used to loop DepList, so the relocated-class guard ran once per id
+// for free. Forwarding the native batch without it answers a relocated id with no
+// entry, which is DependencyBatchLister's spelling of "not held here" and which a
+// dependency walk reads as a bead with no edges: the typed "ask the other store"
+// becomes a silent negative again, now for a whole batch at a time.
+//
+// The native leaf sits over the edge fixture, which reports a missing anchor the
+// way a real backend does. The mem double reports every anchor as held, so it
+// could not tell an omitted anchor from an edge-free one.
+func TestProxiedStoreDepListBatchGuardsEveryIDBeforeTheNativeBatch(t *testing.T) {
+	reader := &edgeFixtureReader{edges: map[string][]*issueops.Dependency{
+		"prx-1": {{IssueID: "prx-1", DependsOnID: "prx-2", Type: beadslib.DepBlocks}},
+		"prx-2": nil,
+	}}
+	native := newNativeDoltStoreForTest(&edgeFixtureStorage{Storage: newNativeDoltMemStorage(), reader: reader}, WithProxiedReadOnly())
+	var forks int
+	bd := NewBdStoreWithPrefix(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		forks++
+		if len(args) > 1 && args[0] == "dep" && args[1] == "list" {
+			return []byte(`[{"issue_id":"prx-1","depends_on_id":"prx-9","type":"blocks"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected bd %v", args)
+	}, "prx", WithBdStoreRelocatedClasses(RelocatedClass{Class: "graph", IDPrefix: "gcg", Location: "the infra binding"}))
+	store, err := NewProxiedStore(native, bd, PinForTest("/scope", "", "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+
+	t.Run("a relocated id refuses the whole batch before anything is read", func(t *testing.T) {
+		deps, err := store.DepListBatch([]string{"prx-1", "gcg-1234"})
+		if !errors.Is(err, ErrBdSQLClassRelocated) {
+			t.Fatalf("DepListBatch(prx-1, gcg-1234) = %v, %v; want the relocated-class refusal, not an answer with no entry for gcg-1234", deps, err)
+		}
+		if deps != nil {
+			t.Errorf("a refused batch returned %#v alongside its error, want no map", deps)
+		}
+		if len(reader.requests) != 0 || forks != 0 {
+			t.Errorf("the guard let %d edge read(s) and %d bd fork(s) through; it must refuse before anything is spent", len(reader.requests), forks)
+		}
+	})
+
+	t.Run("served ids are one native read keyed by held anchor", func(t *testing.T) {
+		reader.requests = nil
+		deps, err := store.DepListBatch([]string{"prx-1", "prx-2", "prx-gone"})
+		if err != nil {
+			t.Fatalf("DepListBatch: %v", err)
+		}
+		if len(reader.requests) != 1 || forks != 0 {
+			t.Errorf("DepListBatch spent %d edge read(s) and %d bd fork(s), want one native read and no fork", len(reader.requests), forks)
+		}
+		// prx-2 is held with no edges and gets an empty entry; prx-gone is not
+		// held and gets none. Neither is an error.
+		want := map[string][]Dep{
+			"prx-1": {{IssueID: "prx-1", DependsOnID: "prx-2", Type: "blocks"}},
+			"prx-2": {},
+		}
+		if !reflect.DeepEqual(deps, want) {
+			t.Errorf("DepListBatch = %#v, want %#v", deps, want)
+		}
+	})
+
+	t.Run("a demoted store answers with the bd leaf's own batch", func(t *testing.T) {
+		reader.requests = nil
+		store.standDown(NewSchemaSkewVerdictError(ProxiedSkewLaneMain, ProxiedSkewDirAhead, "demoted"))
+		deps, err := store.DepListBatch([]string{"prx-1"})
+		if err != nil {
+			t.Fatalf("DepListBatch on a demoted store: %v", err)
+		}
+		want := map[string][]Dep{"prx-1": {{IssueID: "prx-1", DependsOnID: "prx-9", Type: "blocks"}}}
+		if !reflect.DeepEqual(deps, want) {
+			t.Errorf("DepListBatch on a demoted store = %#v, want the bd leaf's answer %#v", deps, want)
+		}
+		if forks != 1 || len(reader.requests) != 0 {
+			t.Errorf("a demoted batch spent %d bd fork(s) and %d native edge read(s), want exactly one fork", forks, len(reader.requests))
 		}
 	})
 }

@@ -59,6 +59,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value also refuses controller start. Remove the key before rolling back to an
   older gc, which rejects it under strict mode.
 
+- **`[beads] native_transport = "off"` and `GC_BEADS_FORCE_FALLBACK=1` refuse
+  a `[storage]` binding served by `beads-workspace`.** That provider opens the
+  native Dolt store, which "off" forbids. `gc start` refuses the binding before
+  it opens anything or records an outcome, and the error names the cause: the
+  city's setting or the process-wide variable. A deployment that sets
+  `GC_BEADS_FORCE_FALLBACK=1`, for example to keep `.beads/hooks` scripts
+  running, and binds a class to a beads workspace stops starting after the
+  upgrade. Unset the variable and set `native_transport = "off"` only in the
+  cities that need it, or remove the binding. `sqlite-beads` and the other
+  providers that never open the native store are unaffected (#7036).
+
+- **A command that opens a city's bead store fails when `city.toml` exists but
+  does not load.** It used to open the store with default settings, which would
+  ignore a `native_transport = "off"` in the file it failed to read. Fix the
+  reported error to proceed; setting `GC_BEADS_FORCE_FALLBACK=1` does not
+  bypass it. A directory with no `city.toml` is unaffected. A running
+  controller keeps the stores it holds open on the value it read at boot, but
+  the stores it opens for a single tick fail the same way. The `file` provider
+  and `exec:` providers other than the bundled `gc-beads-bd` script are
+  unaffected too, unless gc has to read the provider from a `city.toml` that
+  cannot be parsed: it then falls back to `bd`, and the command fails (#7036).
+
+- **An out-of-enum `[beads] conditional_writes`, `guarded_release` or
+  `native_transport` value fails config load.** These keys are now checked on
+  the composed config, so a bad value in `city.toml`, or in a fragment it
+  includes, fails the load with an error naming the key. Before, a city
+  with a bad `conditional_writes` or `guarded_release` value loaded, and its
+  controller warned and ran with that gate off. Correct the value before
+  upgrading (#7036).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
@@ -71,6 +101,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests. gc applies the value where bd lets it: `gc init`, `gc rig add` and
   `gc beads city migrate-proxied`. bd has no way yet to change the value of a
   scope that already exists (#6561).
+
+- **`[beads] native_transport` chooses whether a city's bead stores may open
+  the native Dolt store.** `"auto"`, the default, keeps the current behavior:
+  native when preflight-eligible, the bd subprocess otherwise. `"off"` keeps
+  every store of the city on the bd subprocess, which a city needs while it
+  still depends on `.beads/hooks` scripts. A `[beads]` fragment that
+  `city.toml` includes keeps the city's value unless the fragment sets
+  `native_transport` itself. A running controller keeps the stores it holds
+  open on the value it read at boot until it restarts; `gc` commands, and the
+  stores it opens for a single tick, read the current value.
+  `GC_BEADS_FORCE_FALLBACK=1` still works as a deprecated alias for
+  `"off"`; it overrides every city in the process and logs a deprecation
+  warning once (#7036).
+
+- **`gc rig add --include <binding>=<source>` chooses the rig import's
+  binding.** Without it the binding is still the pack's name (its `[packs]` key
+  or the source's last path segment); `--include gc=<source>` writes
+  `[rigs.imports.gc]` instead. The left side must be letters, digits, `-` and
+  `_`, so a URL or path is never split. A binding that two `--include` flags
+  claim for different packs fails the add.
 
 ### Changed
 
@@ -113,7 +163,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without re-sorting them, so on a split city the graph rows at the end of the
   response are now priority-ordered.
 
+- **`gc rig add --include` resolves a remote pack's version like
+  `gc import add`.** A non-bundled remote include used to be written with no
+  version and no `packs.lock` entry, so `gc import check` reported a missing
+  lock entry and the import floated. It now gets the constraint
+  `gc import add` would write (the constraint the city already holds for that
+  source, else the newest registry release, else the newest semver tag, else
+  the remote HEAD commit) and a `packs.lock` entry in the same add. That needs
+  network access to the source; if resolution fails, the add fails and
+  `city.toml` and `packs.lock` are untouched. Only explicit `--include` flags
+  changed: bundled packs, local paths, sources with an embedded `#ref`, and the
+  imports a new rig gets from `[defaults.rig.imports]` or `default_rig_includes`
+  are written as before.
+
+- **`gc import add` without `--version` keeps the constraint the city already
+  holds for a source.** `packs.lock` has one entry per source, so adding a
+  source the city already imports (in any scope) or locks now writes the
+  existing import's constraint, else one matching the source's `packs.lock`
+  entry, instead of the newest release's, which could conflict with the
+  existing constraint or move the lock entry every importer shares. A local
+  path inside a git worktree is still locked to its current commit. Adding a
+  pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
+  same way. Pass `--version` to choose another constraint.
+
 ### Fixed
+
+- **A new scope directory over an existing current-era managed Dolt database
+  initializes instead of being refused as a legacy Dolt server workspace.**
+  `gc-beads-bd init` now stamps bd's version witness on a store that already
+  existed only when its `schema_migrations` table proves it current-era (an
+  adopted pre-1.0 store is still refused, #5294), never forces a reinit when
+  a schema probe does not answer, and resets a bootstrap that was interrupted
+  between a migration's DDL and its commit, only while it holds the
+  database's init lock exclusively. Behavior change: with bd 1.0.5 or later,
+  init on an already-initialized scope now runs `bd migrate schema`, and fails
+  with bd's message when that fails for any reason other than bd's
+  remote-migrate refusal (which is reported as a warning). An older bd has no
+  `bd migrate schema`, so init skips the step with a warning and bd applies
+  any pending migrations on its next write. With bd 1.3.0 or later the step is
+  also bd's consent to promote the schema of a database on a shared server
+  (gastownhall/beads#5920), which can lock out an older bd that uses the same
+  database; init writes what the step reports to its standard error, which gc
+  shows only when init fails. Init's migration steps also wait up to
+  `GC_DOLT_INIT_LOCK_TIMEOUT_MS` for a concurrent initializer's reset or
+  forced reinit to finish, and fail closed if it does not. That lock lives in
+  a per-user `gc-beads-bd-init-locks-<uid>` directory under `$TMPDIR` or
+  `/tmp` unless `GC_DOLT_INIT_LOCK_DIR` names another; where `flock` is
+  installed, init fails naming the lock file when it cannot create it.
+  Without `flock`, init refuses to reset an interrupted bootstrap and says
+  how to install it (#5926).
 
 - **Work hidden by beads migration 0059 is dispatched again.** On the first
   start under a new bd version, `gc start` (and the supervisor, and

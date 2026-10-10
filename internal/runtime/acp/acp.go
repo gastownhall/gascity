@@ -83,6 +83,7 @@ type Provider struct {
 	conns         map[string]*sessionConn // in-process tracking
 	workDirs      map[string]string       // session name → workDir (for CopyTo)
 	cfg           Config
+	events        *sessionEventHub
 	activityWrite func(path string, data []byte) error                                         // test seam
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
 	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
@@ -93,6 +94,8 @@ var (
 	_ runtime.Provider                    = (*Provider)(nil)
 	_ runtime.InteractionProvider         = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider        = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError   = (*Provider)(nil)
 	_ runtime.ListingAttestation          = (*Provider)(nil)
 )
@@ -125,6 +128,7 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 		conns:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		cfg:      cfg,
+		events:   newSessionEventHub(),
 	}
 }
 
@@ -178,8 +182,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// advertise liveness. Discard sidecars from a dead incarnation first.
 	p.cleanupMeta(name)
 	seedMeta, _ := runtime.SplitEnvForMetaSeed(cfg.Env)
-	for key, value := range seedMeta {
-		if err := p.SetMeta(name, key, value); err != nil {
+	for _, key := range runtime.MetaSeedKeys(seedMeta) {
+		if err := p.SetMeta(name, key, seedMeta[key]); err != nil {
 			p.cleanupMeta(name)
 			p.mu.Unlock()
 			return fmt.Errorf("seeding metadata for %q (%s): %w", name, key, err)
@@ -323,6 +327,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
+	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -342,13 +347,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// the stdout read end itself, so bytes still unread at that point are
 		// not guaranteed to be dispatched.
 		<-sc.readDone
-		sc.drainPending()
+		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
 		// Close unlinks the Unix socket. Do not remove its path again: another
 		// provider can bind a replacement as soon as Close makes it disappear.
 		lis.Close() //nolint:errcheck
 		close(processDone)
+		sc.markExited()
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -442,6 +448,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		clearSentinel()
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
+	// Attach before publishing the connection so Stop, which finds it only
+	// through p.conns, always reports closed after the attached exit.
+	p.attachSessionEvents(name, sc)
 	p.conns[name] = sc
 	p.mu.Unlock()
 	// Stop must be able to close stdin even if initial delivery blocks. Failed
@@ -590,13 +599,23 @@ func (p *Provider) Stop(name string) error {
 
 	if ok {
 		if !sc.alive() {
-			p.cleanupMeta(name)
+			p.cleanupOwnMeta(name, sc.token)
+			// cmd != nil is the observable proxy for "this conn came from
+			// newSessionConn", which is what guarantees exitReported is
+			// non-nil; emitClosed waits on that channel, and waiting on a nil
+			// one would block Stop forever. Start's sentinel conn is the only
+			// conn built outside newSessionConn, and Stop returns above before
+			// reaching here for it.
+			if sc.cmd != nil {
+				sc.emitClosed()
+			}
 			return nil
 		}
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc, p.cfg.stopGrace())
 		if err == nil || runtime.IsSessionGone(err) {
-			p.cleanupMeta(name)
+			p.cleanupOwnMeta(name, sc.token)
+			sc.emitClosed()
 			return nil
 		}
 		return err
@@ -719,11 +738,26 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	// Set busy state BEFORE sendRequest so that dispatch can match the
 	// response ID and clear it. If we set it after, a fast agent could
 	// respond before setActivePrompt runs, leaving busy set permanently.
-	sc.setActivePrompt(id)
+	if !sc.setActivePrompt(id) {
+		// The stdout reader has drained, so no response could settle this
+		// turn. An exiting agent keeps the best-effort nil contract. The bound
+		// is stopGrace() for the same reason the pipe-write branch below uses
+		// it: both wait out the identical "agent is exiting" race, so they must
+		// move together when Config.StopGrace is tuned. A live agent whose
+		// output can no longer be read is reported as an error instead of
+		// receiving a turn that can never finish, but only after the full
+		// bound, which is runtime.ManagedProcessStopGrace by default.
+		select {
+		case <-sc.done:
+			return nil
+		case <-time.After(p.cfg.stopGrace()):
+			return fmt.Errorf("sending prompt to %q: %w", name, errACPConnClosed(name))
+		}
+	}
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {
-		sc.clearActivePrompt(id)
+		sc.abandonPrompt(id, err)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with
 		// the agent lifecycle, so surface them immediately rather than
 		// stalling the caller on sc.done.
@@ -750,8 +784,8 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		}
 	}
 
-	// Drain the response channel in the background. If the agent
-	// returns a JSON-RPC error, log it rather than silently dropping.
+	// Drain the response channel in the background. The read loop records
+	// the turn outcome; a JSON-RPC error is also logged for operators.
 	go func() {
 		resp, ok := <-ch
 		if !ok {
@@ -816,6 +850,13 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	}
 	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
+
+// LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
+// reads the session's local 0600 sidecar.
+func (p *Provider) LocalIdentitySidecar() bool { return true }
+
+// LivenessReadsFresh implements [runtime.FreshByConstruction].
+func (p *Provider) LivenessReadsFresh() bool { return true }
 
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.
@@ -982,6 +1023,17 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
+}
+
+// cleanupOwnMeta clears name's sidecars only while they still carry token, the
+// one the stopped incarnation seeded. The lifecycle lock keeps any Start in
+// this or another provider out while it runs, but a replacement another
+// provider started earlier, beside a dead or unreachable conn of this one, has
+// reseeded the sidecars with its own token and keeps them.
+func (p *Provider) cleanupOwnMeta(name, token string) {
+	if current, err := p.GetMeta(name, "GC_INSTANCE_TOKEN"); err == nil && current == token {
+		p.cleanupMeta(name)
+	}
 }
 
 // cleanupMeta removes all sidecar meta files for the named session.

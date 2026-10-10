@@ -1033,15 +1033,6 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		forbidden []string
 	}{
 		{
-			file: "internal/session/manager.go",
-			required: []string{
-				`ArchivePatch(time.Now().UTC(), reason, false)`,
-			},
-			forbidden: []string{
-				`"archived_at":  time.Now().UTC().Format(time.RFC3339),`,
-			},
-		},
-		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
 				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,

@@ -9,6 +9,7 @@ var (
 	_ ConditionalWriter                = (*MemStore)(nil)
 	_ conditionalWritesModeCarrier     = (*MemStore)(nil)
 	_ conditionalWriteCapabilityProber = (*MemStore)(nil)
+	_ conditionalLabelsGuard           = (*MemStore)(nil)
 
 	// FileStore inherits the stamp and the prober through its embedded
 	// *MemStore: DisableConditionalWrites is ONE field stored on the embedded
@@ -31,11 +32,15 @@ func (m *MemStore) probeConditionalWriteCapability() (bool, string) {
 	return true, ""
 }
 
+// conditionalLabelsGuarded reports that UpdateIfMatch applies labels in the
+// same locked step as the revision check and bump.
+func (m *MemStore) conditionalLabelsGuarded() bool { return true }
+
 // UpdateIfMatch applies opts only when the bead's current revision equals
 // expectedRevision, otherwise it returns *PreconditionFailedError. When the
 // instance has DisableConditionalWrites set it returns ErrConditionalWriteUnsupported.
 func (m *MemStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	if err := validateConditionalUpdateOpts(opts, m.conditionalLabelsGuarded()); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
 	m.mu.Lock()
@@ -73,6 +78,7 @@ func (m *MemStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return nil
 	}
 	setBeadStatus(&m.beads[i], "closed")
+	recordCloseReason(&m.beads[i])
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	return nil
@@ -115,6 +121,7 @@ func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (boo
 	if m.beads[i].Metadata[key] != expected {
 		return false, nil
 	}
+	noteSessionKeys(m.beads[i], map[string]string{key: next})
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap)
 	}

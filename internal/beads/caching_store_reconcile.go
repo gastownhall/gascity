@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -71,7 +72,8 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		}
 	}
 
-	timer := time.NewTimer(cacheReconcilePollInterval)
+	poll := clock.Backstop(cacheReconcilePollInterval)
+	timer := time.NewTimer(poll)
 	defer timer.Stop()
 
 	for {
@@ -81,11 +83,11 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		case <-timer.C:
 		}
 
-		c.reconcileIfDue(time.Now())
+		c.reconcileIfDue(c.clockNow())
 
-		next := c.nextReconcileDelay(time.Now())
-		if next <= 0 || next > cacheReconcilePollInterval {
-			next = cacheReconcilePollInterval
+		next := c.nextReconcileDelay(c.clockNow())
+		if next <= 0 || next > poll {
+			next = poll
 		}
 		timer.Reset(next)
 	}
@@ -289,7 +291,7 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	if lastFullScanAt.IsZero() {
 		lastFullScanAt = c.lastFreshAt
 	}
-	dueAt := lastFullScanAt.Add(c.adaptiveIntervalLocked())
+	dueAt := lastFullScanAt.Add(clock.Backstop(c.adaptiveIntervalLocked()))
 	if !now.Before(dueAt) {
 		return 0
 	}
@@ -369,7 +371,7 @@ func (c *CachingStore) runReconciliation() {
 		c.mu.Unlock()
 		return
 	}
-	now := time.Now()
+	now := c.clockNow()
 	res := c.mergeSnapshotLocked(freshByID, confirmedClosed, deferred, depMap, useFreshDeps, depErr != nil, startSeq, now)
 	durMs := float64(time.Since(start).Microseconds()) / 1000.0
 	c.stats.LastReconcileMs = durMs
@@ -382,6 +384,10 @@ func (c *CachingStore) runReconciliation() {
 		log.Print(logLine)
 	}
 	c.notifyChanges(ChangeScan, res.notifications)
+	// The pass may have evicted a row some read had already installed as
+	// closed; its close is still queued, and a pass with no other change has
+	// nothing else to drain it.
+	c.announceUnannouncedCloses()
 }
 
 // mergeAction is what the reconcile merge does with one id.

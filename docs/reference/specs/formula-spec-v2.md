@@ -580,10 +580,33 @@ children (section 3.5).
 **Dispatch routing intent.** A step's `gc.run_target` metadata is
 compile-time routing intent: at dispatch the router resolves it into
 `gc.routed_to`, the sole persisted routing key, overriding the convoy-wide
-default for that step. Per-dispatch provider options ride `opt_*` step
-metadata (for example `opt_model`), validated against the provider's
-options schema at spawn; `gc.model` is a deprecated spelling that the
-`gc doctor` check `work-option-metadata-migration` migrates to `opt_model`.
+default for that step. Per-dispatch provider options ride `opt_<key>` step
+metadata, where `<key>` is any key of the provider's options schema (for
+example `opt_model`, `opt_effort`). They are validated against that schema,
+and invalid values are skipped per key. They apply when a session is
+launched, from the first of these cases that holds:
+
+1. The session holds a claimed (in-progress) bead in the store its session
+   bead lives in. A claimed bead with `opt_*` metadata supplies the options;
+   if none has any, the launch keeps its default options and the trigger
+   bead is not consulted.
+2. The session's trigger bead (the bead it was spawned for — the routed
+   demand a pool slot starts on) is not claimed yet, and the session holds a
+   claimed bead in any store it can claim from, other than a suspended rig's
+   store, which is not read. The trigger is ignored and the launch keeps its
+   default options.
+3. Otherwise the trigger bead supplies the options while it is still the
+   session's step (not closed, and unassigned or assigned to the session),
+   including when the session has already claimed it. A trigger the session
+   has claimed skips the check of other stores, so a session holding several
+   claims launches with the options of one claimed bead.
+
+An explicit session `template_overrides` value wins per key. Options are
+launch flags: a warm session reused for a later step keeps the flags it
+launched with, and a pool slot keeps the options it launched with even if it
+later claims a different ready bead. `gc.model` is a deprecated spelling that
+the `gc doctor` check `work-option-metadata-migration` migrates to
+`opt_model`.
 
 **Role target aliases.** In the *value* of `gc.run_target`, `gc.<role>` is a
 semantic role alias used by imported role packs. The resolver first treats the
@@ -756,6 +779,7 @@ that run as an infrastructure outcome rather than a verdict:
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
 | any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
+| none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
 
 Attempt-free re-runs are themselves bounded by a separate infrastructure
 budget, so a script that exits 75 forever still terminates; it just does not
@@ -778,6 +802,29 @@ consumers — trigger conditions, hybrid dispatch, and `gc converge` — still
 read a nonzero gate as a genuine verdict. Each lane opts in separately,
 because "re-run without cost" only means something where there is an attempt
 budget to protect.
+
+**A check that cannot be launched.** When `check.path` names a script that is
+missing, is not a regular file, or is not executable, the orchestrator never
+runs it, so there is no exit status to read. The step stays open rather than
+failing: the fix is out of band (ship the script, `chmod +x` it), and closing
+the step would release the steps that need it. The orchestrator re-checks the
+step every sweep; once the script can run, the step resumes and spends attempts
+normally. If the script is still unlaunchable when the stall budget elapses (15
+minutes by default), the orchestrator emits a single `control.stalled` event
+with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+A script that is missing because the step's working directory was removed, and
+that exists nowhere else, is held open the same way. Restoring the directory
+heals it; shipping a copy under the city or store root does not. The script
+always runs inside the step's working directory, so a copy found elsewhere still
+cannot start there. A failed start is not held open: it spends an attempt each
+time, and the step closes failed once its attempts run out.
+
+A `check.path` refused on safety grounds is not in this lane: one that escapes
+the trusted roots, climbs out with `../`, or follows a symlink outside the city
+or store. Such a step is refused and closed failed. A symlink whose target does
+not exist yet is the exception: where it leads is checked only once the target
+exists, so until then it is held open as missing. Once the target appears, a
+target outside the city or store is refused.
 
 ### 3.2. Retry
 

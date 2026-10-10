@@ -521,6 +521,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
@@ -1668,6 +1669,7 @@ func refreshDesiredStateWithSessionBeads(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp.decisionTime = time.Now().UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = false
@@ -3221,8 +3223,19 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // by the assigned-work passes that establish real readiness (in-progress,
 // store-Ready()/deps, and assigned molecule roots) — never by the open-routed
 // orphan-release pass, whose beads have not passed any readiness gate.
+//
+// OPEN work parked on a dispatch hold is never marked: bd's Ready() is
+// hold-transparent, but the session's own hook refuses to serve a held row
+// (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
+// session that drain-acked no_work and was re-woken every tick. The bead stays
+// in the assigned-work snapshot — orphan release, pool accounting and crash
+// recovery still see the assignment (ga-5736js) — it just carries no wake
+// readiness. assignedOpenWorkHeld is the shared predicate.
 func markReadyAssigned(readyIDs map[string]bool, b beads.Bead) {
 	if readyIDs == nil {
+		return
+	}
+	if assignedOpenWorkHeld(b) {
 		return
 	}
 	readyIDs[b.ID] = true
@@ -4271,6 +4284,12 @@ func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		// gc.work_dir before it writes the row.
 		return "", nil
 	}
+	return verifyPoolTriggerWorktree(bp, spec)
+}
+
+// verifyPoolTriggerWorktree verifies spec's worktree on disk and in git,
+// counting the probe: a realize's, never a plan's (verifiedPoolTriggerWorkDir).
+func verifyPoolTriggerWorktree(bp *agentBuildParams, spec worktree.Spec) (string, error) {
 	if bp != nil && bp.realizeProbe != nil {
 		bp.realizeProbe.worktreeVerifies.Add(1)
 	}
@@ -4901,17 +4920,26 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 // raw bead. Byte-identical to the raw form, oracle-pinned by
 // TestExistingPoolSlotWithConfigInfoMatchesRaw.
 func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	return existingPoolSlotWithTemplates(cfg, nil, cfgAgent, &info)
+}
+
+// existingPoolSlotWithTemplates is existingPoolSlotWithConfigInfo with the
+// stored-template match answered through templates, a memo over cfg. Nil
+// computes it, as legacy does: only the v2 allocator builds one (A3). It
+// reads info through a pointer: the v2 fresh-slot occupancy asks it for
+// every row of every pool, and an Info is kilobytes.
+func existingPoolSlotWithTemplates(cfg *config.City, templates *slotTemplateMemo, cfgAgent *config.Agent, info *session.Info) int {
 	if cfgAgent == nil {
 		return 0
 	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return 0
 	}
-	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
-	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	storedTemplateMatches := cfg == nil || templates.storedTemplateMatchesPoolTemplate(storedTemplateRef(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(*info))
 	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
 	sessionNameSlot := 0
-	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(*info) {
 		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
 	}
 	if info.PoolSlot != "" {
@@ -5168,6 +5196,9 @@ func freshPoolOccupancyInfos(bp *agentBuildParams) []session.Info {
 	if bp == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.freshOccupancy()
+	}
 	primary := bp.sessionBeads.OpenInfos()
 	infos := make([]session.Info, 0, len(bp.sessionOccupancyInfos)+len(primary))
 	seen := make(map[string]bool, len(bp.sessionOccupancyInfos)+len(primary))
@@ -5291,6 +5322,19 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		usedSlots[0] = true
 		return 0, nil
 	}
+	if bp != nil {
+		// The v2 realization memo counts its occupancy's slots once (A3).
+		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
+			for slot := 1; unlimited || slot <= upper; slot++ {
+				if usedSlots[slot] || held[slot] {
+					continue
+				}
+				usedSlots[slot] = true
+				return slot, nil
+			}
+			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
+	}
 	occupied := make(map[int]bool, len(usedSlots))
 	for slot, used := range usedSlots {
 		if used {
@@ -5385,6 +5429,12 @@ func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
 func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
+	return infoRefIdentifiesAsCanonical(&i, canonical)
+}
+
+// infoRefIdentifiesAsCanonical is infoIdentifiesAsCanonical through a
+// pointer, for the v2 fresh-slot occupancy's every-row scan (A3).
+func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
 		return false
@@ -5480,9 +5530,10 @@ type poolCreateView struct {
 	// allocator mints it at plan time as its ledger marker.
 	instanceToken string
 	// beforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none). The allocator's effect
-	// uses it to tell a panic before the write from one after it.
-	beforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write. The allocator's effect uses it to tell a panic before the write
+	// from one after it, and to check its context last.
+	beforeWrite func(rowID string) error
 }
 
 // poolCreateViewOf is legacy's view: its build params, unchanged.
@@ -6869,6 +6920,11 @@ func (r *controlDispatcherRouteRepair) persist(bead *beads.Bead, store beads.Sto
 		deferRouteRepair(bead, needsRouteRepair)
 		return
 	}
+	r.write(bead, store, current, route, needsRouteRepair, clearFallback)
+}
+
+// write is persist's store write, and the in-memory mirror of what it wrote.
+func (r *controlDispatcherRouteRepair) write(bead *beads.Bead, store beads.Store, current, route string, needsRouteRepair, clearFallback bool) {
 	metadata := make(map[string]string, 2)
 	if needsRouteRepair {
 		metadata[beadmeta.RoutedToMetadataKey] = route

@@ -276,9 +276,9 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
-// the per-entry name field is emitted under the JSON key "agent", not "name"
-// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// agentInfo mirrors herdr's agent object. herdr 0.7.3 emits the name under
+// the JSON key "agent"; 0.9.1 moved it to "name" and reuses "agent" for the
+// agent kind ("claude", "codex"), which UnmarshalJSON resolves.
 type agentInfo struct {
 	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
@@ -292,6 +292,25 @@ type agentInfo struct {
 	// Verified live on 0.7.3: it moves only while a client renders the pane;
 	// a headless server holds it at 0.
 	Revision uint64 `json:"revision"`
+}
+
+// UnmarshalJSON prefers "name" over "agent": on herdr 0.9.1 decoding "agent"
+// keyed every pane by its kind, so all Claude sessions collapsed into one
+// activity entry and none could ever read as idle for nudge delivery.
+func (a *agentInfo) UnmarshalJSON(b []byte) error {
+	type plain agentInfo
+	var v struct {
+		plain
+		Label string `json:"name"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*a = agentInfo(v.plain)
+	if v.Label != "" {
+		a.Name = v.Label
+	}
+	return nil
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's
@@ -582,7 +601,9 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
-	switch herdrErrorCode(err) {
+	// herdr reports both verdicts through a non-zero exit, which herdrErrorCode
+	// cannot see; reading only that shape left every stall unrecovered.
+	switch herdrCodeAnyShape(err) {
 	case "timeout":
 		return fmt.Errorf("startup submit landed but never reached %v within %dms: %w",
 			startupConfirmStates, startupPromptConfirmTimeoutMS, err)

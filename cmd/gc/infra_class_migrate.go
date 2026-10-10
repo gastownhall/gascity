@@ -1536,13 +1536,9 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 		return infraContainmentGap{}, nil
 	}
 
-	copied, err := destination.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	have, err := infraBindingResidentIDs(destination)
 	if err != nil {
-		return infraContainmentGap{}, fmt.Errorf("listing binding: %w", err)
-	}
-	have := make(map[string]bool, len(copied))
-	for _, b := range copied {
-		have[b.ID] = true
+		return infraContainmentGap{}, err
 	}
 	gap := infraContainmentGap{}
 	for _, b := range rows {
@@ -1560,6 +1556,35 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, pro
 	sort.Strings(gap.Stranded)
 	sort.Strings(gap.Retained)
 	return gap, nil
+}
+
+// infraBindingResidentIDs is the binding's whole id set, both tiers and closed
+// rows included: the "have" side of the containment check. It asks for the ids
+// alone through beads.ResidentIDs, which answers for a bare sqlite engine only,
+// because the check needs nothing else and the binding is the city's largest
+// store — on the measured city a hydrated list was ~15 s of every relocated CLI
+// command's boot gate. Any other store, a wrapped one included, is listed in
+// full.
+func infraBindingResidentIDs(destination beads.Store) (map[string]bool, error) {
+	if ids, ok, err := beads.ResidentIDs(destination); ok || err != nil {
+		if err != nil {
+			return nil, fmt.Errorf("listing binding: %w", err)
+		}
+		have := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			have[id] = true
+		}
+		return have, nil
+	}
+	copied, err := destination.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing binding: %w", err)
+	}
+	have := make(map[string]bool, len(copied))
+	for _, b := range copied {
+		have[b.ID] = true
+	}
+	return have, nil
 }
 
 // writeInfraCopyManifest records the ids the equality stage proved the binding
@@ -2194,6 +2219,11 @@ func beadCopyDifference(want, got beads.Bead) string {
 	// one that invented it hides ready work indefinitely.
 	case !beadCopyEqualInstant(want.DeferUntil, got.DeferUntil):
 		return fmt.Sprintf("defer_until %s != %s", beadCopyFormatInstant(want.DeferUntil), beadCopyFormatInstant(got.DeferUntil))
+	// CloseReason is the only record of why a closed bead closed: bd keeps it
+	// in its own column rather than metadata, so a copy that dropped it loses
+	// the reason outright. The destination round-trips it through bead_json.
+	case want.CloseReason != got.CloseReason:
+		return fmt.Sprintf("close_reason %q != %q", want.CloseReason, got.CloseReason)
 	}
 	if diff := stringSetDifference("label", want.Labels, got.Labels); diff != "" {
 		return diff

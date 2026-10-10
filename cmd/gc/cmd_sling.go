@@ -978,30 +978,8 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		fmt.Fprintln(stderr, newErr) //nolint:errcheck
 		return 1
 	}
-	_ = context.Background() // ctx available for future intent API use
-
-	// For formula/on-formula batch, delegate to the old DoSlingBatch
-	// which handles per-child formula attachment internally.
-	// ExpandConvoy is for plain bead routing of convoy children.
-	var result sling.SlingResult
-	var err error
-	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
-		// Formula paths need per-child wisp attachment -- use legacy API.
-		result, err = sling.DoSlingBatch(opts, deps, querier)
-	} else {
-		result, err = sl.ExpandConvoy(context.Background(), opts.BeadOrFormula, opts.Target, sling.RouteOpts{
-			Merge:      opts.Merge,
-			NoConvoy:   opts.NoConvoy,
-			Owned:      opts.Owned,
-			Reassign:   opts.Reassign,
-			Nudge:      opts.Nudge,
-			Force:      opts.Force,
-			SkipPoke:   opts.SkipPoke,
-			DryRun:     opts.DryRun,
-			InlineText: opts.InlineText,
-			NoFormula:  opts.NoFormula,
-		}, querier)
-	}
+	// The same entry point POST /sling uses, so the two cannot drift.
+	result, err := sl.Dispatch(context.Background(), opts, querier)
 	// Print warnings before error check so they're visible on failure.
 	printSlingWarnings(result, stderr)
 	// Always print results when we have children (partial failures

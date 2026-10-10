@@ -17,6 +17,8 @@ go_library(
         "query.go",
         "reader.go",
         "reader_context.go",
+        "reader_each.go",
+        "reader_history_tail.go",
         "recorder.go",
         "rename_linux.go",
         "rename_other.go",
@@ -56,6 +58,7 @@ go_test(
         "reader_archive_filter_test.go",
         "reader_beforeseq_test.go",
         "reader_context_test.go",
+        "reader_history_tail_test.go",
         "recorder_batch_test.go",
         "recorder_handle_test.go",
         "recorder_readonly_test.go",
@@ -76,6 +79,7 @@ go_test(
     deps = [
         "//internal/events/eventstest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
@@ -87,6 +91,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

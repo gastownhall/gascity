@@ -64,6 +64,22 @@ func (c *fakePlannerClock) NewTimer(d time.Duration) plannerTimer {
 	return t
 }
 
+// WithDeadline cancels with cause DeadlineExceeded when the fake time
+// reaches t. It arms one timer of its own.
+func (c *fakePlannerClock) WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	timer := c.NewTimer(t.Sub(c.Now()))
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C():
+			cancel(context.DeadlineExceeded)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { cancel(context.Canceled) }
+}
+
 func (c *fakePlannerClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -171,6 +187,12 @@ func (t *fakePlannerTimer) drainLocked() {
 type fakeInflight struct{ settled []settlement }
 
 func (f *fakeInflight) settle(s settlement) { f.settled = append(f.settled, s) }
+
+func (f *fakeInflight) add(inflightEntry) uint64 { return 0 }
+
+func (f *fakeInflight) view() inflightView { return inflightView{} }
+
+func (f *fakeInflight) clearVisible(inflightCensus, time.Time) []clearRecord { return nil }
 
 // plannerHarness runs a planner on a fake clock. Every pass reports its start
 // on passes, then runs the test's onPass if it has one.
@@ -638,4 +660,19 @@ func TestRealPlannerClockTimer(t *testing.T) {
 	}
 	timer.Reset(0)
 	expectFire()
+}
+
+// Kills a zero settlement At reaching the in-flight map, where it would make
+// an ambiguous create's hard bound already passed: the drain stamps it with
+// the pass time, and keeps an effect's own At.
+func TestPlannerStampsZeroSettlementAt(t *testing.T) {
+	h := newPlannerHarness(t, nil)
+	own := plannerT0.Add(-time.Minute)
+	h.p.settlements.post(settlement{Kind: inflightCreate, Token: "tok-zero"})
+	h.p.settlements.post(settlement{Kind: inflightCreate, Token: "tok-own", At: own})
+	h.p.runPass(plannerT0)
+	got := h.inflight.settled
+	if len(got) != 2 || !got[0].At.Equal(plannerT0) || !got[1].At.Equal(own) {
+		t.Fatalf("settled = %+v, want the zero At stamped %v and the effect's own At kept", got, plannerT0)
+	}
 }

@@ -1,0 +1,15 @@
+{
+  "city": "maintainer-city",
+  "ticks": 2,
+  "legacy_actions": 5,
+  "v2_intents": 2,
+  "legacy_no_action_records": {
+    "reconciler.pool.accept/accepted": 1,
+    "reconciler.session.skip_unknown_state/skipped": 1
+  },
+  "divergences_by_family": {
+    "deferred arm": 4,
+    "unexplained": 2,
+    "v5 §12.2": 1
+  }
+}
