@@ -1779,6 +1779,14 @@ func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
 // Tx executes fn in one SQLite transaction. Every write is rolled back when
 // the callback returns an error, so callers can safely compose Create, Update,
 // metadata updates, and Close as one all-or-nothing operation.
+//
+// Except on read-only and private-recovery stores, which keep a deferred
+// begin, the transaction takes the write lock as it begins (BEGIN IMMEDIATE,
+// see sqliteStoreWriterDSN), so write contention surfaces there, before fn
+// runs, and a contended begin is retried like every other write. fn itself
+// runs at most once: an error from fn or from the commit is returned without
+// running fn again. Under contention fn can start well after Tx is called, so
+// state read before Tx may have changed by the time fn runs.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1787,31 +1795,24 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 		return errors.New("beads tx: nil callback")
 	}
 	ctx := context.Background()
-	// The whole transaction retries on SQLITE_BUSY, like every other write
-	// path. With BEGIN IMMEDIATE (see sqliteStoreWriterDSN) contention
-	// normally surfaces at BEGIN, before fn has run. When it surfaces later
-	// (commit, or a busy error fn returns), every write of the failed attempt
-	// has been rolled back, so fn is re-run against a fresh transaction. fn
-	// must therefore confine its effects to tx and to captured results it
-	// reassigns on each run; the in-repo callers do. The one store-side effect
-	// that survives a rollback is the in-memory id allocator (s.seq): an
-	// auto-minted id from a rolled-back attempt is never reused, so a retry
-	// mints a fresh id and leaves a harmless gap — the same as the standalone
-	// Create retry.
-	return retryOnBusy(func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
+	var tx *sql.Tx
+	if err := retryOnBusy(func() error {
+		var err error
+		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
 			return fmt.Errorf("sqlite tx: begin: %w", err)
 		}
-		defer tx.Rollback() //nolint:errcheck
-		if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("sqlite tx: commit: %w", err)
-		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite tx: commit: %w", err)
+	}
+	return nil
 }
 
 // AtomicTx reports that Tx uses a real SQLite transaction and rolls all
