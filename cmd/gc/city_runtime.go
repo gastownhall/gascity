@@ -190,10 +190,6 @@ type CityRuntime struct {
 	// directly.
 	inventoryLane *runtimeInventoryLane
 
-	// managedDoltPreflightMu serializes the managed-Dolt preflight, which the
-	// tick, the control dispatcher and the orders lane all run.
-	managedDoltPreflightMu sync.Mutex
-
 	// acpRouteSeed is the input of the last seedACPRoutes. The tick and the
 	// control dispatcher reach it through their snapshot loads, both on the
 	// controller loop; the mutex guards a caller off that loop.
@@ -4164,10 +4160,13 @@ func backgroundManagedDoltHealth(health func(context.Context, string) error) fun
 
 // ensureManagedDoltPublishedForTick runs the managed-Dolt preflight for one
 // caller (the tick, the startup pass, the control dispatcher or the orders
-// lane). ctx is the caller's lifetime context; the health ladder runs under it.
+// lane). The preflight runs as a flight (managed_dolt_flight.go) under ctx, the
+// caller's lifetime context, so shutdown cancels it; the caller waits for it at
+// most managedDoltFlightWindow from the flight's start and then carries on,
+// leaving the recover running. A caller that finds a flight already running
+// joins it, so one city never has two recovers at once. The wait ends with ctx
+// too, and a caller giving up on the recover never cancels it.
 func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
-	cr.managedDoltPreflightMu.Lock()
-	defer cr.managedDoltPreflightMu.Unlock()
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {
 		healthFn = healthBeadsProviderForPreflight
@@ -4180,9 +4179,66 @@ func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
 	if portFn == nil {
 		portFn = currentResolvableManagedDoltPort
 	}
-	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, func(cityPath string) error {
-		return healthFn(ctx, cityPath)
-	}, ownedFn, portFn)
+	if !managedDoltPreflightWanted(cr.cityPath, cr.stderr, cr.logPrefix, ownedFn, portFn) {
+		return
+	}
+	flight := joinOrStartManagedDoltFlight(ctx, cr.cityPath, func(flightCtx context.Context) error {
+		return cr.runManagedDoltPreflight(flightCtx, healthFn)
+	})
+	cr.awaitManagedDoltFlight(ctx, flight)
+}
+
+// runManagedDoltPreflight is the body of one managed-Dolt preflight flight: the
+// health ladder under ctx, with a failure logged once by the flight's owner. A
+// panic in the hook is recovered and logged by safeTick, so it ends the flight
+// instead of the process.
+func (cr *CityRuntime) runManagedDoltPreflight(ctx context.Context, healthFn func(context.Context, string) error) error {
+	var err error
+	cr.safeTick(func() {
+		err = healthFn(ctx, cr.cityPath)
+	}, "managed-dolt-preflight")
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: managed dolt health preflight: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	return err
+}
+
+// awaitManagedDoltFlight waits for flight until managedDoltFlightWindow after
+// it started, or until ctx ends. When the flight is still running at the
+// window it logs that once for the flight, whichever caller notices first, and
+// returns without canceling it; a caller whose own ctx ended logs nothing.
+func (cr *CityRuntime) awaitManagedDoltFlight(ctx context.Context, flight *managedDoltFlight) {
+	waitCtx, cancel := context.WithDeadline(ctx, flight.started.Add(managedDoltFlightWindow))
+	defer cancel()
+	if finished, _ := flight.wait(waitCtx); finished || ctx.Err() != nil {
+		return
+	}
+	if flight.expiryLogged.CompareAndSwap(false, true) {
+		fmt.Fprintf(cr.stderr, "%s: managed dolt preflight still running after %s; continuing without waiting for it\n", //nolint:errcheck // best-effort stderr
+			cr.logPrefix, managedDoltFlightWindow)
+	}
+}
+
+// managedDoltPreflightWanted reports whether the managed-Dolt preflight has
+// anything to do: the city uses the bd store contract, its Dolt is owned by the
+// lifecycle, and no resolvable port is published. An unreadable ownership state
+// is logged and counts as nothing to do.
+func managedDoltPreflightWanted(
+	cityPath string,
+	stderr io.Writer,
+	logPrefix string,
+	ownedFn func(string) (bool, error),
+	portFn func(string) string,
+) bool {
+	if !cityUsesBdStoreContract(cityPath) {
+		return false
+	}
+	owned, err := ownedFn(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return owned && portFn(cityPath) == ""
 }
 
 func ensureManagedDoltPublishedForRuntime(
@@ -4193,18 +4249,7 @@ func ensureManagedDoltPublishedForRuntime(
 	ownedFn func(string) (bool, error),
 	portFn func(string) string,
 ) {
-	if !cityUsesBdStoreContract(cityPath) {
-		return
-	}
-	owned, err := ownedFn(cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: managed dolt ownership preflight: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return
-	}
-	if !owned {
-		return
-	}
-	if portFn(cityPath) != "" {
+	if !managedDoltPreflightWanted(cityPath, stderr, logPrefix, ownedFn, portFn) {
 		return
 	}
 	if err := healthFn(cityPath); err != nil {
