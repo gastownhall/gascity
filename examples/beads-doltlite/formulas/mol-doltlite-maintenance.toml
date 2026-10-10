@@ -1,0 +1,61 @@
+description = """
+Run doltlite maintenance: flatten (VACUUM, WAL checkpoint) and gc (purge
+deleted beads) on the SQLite bead store.
+
+This is an infrastructure formula run by the dog pool. It performs:
+1. Health check (integrity, bead count, storage stats)
+2. Flatten (compact the SQLite database)
+3. GC (remove soft-deleted beads)
+4. Report findings
+
+## Dog Contract
+
+This is infrastructure work. You:
+1. Run `gc beads-doltlite health --json` to assess current state.
+2. Run `gc beads-doltlite flatten --json` to compact.
+3. Run `gc beads-doltlite gc --json` to purge deleted beads.
+4. Emit reporting events and return to kennel.
+"""
+formula = "mol-doltlite-maintenance"
+
+[[steps]]
+id = "maintenance"
+title = "Run doltlite health, flatten, and gc"
+description = """
+Run this as one shell script:
+
+```bash
+set -euo pipefail
+
+WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required; aborting}"
+
+run_or_warn() {
+  local label="$1"
+  shift
+  if ! "$@"; then
+    echo "${label} failed" >&2
+  fi
+}
+
+HEALTH=$(gc beads-doltlite health --json 2>&1 || echo '{"ok":false}')
+echo "$HEALTH"
+
+FLATTEN=$(gc beads-doltlite flatten --json 2>&1 || echo '{"reclaimed_bytes":0}')
+echo "$FLATTEN"
+
+GC=$(gc beads-doltlite gc --json 2>&1 || echo '{"deleted_beads_removed":0}')
+echo "$GC"
+
+RECLAIMED=$(echo "$FLATTEN" | jq -r '.reclaimed_bytes // 0')
+DELETED=$(echo "$GC" | jq -r '.deleted_beads_removed // 0')
+
+run_or_warn "emit maintenance event" gc event emit mol-doltlite-maintenance.done \
+  --message "reclaimed ${RECLAIMED} bytes, removed ${DELETED} deleted beads"
+
+bd close "$WORK_BEAD" --reason "DoltLite maintenance complete: reclaimed ${RECLAIMED} bytes, removed ${DELETED} deleted beads"
+gc runtime drain-ack
+exit
+```
+
+**Exit criteria:** Health report collected, flatten and gc applied, event
+emitted, work bead closed, dog returned to kennel."""
