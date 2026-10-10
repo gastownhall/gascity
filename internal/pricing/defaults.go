@@ -123,4 +123,54 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 1.25,
 		},
 	},
+	// Claude 5 Opus. Regular usage pricing is unchanged from Opus 4.7/4.8.
+	{
+		Provider:     "claude",
+		Model:        "claude-opus-5",
+		LastVerified: "2026-09-15",
+		Tier: Tier{
+			PromptUSDPer1M:        5.00,
+			CompletionUSDPer1M:    25.00,
+			CacheReadUSDPer1M:     0.50,
+			CacheCreationUSDPer1M: 6.25,
+		},
+	},
+	// Claude 5 Sonnet.
+	{
+		Provider:     "claude",
+		Model:        "claude-sonnet-5",
+		LastVerified: "2026-09-15",
+		Tier: Tier{
+			PromptUSDPer1M:        2.00,
+			CompletionUSDPer1M:    10.00,
+			CacheReadUSDPer1M:     0.20,
+			CacheCreationUSDPer1M: 2.50,
+		},
+	},
+	// Claude Fable 5.
+	{
+		Provider:     "claude",
+		Model:        "claude-fable-5",
+		LastVerified: "2026-09-15",
+		Tier: Tier{
+			PromptUSDPer1M:        10.00,
+			CompletionUSDPer1M:    50.00,
+			CacheReadUSDPer1M:     1.00,
+			CacheCreationUSDPer1M: 12.50,
+		},
+	},
+	// Claude Fable 5.1. Same prompt/completion tier as Fable 5, but cache
+	// reads are published at $0.25/MTok rather than the 0.1x prompt rate the
+	// rest of the family uses — see the ratio note in defaults_test.go.
+	{
+		Provider:     "claude",
+		Model:        "claude-fable-5-1",
+		LastVerified: "2026-09-15",
+		Tier: Tier{
+			PromptUSDPer1M:        10.00,
+			CompletionUSDPer1M:    50.00,
+			CacheReadUSDPer1M:     0.25,
+			CacheCreationUSDPer1M: 12.50,
+		},
+	},
 }

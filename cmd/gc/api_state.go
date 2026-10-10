@@ -73,6 +73,13 @@ type controllerState struct {
 	// and has no running sessions: every cache this state owns then skips its
 	// periodic reconcile, so nothing touches a store whose pair was retired.
 	beadsQuiescent *atomic.Bool
+	// storeWork counts the controller's store work in flight off the tick:
+	// a committed close's completion fact and autoclose, a cache-inferred
+	// close's confirming read, and autoclose sweep passes. A quiescent city
+	// retires its bd pairs only once it is zero (enterBeadsQuiescenceIfDue):
+	// work that passed its quiescence check before the city went quiescent is
+	// still reading, and its next read would restart a pair retired under it.
+	storeWork atomic.Int64
 	// suspendedRigs is the set of rigs the city runtime last saw suspended,
 	// published every tick. A suspended rig's cache skips its periodic
 	// reconcile from the next tick on, with no reload: any bd read restarts
@@ -512,6 +519,36 @@ func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
 		return
 	}
 	cs.suspendedRigs.Store(&rigs)
+}
+
+// beginStoreWork counts one piece of store work as in flight (see storeWork)
+// and returns the func that ends it.
+func (cs *controllerState) beginStoreWork() (end func()) {
+	cs.storeWork.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { cs.storeWork.Add(-1) }) }
+}
+
+// trackStoreWork wraps fn as store work counted from now, when it is
+// dispatched, until it returns: a run queued just before the city goes
+// quiescent holds the retire as much as one already reading.
+func (cs *controllerState) trackStoreWork(fn func()) func() {
+	end := cs.beginStoreWork()
+	return func() {
+		defer end()
+		fn()
+	}
+}
+
+// storeWorkInFlight reports whether any store work is in flight.
+func (cs *controllerState) storeWorkInFlight() bool {
+	return cs != nil && cs.storeWork.Load() > 0
+}
+
+// storesQuiescent reports whether the city is quiescent (see beadsQuiescent):
+// its stores take no read until it resumes.
+func (cs *controllerState) storesQuiescent() bool {
+	return cs != nil && cs.beadsQuiescent != nil && cs.beadsQuiescent.Load()
 }
 
 // setBeadsQuiescent records whether the city is quiescent (suspended, with no
@@ -960,15 +997,33 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheReconcileActor {
-			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores, storeRef) })
+			beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef) }))
 			return
 		}
-		// A local close, or a writer's own bead.closed, is a committed close.
-		if step, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
-			cs.emitCompletedFact(step, evt.Actor)
-		}
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+		cs.applyCommittedClose(evt, stores[0], storeRef)
 	}
+}
+
+// applyCommittedClose runs a committed bead.closed's durable effects: the
+// completion fact, then autoclose. A local close, or a writer's own
+// bead.closed, is a committed close. Both effects read (the fact reads the
+// run's root from the graph store), so a quiescent city runs neither yet: the
+// sweep confirms the close after resume and records the fact then. That fact
+// carries the actor of the pass that records it (autoclose-sweep, or
+// execution-reconcile when the completions lane reaches the row first), not
+// the writer's. A row that no longer reads closed by then, reopened or
+// deleted, gets none: both passes record facts only for rows that read closed.
+// The fact's read is store work (storeWork) from before the quiescence check,
+// so a city that goes quiescent while it reads keeps its pairs until it ends.
+func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Store, storeRef string) {
+	defer cs.beginStoreWork()()
+	if cs.deferIfQuiescent(evt.Subject) {
+		return
+	}
+	if step, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
+		cs.emitCompletedFact(step, evt.Actor)
+	}
+	cs.runBeadCloseAutoclose(evt.Subject, store, storeRef)
 }
 
 // applyInferredClose runs a cache-inferred bead.closed's durable effects only
@@ -978,6 +1033,9 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 // unreadable row gets nothing yet: the autoclose sweep re-reads it, and the
 // completions sweep backstops its fact.
 func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
+	if cs.deferIfQuiescent(evt.Subject) {
+		return
+	}
 	store, live, err := liveReadOwner(stores, evt.Subject)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
@@ -985,8 +1043,19 @@ func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.S
 		finished := cs.beadCloseAutoclose(evt.Subject, store, storeRef)()
 		cs.autocloseSweepOf().settle(evt.Subject, finished, time.Now())
 	case closeUnconfirmed:
-		cs.autocloseSweepOf().deferID(evt.Subject, time.Now())
+		cs.autocloseSweepOf().settle(evt.Subject, false, time.Now())
 	}
+}
+
+// deferIfQuiescent owes id's close to the sweep, reading nothing, when the city
+// is quiescent, and reports whether it did. The close is settled unfinished, so
+// a handled mark left by an earlier close of id cannot make the sweep skip it.
+func (cs *controllerState) deferIfQuiescent(id string) bool {
+	if !cs.storesQuiescent() {
+		return false
+	}
+	cs.autocloseSweepOf().settle(id, false, time.Now())
+	return true
 }
 
 // liveReadOwner reads id live from the store that holds it. stores is
@@ -1049,9 +1118,23 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 // bead via the controller's store. Replaces the shell on_close hook chain that
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248). The bead
 // is marked handled only once the run has finished its reads (settle).
+//
+// A run the dispatcher starts once the city is quiescent reads nothing: a
+// close that lands as the city drains (a stopped session's wisp) is owed to
+// the sweep, which confirms it after resume. Read now, it would restart the
+// bd pair the quiescent city just retired. The check is not atomic with the
+// reads it guards: a suspend that lands after it still completes the run, as
+// it does the row a sweep pass has in flight. So the run is store work
+// (storeWork) from dispatch until it returns, and the quiescent city retires
+// its pairs only once no such run is in flight.
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
 	run := cs.beadCloseAutoclose(beadID, store, storeRef)
-	beadCloseAutocloseDispatch(func() { cs.autocloseSweepOf().settle(beadID, run(), time.Now()) })
+	beadCloseAutocloseDispatch(cs.trackStoreWork(func() {
+		if cs.deferIfQuiescent(beadID) {
+			return
+		}
+		cs.autocloseSweepOf().settle(beadID, run(), time.Now())
+	}))
 }
 
 // autocloseRefusalAttempts bounds the runs one trigger makes while a fenced

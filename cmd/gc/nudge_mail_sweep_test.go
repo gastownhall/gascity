@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -43,6 +44,18 @@ func mailSeed(id string, createdAt time.Time) beads.Bead {
 	}
 }
 
+// unreadMailSeed builds a seed Bead for NewMemStoreFrom representing an open
+// message bead that has never been marked read (no "read" label) — the
+// gastownhall/gascity#5240 regression case. id must be unique within the seed slice.
+func unreadMailSeed(id string, createdAt time.Time) beads.Bead {
+	return beads.Bead{
+		ID:        id,
+		Type:      "message",
+		Status:    "open",
+		CreatedAt: createdAt,
+	}
+}
+
 func TestSweepStaleNudgeMail_TTLBoundaries(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	nudgeTTL := 10 * time.Minute
@@ -58,7 +71,7 @@ func TestSweepStaleNudgeMail_TTLBoundaries(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,6 +80,77 @@ func TestSweepStaleNudgeMail_TTLBoundaries(t *testing.T) {
 	}
 	if result.MailClosed != 1 {
 		t.Errorf("MailClosed = %d, want 1", result.MailClosed)
+	}
+}
+
+// TestSweepStaleNudgeMail_UnreadMailPastTTL pins the gastownhall/gascity#5240
+// regression: a message bead that is never marked "read" never matches the
+// read-mail phase's Label:"read" candidate query, so without the unread-mail
+// phase it stays open past unreadMailTTL. This seeds one unread bead just past
+// unreadMailTTL (must sweep) and one just short of it (must not).
+func TestSweepStaleNudgeMail_UnreadMailPastTTL(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := 10 * time.Minute
+	mailTTL := 30 * time.Minute
+	unreadMailTTL := 7 * 24 * time.Hour
+
+	seed := []beads.Bead{
+		unreadMailSeed("unread-old", now.Add(-unreadMailTTL-time.Second)),
+		unreadMailSeed("unread-fresh", now.Add(-unreadMailTTL+time.Second)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, unreadMailTTL, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.MailClosed != 1 {
+		t.Errorf("MailClosed = %d, want 1 (only unread-old should sweep)", result.MailClosed)
+	}
+
+	got, err := store.Get("unread-old")
+	if err != nil {
+		t.Fatalf("Get(unread-old): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("unread-old Status = %q, want closed", got.Status)
+	}
+	if got.Metadata["close_reason"] != beadmail.UnreadRetentionSweepCloseReason {
+		t.Errorf("unread-old close_reason = %q, want %q", got.Metadata["close_reason"], beadmail.UnreadRetentionSweepCloseReason)
+	}
+
+	fresh, err := store.Get("unread-fresh")
+	if err != nil {
+		t.Fatalf("Get(unread-fresh): %v", err)
+	}
+	if fresh.Status != "open" {
+		t.Errorf("unread-fresh Status = %q, want open (not yet past unreadMailTTL)", fresh.Status)
+	}
+}
+
+// TestSweepStaleNudgeMail_UnreadMailNeverSweptByReadPhaseAlone documents why a
+// separate phase is required: an unread bead sitting well past the much
+// shorter read-mail TTL must NOT be swept by the read-mail phase (it lacks the
+// "read" label), only by the unread-mail phase once it also passes the longer
+// unreadMailTTL.
+func TestSweepStaleNudgeMail_UnreadMailNeverSweptByReadPhaseAlone(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := 10 * time.Minute
+	mailTTL := 30 * time.Minute
+	unreadMailTTL := 7 * 24 * time.Hour
+
+	// Well past mailTTL, but not past the far longer unreadMailTTL.
+	seed := []beads.Bead{
+		unreadMailSeed("unread-mid-age", now.Add(-mailTTL-time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, unreadMailTTL, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.MailClosed != 0 {
+		t.Errorf("MailClosed = %d, want 0 (unread bead has not reached unreadMailTTL yet)", result.MailClosed)
 	}
 }
 
@@ -87,7 +171,7 @@ func TestSweepStaleNudgeMail_PendingExclusion(t *testing.T) {
 		Pending: []nudgequeue.Item{{ID: pendingID}},
 	}
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, state, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, state, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +205,7 @@ func TestSweepStaleNudgeMail_InFlightExclusion(t *testing.T) {
 		InFlight: []nudgequeue.Item{{ID: inFlightID}},
 	}
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, state, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, state, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +242,7 @@ func TestSweepStaleNudgeMail_OpenStatusFilter(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, time.Minute, mailTTL, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, time.Minute, mailTTL, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +268,7 @@ func TestSweepStaleNudgeMail_BudgetCap(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, budget)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, nudgeMailSweepDefaultUnreadMailTTL, budget)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,7 +292,7 @@ func TestSweepStaleNudgeMail_BudgetZeroMeansUnlimited(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -251,7 +335,7 @@ func TestSweepStaleNudgeMail_PerBeadCloseFailureContinues(t *testing.T) {
 		failIDs:  map[string]bool{id2: true},
 	}
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 
 	// The sweep should report the error for the failing bead.
 	if err == nil {
@@ -309,7 +393,7 @@ func TestSweepStaleNudgeMail_PerBeadMetadataFailureContinues(t *testing.T) {
 		failIDs:  map[string]bool{id2: true},
 	}
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err == nil {
 		t.Fatal("expected non-nil error for metadata failure")
 	}
@@ -330,7 +414,7 @@ func TestSweepStaleNudgeMail_NudgeTerminalMetadata(t *testing.T) {
 	seed := []beads.Bead{nudgeSeed(beadID, "nudge-abc", now.Add(-nudgeTTL-time.Second))}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -371,7 +455,7 @@ func TestSweepStaleNudgeMail_NilNudgeStateTreatsAllAsSafe(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -396,7 +480,7 @@ func TestSweepStaleNudgeMail_BudgetSplitNudgeThenMail(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, 3)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, nudgeMailSweepDefaultUnreadMailTTL, 3)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -405,6 +489,56 @@ func TestSweepStaleNudgeMail_BudgetSplitNudgeThenMail(t *testing.T) {
 	}
 	if result.MailClosed != 1 {
 		t.Errorf("MailClosed = %d, want 1", result.MailClosed)
+	}
+}
+
+// TestSweepStaleNudgeMail_BudgetSplitNudgeThenMailThenUnread extends the
+// two-phase budget split to phase 3: the unread-mail phase must consume only
+// what the nudge and read-mail phases left over, not restart the budget.
+func TestSweepStaleNudgeMail_BudgetSplitNudgeThenMailThenUnread(t *testing.T) {
+	// With budget=5 and 2 nudge + 2 read mail + 3 unread mail: expect
+	// 2 nudge + 2 read + 1 unread, so MailClosed (read + unread) = 3.
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := 10 * time.Minute
+	mailTTL := 60 * time.Minute
+	unreadMailTTL := 7 * 24 * time.Hour
+
+	seed := make([]beads.Bead, 0, 7)
+	for i := 0; i < 2; i++ {
+		seed = append(seed, nudgeSeed(fmt.Sprintf("nudge-%d", i), fmt.Sprintf("nudge-%d", i), now.Add(-nudgeTTL-time.Second)))
+	}
+	for i := 0; i < 2; i++ {
+		seed = append(seed, mailSeed(fmt.Sprintf("mail-%d", i), now.Add(-mailTTL-time.Second)))
+	}
+	for i := 0; i < 3; i++ {
+		seed = append(seed, unreadMailSeed(fmt.Sprintf("unread-%d", i), now.Add(-unreadMailTTL-time.Second)))
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, unreadMailTTL, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.NudgeClosed != 2 {
+		t.Errorf("NudgeClosed = %d, want 2", result.NudgeClosed)
+	}
+	if result.MailClosed != 3 {
+		t.Errorf("MailClosed = %d, want 3 (2 read + 1 unread under the remaining budget)", result.MailClosed)
+	}
+
+	// Exactly one of the three unread beads should have been closed.
+	unreadClosed := 0
+	for i := 0; i < 3; i++ {
+		got, err := store.Get(fmt.Sprintf("unread-%d", i))
+		if err != nil {
+			t.Fatalf("Get(unread-%d): %v", i, err)
+		}
+		if got.Status == "closed" {
+			unreadClosed++
+		}
+	}
+	if unreadClosed != 1 {
+		t.Errorf("closed unread beads = %d, want 1 (budget had 1 left for phase 3)", unreadClosed)
 	}
 }
 
@@ -424,7 +558,7 @@ func TestSweepStaleNudgeMail_MultiplePerBeadErrors(t *testing.T) {
 		failIDs:  map[string]bool{id1: true, id2: true},
 	}
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, time.Hour, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err == nil {
 		t.Fatal("expected non-nil error when all beads fail")
 	}
@@ -457,7 +591,7 @@ func TestCmdOrderSweepNudgeMailRun_NothingToClose(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "nothing to close") {
 		t.Errorf("expected 'nothing to close' message, got: %q", stdout.String())
 	}
@@ -472,7 +606,7 @@ func TestCmdOrderSweepNudgeMailRun_NormalOutput(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	out := stdout.String()
 	if !strings.Contains(out, "nudge-mail-sweep: closed") {
 		t.Errorf("expected 'nudge-mail-sweep: closed' in output, got: %q", out)
@@ -495,7 +629,7 @@ func TestCmdOrderSweepNudgeMailRun_CapReachedMessage(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "cap reached") {
 		t.Errorf("expected 'cap reached' in output when budget is full, got: %q", stdout.String())
 	}
@@ -512,7 +646,7 @@ func TestCmdOrderSweepNudgeMailRun_PerBeadErrorPrintedToStderr(t *testing.T) {
 	store := &nudgeSweepFailingClose{MemStore: mem, failIDs: map[string]bool{failID: true}}
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	if !strings.Contains(stderr.String(), "ERROR") {
 		t.Errorf("expected ERROR line on stderr for failing bead, got: %q", stderr.String())
 	}
@@ -527,7 +661,7 @@ func TestCmdOrderSweepNudgeMailRun_QuietSuppressesOutput(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, true, &stdout, &stderr)
+	cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, true, &stdout, &stderr)
 	if stdout.String() != "" {
 		t.Errorf("expected empty stdout with --quiet, got: %q", stdout.String())
 	}
@@ -538,7 +672,7 @@ func TestCmdOrderSweepNudgeMailDryRun_NothingToClose(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "nothing to close") {
 		t.Errorf("expected 'nothing to close' for empty store dry-run, got: %q", stdout.String())
 	}
@@ -553,7 +687,7 @@ func TestCmdOrderSweepNudgeMailDryRun_ShowsWouldClose(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	out := stdout.String()
 	if !strings.HasPrefix(out, "[DRY RUN]") {
 		t.Errorf("expected '[DRY RUN]' prefix, got: %q", out)
@@ -575,7 +709,7 @@ func TestCmdOrderSweepNudgeMailDryRun_NoBeadsClosed(t *testing.T) {
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
 	var stdout, stderr bytes.Buffer
-	cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 
 	// The bead should remain open.
 	open, _ := store.ListOpen()
@@ -601,7 +735,7 @@ func TestCmdOrderSweepNudgeMailDryRun_ListErrorReturnsNonZero(t *testing.T) {
 	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	code := cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected non-zero exit code on list error, got %d", code)
 	}
@@ -621,7 +755,7 @@ func TestCmdOrderSweepNudgeMailRun_ListErrorReturnsNonZero(t *testing.T) {
 	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, &stdout, &stderr)
+	code := cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected non-zero exit code on list error, got %d", code)
 	}
@@ -642,7 +776,7 @@ func TestCountStaleNudgeMail_ListErrorPropagates(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	store := &nudgeSweepFailingList{MemStore: beads.NewMemStoreFrom(100, nil, nil)}
 
-	_, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 0)
+	_, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err == nil {
 		t.Fatal("expected non-nil error when the store listing fails")
 	}
@@ -658,7 +792,7 @@ func TestRunNudgeMailSweepWatchdog_ClosesStaleBeads(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if err != nil {
 		t.Fatalf("watchdog sweep: %v", err)
 	}
@@ -703,7 +837,7 @@ func TestCountStaleNudgeMail_MatchesSweepCounts(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, 0)
+	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, mailTTL, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -730,7 +864,7 @@ func TestSweepStaleNudgeMail_ZeroMailTTLSkipsMailPhase(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, 0, 0)
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, 0, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -754,7 +888,7 @@ func TestCountStaleNudgeMail_ZeroMailTTLSkipsMailPhase(t *testing.T) {
 	}
 	store := beads.NewMemStoreFrom(100, seed, nil)
 
-	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, 0, 0)
+	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, 0, nudgeMailSweepDefaultUnreadMailTTL, 0)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -855,24 +989,190 @@ func TestNudgeMailSweepMailTTLForCity_ConfiguredValueUsed(t *testing.T) {
 
 func TestValidateNudgeMailSweepFlags(t *testing.T) {
 	cases := []struct {
-		name            string
-		nudgeTTL        time.Duration
-		mailTTL         time.Duration
-		mailTTLExplicit bool
-		wantErr         bool
+		name                  string
+		nudgeTTL              time.Duration
+		mailTTL               time.Duration
+		unreadMailTTL         time.Duration
+		mailTTLExplicit       bool
+		unreadMailTTLExplicit bool
+		wantErr               bool
 	}{
-		{"defaults ok", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, false},
-		{"nudge-ttl zero rejected", 0, nudgeMailSweepDefaultMailTTL, false, true},
-		{"nudge-ttl negative rejected", -time.Minute, nudgeMailSweepDefaultMailTTL, false, true},
-		{"explicit mail-ttl zero accepted", nudgeMailSweepDefaultNudgeTTL, 0, true, false},
-		{"explicit mail-ttl negative rejected", nudgeMailSweepDefaultNudgeTTL, -time.Minute, true, true},
-		{"unset mail-ttl zero not validated here", nudgeMailSweepDefaultNudgeTTL, 0, false, false},
+		{"defaults ok", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, false, false},
+		{"nudge-ttl zero rejected", 0, nudgeMailSweepDefaultMailTTL, 0, false, false, true},
+		{"nudge-ttl negative rejected", -time.Minute, nudgeMailSweepDefaultMailTTL, 0, false, false, true},
+		{"explicit mail-ttl zero accepted", nudgeMailSweepDefaultNudgeTTL, 0, 0, true, false, false},
+		{"explicit mail-ttl negative rejected", nudgeMailSweepDefaultNudgeTTL, -time.Minute, 0, true, false, true},
+		{"unset mail-ttl zero not validated here", nudgeMailSweepDefaultNudgeTTL, 0, 0, false, false, false},
+		{"explicit unread-mail-ttl zero accepted", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 0, false, true, false},
+		{"explicit unread-mail-ttl positive accepted", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 7 * 24 * time.Hour, false, true, false},
+		{"explicit unread-mail-ttl negative rejected", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, -time.Minute, false, true, true},
+		{"unset unread-mail-ttl not validated here", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, -time.Minute, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateNudgeMailSweepFlags(tc.nudgeTTL, tc.mailTTL, tc.mailTTLExplicit)
+			err := validateNudgeMailSweepFlags(tc.nudgeTTL, tc.mailTTL, tc.unreadMailTTL, tc.mailTTLExplicit, tc.unreadMailTTLExplicit)
 			if (err != nil) != tc.wantErr {
-				t.Errorf("validateNudgeMailSweepFlags(%s, %s, %v) err = %v, wantErr %v", tc.nudgeTTL, tc.mailTTL, tc.mailTTLExplicit, err, tc.wantErr)
+				t.Errorf("validateNudgeMailSweepFlags(%s, %s, %s, %v, %v) err = %v, wantErr %v", tc.nudgeTTL, tc.mailTTL, tc.unreadMailTTL, tc.mailTTLExplicit, tc.unreadMailTTLExplicit, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// --- #5240: opt-in unread-mail phase ---
+
+func TestSweepStaleNudgeMail_ZeroUnreadMailTTLSkipsUnreadPhase(t *testing.T) {
+	// unreadMailTTL <= 0 must skip the unread-mail phase entirely rather than
+	// being treated as a zero-length window (which would close every unread
+	// mail bead immediately, regardless of age).
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := nudgeMailSweepDefaultNudgeTTL
+	seed := []beads.Bead{
+		nudgeSeed("n1", "nudge-1", now.Add(-nudgeTTL-time.Second)),
+		unreadMailSeed("unread-old", now.Add(-30*24*time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, nudgeMailSweepDefaultMailTTL, 0, 0)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.NudgeClosed != 1 {
+		t.Errorf("NudgeClosed = %d, want 1 (unread-mail-ttl=0 must not affect the nudge phase)", result.NudgeClosed)
+	}
+	if result.MailClosed != 0 {
+		t.Errorf("MailClosed = %d, want 0 (unread-mail-ttl=0 must skip the unread phase)", result.MailClosed)
+	}
+	got, err := store.Get("unread-old")
+	if err != nil {
+		t.Fatalf("Get(unread-old): %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("unread-old status = %q, want open", got.Status)
+	}
+}
+
+func TestCountStaleNudgeMail_ZeroUnreadMailTTLSkipsUnreadPhase(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		unreadMailSeed("unread-old", now.Add(-30*24*time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 0, 0)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts.MailClosed != 0 {
+		t.Errorf("MailClosed = %d, want 0 with unread-mail-ttl=0", counts.MailClosed)
+	}
+	got, err := store.Get("unread-old")
+	if err != nil {
+		t.Fatalf("Get(unread-old): %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("unread-old status = %q, want open", got.Status)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_UnsetDisables(t *testing.T) {
+	// The unread-mail phase is opt-in: a city that has never touched
+	// [mail] unread_retention_ttl must not close unread mail.
+	if got := nudgeMailSweepUnreadMailTTLForConfig(&config.City{}, io.Discard); got != 0 {
+		t.Errorf("got %s, want 0 (disabled)", got)
+	}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(nil, io.Discard); got != 0 {
+		t.Errorf("nil cfg: got %s, want 0 (disabled)", got)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_CustomDurationUsed(t *testing.T) {
+	cfg := &config.City{Mail: config.MailConfig{UnreadRetentionTTL: "168h"}}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(cfg, io.Discard); got != 168*time.Hour {
+		t.Errorf("got %s, want 168h", got)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_ExplicitZeroDisables(t *testing.T) {
+	cfg := &config.City{Mail: config.MailConfig{UnreadRetentionTTL: "0"}}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(cfg, io.Discard); got != 0 {
+		t.Errorf("got %s, want 0 (disabled)", got)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_InvalidDisablesWithNote(t *testing.T) {
+	var stderr bytes.Buffer
+	cfg := &config.City{Mail: config.MailConfig{UnreadRetentionTTL: "not-a-duration"}}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(cfg, &stderr); got != 0 {
+		t.Errorf("got %s, want 0 (disabled) on invalid config", got)
+	}
+	if !strings.Contains(stderr.String(), "not-a-duration") {
+		t.Errorf("expected stderr note about the invalid value, got: %q", stderr.String())
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForCity_MissingConfigIsSilent(t *testing.T) {
+	var stderr bytes.Buffer
+	got := nudgeMailSweepUnreadMailTTLForCity(t.TempDir(), nudgeMailSweepDefaultUnreadMailTTL, &stderr)
+	if got != 0 {
+		t.Errorf("got %s, want fallback 0", got)
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr note for a missing city.toml, got: %q", stderr.String())
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForCity_ConfiguredValueUsed(t *testing.T) {
+	cityPath := t.TempDir()
+	cityTOML := "[workspace]\nname = \"test-city\"\n\n[mail]\nunread_retention_ttl = \"168h\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := nudgeMailSweepUnreadMailTTLForCity(cityPath, nudgeMailSweepDefaultUnreadMailTTL, &stderr)
+	if got != 168*time.Hour {
+		t.Errorf("got %s, want 168h from [mail] unread_retention_ttl", got)
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr note for a valid config, got: %q", stderr.String())
+	}
+}
+
+func TestRunNudgeMailSweepWatchdog_UnreadMailOptIn(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		unreadTTL  string
+		wantStatus string
+	}{
+		{"unset leaves unread mail open", "", "open"},
+		{"configured closes aged unread mail", "168h", "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed := []beads.Bead{
+				unreadMailSeed("unread-old", now.Add(-30*24*time.Hour)),
+			}
+			store := beads.NewMemStoreFrom(100, seed, nil)
+
+			cr := &CityRuntime{
+				cityName: "test-city",
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Mail:      config.MailConfig{UnreadRetentionTTL: tc.unreadTTL},
+				},
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			cr.runNudgeMailSweepWatchdog(cr.cfg, now)
+
+			got, err := store.Get("unread-old")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("unread-old status = %s, want %s", got.Status, tc.wantStatus)
 			}
 		})
 	}

@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 746
+baseline_calls = 744
 baseline_files = 222
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 498
+baseline_calls = 496
 baseline_files = 148
 reported_calls = 380
 reported_files = 98
@@ -244,6 +244,17 @@ expires = "2026-10-31"
 [[medium]]
 package_dir = "cmd/gc"
 package_name = "main"
+owner = "TestRuntimeLeaseCLIVsLegacyStart"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CLI-vs-legacy runtime lease harness is a checked Medium subprocess owner"
+resource_owner = "the CLI process is confined to TestRuntimeLeaseCLIVsLegacyStart, which re-execs the test binary as a gc session CLI starting a row through its Manager: the lease's flock and record must exclude a second process, so only a real one proves the controller's legacy start defers to it"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
 owner = "TestPassthroughEnvWithholdsControllerTokenFromChildProcess"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
@@ -420,28 +431,6 @@ expires = "2026-10-31"
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
-owner = "TestRBEWorkerJSONIsolationOffMatchesPreO1"
-resources = ["subprocess"]
-owner_bead = "ga-cp3hwi"
-invariant = "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner"
-resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing"
-migration_target = "P0.4b"
-expires = "2026-10-31"
-
-[[medium]]
-package_dir = "scripts"
-package_name = "scripts_test"
-owner = "TestRBEWorkerScrubCAS"
-resources = ["subprocess"]
-owner_bead = "ga-cp3hwi"
-invariant = "the sticky-disk CAS scrub proof is a checked Medium subprocess owner"
-resource_owner = "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker"
-migration_target = "P0.4b"
-expires = "2026-10-31"
-
-[[medium]]
-package_dir = "scripts"
-package_name = "scripts_test"
 owner = "TestFreshMergeActionBehaviour"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
@@ -498,8 +487,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 472
-baseline_files = 138
+baseline_calls = 471
+baseline_files = 137
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"

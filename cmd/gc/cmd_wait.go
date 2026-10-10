@@ -403,10 +403,7 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 		return 0
 	}
 	if sleep {
-		if err := deps.sessions.ApplyPatch(sessionID, map[string]string{
-			"wait_hold":    "true",
-			"sleep_intent": "wait-hold",
-		}); err != nil {
+		if err := setSessionWaitHold(deps.sessions, sessionID); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -1426,6 +1423,24 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			return err
 		}
+	}
+	return err
+}
+
+// setSessionWaitHold parks the session for a wait: wait_hold, and
+// sleep_intent=wait-hold unless an operator's user hold (HoldUser) already
+// explains the row, so a wait never turns a user hold into a heartbeat hold.
+// It is decided from a fresh read and fenced.
+func setSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
+	ok, err := sessFront.UpdateMetadataFenced(sessionID, 3, func(info sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		patch := sessionpkg.MetadataPatch{"wait_hold": "true"}
+		if sessionpkg.HoldsInfo(info, time.Now()).In&sessionpkg.HoldUser == 0 {
+			patch["sleep_intent"] = string(sessionpkg.SleepReasonWaitHold)
+		}
+		return patch
+	})
+	if err == nil && !ok {
+		err = fmt.Errorf("session %s: wait hold lost to concurrent writes; retry", sessionID)
 	}
 	return err
 }

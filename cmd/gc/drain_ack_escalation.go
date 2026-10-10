@@ -197,10 +197,7 @@ func sessionHasOpenAssignedWorkForEscalation(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
-	identifiers := drainAckAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, drainAckAssigneeIdentities(info, cfg))
 }
 
 // drainAckEscalationDue reports whether a wedged row has exceeded its bound, and
@@ -511,12 +508,30 @@ func queueDrainAckForcedTermination(
 			}
 			done()
 		}()
+		// The whole escalation, its process-table kill included, runs under one
+		// runtime lease, released before the poke. A busy lease means another
+		// holder is starting or stopping this runtime: escalate nothing, and let
+		// a later tick decide again.
+		ctx, release, err := controllerStopLease(store, cityPath, name, sessionID, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %s deferred: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
+			return
+		}
+		defer release()
+		// Decide again under the lease, on a fresh read, before any kill (the
+		// process-table kill included): see queueDrainAckAsyncStop.
+		ctx = drainAckStopPremise(ctx, store, sessionID, info.Generation, expectedToken)
+		if !drainAckStopStillPending(store, sessionID, info.Generation, expectedToken) {
+			fmt.Fprintf(stderr, "%s: %s skipped: the row is no longer stop-pending at its generation and token\n", drainAckEscalationLabel, name) //nolint:errcheck
+			return
+		}
 		// Try the ordinary provider stop once more first: it is the cheap path and
 		// it is what a merely-slow pane needs.
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		if err := controllerKillRowCtx(ctx, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "%s: stopping %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		}
-		if confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
+		if confirmDrainAckRuntimeDead(ctx, cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
+			release()
 			recordDrainAckEscalation(cfg, info, name, reason, "stopped_without_force", attempt, rec)
 			// The caller suppresses its ordinary stop on a true return, so this
 			// goroutine also owns that stop's poke: the runtime is gone but the
@@ -531,7 +546,12 @@ func queueDrainAckForcedTermination(
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
+		if !drainAckStopStillPending(store, sessionID, info.Generation, expectedToken) {
+			fmt.Fprintf(stderr, "%s: %s skipped its process kill: the row is no longer stop-pending at its generation and token\n", drainAckEscalationLabel, name) //nolint:errcheck
+			return
+		}
 		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, now, stderr)
+		release()
 		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
 		_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
 	}()

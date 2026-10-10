@@ -1,13 +1,14 @@
-# worker-env canary (tools/rbe/worker-env-drift). rbe-west's oss and oss-fork
-# schedulers match the worker-env platform property exactly, so when the
-# Blacksmith image under the pool workers stops being the pinned host
-# (tools/rbe/worker-env.txt), no CI action can run until someone re-pins.
-# Every six hours, and whenever the default branch changes the worker host or
-# its pin, a small Blacksmith runner of the pool's image family provisions and
-# measures itself exactly as a pool worker does (blacksmith-worker.sh
-# WORKER_MODE=measure). Drift fails this run and opens or updates the pin's
-# drift issue, with the manifest and pin to commit, before CI runs into it.
-# A match closes the drift issues of superseded pins.
+# worker-env canary (gastownhall/rbe-worker worker/worker-env-drift).
+# rbe-west's oss and oss-fork schedulers match the worker-env platform
+# property exactly, so when the Blacksmith image under the pool workers stops
+# being the pinned host (tools/rbe/worker-env.txt), no CI action can run until
+# someone re-pins. Every six hours, and whenever the default branch changes
+# the worker-env pin or the rbe-worker pin, a small Blacksmith runner of the
+# pool's image family provisions and measures itself exactly as a pool worker
+# does (the pinned rbe-worker's blacksmith-worker.sh, WORKER_MODE=measure).
+# Drift fails this run and opens or updates the pin's drift issue, with the
+# manifest and pin to commit, before CI runs into it. A match closes the drift
+# issues of superseded pins.
 name: rbe-worker-env-canary
 
 on:
@@ -18,7 +19,7 @@ on:
     branches: [main]
     paths:
       - platforms/BUILD.bazel
-      - tools/rbe/**
+      - tools/rbe/worker-env.txt
       - .github/actions/rbe-worker/**
       - .github/workflows/rbe-worker-env-canary.yml
 
@@ -41,15 +42,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      # Cutover switch (D8, S3-S5): unset (today) takes in-tree, this
-      # checkout's own tools/rbe, byte-for-byte what ran before S3b. Set the
-      # repository variable RBE_WORKER_SOURCE_CANARY to pinned to fetch
-      # gastownhall/rbe-worker instead (S4). No secret in this step.
+      # The worker code: gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
+      # fetched anonymously from its main and verified there. No secret in
+      # this step.
       - name: Fetch the pinned rbe-worker
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: ${{ vars.RBE_WORKER_SOURCE_CANARY || 'in-tree' }}
       - name: Provision and measure this host as a pool worker does
         env:
           WORKER_MODE: measure
@@ -92,8 +90,6 @@ jobs:
       - name: Fetch the pinned rbe-worker
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: ${{ vars.RBE_WORKER_SOURCE_CANARY || 'in-tree' }}
       - name: Open or update the drift issue
         if: steps.drift.outcome == 'success'
         env:

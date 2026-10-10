@@ -5,14 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -231,16 +229,21 @@ type premiseRule uint8
 
 const (
 	// premiseDefault: open, carrying the locked runtime name, at the
-	// incarnation and token expected, with the lifecycle facts
-	// (session.LifecycleInputFromInfo) of the expected row: the pass's, then
-	// the one the last landed section wrote.
+	// incarnation and token expected, with the premise facts
+	// (session.FactsOf, the registry's premise keys) of the expected row: the
+	// pass's, then the one the last landed section wrote. An effect that
+	// reads the row's work (L5) compares its assignment identity keys too.
+	// After a callStart, the facts compared are the registry's
+	// FactsAfterStart site's: the started runtime writes the keys it drops.
 	premiseDefault premiseRule = iota
 	// premiseOwnToken (v5 S2's commit): after an earlier section's write
-	// landed, open, creating, active or awake, and still carrying the token
-	// that write set; holds do not veto it.
+	// landed, the registry's FactsCommit site: open, creating, active or
+	// awake, and still carrying the token that write set; holds do not veto
+	// it.
 	premiseOwnToken
 	// premiseClose: a close section (txStep.Terminal). The default premise, and
-	// no kill fence; a row already closed is a no-op that ends the effect.
+	// no kill fence (tx.decide); a row already closed is a no-op that ends the
+	// effect.
 	premiseClose
 )
 
@@ -250,16 +253,24 @@ const (
 type section struct {
 	Premise premiseRule
 	// Decide decides on the attempt's fresh reads, under both locks, with no
-	// I/O; it runs once per attempt.
+	// I/O; it runs once per attempt. Every function stored here is a v2purity
+	// root:
+	//
+	//gc:pure
 	Decide func(v txView) txStep
 	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
 	call   func(ctx context.Context, c txCaps, in any) (any, error)
-	defs   []any // the kind's own Probe and Call, which the effect lint covers
+	// callKind is the Call's kind (called), when it has one.
+	callKind callKind
+	defs     []any // the kind's own Probe and Call, which the effect lint covers
 }
 
 // probed is a section whose Probe, a bounded read under both locks after the
 // transaction's own reads (it sees the expected row), hands Decide its typed
-// result. A probe past fenceProbeTimeout answers errProbeExpired.
+// result. A probe past fenceProbeTimeout answers errProbeExpired. Every decide
+// passed here is a v2purity root, as a section's Decide is:
+//
+//gc:pure-param decide
 func probed[P any](probe func(context.Context, effectReads, txView) (P, error), decide func(txView, P, error) txStep) section {
 	return section{
 		probe: func(ctx context.Context, r effectReads, v txView) (any, error) { return probe(ctx, r, v) },
@@ -271,11 +282,26 @@ func probed[P any](probe func(context.Context, effectReads, txView) (P, error), 
 	}
 }
 
+// callKind is what a section's Call does to the runtime, which decides the
+// premise of the sections after it.
+type callKind uint8
+
+const (
+	// callStart starts a runtime: the sections after it compare the
+	// registry's FactsAfterStart facts, since the started runtime writes the
+	// keys that exception drops.
+	callStart callKind = iota + 1
+	// callStop stops one: the full premise holds after it, a start's
+	// before it included.
+	callStop
+)
+
 // called is sec with a provider Call after it, run under the name lock with
 // the mutation lock released, and only like a write (the context, then the
 // latch). It takes the step's Pass, typed In, and hands the next section's
 // Decide its result (callResult[Out]).
-func called[In, Out any](sec section, call func(context.Context, txCaps, In) (Out, error)) section {
+func called[In, Out any](kind callKind, sec section, call func(context.Context, txCaps, In) (Out, error)) section {
+	sec.callKind = kind
 	sec.call = func(ctx context.Context, c txCaps, in any) (any, error) {
 		typed, _ := in.(In)
 		return call(ctx, c, typed)
@@ -409,7 +435,7 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
 	if n := t.needs; n.NameLock || n.Runtime || n.Legs != 0 || n.Idle || slices.ContainsFunc(spec.sections, func(s section) bool { return s.call != nil }) {
 		name, unlock, ok := lockRuntimeName(p.World, row.Info)
 		switch {
@@ -426,17 +452,19 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 
 // tx is one transaction across its sections.
 type tx struct {
-	c      txCaps
-	p      *effectPass
-	needs  needs
-	writer fencedWriter
-	name   string       // the runtime name, when the name lock is held
-	expect session.Info // the row the premise expects
-	basis  rowBasis     // its incarnation and token
-	landed bool         // a section's write landed
-	facts  effectFacts
-	pass   any // the concluded step's Pass, to its section's Call
-	view   txView
+	c       txCaps
+	p       *effectPass
+	needs   needs
+	writer  fencedWriter
+	name    string        // the runtime name, when the name lock is held
+	expect  session.Info  // the row the premise expects
+	facts0  session.Facts // its premise facts
+	basis   rowBasis      // its incarnation and token
+	started bool          // a callStart ran, and no callStop since
+	landed  bool          // a section's write landed
+	facts   effectFacts
+	pass    any // the concluded step's Pass, to its section's Call
+	view    txView
 }
 
 // run runs the sections, each under the row's mutation lock.
@@ -466,6 +494,12 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 		t.view.prev, t.view.prevErr = sec.call(ctx, t.c, t.pass)
+		switch sec.callKind {
+		case callStart:
+			t.started = true
+		case callStop:
+			t.started = false // a stopped runtime writes nothing more
+		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
 			break
@@ -490,10 +524,12 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		}
 		var step txStep
 		var ended *settlement
+		var wroteFacts session.Facts
 		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
 			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil {
 				return nil
 			}
+			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
 			return step.Write
 		})
 		switch {
@@ -506,7 +542,7 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		case err != nil:
 			return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, true
 		case wrote:
-			t.landed, t.expect = true, wroteRow(t.view.Row, step.Write)
+			t.landed, t.expect, t.facts0 = true, wroteRow(t.view.Row, step.Write), wroteFacts
 			t.basis = rowBasisOf(t.view.It.Key, t.expect)
 			if err := t.c.at(ctx, seamAfterWrite); err != nil {
 				t.facts.merge(step.Facts)
@@ -636,8 +672,9 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s := injected(err)
 		return txStep{}, &s
 	}
-	if !t.premise(sec.Premise, row) {
+	if moved := t.premise(sec.Premise, row, meta); len(moved) > 0 {
 		s := refused(causePremise)
+		s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
 		return txStep{}, &s
 	}
 	step := sec.Decide(v)
@@ -650,6 +687,8 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}
 	case sec.Premise == premiseClose && session.IsKillPendingInfo(row, t.view.Now):
+		// Not subsumed by the facts: a row the pass already read under an
+		// honored kill fence has equal facts, and the fence still refuses.
 		s = refused(causePremise)
 	case len(step.Write) == 0 && len(step.Terminal) == 0:
 		return step, nil
@@ -669,37 +708,46 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	return step, &s
 }
 
-// premise reports whether row is still the expected row (the pass's, then
-// the last landed write's) under rule.
-func (t *tx) premise(rule premiseRule, row session.Info) bool {
-	if row.Closed || t.name != "" && strings.TrimSpace(row.SessionName) != t.name {
-		return false
+// premise reports what keeps row, persisted as meta, from being the
+// expected row (the pass's, then the last landed write's) under rule: none
+// when it is; otherwise the moved premise keys by name, "closed",
+// "session_name", or the basis, so a refusal tells a conflict from a key
+// that moves too often to belong in the premise.
+func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string) (moved []string) {
+	switch {
+	case row.Closed:
+		return []string{"closed"}
+	case t.name != "" && strings.TrimSpace(row.SessionName) != t.name:
+		return []string{"session_name"}
 	}
+	fresh := session.FactsOf(meta)
 	switch rule {
 	case premiseOwnToken:
-		// After the effect's own write: holding its token, and creating,
-		// active or awake, so a kill fence (asleep, same token) refuses.
-		switch session.State(strings.TrimSpace(row.MetadataState)) {
-		case session.StateCreating, session.StateActive, session.StateAwake:
-			return t.landed && row.InstanceToken == t.expect.InstanceToken
+		if !t.landed {
+			return []string{"no own write"}
 		}
-		return false
+		return session.FactsCommit.Moved(fresh, t.facts0)
 	case premiseDefault, premiseClose:
-		return rowBasisOf(t.view.It.Key, row) == t.basis &&
-			reflect.DeepEqual(session.LifecycleInputFromInfo(row), session.LifecycleInputFromInfo(t.expect)) &&
-			(t.needs.Legs&legWork == 0 || t.sameAssignees(row))
+		site := session.FactsDefault
+		if t.started {
+			site = session.FactsAfterStart
+		}
+		moved = site.Moved(t.compared(fresh), t.compared(t.facts0))
+		if len(moved) == 0 && rowBasisOf(t.view.It.Key, row) != t.basis {
+			moved = []string{"basis"}
+		}
+		return moved
 	}
-	return false
+	return []string{"rule"}
 }
 
-// sameAssignees reports that row is assigned work under the identifiers the
-// L5 read used (the expected row's), its alias among them.
-func (t *tx) sameAssignees(row session.Info) bool {
-	var cfg *config.City
-	if t.p.World.Env != nil {
-		cfg = t.p.World.Env.Cfg
+// compared is the part of f the premise compares: the assignment identity
+// keys only for an effect that reads the row's work (L5).
+func (t *tx) compared(f session.Facts) session.Facts {
+	if t.needs.Legs&legWork == 0 {
+		f = f.Premise()
 	}
-	return slices.Equal(sessionAssignmentIdentifiersForConfigInfo(row, cfg), sessionAssignmentIdentifiersForConfigInfo(t.expect, cfg))
+	return f
 }
 
 // rowBasisOf is row's incarnation and token, as the census reads them.
@@ -707,6 +755,9 @@ func rowBasisOf(k rowKey, row session.Info) rowBasis {
 	r := newCensusRow(k, row)
 	return rowBasis{Incarnation: r.Incarnation, InstanceToken: r.InstanceToken}
 }
+
+// errPremiseMoved is a premise refusal's error, naming what moved.
+var errPremiseMoved = errors.New("the row moved since the pass")
 
 // ended is the failure of an effect that may not write: its context ended
 // (context.Cause tells its deadline from a shutdown's cancel, whatever Err

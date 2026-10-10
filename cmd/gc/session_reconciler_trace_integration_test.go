@@ -383,7 +383,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	wakeEvals := map[string]wakeEvaluation{
 		drainBead.ID: {Reasons: nil},
 	}
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		drainTracker,
 		sp,
 		store,

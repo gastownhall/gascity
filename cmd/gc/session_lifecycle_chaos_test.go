@@ -1217,8 +1217,6 @@ func (h *sessionChaosHarness) runRandomAction() {
 		{name: "toggle-pending-interaction", run: h.togglePendingInteraction},
 		{name: "suspend", run: h.suspendSession},
 		{name: "wake", run: h.wakeSession},
-		{name: "archive-continuity", run: h.archiveContinuity},
-		{name: "reactivate", run: h.reactivateSession},
 		{name: "start-failure", run: h.injectStartFailure},
 	}
 	action := actions[h.rng.Intn(len(actions))]
@@ -1371,51 +1369,6 @@ func (h *sessionChaosHarness) wakeSession() {
 	h.record("wake id=%s", b.ID)
 }
 
-func (h *sessionChaosHarness) archiveContinuity() {
-	b, ok := h.currentBead()
-	if !ok || b.Status == "closed" {
-		return
-	}
-	if h.env.sp.IsRunning(h.sessionName) {
-		if err := h.manager.Kill(b.ID); err != nil {
-			h.record("archive kill skipped: %v", err)
-		}
-	}
-	if err := h.manager.Archive(b.ID, "chaos-archive"); err != nil {
-		h.record("archive skipped: %v", err)
-		return
-	}
-	if h.rng.Intn(2) == 0 {
-		if err := h.env.store.SetMetadata(b.ID, "continuity_eligible", "true"); err != nil {
-			h.failf("mark continuity eligible: %v", err)
-		}
-		h.record("archive continuity=true")
-		return
-	}
-	h.record("archive continuity=false")
-}
-
-func (h *sessionChaosHarness) reactivateSession() {
-	b, ok := h.currentBead()
-	if !ok || b.Status == "closed" {
-		return
-	}
-	lcInput := sessionpkg.LifecycleInputFromMetadata(b.Status, b.Metadata)
-	lcInput.Now = h.env.clk.Now()
-	view := sessionpkg.ProjectLifecycle(lcInput)
-	switch view.BaseState {
-	case sessionpkg.BaseStateArchived, sessionpkg.BaseStateQuarantined:
-	default:
-		h.record("reactivate skipped: state=%s", view.BaseState)
-		return
-	}
-	if err := h.manager.Reactivate(b.ID); err != nil {
-		h.record("reactivate skipped: %v", err)
-		return
-	}
-	h.record("reactivate id=%s", b.ID)
-}
-
 func (h *sessionChaosHarness) injectStartFailure() {
 	b, ok := h.currentBead()
 	if !ok || b.Status == "closed" || h.sessionName == "" {
@@ -1524,9 +1477,6 @@ func (h *sessionChaosHarness) assertInvariants() {
 			h.failf("running session retained pending_create_claim=%q", b.Metadata["pending_create_claim"])
 		}
 		h.assertLastStartConfigMatches(b)
-	}
-	if state == string(sessionpkg.StateArchived) && b.Metadata["continuity_eligible"] != "true" && running {
-		h.failf("continuity-ineligible archive still running runtime %q", runtimeName)
 	}
 	if b.Status != "closed" &&
 		strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" &&

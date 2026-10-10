@@ -322,6 +322,13 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) {
+		if err := validateDispatchSessionProviderConfig(cfg, cityPath); err != nil {
+			workflowTracef("serve start-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck // the returned error is the outcome
+			return err
+		}
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
@@ -978,14 +985,23 @@ func dispatchWakeFile(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", "dispatch-wake")
 }
 
-// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
-// Best-effort: if the write fails the dispatch cycle continues normally;
-// workers fall back to their standard poll interval.
+// writeDispatchWakeFile creates the dispatch-wake sentinel file if needed and
+// sets its mtime to now, so every wake is observable to a worker comparing
+// mtimes (opening an existing file does not change its mtime).
+// Best-effort: if the write fails the dispatch cycle continues normally and
+// workers fall back to their standard poll interval; the failure is traced.
 func writeDispatchWakeFile(cityPath string) {
 	path := dispatchWakeFile(cityPath)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		workflowTracef("dispatch-wake create path=%s err=%v", path, err)
 		return
 	}
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		workflowTracef("dispatch-wake close path=%s err=%v", path, err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		workflowTracef("dispatch-wake touch path=%s err=%v", path, err)
+	}
 }

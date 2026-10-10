@@ -14,9 +14,12 @@ import (
 // Panics on failure — intended for TestMain.
 func BuildGC(dir string) string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_GC_BIN")); override != "" {
-		bin, err := filepath.Abs(override)
-		if err != nil {
-			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + err.Error())
+		// A BUILD target may name its gc with $(rootpath ...) (the
+		// testhooks-stamped gc of the quiescence rows), which is relative to
+		// the runfiles root, not to the package directory the test runs in.
+		bin := resolveToolOverride(override)
+		if bin == "" {
+			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + override)
 		}
 		info, err := os.Stat(bin)
 		if err != nil {
@@ -25,7 +28,18 @@ func BuildGC(dir string) string {
 		if info.IsDir() {
 			panic("acceptance: GC_ACCEPTANCE_GC_BIN points to a directory: " + bin)
 		}
-		return bin
+		if filepath.Base(bin) == "gc" {
+			return bin
+		}
+		// gc's exec orders and pack scripts run bare `gc` through PATH, and
+		// NewEnv puts only the returned binary's directory there, so the
+		// binary must be named gc. A symlink, so gc's own os.Executable()
+		// still resolves to the override.
+		link := filepath.Join(dir, "gc")
+		if err := os.Symlink(bin, link); err != nil {
+			panic("acceptance: linking GC_ACCEPTANCE_GC_BIN as gc: " + err.Error())
+		}
+		return link
 	}
 
 	bin := filepath.Join(dir, "gc")

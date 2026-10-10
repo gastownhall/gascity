@@ -117,7 +117,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	}
 
 	// Find the most recent attempt.
-	attempt, err := findLatestAttemptWithRoot(store, bead, opts.gateRoot)
+	attempt, err := findLatestAttemptInView(store, bead, opts)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: finding latest %s: %w", bead.ID, strategy.subjectNoun, err)
 	}
@@ -166,6 +166,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
+		noteWrite(opts, bead.ID, closed)
 		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -186,6 +187,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
+		noteWrite(opts, bead.ID, closed)
 		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -1118,10 +1120,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
 			// A plain child (none of Retry/Ralph/Drain) reaches here with no
 			// gc.kind at all, unlike the root above which always gets one.
-			// Default it to task, mirroring rootMeta's unconditional stamp,
-			// so isWorkRecordGatedBead's (Type=="task" && gc.kind=="") test
-			// does not wrongly sweep it into the ADR-0009 work-record close
-			// gate. See gastownhall/gascity#5246.
+			// Default it to task, mirroring rootMeta's unconditional stamp, so
+			// its control-plane identity remains explicit and it stays out of
+			// the ADR-0009 work-record close gate. See gastownhall/gascity#5246.
 			if childMeta[beadmeta.KindMetadataKey] == "" {
 				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
 			}
@@ -1740,24 +1741,18 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 // matches the durable gc.control_for lineage stamp (with a legacy ref-string
 // fallback for pre-S38 molecules) and returns the max gc.attempt.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
-	return findLatestAttemptWithRoot(store, control, nil)
+	return findLatestAttemptInView(store, control, ProcessOptions{})
 }
 
-// findLatestAttemptWithRoot is findLatestAttempt reusing root, when non-nil
-// and it is the control's workflow root, instead of reading the root again.
-func findLatestAttemptWithRoot(store beads.Store, control beads.Bead, root *beads.Bead) (beads.Bead, error) {
+// findLatestAttemptInView is findLatestAttempt answered from the invocation's
+// root view (rootViewMembers) when opts carries one.
+func findLatestAttemptInView(store beads.Store, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		rootID = control.ID
 	}
 
-	var all []beads.Bead
-	var err error
-	if root != nil && root.ID == rootID {
-		all, err = beads.DirectMembersWithRoot(store, *root)
-	} else {
-		all, err = beads.DirectMembers(store, rootID)
-	}
+	all, err := rootViewMembers(store, rootID, opts)
 	if err == nil {
 		latest := latestAttemptFromCandidates(control, all)
 		if latest.ID != "" {
