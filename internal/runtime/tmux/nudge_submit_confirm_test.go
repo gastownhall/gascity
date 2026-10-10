@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -407,5 +411,79 @@ func TestStagedDraftRecoveryIsClaudeAndCodexOnly(t *testing.T) {
 		if !submitVerifyEligibleFamily(family) {
 			t.Errorf("family %q has a staged-draft marker but is not submit-verify eligible; recovery only runs on the verified path", family)
 		}
+	}
+}
+
+// claudeStagedDraftExecutor answers as a Claude pane whose composer keeps a
+// collapsed paste staged however many submits arrive: no capture shows the
+// busy indicator or a drained composer. attached is the attachment probe's
+// client count; empty makes the probe fail.
+type claudeStagedDraftExecutor struct {
+	session  string
+	attached string
+	calls    [][]string
+}
+
+func (e *claudeStagedDraftExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	switch {
+	case slices.Contains(args, "#{session_name}|#{session_attached}"):
+		if e.attached == "" {
+			return "", errors.New("server busy")
+		}
+		return e.session + "|" + e.attached, nil
+	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_PROVIDER"):
+		return "GC_PROVIDER=claude", nil
+	case slices.Contains(args, "capture-pane"):
+		return strings.Join([]string{"● Done.", "────", "❯\u00a0[Pasted text #1 +42 lines]", "────", "  ⏵⏵ bypass permissions on"}, "\n"), nil
+	}
+	return "", nil
+}
+
+func (e *claudeStagedDraftExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// TestNudgeSessionClaudeStagedDraftStaysUnconfirmed: when recovery cannot
+// resolve a staged Claude paste (its bound runs out, or it is skipped because a
+// client is attached or the probe fails), the composer still shows the
+// placeholder. That composer has not drained, so the nudge must stay
+// ErrNudgeSubmitUnconfirmed and requeue. ErrNudgeSubmitDeliveredUnobserved
+// would ack it and drop the message.
+func TestNudgeSessionClaudeStagedDraftStaysUnconfirmed(t *testing.T) {
+	tests := []struct {
+		name     string
+		session  string
+		attached string
+		enters   int
+	}{
+		{"detached pane exhausts recovery", "staged-claude-detached", "0", submitEnterMaxSends + submitDraftRecoverySends},
+		{"attached pane skips recovery", "staged-claude-attached", "1", submitEnterMaxSends},
+		{"failing attachment probe skips recovery", "staged-claude-probe-error", "", submitEnterMaxSends},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The bubble creates this session's nudge lock channel; drop it so
+			// nothing outside the bubble ever touches it.
+			t.Cleanup(func() { sessionNudgeLocks.Delete(tt.session) })
+			synctest.Test(t, func(t *testing.T) {
+				ex := &claudeStagedDraftExecutor{session: tt.session, attached: tt.attached}
+				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+
+				err := tm.NudgeSession(tt.session, "reminder: please respond to the review")
+				if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+					t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitUnconfirmed", err)
+				}
+				enters := 0
+				for _, c := range ex.calls {
+					if slices.Contains(c, "send-keys") && c[len(c)-1] == "Enter" {
+						enters++
+					}
+				}
+				if enters != tt.enters {
+					t.Fatalf("submit Enter sends = %d, want %d", enters, tt.enters)
+				}
+			})
+		})
 	}
 }
