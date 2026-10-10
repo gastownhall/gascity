@@ -138,19 +138,96 @@ type piSessionCandidate struct {
 	modTime   time.Time
 }
 
+// piSessionDirName mirrors pi's own session-directory encoding
+// (getSessionDir in pi-coding-agent): "--" + cwd with one leading path
+// separator stripped and every "/", "\\" and ":" replaced by "-" + "--". Pi
+// writes every transcript for a cwd under exactly this directory of the
+// sessions root, so a lookup can read that one directory instead of walking
+// the whole root.
+func piSessionDirName(workDir string) string {
+	trimmed := workDir
+	if trimmed != "" && (trimmed[0] == '/' || trimmed[0] == '\\') {
+		trimmed = trimmed[1:]
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
+	return "--" + replacer.Replace(trimmed) + "--"
+}
+
+// piLegacyWalkExcludedRoots lists roots the legacy full-tree walk must never
+// descend into. The generic transcript search paths (the Claude projects tree
+// by default) are merged into the pi roots by mergePiSearchPaths, and that tree
+// can hold tens of thousands of .jsonl files that can never be pi transcripts:
+// walking it cost one readdir+lstat per file, per pi session row, per
+// /sessions request (gascity sys-by2243.75). Overridable for tests.
+var piLegacyWalkExcludedRoots = DefaultSearchPaths
+
 func findPiSessionCandidates(searchPaths []string, workDir string) []piSessionCandidate {
 	workDir = cleanPiWorkDir(workDir)
 	if workDir == "" {
 		return nil
 	}
 
+	roots := mergePiSearchPaths(searchPaths)
+	dirName := piSessionDirName(workDir)
+	// The encoded name is a single path component by construction (every
+	// separator is replaced); the IsLocal guard keeps the join provably
+	// containment-safe for CodeQL's path-injection query.
+	if !filepath.IsLocal(dirName) {
+		return nil
+	}
 	var candidates []piSessionCandidate
-	for _, root := range mergePiSearchPaths(searchPaths) {
-		candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
+	encodedDirFound := false
+	for _, root := range roots {
+		dir := filepath.Join(root, dirName)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		encodedDirFound = true
+		candidates = append(candidates, piSessionCandidatesFromDir(dir, entries, workDir)...)
+	}
+	if !encodedDirFound {
+		// Legacy layout (transcripts not under the cwd-encoded directory):
+		// walk the pi roots, never the excluded generic roots.
+		excluded := make(map[string]bool)
+		for _, p := range piLegacyWalkExcludedRoots() {
+			excluded[filepath.Clean(p)] = true
+		}
+		for _, root := range roots {
+			if excluded[filepath.Clean(root)] {
+				continue
+			}
+			candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
+	return candidates
+}
+
+// piSessionCandidatesFromDir applies the same header check as the walk to the
+// .jsonl files of one directory, without descending.
+func piSessionCandidatesFromDir(dir string, entries []os.DirEntry, workDir string) []piSessionCandidate {
+	var candidates []piSessionCandidate
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		sessionID, cwd := cachedPiSessionHeader(path, info)
+		if cleanPiWorkDir(cwd) != workDir {
+			continue
+		}
+		if sessionID == "" {
+			sessionID = piSessionID(path)
+		}
+		candidates = append(candidates, piSessionCandidate{path: path, sessionID: sessionID, modTime: info.ModTime()})
+	}
 	return candidates
 }
 
