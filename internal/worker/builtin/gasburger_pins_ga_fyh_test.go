@@ -7,8 +7,8 @@ import (
 
 // TestBuiltinGrokModelChoicesIncludeGrok46And47 is the grok half of ga-fyh:
 // gasburger.refinery and gasburger.gorkcats pin model = "grok-4.6", and the
-// catalog must also list grok-4.7 ahead of the next rollout. The option is
-// open, so an unlisted id is no longer dropped — but these two are the ids
+// catalog also lists the models offered by Grok Build 1.0.50. The option is
+// open, so an unlisted id is no longer dropped — but these are the ids
 // this city actually runs, and a curated entry is what keeps them visible in
 // pickers and documented in the recipes guide.
 func TestBuiltinGrokModelChoicesIncludeGrok46And47(t *testing.T) {
@@ -16,7 +16,7 @@ func TestBuiltinGrokModelChoicesIncludeGrok46And47(t *testing.T) {
 	if !ok {
 		t.Fatal("BuiltinProviders() missing grok")
 	}
-	for _, value := range []string{"grok-4.6", "grok-4.7"} {
+	for _, value := range []string{"grok-4.5", "grok-4.6", "grok-4.7", "grok-4.7-build-fast"} {
 		args := mustChoiceFlagArgs(t, grok, "model", value)
 		want := []string{"--model", value}
 		if !slices.Equal(args, want) {

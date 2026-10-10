@@ -4,6 +4,15 @@
 and lifecycle operations. Callers outside `internal/session` reach sessions
 through `worker.Handle`, not through `session.Manager`.
 
+## Grok terminal delivery
+
+The Grok Build profile targets the current CLI's positional startup prompt.
+Do not reintroduce a blind send-keys delay or a retired default model. Live
+wait-idle delivery is enabled only with the Grok footer busy detector and
+verified submit path: `Ctrl+c:cancel` appears in the `Shift+Tab:mode` footer
+while processing and disappears at idle. Keep the real-tmux fixture aligned
+with that observed terminal protocol when changing delivery behavior.
+
 ## Active migration: worker boundary
 
 Started `12a0a848` on Apr 17 2026, in progress. New code on affected paths

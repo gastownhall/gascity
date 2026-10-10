@@ -67,7 +67,7 @@ func TestCodexSubmitIsVerified(t *testing.T) {
 	// Control: a family whose busy indicator this package cannot read stays on
 	// best-effort delivery, because reporting every submit as unconfirmed would
 	// burn the queue's attempts re-pasting messages that already landed.
-	for _, family := range []string{"grok", "kimi", "opencode", "", "some-unregistered-family"} {
+	for _, family := range []string{"kimi", "opencode", "", "some-unregistered-family"} {
 		if submitVerifyEligibleFamily(family) {
 			t.Errorf("submitVerifyEligibleFamily(%q) = true, want false", family)
 		}
@@ -146,4 +146,10 @@ func nudgeSessionSource(t *testing.T) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+func TestGrokSubmitIsVerified(t *testing.T) {
+	if !submitVerifyEligibleFamily("grok") {
+		t.Fatal("grok busy footer must confirm live submits")
+	}
 }
