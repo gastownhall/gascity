@@ -105,6 +105,242 @@ func TestCmdReloadJSONApplied(t *testing.T) {
 	}
 }
 
+// reloadWarningsCLIFixture runs the reload CLI against a supplied controller
+// reply without starting a city or sending a socket request.
+func reloadWarningsCLIFixture(t *testing.T) func(reloadControlReply, bool, bool, bool) (int, []byte, string) {
+	t.Helper()
+	dir := shortSocketTempDir(t, "gc-reload-warnings-")
+	writeCityTOML(t, dir, "test", "test-agent")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	return func(reply reloadControlReply, async, soft, jsonOut bool) (int, []byte, string) {
+		sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+			if !samePath(cityPath, dir) {
+				t.Fatalf("cityPath = %q, want %q", cityPath, canonicalTestPath(dir))
+			}
+			if req.Wait != !async || req.Soft != soft {
+				t.Fatalf("req = %+v, want wait=%t soft=%t", req, !async, soft)
+			}
+			return reply, nil
+		}
+		var stdout, stderr bytes.Buffer
+		code := cmdReload([]string{dir}, async, soft, jsonOut, "30s", !async, &stdout, &stderr)
+		return code, stdout.Bytes(), stderr.String()
+	}
+}
+
+func decodeReloadWarningsJSON(t *testing.T, stdout []byte) map[string]any {
+	t.Helper()
+	if bytes.Count(stdout, []byte{'\n'}) != 1 || !bytes.HasSuffix(stdout, []byte{'\n'}) {
+		t.Fatalf("stdout = %q, want exactly one newline-terminated JSON record", stdout)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout, &payload); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
+	}
+	if payload == nil {
+		t.Fatalf("stdout = %s, want a JSON object", stdout)
+	}
+	return payload
+}
+
+func TestCmdReloadJSONCarriesReplyWarnings(t *testing.T) {
+	runReload := reloadWarningsCLIFixture(t)
+	for _, tc := range []struct {
+		name     string
+		outcome  reloadOutcome
+		async    bool
+		soft     bool
+		warnings []string
+	}{
+		{"applied_one", reloadOutcomeApplied, false, false, []string{"service reload: boom"}},
+		{"applied_multiple", reloadOutcomeApplied, false, false, []string{"  config warning  ", "provider retained: \"local\"", "drift: α\nsecond line"}},
+		{"no_change", reloadOutcomeNoChange, false, false, []string{"config warning", "provider retained"}},
+		{"accepted_async", reloadOutcomeAccepted, true, false, []string{"acceptance warning"}},
+		{"soft_applied", reloadOutcomeApplied, false, true, []string{v2SoftReloadUnavailableWarning, "service reload: boom"}},
+		{"verbatim_duplicates_and_empty", reloadOutcomeApplied, false, false, []string{"repeat", "", "repeat"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reply := reloadControlReply{
+				Outcome: tc.outcome, Message: "Reload result", Revision: "abc123def4567890", Warnings: tc.warnings,
+			}
+			code, stdout, stderr := runReload(reply, tc.async, tc.soft, true)
+			if code != 0 || stderr != "" {
+				t.Fatalf("cmdReload = %d; stderr = %q, want exit 0 and empty stderr", code, stderr)
+			}
+			payload := decodeReloadWarningsJSON(t, stdout)
+			gotWarnings, ok := payload["warnings"].([]any)
+			if !ok || len(gotWarnings) != len(tc.warnings) {
+				t.Errorf("warnings = %#v, want %#v verbatim and in order", payload["warnings"], tc.warnings)
+			} else {
+				for i, warning := range tc.warnings {
+					if gotWarnings[i] != warning {
+						t.Errorf("warnings[%d] = %#v, want %q verbatim and in order", i, gotWarnings[i], warning)
+					}
+				}
+			}
+			if payload["async"] != tc.async || payload["soft"] != tc.soft || payload["outcome"] != string(tc.outcome) {
+				t.Errorf("async/soft/outcome = %v/%v/%v, want %t/%t/%s", payload["async"], payload["soft"], payload["outcome"], tc.async, tc.soft, tc.outcome)
+			}
+			if err := validateJSONAgainstResultSchemaE([]string{"reload"}, stdout); err != nil {
+				t.Errorf("warning-bearing reload JSON does not validate: %v", err)
+			}
+
+			reply.Warnings = nil
+			code, cleanStdout, stderr := runReload(reply, tc.async, tc.soft, true)
+			if code != 0 || stderr != "" {
+				t.Fatalf("clean cmdReload = %d; stderr = %q, want exit 0 and empty stderr", code, stderr)
+			}
+			cleanPayload := decodeReloadWarningsJSON(t, cleanStdout)
+			delete(payload, "warnings")
+			withoutWarnings, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload without warnings: %v", err)
+			}
+			cleanJSON, err := json.Marshal(cleanPayload)
+			if err != nil {
+				t.Fatalf("marshal clean payload: %v", err)
+			}
+			if !bytes.Equal(withoutWarnings, cleanJSON) {
+				t.Errorf("payload excluding warnings = %#v, want unchanged clean payload %#v", payload, cleanPayload)
+			}
+			if cleanPayload["schema_version"] != "1" || cleanPayload["ok"] != true || cleanPayload["revision"] != reply.Revision || cleanPayload["message"] != reply.Message {
+				t.Errorf("clean payload changed existing semantics: %#v", cleanPayload)
+			}
+		})
+	}
+}
+
+func TestCmdReloadJSONOmitsWarningsKeyWhenReplyHasNone(t *testing.T) {
+	runReload := reloadWarningsCLIFixture(t)
+	var nilStdout []byte
+	for _, tc := range []struct {
+		name     string
+		outcome  reloadOutcome
+		message  string
+		async    bool
+		warnings []string
+	}{
+		{"nil", reloadOutcomeApplied, "Config reloaded", false, nil},
+		{"empty", reloadOutcomeApplied, "Config reloaded", false, []string{}},
+		{"accepted_async", reloadOutcomeAccepted, "Reload requested.", true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runReload(reloadControlReply{
+				Outcome: tc.outcome, Message: tc.message, Warnings: tc.warnings,
+			}, tc.async, false, true)
+			if code != 0 || stderr != "" {
+				t.Fatalf("cmdReload = %d; stderr = %q, want exit 0 and empty stderr", code, stderr)
+			}
+			payload := decodeReloadWarningsJSON(t, stdout)
+			if value, present := payload["warnings"]; present {
+				t.Errorf("warnings key is present with value %#v, want absent", value)
+			}
+			if err := validateJSONAgainstResultSchemaE([]string{"reload"}, stdout); err != nil {
+				t.Errorf("clean reload JSON does not validate: %v", err)
+			}
+			if tc.name == "nil" {
+				nilStdout = stdout
+			} else if tc.name == "empty" && !bytes.Equal(stdout, nilStdout) {
+				t.Errorf("empty warnings stdout = %s, want identical nil warnings stdout %s", stdout, nilStdout)
+			}
+		})
+	}
+}
+
+func TestCmdReloadTextWarningsOnePerLineInOrder(t *testing.T) {
+	runReload := reloadWarningsCLIFixture(t)
+	code, stdout, stderr := runReload(reloadControlReply{
+		Outcome: reloadOutcomeApplied, Message: "Config reloaded",
+		Warnings: []string{"config warning", "provider retained", "service reload: boom"},
+	}, false, false, false)
+	if code != 0 {
+		t.Fatalf("cmdReload = %d; stderr = %q, want exit 0", code, stderr)
+	}
+	if got, want := string(stdout), "Config reloaded\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	wantStderr := "gc reload: warning: config warning\ngc reload: warning: provider retained\ngc reload: warning: service reload: boom\n"
+	if stderr != wantStderr {
+		t.Errorf("stderr = %q, want %q", stderr, wantStderr)
+	}
+}
+
+func TestCmdReloadJSONFailedBusyTimeoutUnchanged(t *testing.T) {
+	runReload := reloadWarningsCLIFixture(t)
+	for _, tc := range []struct {
+		name   string
+		reply  reloadControlReply
+		stderr string
+	}{
+		{"failed", reloadControlReply{Outcome: reloadOutcomeFailed, Warnings: []string{"w"}, Error: "boom"}, "gc reload: warning: w\nboom\n"},
+		{"busy", reloadControlReply{Outcome: reloadOutcomeBusy, Message: "controller is busy"}, "controller is busy\n"},
+		{"timeout", reloadControlReply{Outcome: reloadOutcomeTimeout}, "gc reload: timeout\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runReload(tc.reply, false, false, true)
+			if code != 1 {
+				t.Errorf("cmdReload = %d, want exit 1", code)
+			}
+			if len(stdout) != 0 {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if stderr != tc.stderr {
+				t.Errorf("stderr = %q, want %q", stderr, tc.stderr)
+			}
+		})
+	}
+}
+
+func TestReloadResultSchemaTypesWarnings(t *testing.T) {
+	runReload := reloadWarningsCLIFixture(t)
+	code, stdout, stderr := runReload(reloadControlReply{
+		Outcome: reloadOutcomeApplied, Message: "Config reloaded",
+	}, false, false, true)
+	if code != 0 || stderr != "" {
+		t.Fatalf("cmdReload = %d; stderr = %q, want exit 0 and empty stderr", code, stderr)
+	}
+	payload := decodeReloadWarningsJSON(t, stdout)
+	if err := validateJSONAgainstResultSchemaE([]string{"reload"}, stdout); err != nil {
+		t.Fatalf("clean reload JSON does not validate: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value any
+		valid bool
+	}{
+		{"strings", []string{"a", "b"}, true},
+		{"string", "x", false},
+		{"number", 1, false},
+		{"number_element", []any{1}, false},
+		{"null_element", []any{nil}, false},
+		{"object", map[string]any{}, false},
+		{"nested_array", [][]string{{"a"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload["warnings"] = tc.value
+			data, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal payload: %v", err)
+			}
+			err = validateJSONAgainstResultSchemaE([]string{"reload"}, data)
+			if tc.valid && err != nil {
+				t.Errorf("schema rejected string warnings: %v", err)
+			} else if !tc.valid && err == nil {
+				t.Errorf("schema accepted warnings = %#v, want rejection of non-string-array value", tc.value)
+			}
+		})
+	}
+}
+
 func TestCmdReloadSoftPrintsAcceptedDriftCount(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-reload-soft-cli-")
 	writeCityTOML(t, dir, "test", "mayor")
