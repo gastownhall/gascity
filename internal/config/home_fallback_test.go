@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/gchome"
 )
 
 // TestImplicitGCHomeAvoidsSharedTempFallback guards #3650 (sibling of #3506):
@@ -24,6 +26,12 @@ func TestImplicitGCHomeAvoidsSharedTempFallback(t *testing.T) {
 	t.Setenv("HOME", "") // forces os.UserHomeDir() to fail on unix
 
 	got := ImplicitGCHome()
+	if next := ImplicitGCHome(); next != got {
+		t.Fatalf("fallback changed between lookups: %q -> %q", got, next)
+	}
+	if common := gchome.Default(); common != got {
+		t.Fatalf("caller fallback %q differs from shared fallback %q", got, common)
+	}
 
 	if shared := filepath.Join(os.TempDir(), ".gc"); got == shared {
 		t.Fatalf("ImplicitGCHome() = %q, want a process-isolated path, not the shared %q", got, shared)
