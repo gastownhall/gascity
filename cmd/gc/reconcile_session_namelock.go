@@ -23,6 +23,12 @@ import (
 // callers without one, all in tests, lock nothing, and lease is nil.
 // release is idempotent.
 func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Duration) (lease *session.RuntimeLease, release func(), err error) {
+	return waitRuntimeLease(context.Background(), store, cityPath, name, id, ttl, 0)
+}
+
+// waitRuntimeLease is tryRuntimeLease waiting up to bound, and while ctx
+// lasts, for a busy name.
+func waitRuntimeLease(ctx context.Context, store beads.Store, cityPath, name, id string, ttl, bound time.Duration) (lease *session.RuntimeLease, release func(), err error) {
 	switch {
 	case cityPath == "":
 		return nil, func() {}, nil
@@ -35,7 +41,7 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 	} else {
 		id = ""
 	}
-	if lease, err = session.TryRuntimeLease(front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}); err != nil {
+	if lease, err = session.WaitRuntimeLease(ctx, front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}, bound); err != nil {
 		return nil, nil, err
 	}
 	return lease, lease.Release, nil
