@@ -11,6 +11,10 @@
 # (CN=rbe-fork-worker, fork CA) reaches only the fork scheduler and the CAS.
 # Blacksmith donates this compute for workflows of our OSS repos only.
 name: rbe-fork-pool
+# The pool scalers count floor workers by this name (oss-pool-scaler.py
+# ROLE_TITLE): "(floor, idle 15m)". A dispatch without the input (CI
+# pre-warm, by hand) is named burst and keeps the default idle_minutes.
+run-name: ${{ format('rbe-fork-pool ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}
 
 on:
   workflow_dispatch:
@@ -23,6 +27,13 @@ on:
         description: Retire after this many minutes regardless (recycles the VM)
         default: "120"
         type: string
+      role:
+        description: floor (keeps a warm worker, the longer idle window) or burst; the run's name only, the worker never reads it
+        default: burst
+        type: choice
+        options:
+          - burst
+          - floor
 
 permissions:
   contents: read
