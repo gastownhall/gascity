@@ -66,3 +66,9 @@ evidence from tests, source, an issue, or a commit.
   Propagate that stale verdict to the provider-aware caller and clean up using
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
+
+## Proven prompt delivery
+
+A delivered-but-unobserved runtime nudge has already sent the message. Acknowledge
+that delivery exactly once, retain the observation warning, and observe completion
+separately. Unknown delivery errors remain errors and must not trigger a resend.

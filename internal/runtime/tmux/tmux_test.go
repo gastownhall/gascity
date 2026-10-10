@@ -2495,21 +2495,29 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	}
 }
 
-func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
-	fe := &fakeExecutor{}
-	tm := NewTmuxWithConfig(DefaultConfig())
-	tm.exec = fe
-
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
-	if err != nil {
-		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+func TestSendKeysLiteralWithRetryUsesPasteBuffer(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"large", strings.Repeat("x", maxSendKeysLiteralLen+1)},
+		{"multiline", "begin\ncontext\nend"},
+		{"carriage-return", "begin\rend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			tm := NewTmuxWithConfig(DefaultConfig())
+			tm.exec = fe
+			if err := tm.sendKeysLiteralWithRetry("%1", tc.text, time.Second); err != nil {
+				t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+			}
+			if len(fe.calls) != 2 {
+				t.Fatalf("tmux calls = %v, want load-buffer then bracketed paste", fe.calls)
+			}
+			assertTmuxCommand(t, fe.calls[0], "load-buffer")
+			assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+			if !strings.Contains(strings.Join(fe.calls[1], "\x00"), "\x00-p\x00") {
+				t.Fatalf("paste-buffer call = %v, want bracketed paste", fe.calls[1])
+			}
+		})
 	}
-
-	if len(fe.calls) != 2 {
-		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
-	}
-	assertTmuxCommand(t, fe.calls[0], "load-buffer")
-	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
 }
 
 func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {

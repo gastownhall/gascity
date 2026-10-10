@@ -237,7 +237,7 @@ var (
 	// session already received, which is the ga-civwyz duplicate-reminder
 	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
 	// days of production logs).
-	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+	ErrNudgeSubmitDeliveredUnobserved = runtime.ErrNudgeDeliveredUnobserved
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -2315,7 +2315,7 @@ func nextPasteBufferName() string {
 }
 
 func (t *Tmux) sendLiteralText(target, text string) error {
-	if len(text) > maxSendKeysLiteralLen {
+	if len(text) > maxSendKeysLiteralLen || strings.ContainsAny(text, "\r\n") {
 		return t.pasteLiteralText(target, text)
 	}
 	_, err := t.run("send-keys", "-t", paneTarget(target), "-l", text)
