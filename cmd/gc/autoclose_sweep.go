@@ -231,6 +231,7 @@ func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
 // lanes do, so one bad row cannot end the backstop for the controller's life.
 // The ids that pass had already popped are lost; the log names the bug.
 func (cs *controllerState) safeAutocloseSweepPass(now time.Time) (panicked bool) {
+	defer cs.beginStoreWork()()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true

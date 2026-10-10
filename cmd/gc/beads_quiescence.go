@@ -96,7 +96,11 @@ func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 	if !quiescent {
 		return false
 	}
-	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return true })
+	// Store work dispatched before the city went quiescent (an autoclose run
+	// for a drained session's wisp) may still be reading; work dispatched
+	// from now on defers itself. The pairs go once none has been in flight
+	// for a whole tick, so no straggler read restarts them.
+	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.cs.storeWorkInFlight() })
 	return true
 }
 
