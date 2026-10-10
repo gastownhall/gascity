@@ -23,9 +23,11 @@ const (
 //     unassigned automatic dispatch (Tier 3 pool-demand queries and the
 //     control dispatcher's routed/run-target tiers) must exclude these
 //     (ga-5736js), and so must every path that serves a bead to an agent as
-//     work — including the assignee-scoped crash-recovery tier and the
-//     `gc hook --claim` result (gas-kg6). A held bead handed back as work
-//     cannot be advanced, is never released, and so is re-served forever.
+//     work — including the assignee-scoped crash-recovery tier, the
+//     `gc hook --claim` result (gas-kg6) and the continuation-group siblings
+//     a claim pre-assigns (preassignHookContinuationGroup, #6026). A held bead
+//     handed back as work cannot be advanced, is never released, and so is
+//     re-served forever.
 //
 //   - "Does a session still need to EXIST for this bead?" — hold is
 //     irrelevant; the assignment is a real ownership fact either way. The
@@ -39,19 +41,30 @@ const (
 //
 // Waking a session for assigned OPEN work is a "what to DO" decision: the only
 // thing the woken session can do with the row is ask its hook for it, and the
-// hook refuses held rows. So the controller's assigned-work WAKE demand and the
-// drain-ack claimability classifier exclude open held work (HasDispatchHold),
-// while the assignment itself stays visible to orphan release, pool accounting
-// and the in_progress ownership tiers above.
+// hook refuses held rows. So the controller's assigned-work WAKE readiness, its
+// keep-awake probe and the drain-ack claimability classifier exclude open held
+// work (HasDispatchHold), while the assignment itself stays visible to orphan
+// release, pool accounting and the in_progress ownership tiers above.
 var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 
 // HasDispatchHold reports whether labels carry one of DispatchHoldLabels. It is
-// the single label comparison every WORK-SERVING decision answers with — the
-// hook's serve filter (isHeldHookCandidate), session wake demand from assigned
-// open work, and the drain-ack claimability classifier — so the controller can
-// never treat as wake demand a row the session's own hook will refuse to serve
-// (the wake/drain loop where an on-demand named session was re-woken every tick
-// for assigned hold:external work its hook drained past as no_work).
+// the label comparison the hold-aware WORK-SERVING decisions answer with: the
+// hook's serve filter (isHeldHookCandidate), continuation-group pre-assignment
+// (preassignHookContinuationGroup), and three controller gates over OPEN rows —
+// wake readiness and the keep-awake probe (both through assignedOpenWorkHeld)
+// and the drain-ack claimability classifier (classifyDemandRowClaimability).
+// So held OPEN assigned work is never wake readiness, keep-awake work or a
+// drain-ack strand, which ended the wake/drain loop where an on-demand named
+// session was re-woken every tick for assigned hold:external work its hook
+// drained past as no_work.
+//
+// Two demand paths do not consult it. Pool accounting
+// (filterAssignedWorkBeadsForPoolDemandAt) still counts a held OPEN assigned
+// row toward its template's desired seats, and held in_progress work still
+// keeps its owner's session in demand and awake, a claimed ownership fact
+// (ga-5736js). The route-scoped filters that mirror `bd ready --exclude-label`
+// (filterReadyByRoute, the work query's jq hold clause) compare the values
+// exactly rather than through this function.
 //
 // The comparison is trimmed and case-insensitive because the hook's filter is
 // the last word on what a session is served, and it compares that way: a

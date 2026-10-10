@@ -153,12 +153,12 @@ func demandRowServable(b beads.Bead) bool {
 // The reason is the answer, not a bare "not ready", because the two consumers —
 // classifyDemandTrigger and the drain-ack open arm
 // (firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers) — act differently on
-// each cause: a deferral is PROOF of non-claimability, while an unproven
-// blockedness reading is only a question, to be settled against live deps. Naming
-// the cause here keeps that distinction in one place. Reconstructing it by
-// elimination at a call site ("the only remaining reason is …") would be valid
-// only while this function has exactly these clauses, and would break silently
-// the moment a third exclusion is added.
+// each cause: a deferral or a dispatch hold is PROOF of non-claimability, while
+// an unproven blockedness reading is only a question, to be settled against live
+// deps. Naming the cause here keeps that distinction in one place. Reconstructing
+// it by elimination at a call site ("the only remaining reason is …") would be
+// valid only while this function has exactly these clauses, and would break
+// silently the moment another exclusion is added.
 type demandRowClaimability string
 
 const (
