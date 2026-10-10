@@ -42,6 +42,7 @@ const (
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
+	nativeHooksReason        = "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close once nothing depends on them firing for every write"
 	proxiedProviderGate      = BeadsGateProxiedProvider
 	nativeUnavailableMessage = "native_store_unavailable"
 
@@ -431,6 +432,10 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
+	if backend, ok := libraryExtensionBackend(opts.ScopeRoot); ok {
+		return opts.openLibraryExtensionStore(ctx, backend)
+	}
+
 	// The persisted topology is checked before preflight runs. A proxied-server
 	// scope has no library open in beads at all, so no preflight verdict can
 	// change the outcome — and preflight's bd-context probe does not survive
@@ -494,7 +499,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
 			PreflightGate:       nativeHooksGate,
-			PreflightReason:     "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close once nothing depends on them firing for every write",
+			PreflightReason:     nativeHooksReason,
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
@@ -509,6 +514,50 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
+	}
+	return opts.stampedResult(StoreOpenResult{
+		Store: native,
+		Diagnostic: BeadsDiagnostic{
+			Store:               storeNameNativeDoltStore,
+			NativeStoreEligible: true,
+		},
+	}, nil)
+}
+
+// libraryExtensionBackend reports the backend a scope's metadata names when
+// the linked beads library registered it as an extension backend — a workspace
+// gc does not serve, such as one `bd connect <url> --convert-workspace`
+// pointed at a remote server.
+func libraryExtensionBackend(scopeRoot string) (string, bool) {
+	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !ok || !contract.IsLibraryExtensionBackend(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// openLibraryExtensionStore is the library-extension arm. The Dolt preflight
+// is skipped whole: its bd-context fork and SQL ping describe a local Dolt
+// server this scope does not have, and cost seconds per open. The library's
+// own open dispatches to the registered backend, which reads the workspace and
+// its credentials itself. A failed open is returned rather than answered with
+// the bd front door, because nothing vetted that fallback for this scope and
+// the operator needs the backend's own reason. Executable bd hooks still route
+// to the bd front door exactly as they do for a Dolt scope.
+func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, backend string) (StoreOpenResult, error) {
+	if scopeHasExecutableBdHooks(opts.ScopeRoot) {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       nativeHooksGate,
+			PreflightReason:     nativeHooksReason,
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(opts.Provider, diag)
+	}
+	native, err := opts.openNativeStore(ctx)
+	if err != nil {
+		return StoreOpenResult{}, fmt.Errorf("opening beads backend %q for scope %s through the linked beads library: %w", backend, opts.ScopeRoot, err)
 	}
 	return opts.stampedResult(StoreOpenResult{
 		Store: native,
