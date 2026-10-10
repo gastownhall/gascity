@@ -434,18 +434,56 @@ variable `RBE_REPO_CONTENTS_CACHE` rolls it out in mode `remote` only:
 Readers add `startup --experimental_remote_repo_contents_cache` and
 `common --loading_phase_threads=64` to `.bazelrc.local` (key neutral,
 `scripts/bazel_key_parity_test.go`) and still upload nothing. Developer
-machines and macOS/Windows jobs never read it. Rollback: set the variable to
-`off`; lanes fetch as before.
+machines and macOS/Windows jobs never read it. Rollback for these lanes:
+set the variable to `off`; their next runs fetch as before. The variable
+does not reach the fork-cache lanes below.
 
-Lanes on the read-only fork cache (mode `cache`: fork PRs without an
-rbe-fork certificate, `rbe=cache` dispatches) see no repository variables.
-They read the same entries through rbe-cache's anonymous AC and CAS reads,
-with the same two lines, whenever `tools/rbe/cache-rrc-probe.sh` gets a
-GetCapabilities answer from rbe-cache. An unreachable cache with the startup
-flag set costs every repository a retry, so a closed or down rbe-cache
-writes no lines and the lane fetches as before. Kill switch: set
-`fork_rrc_read=off` in that script (a one-line PR). rbe-cache refuses every
-write, and fork-cache uploads nothing.
+Lanes on the read-only fork cache (mode `cache`) see no repository
+variables. Mode `cache` covers fork PRs without an rbe-fork certificate,
+`rbe=cache` dispatches, and, while `RBE_WEST_WORKERS` is not `true`, every
+PR, push and merge group (`bazel.yml`'s rbe job). They read the same
+entries through rbe-cache's anonymous AC and CAS reads, with the same two
+lines, whenever `tools/rbe/cache-rrc-probe.sh` gets a GetCapabilities
+answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
+has and for a ByteStream Read of a blob the CAS does not hold. Each such
+lane's step summary records whether it reads, and rbe-cache's TCP connect
+time (DNS lookup excluded). rbe-cache refuses every write, and fork-cache
+uploads nothing.
+
+An unreachable cache with the startup flag set costs every repository a
+retry, so a cache that is closed or down when the probe runs writes no
+lines, and the lane fetches as before. That holds at probe time only.
+After loading, Bazel fetches a cached repository's files lazily from
+rbe-cache (:8443). If the cache goes away mid-run (rbe-cache-gate closes,
+the runner's IP is banned, or the breaker opens), the command fails, and
+Bazel does not re-fetch the repository (bazel#30218, design R4).
+
+To stop fork-cache lanes reading:
+
+1. Commit `fork_rrc_read=off` in both probe scripts: gascity's
+   `tools/rbe/cache-rrc-probe.sh` and beads'
+   `.github/actions/setup-bazel/cache-rrc-probe.sh`. This is the preferred
+   way: lanes that already read finish, and later runs fetch for
+   themselves. gascity's fresh-merge gives every new run main's switch.
+   beads has no fresh-merge, so an open fork PR keeps its old switch until
+   it is pushed again.
+2. For immediate server-side containment, an operator runs
+   `rbe-cache-gate close` on core. That stops all fork-cache, cache hits
+   included, and fails the lanes that are reading at that moment. While
+   `RBE_WEST_WORKERS` is not `true`, every PR, push and merge group runs in
+   mode `cache`, so closing the gate also fails in-flight required lanes on
+   main and in the merge queue.
+3. The trusted lanes read the same entries: rbe-cache serves the same `oss`
+   action cache. On an `rrc-verify` mismatch, set `RBE_REPO_CONTENTS_CACHE`
+   to `seed`. That stops every mode `remote` reader, while `rrc-seed` and
+   `rrc-verify` keep running. Set it to `off` only to stop seeding too;
+   that also stops `rrc-verify`. If the run only says it could not check
+   the cache, leave the variable as it is.
+
+Known limit (design R4): rbe-cache's anonymous CAS is a size partition
+whose upper store, for blobs of 512 MiB or more, is a noop. A cached
+repository with a file that large is a hit whose download always fails.
+rrc-gate does not refuse such entries today.
 
 Nothing on a reader checks a cached tree against what its repository rule
 produces, so `bazel.yml`'s `rrc-verify` job (from `bazel-nightly.yml`, or a
@@ -453,7 +491,8 @@ dispatch, whenever the variable is not `off`) fetches every lane's
 repositories cold and compares each tree and marker file with the entry a
 lane would read (`tools/bazel/rrc_verify.py`). A mismatch, a poisoned entry
 or a rule falsely marked reproducible, fails the job and opens an issue
-labeled `rrc-verify`: set the variable to `off` first, then investigate.
+labeled `rrc-verify`: contain the readers with the steps above (the
+issue lists them), then investigate.
 
 ### Re-pinning the RBE worker host
 
@@ -1074,8 +1113,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/session` package `session` | TestRuntimeLeaseCrossProcess: subprocess | ga-cp3hwi | the runtime lease cross-process harness is a checked Medium subprocess owner; the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store | P0.4b | 2026-10-31 |
 | Medium owner | `internal/workrecord` package `workrecord` | TestCommitReachableOnBranch: subprocess | ga-cp3hwi | the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner; the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-10-31 |
-| Medium owner | `scripts` package `scripts_test` | TestCacheRRCProbe: http_test_server | ga-cp3hwi | the anonymous-cache repo contents cache probe's behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheRRCProbe, which exists to run tools/rbe/cache-rrc-probe.sh against a stand-in rbe-cache GetCapabilities (an answer or none, gRPC and HTTP errors, malformed answers, a timeout, the kill switch off): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache lanes read the remote repo contents cache | P0.4b | 2026-10-31 |
-| Medium owner | `scripts` package `scripts_test` | TestCacheZstdProbe: http_test_server | ga-cp3hwi | the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd | P0.4b | 2026-10-31 |
+| Medium owner | `scripts` package `scripts_test` | TestCacheProbes: http_test_server | ga-cp3hwi | the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-cp3hwi | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestFreshMergeActionBehaviour: subprocess | ga-cp3hwi | the fresh-merge composite action's behavior proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModDownloadRetryScriptRetriesTransientFailures: subprocess | ga-cp3hwi | the CI go mod download retry proof is a checked Medium subprocess owner; the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails | P0.4b | 2026-10-31 |
@@ -1099,7 +1137,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | `cmd/gc` untagged test source | environment: 124 calls / 16 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 61 calls / 25 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 319 calls / 123 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | http_test_server: 320 calls / 68 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
+| Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |

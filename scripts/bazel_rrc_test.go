@@ -1,13 +1,9 @@
 package scripts_test
 
 import (
-	"bytes"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -225,6 +220,15 @@ func TestBazelForkRRCReadStep(t *testing.T) {
 		if hasNotice := strings.Contains(run.out, notice); hasNotice != (want == nil) {
 			t.Errorf("probe %q: notice %v, want %v (the probe's reason, only when it fails):\n%s", probe, hasNotice, want == nil, run.out)
 		}
+		// The verdict, with the probe's reason (rbe-cache's connect time
+		// when it has one), in the lane's step summary either way.
+		summary := "Fork cache remote repo contents cache read: **off** (stub refused)\n"
+		if want != nil {
+			summary = "Fork cache remote repo contents cache read: **on** (stub answers)\n"
+		}
+		if run.summary != summary {
+			t.Errorf("probe %q: step summary %q, want %q", probe, run.summary, summary)
+		}
 	}
 	wf := readMultiLaneWorkflow(t)
 	read, test := -1, -1
@@ -241,17 +245,14 @@ func TestBazelForkRRCReadStep(t *testing.T) {
 	}
 }
 
-// TestCacheRRCProbe runs cache-rrc-probe.sh against a stand-in rbe-cache:
-// only a gRPC status 0 GetCapabilities answer with cache_capabilities
+// cacheRRCProbeCases runs cache-rrc-probe.sh against serve (TestCacheProbes):
+// only a gRPC status 0 GetCapabilities answer with cache_capabilities, then
+// NOT_FOUND for the probe's GetActionResult key and ByteStream Read blob,
 // passes; every error, refusal, timeout or unreadable answer fails, and so
-// does a copy with the kill switch off, without asking rbe-cache at all.
-// The probe never writes stdout and always says why on stderr.
-func TestCacheRRCProbe(t *testing.T) {
-	for _, tool := range []string{"curl", "python3"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not available", tool)
-		}
-	}
+// does a copy with the kill switch off, without asking rbe-cache at all. The probe never writes
+// stdout and always says why on stderr, with the TCP connect time (without
+// the DNS lookup) once it has one.
+func cacheRRCProbeCases(t *testing.T, serve capsServer) {
 	root := repoRoot(t)
 	probeText := readFile(t, root, bazelCacheRRCProbe)
 	for _, want := range []string{
@@ -270,54 +271,6 @@ func TestCacheRRCProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// serve answers like rbe-cache's Caddy, over TLS and HTTP/2, after
-	// checking the request is the probe's GetCapabilities for instance oss.
-	serve := func(t *testing.T, a capsAnswer) (url, caFile string, hits *atomic.Int32) {
-		t.Helper()
-		hits = new(atomic.Int32)
-		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			hits.Add(1)
-			body, _ := io.ReadAll(r.Body)
-			const path = "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
-			if r.ProtoMajor != 2 || r.Method != http.MethodPost || r.URL.Path != path ||
-				r.Header.Get("Content-Type") != "application/grpc" || !bytes.Equal(body, capsRequest) {
-				t.Errorf("probe sent %s %s %s, content-type %q, body %x; want HTTP/2 POST %s, application/grpc, %x",
-					r.Proto, r.Method, r.URL.Path, r.Header.Get("Content-Type"), body, path, capsRequest)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			select {
-			case <-time.After(a.delay):
-			case <-r.Context().Done():
-				return
-			}
-			w.Header().Set("Content-Type", "application/grpc")
-			trailer := a.grpc != "" && a.body != nil
-			if trailer {
-				w.Header().Set("Trailer", "Grpc-Status")
-			} else if a.grpc != "" {
-				w.Header().Set("Grpc-Status", a.grpc)
-			}
-			status := a.status
-			if status == 0 {
-				status = http.StatusOK
-			}
-			w.WriteHeader(status)
-			_, _ = w.Write(a.body)
-			w.(http.Flusher).Flush()
-			if trailer {
-				w.Header().Set("Grpc-Status", a.grpc)
-			}
-		}))
-		srv.EnableHTTP2 = true
-		srv.StartTLS()
-		t.Cleanup(srv.Close)
-		caFile = filepath.Join(t.TempDir(), "ca.pem")
-		if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return srv.URL, caFile, hits
-	}
 	run := func(t *testing.T, script string, env map[string]string) (bool, string, string) {
 		t.Helper()
 		dir := t.TempDir()
@@ -348,33 +301,50 @@ func TestCacheRRCProbe(t *testing.T) {
 		}
 	}
 	live := grpcMessage(capsZstd)
+	acWith := func(a capsAnswer) capsAnswer { return capsAnswer{grpc: "0", body: live, ac: &a} }
+	bsWith := func(a capsAnswer) capsAnswer { return capsAnswer{grpc: "0", body: live, bs: &a} }
 	for _, c := range []struct {
 		name   string
 		answer capsAnswer
 		want   bool
+		asks   int32 // GetCapabilities, GetActionResult, ByteStream Read: each only after a good answer
 	}{
-		{"rbe-cache today", capsAnswer{grpc: "0", body: live}, true},
-		{"rbe-cache before zstd", capsAnswer{grpc: "0", body: grpcMessage(capsLive)}, true},
-		{"no cache_capabilities", capsAnswer{grpc: "0", body: grpcMessage(capsLiveAPIVersions)}, false},
-		{"gRPC error after the answer", capsAnswer{grpc: "13", body: live}, false},
-		{"no grpc-status", capsAnswer{body: live}, false},
-		{"trailers-only PERMISSION_DENIED", capsAnswer{grpc: "7"}, false},
-		{"HTTP 502", capsAnswer{status: http.StatusBadGateway, grpc: "0", body: live}, false},
-		{"compressed message", capsAnswer{grpc: "0", body: append([]byte{1}, live[1:]...)}, false},
-		{"truncated message", capsAnswer{grpc: "0", body: live[:len(live)-1]}, false},
-		{"not gRPC", capsAnswer{grpc: "0", body: []byte("<html>bad gateway</html>")}, false},
-		{"timeout", capsAnswer{grpc: "0", body: live, delay: 10 * time.Second}, false},
+		{"rbe-cache today", capsAnswer{grpc: "0", body: live}, true, 3},
+		{"rbe-cache before zstd", capsAnswer{grpc: "0", body: grpcMessage(capsLive)}, true, 3},
+		{"no cache_capabilities", capsAnswer{grpc: "0", body: grpcMessage(capsLiveAPIVersions)}, false, 1},
+		{"gRPC error after the answer", capsAnswer{grpc: "13", body: live}, false, 1},
+		{"no grpc-status", capsAnswer{body: live}, false, 1},
+		{"trailers-only PERMISSION_DENIED", capsAnswer{grpc: "7"}, false, 1},
+		{"HTTP 502", capsAnswer{status: http.StatusBadGateway, grpc: "0", body: live}, false, 1},
+		{"compressed message", capsAnswer{grpc: "0", body: append([]byte{1}, live[1:]...)}, false, 1},
+		{"truncated message", capsAnswer{grpc: "0", body: live[:len(live)-1]}, false, 1},
+		{"not gRPC", capsAnswer{grpc: "0", body: []byte("<html>bad gateway</html>")}, false, 1},
+		{"timeout", capsAnswer{grpc: "0", body: live, delay: 10 * time.Second}, false, 1},
+		{"action cache answers the key", acWith(capsAnswer{grpc: "0", body: grpcMessage(nil)}), false, 2},
+		{"action cache PERMISSION_DENIED", acWith(capsAnswer{grpc: "7"}), false, 2},
+		{"action cache UNAVAILABLE", acWith(capsAnswer{grpc: "14"}), false, 2},
+		{"action cache no grpc-status", acWith(capsAnswer{body: []byte{}}), false, 2},
+		{"action cache HTTP 502", acWith(capsAnswer{status: http.StatusBadGateway, grpc: "5"}), false, 2},
+		{"action cache timeout", acWith(capsAnswer{grpc: "5", delay: 10 * time.Second}), false, 2},
+		{"CAS serves the blob", bsWith(capsAnswer{grpc: "0", body: grpcMessage(pbBytes(10, []byte{0}))}), false, 3},
+		{"CAS UNAVAILABLE", bsWith(capsAnswer{grpc: "14"}), false, 3},
+		{"CAS PERMISSION_DENIED", bsWith(capsAnswer{grpc: "7"}), false, 3},
+		{"CAS HTTP 502", bsWith(capsAnswer{status: http.StatusBadGateway, grpc: "5"}), false, 3},
+		{"CAS timeout", bsWith(capsAnswer{grpc: "5", delay: 10 * time.Second}), false, 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			url, ca, hits := serve(t, c.answer)
 			start := time.Now()
 			ok, stdout, stderr := run(t, filepath.Join(root, bazelCacheRRCProbe), map[string]string{"RBE_CACHE_PROBE_URL": url, "CURL_CA_BUNDLE": ca})
 			check(t, ok, stdout, stderr, c.want)
-			if hits.Load() != 1 {
-				t.Errorf("probe asked %d times, want 1", hits.Load())
+			if hits.Load() != c.asks {
+				t.Errorf("probe asked %d times, want %d", hits.Load(), c.asks)
+			}
+			if c.asks > 1 && !regexp.MustCompile(` \(tcp connect [0-9]+\.[0-9] ms\); `).MatchString(stderr) {
+				t.Errorf("probe stderr %q lacks the GetCapabilities TCP connect time", stderr)
 			}
 			if d := time.Since(start); d > 5*time.Second {
-				t.Errorf("probe took %v; RBE_CACHE_PROBE_MAX_TIME=1 bounds it", d)
+				t.Errorf("probe took %v; RBE_CACHE_PROBE_MAX_TIME=1 bounds each call", d)
 			}
 		})
 	}
@@ -802,6 +772,25 @@ func TestBazelRRCVerifyJob(t *testing.T) {
 	}
 	if strings.Contains(alert.Run, "${{") {
 		t.Errorf("alert step interpolates an expression into its script; pass it through env")
+	}
+	// The issue's containment: fork-cache lanes see no repository variables,
+	// so the committed switches (both repositories) and rbe-cache-gate stop
+	// them. The trusted readers read the same entries, so a mismatch sets
+	// the variable to seed (no reader, rrc-seed and this check keep running);
+	// off stops seeding and this check too.
+	for _, want := range []string{
+		"fork_rrc_read=off in both probe scripts", bazelCacheRRCProbe, ".github/actions/setup-bazel/cache-rrc-probe.sh",
+		"rbe-cache-gate close", "on a mismatch, set RBE_REPO_CONTENTS_CACHE to seed", "set it to off only to stop seeding too",
+		"could not check, leave the variable as it is",
+	} {
+		if !strings.Contains(alert.Run, want) {
+			t.Errorf("alert issue body lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"Stop readers first: set the repository variable", "leave RBE_REPO_CONTENTS_CACHE on"} {
+		if strings.Contains(alert.Run, bad) {
+			t.Errorf("alert issue body still says %q; a mismatch sets the variable to seed", bad)
+		}
 	}
 
 	nightly := readFile(t, repoRoot(t), ".github/workflows/bazel-nightly.yml")
