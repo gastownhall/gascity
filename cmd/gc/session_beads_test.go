@@ -1949,6 +1949,58 @@ func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartupKickoffMetadata
 	}
 }
 
+func TestSyncSessionBeads_StaleManualPlanDoesNotRecreateClosedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	const sn = "s-gc-manual"
+	bead, err := store.Create(beads.Bead{
+		Title: "demo/conversation", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name": "demo/conversation", "session_name": sn,
+			"template": "demo/ant", "session_origin": "manual",
+			"alias": "demo/conversation", "state": "active",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), sn, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	// Planning observes an open user-owned session. Close then wins before
+	// sync reloads the store, leaving a stale desired entry for that session.
+	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
+	desired := map[string]TemplateParams{
+		sn: {
+			TemplateName: "demo/ant", InstanceName: "demo/conversation",
+			Alias: "demo/conversation", Command: "true", ManualSession: true,
+		},
+	}
+	manager := session.NewManagerWithOptions(store, sp)
+	if _, err := manager.CloseDetailed(bead.ID); err != nil {
+		t.Fatalf("close manual session: %v", err)
+	}
+	var stderr bytes.Buffer
+	for tick := 0; tick < 2; tick++ {
+		index, updated := syncSessionBeadsWithSnapshot(store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, snapshot)
+		if len(index) != 0 {
+			t.Fatalf("tick %d recreated a closed manual session: %v", tick, index)
+		}
+		snapshot = updated
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected sync error: %s", stderr.String())
+	}
+	rows, err := store.List(beads.ListQuery{Type: sessionBeadType, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != bead.ID || rows[0].Status != "closed" {
+		t.Fatalf("close must remain terminal without a successor: %+v", rows)
+	}
+}
+
 func TestSyncSessionBeads_BackfillsLegacyConcretePoolIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
