@@ -149,6 +149,14 @@ type CachingStore struct {
 	eventCheckBusy                atomic.Bool
 	eventCheckAfter               func(time.Duration) <-chan time.Time
 	applyEventBeforeCommitForTest func()
+
+	// ownEmits holds, per row, the snapshots this cache emitted within the
+	// recency window, so applyEvent tells its own echoes from other writers'
+	// events (ownEmission). ownEmitMu guards both and is never held while
+	// taking c.mu.
+	ownEmitMu       sync.Mutex
+	ownEmits        map[string][]ownEmit
+	ownEmitsSweptAt time.Time
 }
 
 // CacheObservation is an opaque, process-local stamp returned with a cached
@@ -203,9 +211,11 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - an ApplyEvent whose verification against the backing fails or times
 //     out, or whose field conflict the backing does not confirm while its
 //     read equals the cached row (gastownhall/gascity#2927), a clean row's
-//     unconfirmed field update included (mc-03lk4). A read that differs
-//     from the cached row installs instead, stamped. An event merged onto a
-//     cached row never clears a mark: it is not a backing read;
+//     unconfirmed field update included (mc-03lk4), and one within five
+//     seconds of a local write to the row (mc-xlphf; only the cache's own
+//     emission coming back drops there unchecked). A read that differs from
+//     the cached row installs instead, stamped. An event merged onto a cached
+//     row never clears a mark: it is not a backing read;
 //   - an ApplyEvent for a row the cache does not hold that a local write or
 //     deletion of the row overlapped;
 //   - a refetch (Get, the overlay, a Live or Parent list, a conditional
@@ -274,6 +284,12 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     that lags the event looks the same. The mark refuses the census for
 //     the whole store until a backing read of the row clears it, so a row
 //     RefreshRow installed is not thereby visible in the next census.
+//   - Within five seconds of a local write to a row, an event that is,
+//     field for field and to the updated_at stamp, a complete snapshot this
+//     cache emitted for the row in that window is taken for its own echo and
+//     dropped unchecked (mc-xlphf). Another writer that leaves the row exactly
+//     so, stamp included (on a backing that stamps whole seconds, within the
+//     same second), is dropped with it until a read or scan settles the row.
 //   - A verified bead.closed snapshot older than the backing row takes the
 //     backing row, but the order is read from updated_at. A backing whose
 //     updated_at is coarser than a close/reopen cycle can tie a delayed

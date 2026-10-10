@@ -93,6 +93,7 @@ go_test(
         "caching_store_ready_outcome_test.go",
         "caching_store_ready_projection_internal_test.go",
         "caching_store_ready_staleness_internal_test.go",
+        "caching_store_recent_local_event_internal_test.go",
         "caching_store_reconcile_census_test.go",
         "caching_store_reconcile_coverage_test.go",
         "caching_store_reconcile_decision_test.go",
