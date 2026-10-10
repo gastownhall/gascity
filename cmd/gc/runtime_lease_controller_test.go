@@ -24,19 +24,19 @@ func TestLockRuntimeNameTakesTheNameFlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := &World{CityPath: city}
-	if _, unlock, ok := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"}); ok || unlock != nil {
+	if _, lease, cause, _ := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"}, nil, 0); cause != causeNameBusy || lease != nil {
 		t.Fatal("lockRuntimeName ignored the name's flock")
 	}
 	flock.Release()
-	_, unlock, ok := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"})
-	if !ok {
-		t.Fatal("lockRuntimeName refused a free name")
+	_, lease, cause, _ := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"}, nil, 0)
+	if cause != "" {
+		t.Fatalf("lockRuntimeName refused a free name: %q", cause)
 	}
 	if _, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: city, Name: "named-1"}); !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) {
 		t.Fatalf("flock under an effect's lock = %v, want busy", err)
 	}
-	unlock()
-	unlock()
+	lease.Release()
+	lease.Release()
 }
 
 // TestControllerKillsNeverWait (M1): the controller's kill takes the runtime

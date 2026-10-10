@@ -766,7 +766,8 @@ func closePremiseHolds(decided, open Info) bool {
 // (false, nil). decide returning false, or a row already closed, writes
 // nothing. Without an atomic conditional closer it returns
 // beads.ErrConditionalWriteUnsupported and writes nothing: there is no
-// two-write fallback.
+// two-write fallback. The close clears the runtime lease record, which a
+// closed row holds no more.
 func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedResponse) (MetadataPatch, bool)) (bool, error) {
 	closer, ok := beads.AtomicConditionalCloserFor(s.store)
 	if !ok {
@@ -780,7 +781,7 @@ func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedR
 	if !ok {
 		return false, nil
 	}
-	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch)); {
+	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(withRuntimeLeaseCleared(patch))); {
 	case err == nil:
 		return true, nil
 	case beads.IsPreconditionFailed(err):

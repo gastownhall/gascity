@@ -1529,6 +1529,7 @@ go_test(
         "reconcile_dirty_test.go",
         "reconcile_effect_create_test.go",
         "reconcile_effect_heal_test.go",
+        "reconcile_effect_lease_test.go",
         "reconcile_effect_rekey_test.go",
         "reconcile_effect_runtime_test.go",
         "reconcile_effect_tx_test.go",
