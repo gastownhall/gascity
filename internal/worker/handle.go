@@ -217,6 +217,10 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredPendingInteraction means the session is waiting on a
+	// pending interaction such as a tool permission prompt. Typing into it
+	// would answer the prompt, so the nudge waits until it is resolved.
+	NudgeUndeliveredPendingInteraction NudgeUndeliveredReason = "pending_interaction"
 	// NudgeUndeliveredHeld means the session is held, which a nudge does not
 	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
 	// must queue it (a wait-idle nudge).

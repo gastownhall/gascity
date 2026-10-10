@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker/workertest"
@@ -533,5 +535,555 @@ func phase2ReportProfile() workertest.ProfileID {
 		return workertest.ProfileGeminiTmuxCLI
 	default:
 		return workertest.ProfileClaudeTmuxCLI
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code 2.1.284 fixtures (#2892)
+//
+// The files under testdata/claude-approval are real `tmux capture-pane -p`
+// captures of the claude CLI (Claude Code v2.1.284, Haiku and Sonnet) sitting
+// on permission prompts in a scratch session. Unlike the hand-written legacy
+// panes above, today's layout:
+//   - renders the tool line with an animated ⏺ that blinks to a space, or as
+//     prose ("Running date command…"), so no "● Tool(" header is reliable;
+//   - omits "This command requires approval" in the default (manual) mode;
+//   - wraps long option labels onto continuation lines at 80 columns;
+//   - can offer four options, where "3" is "Yes, and switch to auto mode".
+// ---------------------------------------------------------------------------
+
+func readApprovalFixture(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "claude-approval", name))
+	if err != nil {
+		t.Fatalf("reading fixture %s: %v", name, err)
+	}
+	return string(data)
+}
+
+func TestParseApprovalPrompt_ClaudeCodeFixtures(t *testing.T) {
+	cases := []struct {
+		fixture   string
+		tool      string
+		input     string
+		wantLabel []string
+	}{
+		{
+			fixture: "bash-manual-80x24.txt",
+			tool:    "Bash",
+			input:   "date > bash-ran.txt",
+			wantLabel: []string{
+				"Yes",
+				"Yes, and always allow access to /private/tmp/claude/aprcap.QPjbuv from this project",
+				"No",
+			},
+		},
+		{
+			fixture: "bash-manual-160x50.txt",
+			tool:    "Bash",
+			input:   "date > bash-ran.txt",
+			wantLabel: []string{
+				"Yes",
+				"Yes, and always allow access to /private/tmp/claude/aprcap.QPjbuv from this project",
+				"No",
+			},
+		},
+		{
+			fixture:   "bash-acceptedits-80x24.txt",
+			tool:      "Bash",
+			input:     `python3 -c "print(6*7)"`,
+			wantLabel: []string{"Yes", "Yes, and don’t ask again for: python3 *", "No"},
+		},
+		{
+			fixture: "bash-automode-option.txt",
+			tool:    "Bash",
+			input:   `python3 -c "print(6*7)"`,
+			wantLabel: []string{
+				"Yes",
+				"Yes, and don’t ask again for: python3 *",
+				"Yes, and switch to auto mode · auto mode handles these prompts for you",
+				"No",
+			},
+		},
+		{
+			fixture: "edit-80x24.txt",
+			tool:    "Edit",
+			input:   "notes.txt",
+			wantLabel: []string{
+				"Yes",
+				"Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+				"No",
+			},
+		},
+		{
+			fixture: "edit-160x50.txt",
+			tool:    "Edit",
+			input:   "notes.txt",
+			wantLabel: []string{
+				"Yes",
+				"Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+				"No",
+			},
+		},
+		{
+			// Claude Code 2.1.287 moved the command into a ╌-delimited box
+			// below Claude's one-line description.
+			fixture: "bash-acceptedits-2.1.287-80x24.txt",
+			tool:    "Bash",
+			input:   `python3 -c "print(6*7)"`,
+			wantLabel: []string{
+				"Yes",
+				"Yes, and don’t ask again for: python3 *",
+				"No",
+			},
+		},
+		{
+			fixture: "write-80x24.txt",
+			tool:    "Write",
+			input:   "hello.txt",
+			wantLabel: []string{
+				"Yes",
+				"Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+				"No",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			a := parseApprovalPrompt(readApprovalFixture(t, tc.fixture))
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			if a.ToolName != tc.tool {
+				t.Errorf("ToolName = %q, want %q", a.ToolName, tc.tool)
+			}
+			if !strings.Contains(a.Input, tc.input) {
+				t.Errorf("Input = %q, want it to contain %q", a.Input, tc.input)
+			}
+			if got := approvalOptionLabels(a); strings.Join(got, "\n") != strings.Join(tc.wantLabel, "\n") {
+				t.Errorf("option labels = %q, want %q", got, tc.wantLabel)
+			}
+		})
+	}
+}
+
+func TestParseApprovalPrompt_RequestIDStableAcrossPaneWidths(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"bash-manual-80x24.txt", "bash-manual-160x50.txt"},
+		{"edit-80x24.txt", "edit-160x50.txt"},
+		{"bash-acceptedits-2.1.287-80x24.txt", "bash-acceptedits-2.1.287-100x30.txt"},
+		{"bash-acceptedits-2.1.288-long-80x30.txt", "bash-acceptedits-2.1.288-long-100x40.txt"},
+		{"bash-acceptedits-2.1.288-multiline-80x30.txt", "bash-acceptedits-2.1.288-multiline-100x40.txt"},
+	} {
+		narrow := parseApprovalPrompt(readApprovalFixture(t, pair[0]))
+		wide := parseApprovalPrompt(readApprovalFixture(t, pair[1]))
+		if narrow == nil || wide == nil {
+			t.Fatalf("%v: expected both captures to parse, got %v / %v", pair, narrow, wide)
+		}
+		if approvalHash(narrow) != approvalHash(wide) {
+			t.Errorf("%v: request IDs differ across widths: %+v vs %+v", pair, narrow, wide)
+		}
+	}
+}
+
+func TestParseApprovalPrompt_IdleClaudeCodePanes(t *testing.T) {
+	for _, fixture := range []string{"idle-after-deny-80x24.txt", "idle-after-approve.txt"} {
+		if a := parseApprovalPrompt(readApprovalFixture(t, fixture)); a != nil {
+			t.Errorf("%s: expected no approval prompt, got %+v", fixture, a)
+		}
+	}
+}
+
+func TestParseApprovalPrompt_MenuMustBeLive(t *testing.T) {
+	// A menu that has scrolled up above the composer is history, not a live
+	// prompt: text typed now goes to the composer.
+	pane := readApprovalFixture(t, "bash-manual-80x24.txt") + `
+  Ran 1 shell command
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents`
+	if a := parseApprovalPrompt(pane); a != nil {
+		t.Fatalf("expected no live approval prompt, got %+v", a)
+	}
+}
+
+func TestParseApprovalPrompt_IgnoresAPIKeyDialog(t *testing.T) {
+	pane := ` Detected a custom API key in your environment
+
+ ANTHROPIC_API_KEY: sk-ant-...XXXX
+
+ Do you want to use this API key?
+
+ ❯ 1. Yes
+   2. No (recommended)`
+	if a := parseApprovalPrompt(pane); a != nil {
+		t.Fatalf("expected the API-key startup dialog not to parse as an approval, got %+v", a)
+	}
+}
+
+func TestApprovalOptionKey_ChoosesByLabel(t *testing.T) {
+	cases := []struct {
+		fixture string
+		action  string
+		want    string
+	}{
+		{"bash-manual-80x24.txt", "approve", "1"},
+		{"bash-manual-80x24.txt", "approve_always", "2"},
+		{"bash-manual-80x24.txt", "deny", "3"},
+		{"bash-acceptedits-80x24.txt", "approve_always", "2"},
+		{"bash-acceptedits-80x24.txt", "deny", "3"},
+		// "3" is "Yes, and switch to auto mode" here: deny must be "4".
+		{"bash-automode-option.txt", "approve", "1"},
+		{"bash-automode-option.txt", "approve_always", "2"},
+		{"bash-automode-option.txt", "deny", "4"},
+		{"edit-80x24.txt", "approve_accept_edits", "2"},
+		{"edit-80x24.txt", "deny", "3"},
+		{"write-80x24.txt", "approve", "1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture+"/"+tc.action, func(t *testing.T) {
+			a := parseApprovalPrompt(readApprovalFixture(t, tc.fixture))
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			got, err := approvalOptionKey(a, tc.action)
+			if err != nil {
+				t.Fatalf("approvalOptionKey(%q): %v", tc.action, err)
+			}
+			if got != tc.want {
+				t.Fatalf("approvalOptionKey(%q) = %q, want %q (options %q)", tc.action, got, tc.want, approvalOptionLabels(a))
+			}
+		})
+	}
+}
+
+func TestApprovalOptionKey_FailsClosed(t *testing.T) {
+	cases := []struct {
+		name   string
+		pane   string
+		action string
+	}{
+		{
+			name:   "no reject option",
+			action: "deny",
+			pane: ` Bash command
+
+   rm -rf build
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and switch to auto mode`,
+		},
+		{
+			name:   "two plain yes options",
+			action: "approve",
+			pane: ` Bash command
+
+   rm -rf build
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes
+   3. No`,
+		},
+		{
+			name:   "accept edits not offered on a bash prompt",
+			action: "approve_accept_edits",
+			pane:   readApprovalFixture(t, "bash-automode-option.txt"),
+		},
+		{
+			name:   "unknown action",
+			action: "allow",
+			pane:   readApprovalFixture(t, "bash-manual-80x24.txt"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := parseApprovalPrompt(tc.pane)
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			if key, err := approvalOptionKey(a, tc.action); err == nil {
+				t.Fatalf("approvalOptionKey(%q) = %q, want an error (options %q)", tc.action, key, approvalOptionLabels(a))
+			}
+		})
+	}
+}
+
+func TestRespond_DenySendsTheNoOptionNotThree(t *testing.T) {
+	session := "automode-deny"
+	fe := &fakeExecutor{
+		// pre-verify capture, #{pane_in_mode} probe (not parked), send-keys,
+		// then the verify capture showing the prompt cleared.
+		outs: []string{
+			readApprovalFixture(t, "bash-automode-option.txt"),
+			"0",
+			"",
+			readApprovalFixture(t, "idle-after-deny-80x24.txt"),
+		},
+	}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	if err := provider.Respond(session, runtime.InteractionResponse{Action: "deny"}); err != nil {
+		t.Fatalf("Respond(deny): %v", err)
+	}
+	var sent []string
+	for _, call := range fe.calls {
+		if sendsKeys(call) {
+			sent = append(sent, call[len(call)-1])
+		}
+	}
+	if len(sent) != 1 || sent[0] != "4" {
+		t.Fatalf("send-keys payloads = %q, want exactly [\"4\"] (the \"No\" option)", sent)
+	}
+}
+
+func TestRespond_UnresolvableMenuSendsNothing(t *testing.T) {
+	session := "no-reject"
+	pane := ` Bash command
+
+   rm -rf build
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and switch to auto mode`
+	fe := &fakeExecutor{out: pane}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	err := provider.Respond(session, runtime.InteractionResponse{Action: "deny"})
+	if err == nil {
+		t.Fatal("Respond(deny) succeeded on a menu with no reject option, want an error")
+	}
+	if !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
+		t.Fatalf("Respond(deny) error = %v, want runtime.ErrInteractionActionUnavailable", err)
+	}
+	for _, call := range fe.calls {
+		if sendsKeys(call) {
+			t.Fatalf("Respond sent keys despite an unresolvable menu: %v", call)
+		}
+	}
+}
+
+func TestPending_ReportsParsedOptionLabels(t *testing.T) {
+	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-automode-option.txt")}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	pending, err := provider.Pending("s")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending == nil {
+		t.Fatal("Pending = nil, want the approval prompt")
+	}
+	if len(pending.Options) != 4 || pending.Options[3] != "No" {
+		t.Fatalf("Options = %q, want the four labels from the pane", pending.Options)
+	}
+	if pending.Metadata["tool_name"] != "Bash" {
+		t.Fatalf("tool_name = %q, want Bash", pending.Metadata["tool_name"])
+	}
+	// Clients read the command and Claude's description separately, so a
+	// multi-line command is never confused with the description.
+	if got := pending.Metadata["command"]; got != `python3 -c "print(6*7)"` {
+		t.Fatalf("metadata command = %q", got)
+	}
+	if got := pending.Metadata["description"]; got != "Run python3 command to print 6*7" {
+		t.Fatalf("metadata description = %q", got)
+	}
+}
+
+func TestNudgeNow_RefusesToTypeIntoApprovalPrompt(t *testing.T) {
+	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-manual-80x24.txt")}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	err := provider.NudgeNow("s", runtime.TextContent("hello?"))
+	if !errors.Is(err, runtime.ErrPendingInteraction) {
+		t.Fatalf("NudgeNow error = %v, want runtime.ErrPendingInteraction", err)
+	}
+	for _, call := range fe.calls {
+		if sendsKeys(call) {
+			t.Fatalf("NudgeNow sent keys into a pending approval prompt: %v", call)
+		}
+	}
+}
+
+func TestSnapshotPaneIdle_ApprovalPromptIsNotIdle(t *testing.T) {
+	// "❯ 1. Yes" matches the ready-prompt prefix, so without an explicit
+	// approval check a permission prompt reads as an idle composer and
+	// wait-idle delivery types into it.
+	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-manual-80x24.txt")}
+	tm := &Tmux{exec: fe}
+	idle, err := tm.snapshotPaneIdleWithPrefix("s", DefaultReadyPromptPrefix)
+	if err != nil {
+		t.Fatalf("snapshotPaneIdleWithPrefix: %v", err)
+	}
+	if idle {
+		t.Fatal("pane showing a permission prompt reported idle")
+	}
+
+	fe.out = readApprovalFixture(t, "idle-after-deny-80x24.txt")
+	idle, err = tm.snapshotPaneIdleWithPrefix("s", DefaultReadyPromptPrefix)
+	if err != nil {
+		t.Fatalf("snapshotPaneIdleWithPrefix: %v", err)
+	}
+	if !idle {
+		t.Fatal("idle composer pane reported busy")
+	}
+}
+
+// sendsKeys reports whether a recorded tmux call is a send-keys.
+func sendsKeys(call []string) bool {
+	for _, arg := range call {
+		if arg == "send-keys" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestParseApprovalPrompt_BashInputLeadsWithCommand pins the contract clients
+// rely on: a Bash prompt's Input starts with the command itself, and Claude's
+// model-written description (if any) follows it. A client that shows or speaks
+// only the first line must never present the description as the command.
+func TestParseApprovalPrompt_BashInputLeadsWithCommand(t *testing.T) {
+	for _, tc := range []struct {
+		fixture, command, description string
+	}{
+		{"bash-manual-80x24.txt", "date > bash-ran.txt", "Run date command and write output to bash-ran.txt"},
+		{"bash-acceptedits-2.1.287-80x24.txt", `python3 -c "print(6*7)"`, "Run Python command to calculate 6*7"},
+		{"bash-acceptedits-2.1.287-100x30.txt", `python3 -c "print(6*7)"`, "Run Python command to calculate 6*7"},
+		// Claude Code 2.1.288 prefixes the box's lines with "│ ". A line that
+		// ends because the next word didn't fit is a wrap and is rejoined; a
+		// line that ends early is a real newline in the command and is kept.
+		{"bash-acceptedits-2.1.288-long-80x30.txt", `python3 -c 'print(5+6)' > sum.txt && echo "exit=$?" && echo "--- sum.txt contents follow ---" && cat sum.txt && echo "--- end of sum.txt contents ---"`, "Run Python calculation and save to file with status checks"},
+		{"bash-acceptedits-2.1.288-long-100x40.txt", `python3 -c 'print(5+6)' > sum.txt && echo "exit=$?" && echo "--- sum.txt contents follow ---" && cat sum.txt && echo "--- end of sum.txt contents ---"`, "Run Python calculation and save to file with status checks"},
+		{"bash-acceptedits-2.1.288-multiline-80x30.txt", "cd /tmp/gjcapml\n" + `python3 -c 'print(5 + 6)' > sum.txt` + "\nSTATUS=$?\n" + `echo "python3 finished with exit status $STATUS and wrote sum.txt into the demo working directory"`, "Run a four-line script: change to /tmp/gjcapml, run Python to compute 5 + 6 and write to sum.txt, capture exit status, then report completion"},
+		{"bash-acceptedits-2.1.288-multiline-100x40.txt", "cd /tmp/gjcapml\n" + `python3 -c 'print(5 + 6)' > sum.txt` + "\nSTATUS=$?\n" + `echo "python3 finished with exit status $STATUS and wrote sum.txt into the demo working directory"`, "Run a four-line script: change to /tmp/gjcapml, run Python to compute 5 + 6 and write to sum.txt, capture exit status, then report completion"},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			a := parseApprovalPrompt(readApprovalFixture(t, tc.fixture))
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			if a.Command != tc.command {
+				t.Errorf("Command = %q, want %q", a.Command, tc.command)
+			}
+			if a.Description != tc.description {
+				t.Errorf("Description = %q, want %q", a.Description, tc.description)
+			}
+			if !strings.HasPrefix(a.Input, tc.command) || !strings.Contains(a.Input, tc.description) {
+				t.Errorf("Input = %q, want the command first and the description after it", a.Input)
+			}
+			if got, want := approvalPromptText(a), "Bash: "+tc.command; !strings.HasPrefix(got, want) {
+				t.Errorf("prompt = %q, want it to start with %q", got, want)
+			}
+		})
+	}
+}
+
+// withFastRespondVerify shrinks Respond's verify polling for a test.
+func withFastRespondVerify(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	interval, deadline := respondVerifyInterval, respondVerifyTimeout
+	respondVerifyInterval, respondVerifyTimeout = time.Millisecond, timeout
+	t.Cleanup(func() { respondVerifyInterval, respondVerifyTimeout = interval, deadline })
+}
+
+// TestRespond_WaitsForASlowRedrawBeforeReportingFailure: under load Claude Code
+// can take seconds to redraw after the answer key. Respond must keep checking
+// until its deadline instead of reporting a failure for an answer that landed.
+func TestRespond_WaitsForASlowRedrawBeforeReportingFailure(t *testing.T) {
+	withFastRespondVerify(t, 2*time.Second)
+	prompt := readApprovalFixture(t, "bash-automode-option.txt")
+	// pre-verify capture, #{pane_in_mode} probe, send-keys, then six verify
+	// captures that still show the prompt before the idle screen.
+	outs := []string{prompt, "0", ""}
+	for range 6 {
+		outs = append(outs, prompt)
+	}
+	outs = append(outs, readApprovalFixture(t, "idle-after-deny-80x24.txt"))
+	fe := &fakeExecutor{outs: outs}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	if err := provider.Respond("slow-redraw", runtime.InteractionResponse{Action: "deny"}); err != nil {
+		t.Fatalf("Respond(deny) on a slow redraw: %v", err)
+	}
+	sends := 0
+	for _, call := range fe.calls {
+		if sendsKeys(call) {
+			sends++
+		}
+	}
+	if sends != 1 {
+		t.Fatalf("send-keys calls = %d, want exactly 1 (the answer is never re-sent)", sends)
+	}
+}
+
+// TestRespond_ReportsFailureWhenThePromptNeverClears keeps the honest failure
+// when the answer really didn't take.
+func TestRespond_ReportsFailureWhenThePromptNeverClears(t *testing.T) {
+	withFastRespondVerify(t, 30*time.Millisecond)
+	prompt := readApprovalFixture(t, "bash-automode-option.txt")
+	fe := &fakeExecutor{outs: []string{prompt, "0", ""}, out: prompt}
+	provider := &Provider{tm: &Tmux{exec: fe}}
+	err := provider.Respond("stuck", runtime.InteractionResponse{Action: "deny"})
+	if err == nil || !strings.Contains(err.Error(), "did not clear") {
+		t.Fatalf("Respond(deny) on a prompt that never clears = %v, want a did-not-clear error", err)
+	}
+}
+
+// Claude Code hard-wraps a long permission question at the pane width, in the
+// middle of a word when it has to: on 2.1.289 at 80 columns "Do you want to
+// make this edit to <long file name>?" took two rows. Such a prompt must still
+// be detected, or a submit's Enter answers it, and the question must read the
+// same as on a pane wide enough not to wrap it.
+func TestParseApprovalPrompt_WrappedQuestion(t *testing.T) {
+	const want = "Do you want to make this edit to deployment-configuration-checklist-for-the-staging-and-production-environments.txt?"
+	for _, fixture := range []string{
+		"edit-wrapped-question-2.1.289-80x30.txt",
+		"edit-wrapped-question-2.1.289-160x40.txt",
+	} {
+		t.Run(fixture, func(t *testing.T) {
+			a := parseApprovalPrompt(readApprovalFixture(t, fixture))
+			if a == nil {
+				t.Fatal("expected an approval prompt, got nil")
+			}
+			if a.ToolName != "Edit" {
+				t.Errorf("ToolName = %q, want Edit", a.ToolName)
+			}
+			if a.Question != want {
+				t.Errorf("Question = %q, want %q", a.Question, want)
+			}
+			if got := approvalOptionLabels(a); len(got) != 3 || got[0] != "Yes" || got[2] != "No" {
+				t.Errorf("option labels = %q, want Yes / Yes, and switch... / No", got)
+			}
+		})
+	}
+}
+
+// When the wrap falls on a space, the space ends the first row (and the
+// capture drops it) or starts the second; either way the rejoined question
+// keeps exactly one space there.
+func TestParseApprovalPrompt_QuestionWrappedAtASpace(t *testing.T) {
+	// An 80-column pane: one column of indent, 78 of question per row.
+	for _, xs := range []int{44, 45} {
+		question := "Do you want to make this edit to " + strings.Repeat("x", xs) + " notes for the release.txt?"
+		rows := " " + strings.TrimRight(question[:78], " ") + "\n " + question[78:] + "\n"
+		pane := strings.Replace(readApprovalFixture(t, "edit-80x24.txt"),
+			" Do you want to make this edit to notes.txt?\n", rows, 1)
+		a := parseApprovalPrompt(pane)
+		if a == nil {
+			t.Fatalf("%d x: expected an approval prompt, got nil", xs)
+		}
+		if a.Question != question {
+			t.Errorf("%d x: Question = %q, want %q", xs, a.Question, question)
+		}
+	}
+}
+
+// The rejoined question takes only the rows from its start down to the menu.
+func TestParseApprovalPrompt_WrappedQuestionStopsAtTheMenu(t *testing.T) {
+	a := parseApprovalPrompt(readApprovalFixture(t, "edit-wrapped-question-2.1.289-80x30.txt"))
+	if a == nil {
+		t.Fatal("expected an approval prompt, got nil")
+	}
+	if strings.Contains(a.Question, "Yes") || strings.Contains(a.Question, "╌") {
+		t.Errorf("Question = %q, want only the question rows", a.Question)
 	}
 }

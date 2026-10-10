@@ -642,6 +642,32 @@ func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store
 	return apiSessionTargetNotFound(identifier)
 }
 
+// rejectPendingInteraction refuses a text delivery synchronously while the
+// target session is waiting on a pending interaction such as a tool
+// permission prompt (#2892). The delivery itself runs asynchronously after
+// the 202, so without this check the caller would be told "accepted" and the
+// refusal would surface only as a request.failed event -- or, where the
+// provider could not see the prompt, the text's Enter would answer it. A
+// configured named session that has not been materialized yet has nothing
+// pending.
+func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store, identifier string) error {
+	id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{})
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return nil
+		}
+		return humaResolveError(err)
+	}
+	pending, _, err := s.sessionManager(store).Pending(id)
+	if err != nil {
+		return humaSessionManagerError(err)
+	}
+	if pending != nil {
+		return humaSessionManagerError(session.PendingInteractionError(pending))
+	}
+	return nil
+}
+
 func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{materialize: true})
 }

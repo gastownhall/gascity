@@ -3184,7 +3184,11 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 		{"bare drained composer", []string{"❯ "}, "hello", true},
 		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
 		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
-		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		// Any text left in the composer puts the submit in doubt: a draft
+		// Claude restored after an interrupt, with the sent message pasted
+		// behind it, starts with the old prompt (see
+		// TestPaneShowsDrainedComposerRejectsMergedClaudeDraft).
+		{"composer holds other text", []string{"❯ something else entirely"}, "hello", false},
 		{
 			"long draft truncated to pane width still detected via 40-rune compare",
 			[]string{"❯ " + longSentFirst40},
@@ -3230,7 +3234,7 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			got := paneShowsDrainedComposer(tt.lines)
 			if got != tt.want {
 				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}

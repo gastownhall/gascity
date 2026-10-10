@@ -150,6 +150,7 @@ go_test(
         "sleep_reason_test.go",
         "startup_health_test.go",
         "state_machine_test.go",
+        "stop_input_clear_test.go",
         "store_close_backends_test.go",
         "store_close_terminal_test.go",
         "store_close_test.go",

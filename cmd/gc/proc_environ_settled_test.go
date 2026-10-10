@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -26,11 +27,30 @@ func TestWaitForProcEnvironNeverReturnsATornRead(t *testing.T) {
 	env = append(env, marker)
 
 	for i := 0; i < 300; i++ {
-		// The child execs twice (sh, then sleep), like the fake dolt.
-		cmd := exec.Command("/bin/sh", "-c", "exec sleep 30")
+		// Wait for the shell's first instruction before measuring the sh ->
+		// sleep exec race. Start may return while /proc still exposes the
+		// pre-exec child image and its inherited parent environment; that is
+		// a complete snapshot of the wrong image, not a torn read.
+		ready, notify, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", "-c", "printf x >&3; exec 3>&-; exec sleep 30")
+		cmd.ExtraFiles = []*os.File{notify}
 		cmd.Env = env
 		if err := cmd.Start(); err != nil {
+			_ = ready.Close()
+			_ = notify.Close()
 			t.Fatalf("start child: %v", err)
+		}
+		_ = notify.Close()
+		var signal [1]byte
+		_, err = ready.Read(signal[:])
+		_ = ready.Close()
+		if err != nil || signal[0] != 'x' {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("wait for shell startup: %v", err)
 		}
 		got := waitForProcEnviron(t, cmd.Process.Pid)
 		_ = cmd.Process.Kill()

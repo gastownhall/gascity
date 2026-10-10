@@ -32,6 +32,23 @@ var ErrSessionInitializing = errors.New("session is initializing")
 // structured pending/respond interaction capability for the requested session.
 var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 
+// ErrPendingInteraction reports that a session is showing a blocking
+// interaction (for example a tool permission prompt) that must be answered
+// before any text is delivered to it. Typing into such a prompt can select
+// one of its options, so providers refuse the delivery instead.
+var ErrPendingInteraction = errors.New("session has a pending interaction")
+
+// ErrInputClearSkipped reports that a runtime left a session's input box
+// alone instead of clearing it: a client is attached (or the runtime cannot
+// tell whether one is), so a human may be typing there, and wiping their draft
+// is worse than leaving a stale one (#5192). No keys were sent.
+var ErrInputClearSkipped = errors.New("input box left alone: a client may be attached")
+
+// ErrInteractionActionUnavailable reports that the pending interaction offers
+// no single option matching the requested response action, so the provider
+// sent nothing rather than guess which option to pick.
+var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
@@ -621,6 +638,21 @@ type ImmediateNudgeProvider interface {
 // the canceled request and the replacement request in one combined turn.
 type InterruptedTurnResetProvider interface {
 	ResetInterruptedTurn(ctx context.Context, name string) error
+}
+
+// InputClearProvider is an optional extension for runtimes that can empty a
+// session's input box and confirm it is empty.
+//
+// Claude Code puts a prompt that was interrupted before its first response
+// back into the input box, sometimes after the interrupt has settled. Left
+// there, the next submitted message is appended to it and both go out as one.
+// ClearInput waits up to restoreWindow for such a draft to appear, clears it,
+// and confirms the input box reads empty. It sends no keys when the input box
+// stays empty, and returns an error when a draft is visible but cannot be
+// cleared. When a client is attached (or the runtime cannot tell) it sends no
+// keys and returns an error wrapping [ErrInputClearSkipped].
+type InputClearProvider interface {
+	ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error
 }
 
 // InterruptBoundaryWaitProvider is an optional extension for runtimes that can
