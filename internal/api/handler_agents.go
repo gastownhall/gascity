@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -349,9 +350,8 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 	return s.findActiveBeadForAssigneesWithFreshness(rig, true, assignees...)
 }
 
-// findActiveBeadForAssigneesWithFreshness uses a targeted ListQuery with
-// Limit=1 instead of broad scans so active-bead lookup stays cheap even when
-// bead counts are large.
+// findActiveBeadForAssigneesWithFreshness uses targeted assignee queries.
+// Live reads batch identities per store; cached reads stop at the first match.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
 	stores := s.state.BeadStores()
 	var rigNames []string
@@ -372,6 +372,36 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 		}
 		seen[assignee] = true
 		unique = append(unique, assignee)
+	}
+	if live && len(unique) > 0 {
+		// A detail read must be fresh, but each backing List can spawn database
+		// commands. Batch aliases into one query per store instead of paying
+		// that cost once for every possible identity. Keep assignee priority
+		// above rig order, and newest-first within a rig, as on the cached path.
+		firstByAssignee := make(map[string]string, len(unique))
+		for _, rn := range rigNames {
+			matches, err := stores[rn].List(beads.ListQuery{
+				Assignees: unique,
+				Status:    "in_progress",
+				Live:      true,
+				Sort:      beads.SortCreatedDesc,
+			})
+			if err != nil {
+				log.Printf("api: looking up active work in rig %q: %v", rn, err)
+				continue
+			}
+			for _, match := range matches {
+				if seen[match.Assignee] && firstByAssignee[match.Assignee] == "" {
+					firstByAssignee[match.Assignee] = match.ID
+				}
+			}
+		}
+		for _, assignee := range unique {
+			if id := firstByAssignee[assignee]; id != "" {
+				return id
+			}
+		}
+		return ""
 	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {

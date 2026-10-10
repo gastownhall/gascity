@@ -39,7 +39,7 @@ type activeBeadQueryStore struct {
 }
 
 func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Assignee != "" && query.Status == "in_progress" {
+	if query.Status == "in_progress" {
 		s.queries = append(s.queries, query)
 	}
 	return s.Store.List(query)
@@ -1645,5 +1645,58 @@ func TestAgentListProvenancePoolInheritance(t *testing.T) {
 		if item.Pack != "gastown" {
 			t.Errorf("Items[%d] (%s) Pack = %q, want %q", i, item.Name, item.Pack, "gastown")
 		}
+	}
+}
+
+func TestLiveActiveBeadBatchesIdentitiesAndPreservesPrecedence(t *testing.T) {
+	state := newFakeState(t)
+	a := &activeBeadQueryStore{Store: beads.NewMemStore()}
+	z := &activeBeadQueryStore{Store: beads.NewMemStore()}
+	state.stores = map[string]beads.Store{"a": a, "z": z}
+	srv := New(state)
+	identities := []string{"session-id", "runtime-name", "alias", "template"}
+	assertReads := func() {
+		t.Helper()
+		for name, store := range map[string]*activeBeadQueryStore{"a": a, "z": z} {
+			if len(store.queries) != 1 {
+				t.Errorf("store %s: %d live active-work reads, want one per store", name, len(store.queries))
+			}
+			for _, q := range store.queries {
+				if !q.Live {
+					t.Errorf("store %s used a stale lookup", name)
+				}
+			}
+			store.queries = nil
+		}
+	}
+	if got := srv.findLiveActiveBeadForAssignees("", identities...); got != "" {
+		t.Fatalf("empty stores returned %q", got)
+	}
+	assertReads()
+	add := func(store beads.Store, assignee string, created time.Time) string {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Title: "assigned work", CreatedAt: created})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := "in_progress"
+		if err := store.Update(b.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+		return b.ID
+	}
+	now := time.Now()
+	alias := add(a, "alias", now)
+	add(z, "session-id", now.Add(-time.Hour))
+	newest := add(z, "session-id", now)
+	if got := srv.findLiveActiveBeadForAssignees("", identities...); got != newest {
+		t.Fatalf("concrete session must win across rigs; got %q, want %q", got, newest)
+	}
+	assertReads()
+	if got := srv.findLiveActiveBeadForAssignees("a", identities...); got != alias {
+		t.Fatalf("rig-scoped alias lookup = %q, want %q", got, alias)
+	}
+	if len(a.queries) != 1 || len(z.queries) != 0 {
+		t.Fatalf("rig filter queried a=%d z=%d times", len(a.queries), len(z.queries))
 	}
 }
