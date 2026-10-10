@@ -84,7 +84,7 @@ func (p *effectPass) readWork(row session.Info) *txWork {
 // began.
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
 	wp, ok := leaf.(runtime.IdleWaitProvider)
-	if !ok || wp.WaitForIdle(ctx, name, idleSleepProbeTimeout) != nil {
+	if !ok || wp.WaitForIdle(ctx, name, idleSleepProbeTimeoutFor(leaf, name)) != nil {
 		return false
 	}
 	last, ok := boundedProbe(ctx, func() error {

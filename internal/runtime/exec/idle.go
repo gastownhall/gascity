@@ -16,6 +16,13 @@ import (
 // variable so tests can shorten it.
 var execIdlePollInterval = 200 * time.Millisecond
 
+// execIdleProbeBudget is the WaitForIdle timeout one idle proof needs on a
+// pack with an idle boundary (see IdleProbeBudget). Each pane observation is
+// a full round trip to the box, so two observations plus the poll interval fit
+// whenever a capture takes under about 2.4s. A package variable so tests can
+// change it.
+var execIdleProbeBudget = 5 * time.Second
+
 // execIdleRequiredObservations is how many consecutive idle pane observations
 // WaitForIdle needs, mirroring the tmux provider: a single observation can
 // land in the gap between two tool calls, when the prompt is visible but the
@@ -162,6 +169,17 @@ func boundedPeek(ctx context.Context, c runtime.Carrier, name string, limit time
 	case <-captureCtx.Done():
 		return "", errors.Is(captureCtx.Err(), context.DeadlineExceeded), fmt.Errorf("exec provider: capturing %q: %w", name, captureCtx.Err())
 	}
+}
+
+// IdleProbeBudget reports the timeout one idle proof needs on this pack and
+// implements [runtime.IdleProbeBudgetProvider]: execIdleProbeBudget for a pack
+// with an idle boundary, whose every pane observation is an exec round trip;
+// zero otherwise, so the orchestrator keeps its default.
+func (p *Provider) IdleProbeBudget() time.Duration {
+	if p.idleBoundaryDeclared() {
+		return execIdleProbeBudget
+	}
+	return 0
 }
 
 // paneLines splits captured pane output into lines; empty output has none.

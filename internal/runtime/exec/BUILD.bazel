@@ -28,6 +28,7 @@ go_test(
         "exec_reuse_test.go",
         "exec_test.go",
         "handshake_test.go",
+        "idle_budget_test.go",
         "idle_integration_test.go",
         "idle_test.go",
         "json_test.go",

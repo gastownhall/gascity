@@ -1723,6 +1723,7 @@ go_test(
         "session_rollback_pending_create_atomic_test.go",
         "session_scaffold_staging_test.go",
         "session_sleep_exec_test.go",
+        "session_sleep_probe_budget_test.go",
         "session_sleep_test.go",
         "session_sleep_wake_override_test.go",
         "session_state_helpers_test.go",

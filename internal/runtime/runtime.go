@@ -468,6 +468,15 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// IdleProbeBudgetProvider is an optional extension for runtimes whose pane
+// observations are remote round trips. IdleProbeBudget reports the timeout
+// one idle proof (a [IdleWaitProvider.WaitForIdle] that needs two pane
+// observations) requires on this runtime; zero means the caller's default.
+// Callers clamp the answer to their own bounds.
+type IdleProbeBudgetProvider interface {
+	IdleProbeBudget() time.Duration
+}
+
 // IdleSnapshotProvider is an optional extension for runtimes that can report,
 // in a single non-blocking observation, whether a session is at an idle
 // interactive boundary right now (a ready prompt with no active-processing

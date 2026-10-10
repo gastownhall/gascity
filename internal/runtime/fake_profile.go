@@ -82,7 +82,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
-		return execProfile{core, b, b, b, b, timed}
+		return execProfile{core, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
@@ -93,13 +93,16 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 
 // The fixed traits a backend reports.
 type (
-	sleepTrait     struct{ c SessionSleepCapability }
-	freshTrait     struct{} // acp and subprocess probe their control socket on every read
-	sidecarTrait   struct{} // acp and subprocess keep identity in a local sidecar
-	transportTrait struct{} // acp's
+	sleepTrait       struct{ c SessionSleepCapability }
+	freshTrait       struct{}                  // acp and subprocess probe their control socket on every read
+	sidecarTrait     struct{}                  // acp and subprocess keep identity in a local sidecar
+	transportTrait   struct{}                  // acp's
+	probeBudgetTrait struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
+
+func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
 func (freshTrait) LivenessReadsFresh() bool { return true }
 
@@ -196,6 +199,7 @@ type (
 		IdleWaitProvider
 		RelaunchProvider
 		sleepTrait
+		probeBudgetTrait
 	}
 	sshProfile struct {
 		Provider

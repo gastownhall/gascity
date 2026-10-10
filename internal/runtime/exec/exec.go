@@ -868,6 +868,7 @@ var (
 	_ runtime.SleepCapabilityProvider     = (*Provider)(nil)
 	_ runtime.IdleWaitProvider            = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
+	_ runtime.IdleProbeBudgetProvider     = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements
