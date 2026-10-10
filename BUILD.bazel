@@ -66,14 +66,14 @@ sh_test(
 # workflows run (formerly `make test-ci-policy`'s Python half).
 py_test(
     name = "ci_runner_policy_test",
+    srcs = [
+        ".github/workflows/scripts/runner_policy.py",
+        ".github/workflows/scripts/test_runner_policy.py",
+    ],
     data = [
         ".bazelrc",
         "//internal/gchome:BUILD.bazel",
         "//internal/productmetrics:BUILD.bazel",
-    ],
-    srcs = [
-        ".github/workflows/scripts/runner_policy.py",
-        ".github/workflows/scripts/test_runner_policy.py",
     ],
     imports = [".github/workflows/scripts"],
     main = ".github/workflows/scripts/test_runner_policy.py",
