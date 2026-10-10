@@ -13,7 +13,8 @@ import (
 // MemStore write of an unregistered key from production code fails the test
 // (GuardSessionKeys), and cmd/gc's flow and clear-site tests run the declared
 // sites. A Site with Pending is a contract site not yet built or doing its
-// job, on the bead that owns it. Nothing reads this table in production.
+// job, on the bead that owns it. In production only Facts reads it: a v2
+// premise compares the keys it classes in the premise (facts.go).
 
 // FieldClass is what a key means to a decision.
 type FieldClass uint8
