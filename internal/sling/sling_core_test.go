@@ -1,6 +1,7 @@
 package sling
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,5 +233,66 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Fo
 	}
 	if convoys[0].Status != "closed" {
 		t.Errorf("synthetic input convoy %s status = %q, want closed (fallback must close it, not leak it)", convoys[0].ID, convoys[0].Status)
+	}
+}
+
+// convoyCloseFailingStore refuses every Close of a convoy bead, simulating a
+// store write that fails while a pour cleans up its synthetic input convoy.
+type convoyCloseFailingStore struct {
+	*beads.MemStore
+}
+
+func (s convoyCloseFailingStore) Close(id string) error {
+	if b, err := s.Get(id); err == nil && b.Type == "convoy" {
+		return errors.New("store refused the convoy close")
+	}
+	return s.MemStore.Close(id)
+}
+
+// TestDoSlingGraphV2FallbackWarnsWhenSyntheticConvoyCloseFails pins the
+// fallback outcome of a failed cleanup: the plain-route fallback still
+// succeeds, and the refused close of the synthetic input convoy is reported
+// as a warning naming the convoy instead of being dropped.
+func TestDoSlingGraphV2FallbackWarnsWhenSyntheticConvoyCloseFails(t *testing.T) {
+	dir := t.TempDir()
+	content := "formula = \"graph-review\"\nversion = 1\ncontract = \"graph.v2\"\ntype = \"workflow\"\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "graph-review.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("writing graph-review fixture: %v", err)
+	}
+
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "BL-1", Type: "task", Status: "open", Assignee: "reviewer-session"},
+		{ID: "MOL-1", Type: "molecule", Status: "open", ParentID: "BL-1"},
+	}, nil)
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
+	runner := newFakeRunner()
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = convoyCloseFailingStore{MemStore: mem}
+
+	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-review")}
+	opts := SlingOpts{Target: a, BeadOrFormula: "BL-1", NoConvoy: true}
+
+	result, err := DoSling(opts, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: expected the plain-route fallback to succeed, got %v", err)
+	}
+	convoys, err := mem.List(beads.ListQuery{Type: "convoy", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List(convoy): %v", err)
+	}
+	if len(convoys) != 1 {
+		t.Fatalf("convoys = %d, want 1 (the synthetic input convoy)", len(convoys))
+	}
+	var warned bool
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "closing synthetic input convoy "+convoys[0].ID) && strings.Contains(w, "store refused the convoy close") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("BeadWarnings = %v, want a warning that closing synthetic input convoy %s failed", result.BeadWarnings, convoys[0].ID)
 	}
 }

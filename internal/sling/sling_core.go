@@ -555,8 +555,11 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			Title: opts.Title,
 			Vars:  formulaVars,
 		}); err != nil {
-			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
-			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+			varsErr := fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+			if closeErr := graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID); closeErr != nil {
+				return result, errors.Join(varsErr, closeErr)
+			}
+			return result, varsErr
 		}
 		var fellBackToPlainRoute bool
 		lockedResult, lockedErr := withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
@@ -634,8 +637,16 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// to plain routing on an unrelated molecule/wisp conflict (also
 			// nil error). Either way the convoy was never handed to a live
 			// graph workflow, so close it here — otherwise it leaks as an
-			// open, claim-attracting convoy.
-			graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID)
+			// open, claim-attracting convoy. A failed close is reported the
+			// way each outcome already reports: beside the pour's error, or
+			// as a warning on the plain-route fallback, which still succeeds.
+			if closeErr := graphv2.CloseSyntheticInputConvoy(deps.Store, graphInv.InputConvoy, beadID); closeErr != nil {
+				if lockedErr != nil {
+					lockedErr = errors.Join(lockedErr, closeErr)
+				} else {
+					lockedResult.BeadWarnings = append(lockedResult.BeadWarnings, closeErr.Error())
+				}
+			}
 		}
 		return lockedResult, lockedErr
 	}
