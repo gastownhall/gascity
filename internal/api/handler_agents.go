@@ -334,6 +334,29 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
+// rigTemplateInstance reports whether name is a rig-qualified identity that
+// only resolves through a generic scope="rig" template ("myrig/rigbot" served
+// by template "rigbot", see agentutil.ResolveQualifiedRigScopedTemplate). Such
+// an instance has no config of its own: the template it reads through serves
+// every rig. It returns the template's identity and the instance's rig.
+func rigTemplateInstance(cfg *config.City, name string) (template, rig string, ok bool) {
+	if cfg == nil {
+		return "", "", false
+	}
+	for i := range cfg.Agents {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], name) {
+			return "", "", false
+		}
+	}
+	instance, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name)
+	if !ok {
+		return "", "", false
+	}
+	rig = instance.Dir
+	instance.Dir = ""
+	return instance.QualifiedName(), rig, true
+}
+
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are

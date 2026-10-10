@@ -127,8 +127,14 @@ type controllerState struct {
 	adapterReg             *extmsg.AdapterRegistry
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq      uint64
-	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	// publishMu makes deciding to publish a config snapshot atomic with
+	// publishing it: a runtime reload's staleness check plus swap, and an API
+	// mutation's refresh plus pending-revision mark. Without it a reload could
+	// pass its check, then swap its older config over a mutation that
+	// refreshed in between. Lock order: publishMu, then updateMu, then mu.
+	publishMu           sync.Mutex
+	beadEventStartSeq   uint64
+	beadEventStartSeqOK bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the controller's warm completion-fact
 	// idempotency record, shared by the tick delta pass and the close path
@@ -1383,6 +1389,8 @@ func storePointerKey(store beads.Store) (uintptr, bool) {
 // or on-disk config won while the reload was preparing it) and leaves the
 // controller state untouched; the caller must then keep its own generation too.
 func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) bool {
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
 	if cs.configMutationPending.Load() {
 		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
 		if stale {
@@ -3308,7 +3316,12 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	if err := mutate(); err != nil {
 		return err
 	}
+	cs.publishMu.Lock()
 	revision, err := cs.refreshConfigSnapshot()
+	if err == nil {
+		cs.markConfigMutationPending(revision)
+	}
+	cs.publishMu.Unlock()
 	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {
@@ -3318,7 +3331,6 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}

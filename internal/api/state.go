@@ -60,7 +60,9 @@ type MaintenanceProvider interface {
 // those accessors; on a single-store city every one collapses to the same
 // concrete store CityBeadStore() returns, so they are byte-identical today.
 type State interface {
-	// Config returns the current city config snapshot.
+	// Config returns the current city config snapshot. A changed config is
+	// served as a new snapshot; a served one is never mutated in place
+	// (Server.configGeneration tells snapshots apart by pointer).
 	Config() *config.City
 
 	// SessionProvider returns the current session provider.
@@ -271,8 +273,9 @@ type ProviderUpdate struct {
 }
 
 // RawConfigProvider is optionally implemented by State to provide the
-// raw (pre-expansion) config for provenance detection. Used by the
-// /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
+// raw (pre-expansion) config. The agent and config reads use it to tell
+// inline from pack-derived agents, and the patch reads and patch counts use
+// it for the declared [[patches]] that composition clears from Config().
 type RawConfigProvider interface {
 	RawConfig() *config.City
 }

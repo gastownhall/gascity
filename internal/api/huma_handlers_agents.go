@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,17 +33,16 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// Raw config drives accurate provenance detection (pack-derived vs.
 	// city-native). Optional capability: when absent, agentOrigin falls
 	// back to the patch-presence heuristic.
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
+	rawCfg := s.rawConfig()
 
 	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
-		cacheKey = cacheKeyFor("agents", input)
+		// The list projects the config, whose swaps do not advance the
+		// event index, so the key also carries the config generation.
+		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
 		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
@@ -313,11 +313,7 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		}
 	}
 
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
-	pack, packDerived := agentPackProvenance(agentCfg, rawCfg, cfg)
+	pack, packDerived := agentPackProvenance(agentCfg, s.rawConfig(), cfg)
 
 	resp := agentResponse{
 		Name:              name,
@@ -465,6 +461,9 @@ func (s *Server) updateAgentByName(name, provider, scope string, suspended *bool
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
+	if err := rigTemplateInstanceConflict(s.state.Config(), name, "update"); err != nil {
+		return nil, err
+	}
 	patch := AgentUpdate{Provider: provider, Scope: scope, Suspended: suspended}
 	if err := sm.UpdateAgent(name, patch); err != nil {
 		return nil, mutationError(err)
@@ -490,6 +489,9 @@ func (s *Server) deleteAgentByName(name string) (*OKResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
+	}
+	if err := rigTemplateInstanceConflict(s.state.Config(), name, "delete"); err != nil {
+		return nil, err
 	}
 	if err := sm.DeleteAgent(name); err != nil {
 		return nil, mutationError(err)
@@ -520,6 +522,9 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	if _, ok := findAgent(cfg, name); !ok {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
+	if err := rigTemplateInstanceConflict(cfg, name, action); err != nil {
+		return nil, err
+	}
 	var err error
 	switch action {
 	case "suspend":
@@ -535,6 +540,25 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	resp := &OKResponse{}
 	resp.Body.Status = "ok"
 	return resp, nil
+}
+
+// rigTemplateInstanceConflict refuses an edit addressed to a per-rig instance
+// of a generic rig-scoped template (see rigTemplateInstance): the only config
+// behind the instance is the template, so the edit would change every rig. The
+// 409 names the template to edit instead and, for suspend and resume, the rig
+// action that stays within one rig. It returns nil when name is not such an
+// instance.
+func rigTemplateInstanceConflict(cfg *config.City, name, verb string) error {
+	template, rig, ok := rigTemplateInstance(cfg, name)
+	if !ok {
+		return nil
+	}
+	msg := "agent " + name + " is a per-rig instance of the rig-scoped template " + template +
+		", which serves every rig; " + verb + " agent " + template + " to " + verb + " it in every rig"
+	if verb == "suspend" || verb == "resume" {
+		msg += ", or " + verb + " rig " + rig + " to " + verb + " that rig's agents"
+	}
+	return apierr.ConflictWrongState.Msg(msg)
 }
 
 // humaHandleAgentOutput is the Huma-typed handler for GET /v0/agent/{base}/output

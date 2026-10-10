@@ -119,6 +119,7 @@ go_test(
     }),
     shard_count = 14,
     deps = [
+        "//internal/api/apicontract",
         "//internal/bazeltest",
         "//internal/beads",
         "//internal/beads/beadstest",
@@ -142,8 +143,6 @@ go_test(
         "//test/toolhome",
         "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
-        "@com_github_pb33f_libopenapi//:libopenapi",
-        "@com_github_pb33f_libopenapi_validator//:libopenapi-validator",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

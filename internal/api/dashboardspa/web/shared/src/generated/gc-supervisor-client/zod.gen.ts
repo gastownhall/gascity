@@ -397,7 +397,7 @@ export const zDeliveryContextRecord = z.object({
     ID: z.string(),
     LastMessageID: z.string(),
     LastPublishedAt: z.iso.datetime(),
-    Metadata: z.record(z.string(), z.string()),
+    Metadata: z.record(z.string(), z.string()).optional(),
     SchemaVersion: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     SessionID: z.string(),
     SourceSessionID: z.string()
@@ -1137,11 +1137,11 @@ export const zAgentPatch = z.object({
     AssignedWorkDeferLimit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     Attach: z.boolean().nullable(),
     AutoReclaimStaleClaims: z.boolean().nullable(),
-    ContextAdvisory: zContextAdvisory,
+    ContextAdvisory: zContextAdvisory.optional(),
     DefaultSlingFormula: z.string().nullable(),
     DependsOn: z.array(z.string()).nullable(),
     Dir: z.string(),
-    Env: z.record(z.string(), z.string()),
+    Env: z.record(z.string(), z.string()).optional(),
     EnvRemove: z.array(z.string()).nullable(),
     HooksInstalled: z.boolean().nullable(),
     IdleTimeout: z.string().nullable(),
@@ -1160,9 +1160,9 @@ export const zAgentPatch = z.object({
     MouseMode: z.string().nullable(),
     Name: z.string(),
     Nudge: z.string().nullable(),
-    OptionDefaults: z.record(z.string(), z.string()),
+    OptionDefaults: z.record(z.string(), z.string()).optional(),
     OverlayDir: z.string().nullable(),
-    Pool: zPoolOverride,
+    Pool: zPoolOverride.optional(),
     PreStart: z.array(z.string()).nullable(),
     PreStartAppend: z.array(z.string()).nullable(),
     PromptTemplate: z.string().nullable(),
@@ -1242,7 +1242,7 @@ export const zProviderPatch = z.object({
     ArgsAppend: z.array(z.string()).nullable(),
     Base: z.string().nullable(),
     Command: z.string().nullable(),
-    Env: z.record(z.string(), z.string()),
+    Env: z.record(z.string(), z.string()).optional(),
     EnvRemove: z.array(z.string()).nullable(),
     Name: z.string(),
     OptionsSchemaMerge: z.string().nullable(),
@@ -1378,7 +1378,7 @@ export const zPublishReceipt = z.object({
     Delivered: z.boolean(),
     FailureKind: z.string(),
     MessageID: z.string(),
-    Metadata: z.record(z.string(), z.string()),
+    Metadata: z.record(z.string(), z.string()).optional(),
     RetryAfter: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -1462,7 +1462,7 @@ export const zRigPatch = z.object({
     BeadsProxiedIdleTimeout: z.string().nullable(),
     DefaultBranch: z.string().nullable(),
     DefaultMergeStrategy: z.string().nullable(),
-    FormulaVars: z.record(z.string(), z.string()),
+    FormulaVars: z.record(z.string(), z.string()).optional(),
     Name: z.string(),
     Path: z.string().nullable(),
     Prefix: z.string().nullable(),
@@ -3257,7 +3257,7 @@ export const zConversationTranscriptRecord = z.object({
     ExplicitTarget: z.string(),
     ID: z.string(),
     Kind: zTranscriptMessageKind,
-    Metadata: z.record(z.string(), z.string()),
+    Metadata: z.record(z.string(), z.string()).optional(),
     Provenance: zTranscriptProvenance,
     ProviderMessageID: z.string(),
     ReplyToMessageID: z.string(),
@@ -3268,12 +3268,12 @@ export const zConversationTranscriptRecord = z.object({
 });
 
 export const zInboundResult = z.object({
-    Binding: zSessionBindingRecord,
-    GroupRoute: zGroupRouteDecision,
+    Binding: zSessionBindingRecord.optional(),
+    GroupRoute: zGroupRouteDecision.optional(),
     Message: zExternalInboundMessage,
     TargetAgentName: z.string(),
     TargetSessionID: z.string(),
-    TranscriptEntry: zConversationTranscriptRecord
+    TranscriptEntry: zConversationTranscriptRecord.optional()
 });
 
 export const zListBodyConversationTranscriptRecord = z.object({
@@ -3285,9 +3285,9 @@ export const zListBodyConversationTranscriptRecord = z.object({
 });
 
 export const zOutboundResult = z.object({
-    DeliveryContext: zDeliveryContextRecord,
+    DeliveryContext: zDeliveryContextRecord.optional(),
     Receipt: zPublishReceipt,
-    TranscriptEntry: zConversationTranscriptRecord
+    TranscriptEntry: zConversationTranscriptRecord.optional()
 });
 
 export const zUnboundEventPayload = z.object({
