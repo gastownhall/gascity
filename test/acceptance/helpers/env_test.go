@@ -177,11 +177,6 @@ func passwdHomeForTest(t *testing.T) string {
 	return strings.TrimSpace(lu.HomeDir)
 }
 
-// The acceptance env must never hand gc the operator's home, in any mode: gc
-// doctor (and every other in-process HOME read in gc) would otherwise report on
-// the host — e.g. a bd shared server under ~/.beads/shared-server — and a cached
-// PASS would depend on which machine ran it. Under Bazel the action HOME is
-// TEST_TMPDIR, which the env used to swap for the passwd home.
 // TestNewEnvForwardsGitTemplateDir pins the host-env allowlist entry for the
 // hermetic git template internal/testenv installs. NewEnv builds the child's
 // environment from an allowlist, so a gc or git the child runs makes repos
@@ -197,6 +192,11 @@ func TestNewEnvForwardsGitTemplateDir(t *testing.T) {
 	}
 }
 
+// The acceptance env must never hand gc the operator's home, in any mode: gc
+// doctor (and every other in-process HOME read in gc) would otherwise report on
+// the host — e.g. a bd shared server under ~/.beads/shared-server — and a cached
+// PASS would depend on which machine ran it. Under Bazel the action HOME is
+// TEST_TMPDIR, which the env used to swap for the passwd home.
 func TestNewEnvIsolatesHomeFromTheHost(t *testing.T) {
 	for _, mode := range []string{"go-test", "bazel"} {
 		t.Run(mode, func(t *testing.T) {
