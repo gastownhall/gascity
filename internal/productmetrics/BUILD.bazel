@@ -1,5 +1,7 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+exports_files(["BUILD.bazel"])
+
 # //cmd/gc:gc_productmetrics_testhook_test builds this package with -tags
 # productmetrics_testhook; gazelle lists the tagged files in srcs, and
 # rules_go drops them again in every configuration without the tag.
@@ -96,6 +98,7 @@ go_test(
     # Storage trust checks walk root-owned ancestors through gchome. Run on
     # the host so Linux sandbox UID remapping cannot invalidate that boundary.
     tags = [
+        "external",
         "no-remote-exec",
         "no-sandbox",
     ],

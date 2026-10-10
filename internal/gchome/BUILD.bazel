@@ -1,5 +1,7 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+exports_files(["BUILD.bazel"])
+
 go_library(
     name = "gchome",
     srcs = [
@@ -26,6 +28,7 @@ go_test(
     # These tests validate real ancestor ownership. Linux sandbox user
     # namespaces map the host's root-owned directories to UID 65534.
     tags = [
+        "external",
         "no-remote-exec",
         "no-sandbox",
     ],
