@@ -1,0 +1,416 @@
+# The disposition table (ARCH-RESTRUCTURE-2 R7): event by actor, from seed -> result.
+# Regenerate: go test ./internal/session -run TestDispositionTableGolden -update-golden
+
+Suspend by operator
+  none                         life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  none+wait                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  none+heartbeat-expired       life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  none+idle-stop               life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  none+wait+idle-stop(legacy)  life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s wait_hold=true
+  none+quarantine              life=asleep   -> held_until=∞ quarantined_until=t01h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+quarantine-expired      life=asleep   -> held_until=∞ quarantined_until=t0-1m0s sleep_intent=user-hold suspended_at=t00s
+  none+unknown-timer           life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  none+unknown-quarantine      life=asleep   -> held_until=∞ quarantined_until=later sleep_intent=user-hold suspended_at=t00s
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended-soft               life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+
+Suspend by controller
+  none                         life=asleep   -> REFUSED: only an operator's suspend holds
+  none+wait                    life=asleep   -> REFUSED: only an operator's suspend holds
+  none+heartbeat               life=asleep   -> REFUSED: only an operator's suspend holds
+  none+heartbeat-expired       life=asleep   -> REFUSED: only an operator's suspend holds
+  none+idle-stop               life=asleep   -> REFUSED: only an operator's suspend holds
+  none+wait+idle-stop(legacy)  life=asleep   -> REFUSED: only an operator's suspend holds
+  none+quarantine              life=asleep   -> REFUSED: only an operator's suspend holds
+  none+quarantine-expired      life=asleep   -> REFUSED: only an operator's suspend holds
+  none+unknown-timer           life=asleep   -> REFUSED: only an operator's suspend holds
+  none+unknown-quarantine      life=asleep   -> REFUSED: only an operator's suspend holds
+  suspended                    life=asleep   -> REFUSED: only an operator's suspend holds
+  suspended+wait               life=asleep   -> REFUSED: only an operator's suspend holds
+  suspended-finite-expired     life=asleep   -> REFUSED: only an operator's suspend holds
+  suspended-soft               life=asleep   -> REFUSED: only an operator's suspend holds
+
+Suspend by operator until t02h0m0s
+  none                         life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+wait                    life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+heartbeat-expired       life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+idle-stop               life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+wait+idle-stop(legacy)  life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s wait_hold=true
+  none+quarantine              life=asleep   -> held_until=t02h0m0s quarantined_until=t01h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+quarantine-expired      life=asleep   -> held_until=t02h0m0s quarantined_until=t0-1m0s sleep_intent=user-hold suspended_at=t00s
+  none+unknown-timer           life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+unknown-quarantine      life=asleep   -> held_until=t02h0m0s quarantined_until=later sleep_intent=user-hold suspended_at=t00s
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  suspended-soft               life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+
+SuspendSoft by controller
+  none                         life=asleep   -> state=suspended suspended_at=t00s
+  none+wait                    life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=t00s wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s state=suspended suspended_at=t00s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s state=suspended suspended_at=t00s
+  none+idle-stop               life=asleep   -> state=suspended suspended_at=t00s
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=t00s wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s state=suspended suspended_at=t00s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s state=suspended suspended_at=t00s
+  none+unknown-timer           life=asleep   -> held_until=soon state=suspended suspended_at=t00s
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later state=suspended suspended_at=t00s
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> state=suspended suspended_at=t00s
+
+SuspendSoft by sweep
+  none                         life=asleep   -> state=suspended suspended_at=t00s
+  none+wait                    life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=t00s wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s state=suspended suspended_at=t00s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s state=suspended suspended_at=t00s
+  none+idle-stop               life=asleep   -> state=suspended suspended_at=t00s
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=t00s wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s state=suspended suspended_at=t00s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s state=suspended suspended_at=t00s
+  none+unknown-timer           life=asleep   -> held_until=soon state=suspended suspended_at=t00s
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later state=suspended suspended_at=t00s
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> state=suspended suspended_at=t00s
+
+Kill by operator
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> (none)
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> (none)
+  suspended+wait               life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> (none)
+  suspended-soft               life=asleep   -> (none)
+
+Kill by controller
+  none                         life=asleep   -> REFUSED: only an operator kills
+  none+wait                    life=asleep   -> REFUSED: only an operator kills
+  none+heartbeat               life=asleep   -> REFUSED: only an operator kills
+  none+heartbeat-expired       life=asleep   -> REFUSED: only an operator kills
+  none+idle-stop               life=asleep   -> REFUSED: only an operator kills
+  none+wait+idle-stop(legacy)  life=asleep   -> REFUSED: only an operator kills
+  none+quarantine              life=asleep   -> REFUSED: only an operator kills
+  none+quarantine-expired      life=asleep   -> REFUSED: only an operator kills
+  none+unknown-timer           life=asleep   -> REFUSED: only an operator kills
+  none+unknown-quarantine      life=asleep   -> REFUSED: only an operator kills
+  suspended                    life=asleep   -> REFUSED: only an operator kills
+  suspended+wait               life=asleep   -> REFUSED: only an operator kills
+  suspended-finite-expired     life=asleep   -> REFUSED: only an operator kills
+  suspended-soft               life=asleep   -> REFUSED: only an operator kills
+
+Resume by operator
+  none                         life=asleep   -> (none)
+  none                         life=draining -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+wait                    life=draining -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat               life=draining -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+heartbeat-expired       life=draining -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+idle-stop               life=draining -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending wait_hold=true
+  none+wait+idle-stop(legacy)  life=draining -> sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine              life=draining -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+quarantine-expired      life=draining -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-timer           life=draining -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  none+unknown-quarantine      life=draining -> quarantined_until=later
+  suspended                    life=asleep   -> (none)
+  suspended                    life=draining -> REFUSED: the drain's stop owns the runtime
+  suspended+wait               life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  suspended+wait               life=draining -> REFUSED: the drain's stop owns the runtime
+  suspended-finite-expired     life=asleep   -> (none)
+  suspended-finite-expired     life=draining -> REFUSED: the drain's stop owns the runtime
+  suspended-soft               life=asleep   -> (none)
+  suspended-soft               life=draining -> (none)
+
+Resume by agent
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended+wait               life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended-finite-expired     life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended-soft               life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+
+Resume by background
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended+wait               life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended-finite-expired     life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended-soft               life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+
+Resume by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended+wait               life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended-finite-expired     life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+  suspended-soft               life=asleep   -> REFUSED: only an operator's resume consumes a suspend
+
+Restart by agent
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> state=suspended suspended_at=t00s
+
+Heartbeat by agent until t02h0m0s
+  none                         life=asleep   -> held_until=t02h0m0s
+  none+wait                    life=asleep   -> held_until=t02h0m0s sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t02h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t02h0m0s
+  none+idle-stop               life=asleep   -> held_until=t02h0m0s sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> held_until=t02h0m0s sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> held_until=t02h0m0s quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> held_until=t02h0m0s quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=t02h0m0s
+  none+unknown-quarantine      life=asleep   -> held_until=t02h0m0s quarantined_until=later
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> held_until=t02h0m0s state=suspended suspended_at=t00s
+
+Heartbeat by agent until t030m0s
+  none                         life=asleep   -> held_until=t030m0s
+  none+wait                    life=asleep   -> held_until=t030m0s sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t030m0s
+  none+idle-stop               life=asleep   -> held_until=t030m0s sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> held_until=t030m0s sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> held_until=t030m0s quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> held_until=t030m0s quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=t030m0s
+  none+unknown-quarantine      life=asleep   -> held_until=t030m0s quarantined_until=later
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> held_until=t030m0s state=suspended suspended_at=t00s
+
+WaitBegin by agent
+  none                         life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s sleep_intent=wait-hold wait_hold=true
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s sleep_intent=wait-hold wait_hold=true
+  none+idle-stop               life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s sleep_intent=wait-hold wait_hold=true
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s sleep_intent=wait-hold wait_hold=true
+  none+unknown-timer           life=asleep   -> held_until=soon sleep_intent=wait-hold wait_hold=true
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later sleep_intent=wait-hold wait_hold=true
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s wait_hold=true
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s wait_hold=true
+  suspended-soft               life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=t00s wait_hold=true
+
+WaitEnd by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> (none)
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> state=suspended suspended_at=t00s
+
+Sleep by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> (none)
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> (none)
+
+PreWake by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> (none)
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> REFUSED: a suspended row never starts
+  suspended+wait               life=asleep   -> REFUSED: a suspended row never starts
+  suspended-finite-expired     life=asleep   -> REFUSED: a suspended row never starts
+  suspended-soft               life=asleep   -> (none)
+
+IdleStopBegin by controller
+  none                         life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait                    life=asleep   -> REFUSED: an idle stop never runs over a hold
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s sleep_intent=idle-stop-pending
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s sleep_intent=idle-stop-pending
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> REFUSED: an idle stop never runs over a hold
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s sleep_intent=idle-stop-pending
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s sleep_intent=idle-stop-pending
+  none+unknown-timer           life=asleep   -> held_until=soon sleep_intent=idle-stop-pending
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later sleep_intent=idle-stop-pending
+  suspended                    life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended+wait               life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended-finite-expired     life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended-soft               life=asleep   -> REFUSED: an idle stop never runs over a hold
+
+IdleStopEnd by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> (none)
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended+wait               life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended-finite-expired     life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended-soft               life=asleep   -> REFUSED: an idle stop never runs over a hold
+
+Quarantine by controller until t02h0m0s
+  none                         life=asleep   -> quarantined_until=t02h0m0s
+  none+wait                    life=asleep   -> quarantined_until=t02h0m0s sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s quarantined_until=t02h0m0s
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s quarantined_until=t02h0m0s
+  none+idle-stop               life=asleep   -> quarantined_until=t02h0m0s sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> quarantined_until=t02h0m0s sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t02h0m0s
+  none+quarantine-expired      life=asleep   -> quarantined_until=t02h0m0s
+  none+unknown-timer           life=asleep   -> held_until=soon quarantined_until=t02h0m0s
+  none+unknown-quarantine      life=asleep   -> quarantined_until=t02h0m0s
+  suspended                    life=asleep   -> held_until=∞ quarantined_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ quarantined_until=t02h0m0s sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> held_until=t0-1m0s quarantined_until=t02h0m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
+  suspended-soft               life=asleep   -> quarantined_until=t02h0m0s state=suspended suspended_at=t00s
+
+TimerTick by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+heartbeat               life=asleep   -> held_until=t01h0m0s
+  none+heartbeat-expired       life=asleep   -> (none)
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> sleep_intent=idle-stop-pending wait_hold=true
+  none+quarantine              life=asleep   -> quarantined_until=t01h0m0s
+  none+quarantine-expired      life=asleep   -> (none)
+  none+unknown-timer           life=asleep   -> held_until=soon
+  none+unknown-quarantine      life=asleep   -> quarantined_until=later
+  suspended                    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+wait               life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
+  suspended-finite-expired     life=asleep   -> (none)
+  suspended-soft               life=asleep   -> state=suspended suspended_at=t00s
+
+Wake by operator
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> (none)
+  none+heartbeat               life=asleep   -> (none)
+  none+heartbeat-expired       life=asleep   -> (none)
+  none+idle-stop               life=asleep   -> (none)
+  none+wait+idle-stop(legacy)  life=asleep   -> (none)
+  none+quarantine              life=asleep   -> (none)
+  none+quarantine-expired      life=asleep   -> (none)
+  none+unknown-timer           life=asleep   -> (none)
+  none+unknown-quarantine      life=asleep   -> (none)
+  suspended                    life=asleep   -> (none)
+  suspended+wait               life=asleep   -> (none)
+  suspended-finite-expired     life=asleep   -> (none)
+  suspended-soft               life=asleep   -> (none)
+
+Wake by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> REFUSED: only an operator's wake clears a hold
+  none+heartbeat               life=asleep   -> REFUSED: only an operator's wake clears a hold
+  none+heartbeat-expired       life=asleep   -> held_until=t0-1m0s
+  none+idle-stop               life=asleep   -> sleep_intent=idle-stop-pending
+  none+wait+idle-stop(legacy)  life=asleep   -> REFUSED: only an operator's wake clears a hold
+  none+quarantine              life=asleep   -> REFUSED: only an operator's wake clears a hold
+  none+quarantine-expired      life=asleep   -> quarantined_until=t0-1m0s
+  none+unknown-timer           life=asleep   -> REFUSED: only an operator's wake clears a hold
+  none+unknown-quarantine      life=asleep   -> REFUSED: only an operator's wake clears a hold
+  suspended                    life=asleep   -> REFUSED: only an operator's wake clears a hold
+  suspended+wait               life=asleep   -> REFUSED: only an operator's wake clears a hold
+  suspended-finite-expired     life=asleep   -> REFUSED: only an operator's wake clears a hold
+  suspended-soft               life=asleep   -> REFUSED: only an operator's wake clears a hold
+
+Retire by controller
+  none                         life=asleep   -> (none)
+  none+wait                    life=asleep   -> (none)
+  none+heartbeat               life=asleep   -> (none)
+  none+heartbeat-expired       life=asleep   -> (none)
+  none+idle-stop               life=asleep   -> (none)
+  none+wait+idle-stop(legacy)  life=asleep   -> (none)
+  none+quarantine              life=asleep   -> (none)
+  none+quarantine-expired      life=asleep   -> (none)
+  none+unknown-timer           life=asleep   -> (none)
+  none+unknown-quarantine      life=asleep   -> (none)
+  suspended                    life=asleep   -> (none)
+  suspended+wait               life=asleep   -> (none)
+  suspended-finite-expired     life=asleep   -> (none)
+  suspended-soft               life=asleep   -> (none)
