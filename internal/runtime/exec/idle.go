@@ -67,70 +67,87 @@ func idlePromptPrefix(configured string) string {
 	return configured
 }
 
-// publishReadyPrompt writes the session's ready-prompt prefix into the in-box
-// tmux session environment (readyPromptEnvKey), or unsets it for a blank
-// prefix, once the in-box session exists. The in-memory cache only covers the
-// provider instance that started the session; this copy lets any other
-// instance (a restarted orchestrator, a rebuilt provider, a CLI process)
-// recover it in readyPromptPrefix. Only a pack with an idle boundary has the
-// in-box tmux session and the exec connection this needs. Best effort: on
-// failure other instances fall back to the default prompt.
+// publishReadyPrompt writes the session's effective ready-prompt prefix (the
+// default one for a blank prefix) into the in-box tmux session environment
+// (readyPromptEnvKey) once the in-box session exists. The in-memory cache only
+// covers the provider instance that started the session; this copy lets any
+// other instance (a restarted orchestrator, a rebuilt provider, a CLI process)
+// recover it in readyPromptPrefix. The prefix is always written, never unset,
+// so an absent variable means "never published" (a failed publish, or a
+// session started before publishing existed) rather than "default prompt".
+// Only a pack with an idle boundary has the in-box tmux session and the exec
+// connection this needs. Best effort: on failure other instances fall back to
+// the default prompt on each wait until a later Start publishes it.
 func (p *Provider) publishReadyPrompt(ctx context.Context, name string, cfg runtime.Config) {
 	if !p.idleBoundaryDeclared() {
 		return
 	}
-	argv := []string{"tmux", "set-environment", "-t", execTmuxSession, readyPromptEnvKey, cfg.ReadyPromptPrefix}
-	if strings.TrimSpace(cfg.ReadyPromptPrefix) == "" {
-		argv = []string{"tmux", "set-environment", "-t", execTmuxSession, "-u", readyPromptEnvKey}
-	}
+	// -u, as local tmux passes on every command: tmux otherwise treats the
+	// client as non-UTF-8 when the in-box exec environment sets no UTF-8
+	// locale.
+	argv := []string{"tmux", "-u", "set-environment", "-t", execTmuxSession, readyPromptEnvKey, idlePromptPrefix(cfg.ReadyPromptPrefix)}
 	_, _, _ = p.Exec(ctx, name, argv)
 }
 
-// readyPromptPrefix returns the ready-prompt prefix for name, reading it within
-// limit. A prefix this instance remembered from Start is returned without a
-// round trip. Otherwise (this instance did not start the session, for example
-// after an orchestrator restart) it is read from the in-box tmux session
-// environment that publishReadyPrompt wrote and remembered; an unset variable
-// means the default prompt and is remembered too. A failed read returns
+// readyPromptPrefix returns the ready-prompt prefix for name, running read
+// within limit when it is not known yet. A prefix this instance remembered
+// from Start, or read back earlier, is returned without a round trip.
+// Otherwise (this instance did not start the session, for example after an
+// orchestrator restart) read fetches the prefix publishReadyPrompt wrote into
+// the in-box tmux session environment, and a found prefix is remembered. A
+// failed or expired read, or an absent variable (never published), returns
 // tmux.DefaultReadyPromptPrefix without remembering it, so the next call
 // retries.
-func (p *Provider) readyPromptPrefix(ctx context.Context, name string, limit time.Duration) string {
+func (p *Provider) readyPromptPrefix(ctx context.Context, name string, limit time.Duration, read readyPromptReader) string {
 	if v, ok := p.readyPrompts.Load(name); ok {
 		if prefix, ok := v.(string); ok {
 			return prefix
 		}
 	}
-	prefix, expired, err := bounded(ctx, limit, func(ctx context.Context) (string, error) {
-		return p.readPublishedReadyPrompt(ctx, name)
+	type published struct {
+		prefix string
+		found  bool
+	}
+	got, expired, err := bounded(ctx, limit, func(ctx context.Context) (published, error) {
+		prefix, found, err := read(ctx)
+		return published{prefix, found}, err
 	})
-	if expired || err != nil {
+	if expired || err != nil || !got.found {
 		return tmux.DefaultReadyPromptPrefix
 	}
-	p.readyPrompts.LoadOrStore(name, prefix)
-	return prefix
+	p.readyPrompts.LoadOrStore(name, got.prefix)
+	return got.prefix
 }
+
+// readyPromptReader reads a session's published ready-prompt prefix; found
+// reports whether it was published. readPublishedReadyPrompt is the real one;
+// tests substitute slow or hung readers.
+type readyPromptReader func(ctx context.Context) (prefix string, found bool, err error)
 
 // readPublishedReadyPrompt reads readyPromptEnvKey from the in-box tmux
 // session over the exec connection. It lists the whole session environment
 // rather than asking for the one key, because tmux exits 1 both for an unset
 // key and for a missing session, and the exec op does not carry the stderr
 // that tells them apart: a "KEY=value" line is the prefix, a "-KEY" line or
-// no line means unset (the default prompt), and a non-zero exit is an error.
-func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (string, error) {
-	out, code, err := p.Exec(ctx, name, []string{"tmux", "show-environment", "-t", execTmuxSession})
+// no line means not published, and a non-zero exit is an error. It passes -u
+// as local tmux does: without a UTF-8 locale in the exec environment (an
+// image that sets no LANG) tmux prints every non-ASCII character of the
+// environment as "_", which would turn "❯ " into "_ ".
+func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (string, bool, error) {
+	out, code, err := p.Exec(ctx, name, []string{"tmux", "-u", "show-environment", "-t", execTmuxSession})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if code != 0 {
-		return "", fmt.Errorf("exec provider: reading the tmux environment in %q: tmux exited %d", name, code)
+		return "", false, fmt.Errorf("exec provider: reading the tmux environment in %q: tmux exited %d", name, code)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if value, ok := strings.CutPrefix(line, readyPromptEnvKey+"="); ok {
-			return idlePromptPrefix(value), nil
+			return idlePromptPrefix(value), true, nil
 		}
 	}
-	return tmux.DefaultReadyPromptPrefix, nil
+	return "", false, nil
 }
 
 // WaitForIdle waits until the in-box tmux pane shows the session's ready prompt
@@ -142,16 +159,27 @@ func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (s
 // A pack that does not declare report-activity, report-attachment and
 // proc.exec gets [runtime.ErrInteractionUnsupported] without any op being run.
 //
-// timeout is a hard upper bound: every capture runs under a context that
-// expires at the deadline, and WaitForIdle returns at the deadline even if a
-// capture is still in flight. On expiry the error wraps
+// timeout is a hard upper bound: the ready-prompt read (see
+// readyPromptPrefix) and every capture run under a context that expires at
+// the deadline, and WaitForIdle returns at the deadline even if one is still
+// in flight. On expiry the error wraps
 // context.DeadlineExceeded; a canceled ctx returns ctx.Err().
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	if !p.idleBoundaryDeclared() {
 		return runtime.ErrInteractionUnsupported
 	}
+	return p.waitForIdle(ctx, p.carrier(), name, timeout, func(ctx context.Context) (string, bool, error) {
+		return p.readPublishedReadyPrompt(ctx, name)
+	})
+}
+
+// waitForIdle is WaitForIdle over carrier c, with read fetching the published
+// ready prompt when this instance does not know it. The prompt read and the
+// captures share the one timeout: the read runs within timeout and the
+// capture loop gets only what is left.
+func (p *Provider) waitForIdle(ctx context.Context, c runtime.Carrier, name string, timeout time.Duration, read readyPromptReader) error {
 	deadline := time.Now().Add(timeout)
-	prefix := p.readyPromptPrefix(ctx, name, timeout)
+	prefix := p.readyPromptPrefix(ctx, name, timeout, read)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -159,7 +187,7 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	if remaining <= 0 {
 		return fmt.Errorf("exec provider: %q not idle within %s: %w (reading the ready prompt used the whole timeout)", name, timeout, context.DeadlineExceeded)
 	}
-	return waitForPaneIdle(ctx, p.carrier(), time.Now, name, prefix, remaining)
+	return waitForPaneIdle(ctx, c, time.Now, name, prefix, remaining)
 }
 
 // waitForPaneIdle is WaitForIdle's poll loop over carrier c, reading time from
