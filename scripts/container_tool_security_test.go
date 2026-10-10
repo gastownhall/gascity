@@ -185,6 +185,13 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
+		"litellm==1.89.7 \\",
+		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
+		"bleach==6.4.0 \\",
+		"h2==4.4.1 \\",
+		"hpack==4.2.0 \\",
+		"multidict==6.9.1 \\",
+		"pydantic-settings==2.14.2 \\",
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)
