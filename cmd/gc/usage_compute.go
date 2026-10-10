@@ -42,6 +42,17 @@ const usageModelSweptAtKey = "usage_model_swept_at"
 // cursor-guarded sweep bills the whole batch pending at the moment it next runs.
 const liveModelSweepMinInterval = 30 * time.Second
 
+// recentlyClosedUsageWindow bounds how long after close we still try to recover
+// model/compute facts for sessions that left the open set before the terminal
+// open-scan sweep could settle them (drain→close race).
+const recentlyClosedUsageWindow = 15 * time.Minute
+
+// recentlyClosedUsageMinInterval floors how often the reconcile tick may
+// re-list closed session beads for that recovery. The List is IncludeClosed +
+// AllowScan — fleet-costly if repeated at poke cadence — so match the live
+// lane's 30s floor: nothing is lost by waiting inside the 15m window.
+const recentlyClosedUsageMinInterval = 30 * time.Second
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -446,4 +457,144 @@ func (cr *CityRuntime) liveSweepMemoFor(sessionID, awakeStart, sessionKey string
 
 func (cr *CityRuntime) storeLiveSweepMemo(sessionID string, memo liveSweepMemo) {
 	cr.liveSweepMemos.Store(sessionID, memo)
+}
+
+func recentlyClosedUsageCandidate(b beads.Bead, now time.Time) bool {
+	if strings.TrimSpace(b.Status) != "closed" || b.Metadata == nil {
+		return false
+	}
+	awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
+	if awakeStart == "" {
+		return false
+	}
+	modelDone := strings.TrimSpace(b.Metadata[usageModelSweptAtKey]) == awakeStart
+	computeDone := strings.TrimSpace(b.Metadata[usageComputeEmittedAtKey]) == awakeStart
+	if modelDone && computeDone {
+		return false
+	}
+	closedRaw := strings.TrimSpace(b.Metadata["closed_at"])
+	var closedAt time.Time
+	if closedRaw != "" {
+		if t, err := time.Parse(time.RFC3339, closedRaw); err == nil {
+			closedAt = t
+		}
+	}
+	if closedAt.IsZero() {
+		closedAt = b.UpdatedAt
+	}
+	if closedAt.IsZero() {
+		return false
+	}
+	age := now.Sub(closedAt.UTC())
+	return age >= 0 && age <= recentlyClosedUsageWindow
+}
+
+// emitRecentlyClosedUsage recovers model/compute facts for session beads that
+// left the open set before the terminal open-scan sweep could settle them
+// (drain→close race). Bounded to recentlyClosedUsageWindow and throttled by
+// recentlyClosedUsageMinInterval so the IncludeClosed scan is not per-tick.
+func (cr *CityRuntime) emitRecentlyClosedUsage(ctx context.Context) {
+	if cr.cs == nil {
+		return
+	}
+	sink := cr.cs.UsageSink()
+	if sink == nil || sink == usage.Discard {
+		return
+	}
+	store := cr.cityBeadStore()
+	if store == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if !cr.recentlyClosedUsageNextAt.IsZero() && now.Before(cr.recentlyClosedUsageNextAt) {
+		return
+	}
+	cr.recentlyClosedUsageNextAt = now.Add(recentlyClosedUsageMinInterval)
+	runtimeKind := ""
+	if cr.cfg != nil {
+		runtimeKind = cr.cfg.Session.Provider
+	}
+	closed, err := store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "usage: listing sessions for recently-closed sweep failed: %v\n", err) //nolint:errcheck
+		}
+		return
+	}
+	var (
+		factory      *worker.Factory
+		factoryTried bool
+		logged       bool
+	)
+	logf := func(format string, args ...any) {
+		if logged || cr.stderr == nil {
+			return
+		}
+		logged = true
+		fmt.Fprintf(cr.stderr, format+"\n", args...) //nolint:errcheck
+	}
+	for _, b := range closed {
+		if ctx.Err() != nil {
+			return
+		}
+		if !recentlyClosedUsageCandidate(b, now) {
+			continue
+		}
+		// Refresh: list payloads can be stale vs SetMetadata from a prior tick.
+		fresh, gerr := store.Get(b.ID)
+		if gerr != nil {
+			logf("usage: loading closed session %s for usage sweep failed: %v", b.ID, gerr)
+			continue
+		}
+		if !recentlyClosedUsageCandidate(fresh, now) {
+			continue
+		}
+		awakeStart := strings.TrimSpace(fresh.Metadata["awake_started_at"])
+		sweepSettled := true
+		if strings.TrimSpace(fresh.Metadata[usageModelSweptAtKey]) != awakeStart {
+			if !factoryTried {
+				factoryTried = true
+				if cr.cfg != nil {
+					f, ferr := workerFactoryWithConfig(cr.cityPath, store, cr.sp, cr.cfg)
+					if ferr != nil {
+						logf("usage: building worker factory for recently-closed model sweep failed: %v", ferr)
+					} else {
+						factory = f
+					}
+				}
+			}
+			if factory != nil {
+				_, settled, serr := factory.SweepSessionModelUsage(ctx, fresh.ID, fresh.Metadata, now)
+				if serr != nil {
+					logf("usage: recently-closed model sweep for session %s failed; will retry: %v", fresh.ID, serr)
+				}
+				sweepSettled = settled
+				if settled {
+					if merr := store.SetMetadata(fresh.ID, usageModelSweptAtKey, awakeStart); merr != nil {
+						logf("usage: marking recently-closed model sweep for session %s failed: %v", fresh.ID, merr)
+					}
+				}
+			}
+		}
+		if strings.TrimSpace(fresh.Metadata[usageComputeEmittedAtKey]) != awakeStart {
+			// ClosePatch stamps closed_at and never slept_at, so emitComputeFactForBead
+			// would fall through to `now` and bill this interval to RECOVERY time rather
+			// than close time — inflating wall_seconds by up to recentlyClosedUsageWindow
+			// after a controller restart. closed_at is the true interval end; present it
+			// as slept_at on a COPY so the shared helper's existing preference applies and
+			// the open-set lane is untouched.
+			billing := fresh
+			if closedRaw := strings.TrimSpace(fresh.Metadata["closed_at"]); closedRaw != "" {
+				if closedAt, perr := time.Parse(time.RFC3339, closedRaw); perr == nil {
+					meta := make(map[string]string, len(fresh.Metadata))
+					for k, v := range fresh.Metadata {
+						meta[k] = v
+					}
+					meta["slept_at"] = closedAt.UTC().Format(time.RFC3339)
+					billing.Metadata = meta
+				}
+			}
+			emitComputeFactForBead(ctx, sink, store, billing, runtimeKind, cr.cityName, now, logf, sweepSettled)
+		}
+	}
 }
