@@ -15,16 +15,17 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// closeCountingStore is a beads.Store that counts CloseStore calls and poisons
-// its read methods after close, so a test can prove (a) how many times a handle
-// was closed and (b) that CachedReady never touches the backing once the
-// snapshot is in memory. It embeds *beads.MemStore so PrimeActive's list/dep
-// scan behaves like a real in-memory store during priming.
+// closeCountingStore is a beads.Store that counts CloseStore calls and Ready
+// reads and poisons its read methods after close, so a test can prove how many
+// times a handle was closed, how many reads a scan made against it, and that
+// no read reached it after it was closed.
 type closeCountingStore struct {
 	*beads.MemStore
 	closeCount  atomic.Int64
+	readyCount  atomic.Int64
 	closed      atomic.Bool
 	getNotFound bool // when true, Get always answers ErrNotFound (dispatch error path)
+	readyErr    error
 }
 
 func newCloseCountingStore(t *testing.T, seedReady bool) *closeCountingStore {
@@ -46,12 +47,26 @@ func (s *closeCountingStore) CloseStore() error { //nolint:unparam // must satis
 
 func (s *closeCountingStore) closes() int64 { return s.closeCount.Load() }
 
+func (s *closeCountingStore) readies() int64 { return s.readyCount.Load() }
+
 // List poisons after close so a stray read from a closed handle surfaces loudly.
 func (s *closeCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	if s.closed.Load() {
 		return nil, fmt.Errorf("closeCountingStore.List called after CloseStore (use-after-close)")
 	}
 	return s.MemStore.List(q)
+}
+
+// Ready counts reads and poisons after close.
+func (s *closeCountingStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if s.closed.Load() {
+		return nil, fmt.Errorf("closeCountingStore.Ready called after CloseStore (use-after-close)")
+	}
+	s.readyCount.Add(1)
+	if s.readyErr != nil {
+		return nil, s.readyErr
+	}
+	return s.MemStore.Ready(q...)
 }
 
 // Get either forces the not-found dispatch path or poisons after close.
@@ -65,44 +80,25 @@ func (s *closeCountingStore) Get(id string) (beads.Bead, error) {
 	return s.MemStore.Get(id)
 }
 
-// forceControlReadyCacheStale rewinds a scope's primed timestamp past the TTL so
-// the next controlReadyCachesFor call re-primes instead of reusing the entry --
-// no clock seam needed.
-func forceControlReadyCacheStale(t *testing.T, dir string) {
+// installControlReadyLegSourcesFn swaps the source seam for the duration of a
+// test.
+func installControlReadyLegSourcesFn(t *testing.T, fn func(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error)) {
 	t.Helper()
-	controlReadyCacheRegistry.mu.Lock()
-	defer controlReadyCacheRegistry.mu.Unlock()
-	entry, ok := controlReadyCacheRegistry.byDir[dir]
-	if !ok {
-		t.Fatalf("forceControlReadyCacheStale: no cache entry for %q", dir)
-	}
-	entry.primedAt = entry.primedAt.Add(-2 * controlReadyCacheTTL)
+	prev := controlReadyLegSourcesFn
+	controlReadyLegSourcesFn = fn
+	t.Cleanup(func() { controlReadyLegSourcesFn = prev })
 }
 
-// installControlReadyCacheSourcesFn swaps the source seam for the duration of a
-// test and drops the scope's registry entry on cleanup so the global registry
-// never leaks fixtures across tests.
-func installControlReadyCacheSourcesFn(t *testing.T, dir string, fn func(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error)) {
-	t.Helper()
-	prev := controlReadyCacheSourcesFn
-	controlReadyCacheSourcesFn = fn
-	t.Cleanup(func() {
-		controlReadyCacheSourcesFn = prev
-		controlReadyCacheRegistry.mu.Lock()
-		delete(controlReadyCacheRegistry.byDir, dir)
-		controlReadyCacheRegistry.mu.Unlock()
-	})
-}
-
-// TestControlReadyCachesForClosesOwnedSourcesPerPrime is the regression pin for
-// the WAL-starvation leak: every TTL-stale re-prime must release the scoped
-// backing it opened, and the primed snapshot must keep answering afterward.
-func TestControlReadyCachesForClosesOwnedSourcesPerPrime(t *testing.T) {
+// TestControlReadyLegsReadyClosesOwnedSourcesPerScan is the regression pin for
+// the WAL-starvation leak (#6255) and the scan's cost (ga-vnycm2.19): every
+// scan reads each leg exactly once, answers from that read, and releases the
+// scoped backing it opened before returning.
+func TestControlReadyLegsReadyClosesOwnedSourcesPerScan(t *testing.T) {
 	dir := t.TempDir()
 
 	var mu sync.Mutex
 	var minted []*closeCountingStore
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		f := newCloseCountingStore(t, true)
 		mu.Lock()
 		minted = append(minted, f)
@@ -110,51 +106,42 @@ func TestControlReadyCachesForClosesOwnedSourcesPerPrime(t *testing.T) {
 		return []beads.Store{f}, []beads.Store{f}, nil
 	})
 
-	const primes = 3
-	var caches []*beads.CachingStore
-	for i := 0; i < primes; i++ {
-		caches = controlReadyCachesFor(dir, dir, nil)
-		if len(caches) != 1 {
-			t.Fatalf("prime %d: controlReadyCachesFor returned %d caches, want 1", i, len(caches))
+	const scans = 3
+	for i := 0; i < scans; i++ {
+		ready, opened, err := controlReadyLegsReady(dir, dir, nil)
+		if err != nil || !opened {
+			t.Fatalf("scan %d: controlReadyLegsReady = opened %t, err %v; want opened, nil", i, opened, err)
 		}
-		forceControlReadyCacheStale(t, dir)
+		if len(ready) != 1 {
+			t.Fatalf("scan %d: ready = %d beads, want the 1 seeded ready bead", i, len(ready))
+		}
 	}
 
 	mu.Lock()
-	opens := int64(len(minted))
-	var closes int64
-	for _, f := range minted {
-		closes += f.closes()
+	defer mu.Unlock()
+	if len(minted) != scans {
+		t.Fatalf("opens = %d, want %d (each scan reads a freshly opened scoped store)", len(minted), scans)
 	}
-	mu.Unlock()
-
-	if opens != primes {
-		t.Fatalf("opens = %d, want %d (each stale re-prime opens a fresh scoped store)", opens, primes)
-	}
-	// The leak fix must bound live handles: opens minus closes is the count of
-	// still-open backings, and the fix closes each per prime, so it is 0 here and
-	// must never exceed 1. On the pre-fix base closes == 0, so opens-closes == 3.
-	if opens-closes > 1 {
-		t.Fatalf("opens-closes = %d (opens=%d closes=%d), want <= 1: scoped backings are leaking", opens-closes, opens, closes)
-	}
-
-	// The last prime's snapshot must still answer from memory even though its
-	// backing was closed -- the poisoned fake proves CachedReady never touched it.
-	if _, ok := cachedControlReadyUnion(caches); !ok {
-		t.Fatal("cachedControlReadyUnion reported unavailable after the backing was closed; CachedReady must serve from the in-memory snapshot")
+	for i, f := range minted {
+		if got := f.closes(); got != 1 {
+			t.Fatalf("scan %d's scoped leg closed %d times, want 1: scoped backings are leaking", i, got)
+		}
+		if got := f.readies(); got != 1 {
+			t.Fatalf("scan %d's scoped leg read %d times, want exactly one Ready per leg per scan", i, got)
+		}
 	}
 }
 
-// TestControlReadyCachesForNeverClosesSharedBindingLeg pins the ownership
-// boundary: the process-shared graph binding must never be closed by the cache
-// prime, only the scoped leg this call opened.
-func TestControlReadyCachesForNeverClosesSharedBindingLeg(t *testing.T) {
+// TestControlReadyLegsReadyNeverClosesSharedBindingLeg pins the ownership
+// boundary: the process-shared graph binding must never be closed by a scan,
+// only the scoped leg this call opened, and each leg is read once per scan.
+func TestControlReadyLegsReadyNeverClosesSharedBindingLeg(t *testing.T) {
 	dir := t.TempDir()
 
-	shared := newCloseCountingStore(t, false)
+	shared := newCloseCountingStore(t, true)
 	var mu sync.Mutex
 	var ownedMinted []*closeCountingStore
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		owned := newCloseCountingStore(t, true)
 		mu.Lock()
 		ownedMinted = append(ownedMinted, owned)
@@ -163,56 +150,47 @@ func TestControlReadyCachesForNeverClosesSharedBindingLeg(t *testing.T) {
 		return []beads.Store{owned, shared}, []beads.Store{owned}, nil
 	})
 
-	const primes = 3
-	for i := 0; i < primes; i++ {
-		if got := controlReadyCachesFor(dir, dir, nil); len(got) != 2 {
-			t.Fatalf("prime %d: got %d caches, want 2 (scoped + binding legs)", i, len(got))
+	const scans = 3
+	for i := 0; i < scans; i++ {
+		if _, opened, err := controlReadyLegsReady(dir, dir, nil); err != nil || !opened {
+			t.Fatalf("scan %d: controlReadyLegsReady = opened %t, err %v; want opened, nil", i, opened, err)
 		}
-		forceControlReadyCacheStale(t, dir)
 	}
 
 	if got := shared.closes(); got != 0 {
 		t.Fatalf("shared binding leg closed %d times, want 0: closing the process-shared binding poisons every later graph-class op", got)
 	}
-	mu.Lock()
-	var ownedCloses int64
-	for _, f := range ownedMinted {
-		ownedCloses += f.closes()
+	if got := shared.readies(); got != scans {
+		t.Fatalf("shared binding leg read %d times over %d scans, want one Ready per scan", got, scans)
 	}
-	ownedOpens := int64(len(ownedMinted))
-	mu.Unlock()
-	if ownedCloses != ownedOpens {
-		t.Fatalf("owned scoped legs: closes = %d, want %d (one per prime)", ownedCloses, ownedOpens)
+	mu.Lock()
+	defer mu.Unlock()
+	for i, f := range ownedMinted {
+		if f.closes() != 1 || f.readies() != 1 {
+			t.Fatalf("scan %d's scoped leg: closes = %d, readies = %d; want 1 and 1", i, f.closes(), f.readies())
+		}
 	}
 }
 
-// TestControlReadyCachesForClosesOwnedSourcesOnPrimeFailure covers the
-// prime-failure early return: a source that cannot prime must still have its
-// opened backing closed rather than leaked.
-func TestControlReadyCachesForClosesOwnedSourcesOnPrimeFailure(t *testing.T) {
+// TestControlReadyLegsReadyClosesOwnedSourcesOnReadFailure covers the read
+// failure return: a leg whose Ready fails fails the scan loudly, and the
+// opened backing is still closed rather than leaked.
+func TestControlReadyLegsReadyClosesOwnedSourcesOnReadFailure(t *testing.T) {
 	dir := t.TempDir()
 
-	failing := &primeFailingStore{closeCountingStore: newCloseCountingStore(t, false)}
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	failing := newCloseCountingStore(t, false)
+	failing.readyErr = fmt.Errorf("ready unavailable")
+	installControlReadyLegSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{failing}, []beads.Store{failing}, nil
 	})
 
-	if got := controlReadyCachesFor(dir, dir, nil); got != nil {
-		t.Fatalf("controlReadyCachesFor = %v, want nil when a leg fails to prime", got)
+	ready, opened, err := controlReadyLegsReady(dir, dir, nil)
+	if err == nil || !opened || ready != nil {
+		t.Fatalf("controlReadyLegsReady = (%v, %t, %v), want (nil, true, error) when a leg's read fails", ready, opened, err)
 	}
 	if got := failing.closes(); got != 1 {
-		t.Fatalf("failing scoped leg closed %d times, want 1: the prime-failure early return must not leak the opened handle", got)
+		t.Fatalf("failing scoped leg closed %d times, want 1: the read-failure return must not leak the opened handle", got)
 	}
-}
-
-// primeFailingStore fails every List so CachingStore.PrimeActive returns an
-// error, exercising controlReadyCachesFor's early-return path.
-type primeFailingStore struct {
-	*closeCountingStore
-}
-
-func (s *primeFailingStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
-	return nil, fmt.Errorf("primeFailingStore: list unavailable")
 }
 
 // TestRunControlDispatcherInStoreClosesScopeStoreOnError pins the second leak
@@ -235,7 +213,7 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnError(t *testing.T) {
 	t.Cleanup(func() { openControlStoreForDispatch = prev })
 
 	var stdout, stderr bytes.Buffer
-	err := runControlDispatcherInStore(cityDir, cityDir, "ga-missing-control", &stdout, &stderr)
+	err := runControlDispatcherInStore(cityDir, cityDir, "ga-missing-control", &stdout, &stderr, nil)
 	if err == nil {
 		t.Fatalf("runControlDispatcherInStore: err = nil, want an error for a missing control bead (stderr=%q)", stderr.String())
 	}
@@ -283,7 +261,7 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnSuccess(t *testing.T) {
 	t.Cleanup(func() { openControlStoreForDispatch = prev })
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcherInStore(cityDir, cityDir, control.ID, &stdout, &stderr); err != nil {
+	if err := runControlDispatcherInStore(cityDir, cityDir, control.ID, &stdout, &stderr, nil); err != nil {
 		t.Fatalf("runControlDispatcherInStore: %v (stderr=%q)", err, stderr.String())
 	}
 	// Assert the dispatch actually reached the processed branch. Without this

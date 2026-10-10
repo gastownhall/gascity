@@ -66,6 +66,53 @@ func herdrErrorCode(err error) string {
 	return ""
 }
 
+// herdrCodeAnyShape returns the herdr-reported error code from err
+// regardless of which shape runWithSecrets wrapped it in: the typed
+// envelope herdrErrorCode already recovers (a zero-exit CLI invocation), or
+// the *herdrStderr shape a non-zero exit wraps instead. herdrErrorCode alone
+// cannot see through the second shape, which is what left the pane-busy
+// retry guard at provider.go unable to recognize agent_pane_busy
+// (ga-iwanrj): herdr reports that rejection via a non-zero exit.
+func herdrCodeAnyShape(err error) string {
+	if code := herdrErrorCode(err); code != "" {
+		return code
+	}
+	var hs *herdrStderr
+	if !errors.As(err, &hs) {
+		return ""
+	}
+	codes := herdrErrorCodeFromStderr(hs.Text)
+	if len(codes) == 0 {
+		return ""
+	}
+	return codes[0]
+}
+
+// herdrErrorCodeFromStderr scans stderr text from a non-zero-exit herdr
+// invocation for every JSON error envelope it contains and returns their
+// codes in the order found. Applies no filtering of its own -- callers
+// decide which code, if any, matters; disqualifyingCode's agentlessCapableCode
+// filter in particular stays there, not here.
+func herdrErrorCodeFromStderr(text string) []string {
+	var codes []string
+	for i := strings.Index(text, "{"); i >= 0; {
+		var env envelope
+		// A decoder rather than Unmarshal: it stops at the end of the first
+		// complete value, so an envelope with text after it still parses.
+		if derr := json.NewDecoder(strings.NewReader(text[i:])).Decode(&env); derr == nil && env.Error != nil {
+			if code := env.Error.Code; code != "" {
+				codes = append(codes, code)
+			}
+		}
+		next := strings.Index(text[i+1:], "{")
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	return codes
+}
+
 // disqualifyingCode returns a herdr error code that rules the paste fallback out,
 // or "" if none does. It is the only use this change makes of a failure's text, and
 // the direction is the whole point: see targetHasNoNamedAgent for why text cannot
@@ -96,20 +143,10 @@ func disqualifyingCode(err error) string {
 	if !errors.As(err, &hs) {
 		return ""
 	}
-	for i := strings.Index(hs.Text, "{"); i >= 0; {
-		var env envelope
-		// A decoder rather than Unmarshal: it stops at the end of the first
-		// complete value, so an envelope with text after it still parses.
-		if derr := json.NewDecoder(strings.NewReader(hs.Text[i:])).Decode(&env); derr == nil && env.Error != nil {
-			if code := env.Error.Code; code != "" && !agentlessCapableCode(code) {
-				return code
-			}
+	for _, code := range herdrErrorCodeFromStderr(hs.Text) {
+		if !agentlessCapableCode(code) {
+			return code
 		}
-		next := strings.Index(hs.Text[i+1:], "{")
-		if next < 0 {
-			break
-		}
-		i += 1 + next
 	}
 	return ""
 }
@@ -239,9 +276,9 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
-// the per-entry name field is emitted under the JSON key "agent", not "name"
-// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// agentInfo mirrors herdr's agent object. herdr 0.7.3 emits the name under
+// the JSON key "agent"; 0.9.1 moved it to "name" and reuses "agent" for the
+// agent kind ("claude", "codex"), which UnmarshalJSON resolves.
 type agentInfo struct {
 	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
@@ -255,6 +292,25 @@ type agentInfo struct {
 	// Verified live on 0.7.3: it moves only while a client renders the pane;
 	// a headless server holds it at 0.
 	Revision uint64 `json:"revision"`
+}
+
+// UnmarshalJSON prefers "name" over "agent": on herdr 0.9.1 decoding "agent"
+// keyed every pane by its kind, so all Claude sessions collapsed into one
+// activity entry and none could ever read as idle for nudge delivery.
+func (a *agentInfo) UnmarshalJSON(b []byte) error {
+	type plain agentInfo
+	var v struct {
+		plain
+		Label string `json:"name"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*a = agentInfo(v.plain)
+	if v.Label != "" {
+		a.Name = v.Label
+	}
+	return nil
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's
@@ -545,7 +601,9 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 	if c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
-	switch herdrErrorCode(err) {
+	// herdr reports both verdicts through a non-zero exit, which herdrErrorCode
+	// cannot see; reading only that shape left every stall unrecovered.
+	switch herdrCodeAnyShape(err) {
 	case "timeout":
 		return fmt.Errorf("startup submit landed but never reached %v within %dms: %w",
 			startupConfirmStates, startupPromptConfirmTimeoutMS, err)

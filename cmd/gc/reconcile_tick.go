@@ -113,7 +113,7 @@ func (t *reconcileTick) set(id string, info sessionpkg.Info) sessionpkg.Info {
 // write the store rejected. Routing tuples through this mutator lets the fold
 // front-door guard forbid the bare tuple form outright.
 //
-// Contrast applyOptimistic, whose local fold must SURVIVE a failed write (the
+// Contrast applySleepOptimistic, whose local fold must SURVIVE a failed write (the
 // kill/sleep sites).
 func (t *reconcileTick) applyStore(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) sessionpkg.Info {
 	next, _ := front.ApplyPatchInfo(t.infoByID[id], patch)
@@ -121,22 +121,36 @@ func (t *reconcileTick) applyStore(id string, front *sessionpkg.Store, patch ses
 	return next
 }
 
-// applyOptimistic is the kill/sleep-site mutator whose local fold SURVIVES a
-// failed write. It attempts the durable write (front.ApplyPatch; the error is
-// intentionally discarded, matching the pre-migration `_ = ApplyPatch(...)` at
-// these sites) and then ALWAYS folds patch onto the snapshot entry for id.
-//
-// This is required at sites that killed a session's runtime and then folded
-// SleepPatch (or a marker clear) UNCONDITIONALLY on origin/main: the kill already
-// happened, so the snapshot MUST record the sleep even if its persistence failed.
-// If the fold were dropped on write failure (applyStore's behavior), the killed
-// session would still look awake to the same-tick awake scan and be respawned in
-// the same tick — or its stale last_woke_at would skew wake-budget fairness and
-// steal a peer's slot. applyStore is wrong here for exactly that reason: it
-// reflects the (failed) persistence rather than the completed kill.
-func (t *reconcileTick) applyOptimistic(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) {
-	// Error intentionally discarded (matches origin/main's `_ = ApplyPatch` at these
-	// sites): the local fold below must survive a failed sleep write.
-	_ = front.ApplyPatch(id, patch)
+// clearIdleStopPending drops the idle-stop-pending intent decided from the
+// snapshot, fenced on a fresh read: it clears only while the row still reads
+// idle-stop-pending, so an operator's suspend that landed since keeps its
+// user-hold intent. The fold follows the fresh intent; a failed write still
+// folds the clear (origin/main parity: the clear's fold survives it).
+func (t *reconcileTick) clearIdleStopPending(id string, front *sessionpkg.Store) {
+	intent := ""
+	_, err := front.UpdateMetadataFenced(id, 3, func(info sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		if intent = info.SleepIntent; intent != "idle-stop-pending" {
+			return nil
+		}
+		intent = ""
+		return sessionpkg.MetadataPatch{"sleep_intent": ""}
+	})
+	if err != nil {
+		intent = ""
+	}
+	t.infoByID[id] = t.infoByID[id].ApplyPatch(sessionpkg.MetadataPatch{"sleep_intent": intent})
+}
+
+// applySleepOptimistic is the kill/sleep-site mutator whose local fold
+// SURVIVES a failed write: the kill already happened, so the snapshot must
+// record the sleep even if its persistence failed, or the killed session would
+// look awake to the same-tick awake scan and be respawned in the same tick.
+// The write keeps an operator's user hold that a fresh read shows
+// (ApplyKeepingUserHold), and the fold follows what was written, or patch
+// when the write failed.
+func (t *reconcileTick) applySleepOptimistic(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) {
+	if written, err := front.ApplyKeepingUserHold(id, patch); err == nil && written != nil {
+		patch = written
+	}
 	t.infoByID[id] = t.infoByID[id].ApplyPatch(patch)
 }

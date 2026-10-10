@@ -81,20 +81,21 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	// Step 3: detect git and resolve the default branch.
 	hasGit, defaultBranchOverride, resolvedDefaultBranch, defaultBranchRemote := resolveGitDefaultBranch(deps, req, rigPath)
 
-	// Step 4: canonicalize --include tokens that name a pack (builtin or
-	// registry) rather than a path, and reject any token that resolves to no
-	// pack at all. Validation runs after the registry rewrite so a valid
-	// registry pack name is not rejected before it becomes a remote source.
-	// This runs before every mutation so an unresolvable include leaves the
-	// city untouched instead of bricking pack expansion citywide.
-	includes, err = resolveIncludeSources(fs, cityPath, includes, cfg.Packs, deps.ResolveRegistryPack)
+	// Step 4: split an explicit "<binding>=<source>" off each --include token,
+	// then canonicalize sources that name a pack (builtin or registry) rather
+	// than a path, and reject any source that resolves to no pack at all.
+	// Validation runs after the registry rewrite so a valid registry pack name
+	// is not rejected before it becomes a remote source. This runs before every
+	// mutation so an unresolvable include leaves the city untouched instead of
+	// bricking pack expansion citywide.
+	specs, err := resolveIncludeSpecs(fs, cityPath, includes, cfg.Packs, deps.ResolveRegistryPack)
 	if err != nil {
 		return config.Rig{}, result, err
 	}
 
-	// Steps 5-9: resolve imports, detect re-add, derive the prefix, build the next
-	// config, and validate it before any filesystem mutation.
-	plan, err := planRigMutation(deps, req, rigPath, resolvedDefaultBranch, includes)
+	// Steps 5-9: detect re-add, derive the prefix, resolve imports, build the
+	// next config, and validate it before any filesystem mutation.
+	plan, err := planRigMutation(deps, req, rigPath, resolvedDefaultBranch, specs)
 	if err != nil {
 		return config.Rig{}, result, err
 	}
@@ -190,30 +191,32 @@ type rigMutationPlan struct {
 	commitRigImports      func() error
 }
 
-// planRigMutation runs steps 5-9: it resolves the explicit bundled imports,
-// detects a re-add, derives and collision-checks the prefix, backfills a
-// default branch that forces a re-add write, builds the next config, and
-// validates the resulting rig set before any filesystem mutation. Its errors
-// are the byte-identical fatal texts the CLI prints.
-func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch string, includes []string) (rigMutationPlan, error) {
+// planRigMutation runs steps 5-9: it detects a re-add, derives and
+// collision-checks the prefix, resolves the explicit --include imports,
+// backfills a default branch that forces a re-add write, builds the next
+// config, and validates the resulting rig set before any filesystem mutation.
+// Its errors are the byte-identical fatal texts the CLI prints.
+func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch string, specs []includeSpec) (rigMutationPlan, error) {
 	cfg := deps.Cfg
 	cityPath := deps.CityPath
 	name := req.Name
 
-	// Step 5: resolve the explicit bundled rig imports (call #1).
-	explicitRigImports, commitRigImports, err := deps.ComposePacks(cityPath, config.BoundImportsFromLegacySources(includes, cfg.Packs))
-	if err != nil {
-		return rigMutationPlan{}, fmt.Errorf("installing bundled rig imports: %w", err)
-	}
-
-	// Step 6: re-add detection.
+	// Step 5: re-add detection. It runs first so a re-add, which ignores
+	// --include, never resolves versions or reaches the network.
 	reAdd, reAddNeedsConfigWrite, existingRigIdx, existingRig, err := detectRigReAdd(cfg, name, cityPath, rigPath)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
 
-	// Step 7: prefix resolution + collision checks.
+	// Step 6: prefix resolution + collision checks. It runs before import
+	// resolution so a colliding prefix never reaches the network.
 	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig)
+	if err != nil {
+		return rigMutationPlan{}, err
+	}
+
+	// Step 7: bind and resolve the explicit rig imports (call #1).
+	explicitRigImports, commitRigImports, err := composeExplicitRigImports(deps, specs, reAdd, existingRig)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -650,13 +653,14 @@ func writeRigTopology(deps Deps, plan rigMutationPlan, tomlPath string, snapshot
 		}
 	}
 
-	// Persist packs.lock and materialize bundled rig imports only after the city
-	// config write succeeds, so the lockfile honors the same "city.toml written
-	// last" contract: any earlier failure leaves packs.lock untouched, and a
-	// failure here rolls back through the snapshot (which now covers packs.lock).
+	// Persist packs.lock and materialize the locked rig imports only after the
+	// city config write succeeds, so the lockfile honors the same "city.toml
+	// written last" contract: any earlier failure leaves packs.lock untouched,
+	// and a failure here rolls back through the snapshot (which now covers
+	// packs.lock).
 	if plan.commitRigImports != nil {
 		if err := plan.commitRigImports(); err != nil {
-			return rollbackError(fs, snapshots, "installing bundled rig imports", err)
+			return rollbackError(fs, snapshots, "installing rig imports", err)
 		}
 	}
 	return nil

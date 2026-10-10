@@ -58,6 +58,7 @@ ACPSessionConfig holds settings for the ACP session provider.
 | `handshake_timeout` | string |  | `30s` | HandshakeTimeout is how long to wait for the ACP handshake to complete. Duration string (e.g., "30s", "1m"). Defaults to "30s". |
 | `nudge_busy_timeout` | string |  | `60s` | NudgeBusyTimeout is how long to wait for an agent to become idle before sending a new prompt. Duration string. Defaults to "60s". |
 | `output_buffer_lines` | integer |  | `1000` | OutputBufferLines is the number of output lines to keep in the circular buffer for Peek. Defaults to 1000. |
+| `stop_grace` | string |  | `5s` | StopGrace is how long stopping an ACP session waits after SIGTERM before escalating to SIGKILL. Raise it for agents that need longer to drain in-flight tool calls on shutdown. Duration string (e.g., "5s", "20s"). Defaults to "5s"; non-positive or unparseable values fall back to the default. gc stop bounds each session at 30s, so keep stop_grace comfortably below that. |
 
 ## APIConfig
 
@@ -92,6 +93,7 @@ Agent defines a configured agent in the city.
 | `nudge` | string |  |  | Nudge is text typed into the agent's session after startup. Used for CLI agents that don't accept command-line prompts. For a known pool session whose trigger remains unclaimed after the 90-second recovery grace period, an empty or whitespace-only Nudge does not opt out: it sends "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately." This fallback applies only to the initial stalled-claim recovery; continuation-claim recovery remains configured-only. Unknown templates receive no fallback. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
 | `lifecycle` | string |  |  | Lifecycle controls runtime lifetime semantics. Empty uses the default long-lived session lifecycle; "one_shot" means the command is expected to do bounded work and exit cleanly. Enum: `one_shot` |
@@ -111,13 +113,14 @@ Agent defines a configured agent in the city.
 | `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the command. |
 | `on_death` | string |  |  | OnDeath is a shell command template run when a session dies unexpectedly. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the command. |
 | `namepool` | string |  |  | Namepool is the path to a plain text file with one name per line. When set, sessions use names from the file as display aliases. |
-| `work_query` | string |  |  | WorkQuery is the shell command template to find available work for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before probe, hook, and prompt-context execution. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. If unset, Gas City uses a three-tier default query:   1. in_progress work assigned to this session/alias (crash recovery)   2. ready work assigned to this session/alias (pre-assigned work)   3. ready unassigned work with gc.routed_to=&lt;qualified-name&gt; When the controller probes for demand without session context, only the routed_to tier applies. Override to integrate with external task systems. |
+| `work_query` | string |  |  | WorkQuery is the shell command template to find available work for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before probe, hook, and prompt-context execution. Used by gc hook and available in prompt templates as &#123;&#123;.WorkQuery&#125;&#125;. If unset, Gas City uses a three-tier default query:   1. in_progress work assigned to this session/alias (crash recovery)   2. ready work assigned to this session/alias (pre-assigned work)   3. ready unassigned work with gc.routed_to=&lt;qualified-name&gt; When the controller probes for demand without session context, only the routed_to tier applies. Override to integrate with external task systems. A custom query that looks up assigned work should read $GC_ALIAS: under gc hook --claim, a single-slot pool session the supervisor collapsed onto the agent's canonical [[named_session]] identity runs the query with $GC_ALIAS set to that identity, while $GC_AGENT keeps the session's runtime value. |
 | `sling_query` | string |  |  | SlingQuery is the command template to route a bead to this session config. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing &#123;&#125; with the bead ID. Used by gc sling to make a bead visible to the target's work_query. The placeholder &#123;&#125; is replaced with the bead ID at runtime. Default for all agents: "bd update &#123;&#125; --set-metadata gc.routed_to=&lt;qualified-name&gt;". Routing is metadata-based; sling stamps the target template and the reconciler/scale_check paths decide when sessions are created. Custom sling_query and work_query can be overridden independently. |
 | `idle_timeout` | string |  |  | IdleTimeout is the maximum time an agent session can be inactive before the controller kills and restarts it. Duration string (e.g., "15m", "1h"). Empty (default) disables idle checking. |
 | `max_session_age` | string |  |  | MaxSessionAge is the maximum wall-clock lifetime of a single runtime session before the controller preemptively restarts it. Duration string (e.g., "5h"). Empty (default) disables preemptive restarts. The restart is idle-gated: sessions with a pending interaction or an in-progress assigned work bead are left alone until they settle.  Motivation: provider SDKs that cache credentials at session start (e.g., Claude Code via Bedrock) can wedge when the underlying token expires if the SDK doesn't re-chain providers. Cycling long-running sessions before the token-expiry window prevents that failure mode without requiring upstream provider fixes. |
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a per-session basis so a fleet of identically-configured agents doesn't synchronize restarts. Duration string (e.g., "15m"). Empty or 0 disables jitter (every session restarts at exactly MaxSessionAge). Ignored when MaxSessionAge is unset. |
 | `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the idle-timeout ladder may defer on the same assigned-work bead (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler overrides the defer and forces a stop via DecideAssignedWorkExhausted. Nil means use the built-in default. Without this backstop a session anchored to a bead that never clears assigned-work (e.g. a bead stuck open due to an upstream status-mapping bug) would defer indefinitely, reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at the single-tick level. The counter resets whenever the anchor bead changes or the session is not idle-kill-eligible; see sessionHasAwakeAssignedWorkForReachableStore's caller in session_reconciler.go. |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
+| `auto_reclaim_stale_claims` | boolean |  |  | AutoReclaimStaleClaims opts this agent into gc hook --claim attempting a scoped stale-lease reclaim (via `bd reclaim --id`) when a route-matched candidate's only claim blocker is an existing assignee. Off by default; staleness is decided entirely by bd's own lease TTL. |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides workspace-level install_agent_hooks for this agent. When set, replaces (not adds to) the workspace default. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Accepted during parse for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Accepted during parse for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
@@ -142,6 +145,7 @@ AgentDefaults provides agent defaults declared via [agent_defaults] in city.toml
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory is the city-wide default context-pressure guidance. |
 | `provider` | string |  |  | Provider is the default provider name for agents that do not set their own provider. It also counts as a configured provider for implicit agent injection. |
 | `model` | string |  |  | Model is the parsed/composed default model name for agents (e.g., "claude-sonnet-4-6"), but it is not yet auto-applied at runtime. Agents with their own model override would take precedence. |
 | `upstream` | string |  |  | Upstream is the default model-serving endpoint (a key in [upstreams]) for agents that do not set their own upstream (Phase C — the Upstream axis). Applied to agents with an empty Upstream by ApplyAgentDefaults. |
@@ -172,6 +176,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -182,6 +187,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge. Duration string (e.g., "15m"). Empty disables jitter. |
 | `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that field for semantics). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string (e.g., "30s") or "off". |
+| `auto_reclaim_stale_claims` | boolean |  |  | AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that field for semantics). |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
 | `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility. Parsed for migration visibility, but attachment-list fields are accepted but ignored by the active materializer. |
@@ -231,6 +237,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `context_advisory` | ContextAdvisory |  |  | ContextAdvisory overrides context-pressure guidance for this agent. |
 | `upstream` | string |  |  | Upstream overrides the model-serving endpoint selection (Phase C). |
 | `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
@@ -241,6 +248,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `max_session_age_jitter` | string |  |  | MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m"). |
 | `assigned_work_defer_limit` | integer |  |  | AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that field for semantics). |
 | `sleep_after_idle` | string |  |  | SleepAfterIdle overrides idle sleep policy for this agent. Accepts a duration string or "off". |
+| `auto_reclaim_stale_claims` | boolean |  |  | AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that field for semantics). |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks overrides the agent's install_agent_hooks list. |
 | `skills` | []string |  |  | Skills is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
 | `mcp` | []string |  |  | MCP is a tombstone field retained for v0.15.1 backwards compatibility.  Deprecated: removed in v0.16. Tombstone — accepted but ignored. See engdocs/proposals/skill-materialization.md |
@@ -291,6 +299,9 @@ BeadsConfig holds bead store settings.
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
+| `allow_schema_behind_migrate` | boolean |  | `false` | AllowSchemaBehindMigrate opts this city in to letting the linked beads library migrate its database forward when the database's own schema cursor trails the library's ceiling. Without it, the native-store preflight schema check FAILs a behind schema (stays on BdStore) instead of risking a native open that would migrate a possibly-shared database; the direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the linked library the same way. Default: false (nil). A break-glass GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in internal/rollout (beads.allow_schema_behind_migrate); read the effective value through internal/rollout.Flags.AllowSchemaBehindMigrate, never this field directly. |
+| `proxied_idle_timeout` | string |  | `30m` | ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt child stay up with no connections before bd retires them; the next bd command restarts them. Go duration; "0" means never. A finite value must be at least 1m. Empty uses the default, 30m. It applies to scopes gc initializes (gc init, gc rig add, gc beads city migrate-proxied); bd cannot change an existing scope's value, and gc doctor reports drift. Overridden per rig by beads_proxied_idle_timeout and by the GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable. |
+| `native_transport` | string |  | `auto` | NativeTransport selects whether this city's bead stores may open the native Dolt store at all: "off" (this city's stores never open natively; always BdStore, the bd CLI subprocess — logged once at boot) or "auto" (default: native when preflight-eligible, today's behavior). Empty defaults to "auto". Any other value (including "require", which belongs to conditional_writes/guarded_release, not this switch) fails config load. A running city keeps the stores it holds open on the value it read at boot until it restarts; every other open, by a gc command or for a single tick, reads the current value. GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for "off" that overrides every city's value for one release. Enum: `auto`, `off` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
@@ -301,6 +312,26 @@ ChatSessionsConfig configures chat session behavior.
 |-------|------|----------|---------|-------------|
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
 | `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
+
+## ContextAdvisory
+
+ContextAdvisory configures context-pressure guidance.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  |  |
+| `window_tokens` | integer |  |  |  |
+| `tiers` | []ContextAdvisoryTier |  |  |  |
+
+## ContextAdvisoryTier
+
+ContextAdvisoryTier is one threshold and message in a context-pressure advisory.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `threshold` | integer |  |  |  |
+| `message` | string |  |  |  |
+| `enabled` | boolean |  |  |  |
 
 ## ConvergenceConfig
 
@@ -336,6 +367,7 @@ DaemonConfig holds controller daemon settings.
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Fresh generic pool session-bead creation uses the same budget so the controller does not materialize more ordinary pool sessions than it can wake. Bounded dependency-floor prerequisites are exempt. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
 | `nudge_dispatcher` | string |  | `legacy` | NudgeDispatcher selects how queued nudges get delivered to running sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll` process that polls the file-backed queue every 2s. "supervisor" runs the delivery loop inside the city runtime instead, with a unix-socket wake fast path triggered by enqueue, eliminating the per-session bd shellout storm. Enum: `legacy`, `supervisor` |
+| `session_reconciler` | string |  | `legacy` | SessionReconciler selects the controller's session reconciler. "legacy" (default) runs the tick reconciler. "v2" is reserved for the keyed reconciler and is refused in this build: a controller configured with it does not start. The gc-enterprise values "off", "auto" and "require" are deprecated aliases for "legacy". Boot-latched: a change applies at the next controller restart. Leave it unset. Enum: `legacy`, `v2`, `off`, `auto`, `require` |
 | `auto_restart_on_drift` | boolean |  | `true` | AutoRestartOnDrift controls whether `gc start` automatically restarts the supervisor when it detects the running supervisor's binary or pack snapshot has drifted from on-disk state. Nil (unset) defaults to true — operators get the correct-by-default behavior. Set to false as a global kill switch (e.g., for production cities where a rebuild on the host should not auto-restart the supervisor). |
 | `auto_reap_closed_bead_worktrees` | boolean |  | `false` | AutoReapClosedBeadWorktrees controls whether the reconciler patrol automatically removes per-bead git worktrees once their associated work bead reaches closed status. Only worktrees with a clean working tree, no stashes, and no commits that removal would orphan — commits reachable from no branch, tag, or remote-tracking ref — are removed; push state is deliberately not the test, since `git worktree remove` deletes the checkout and not refs/heads. Unsafe worktrees are logged as warnings and left in place for operator review. Session home directories (agent template directories) are never touched. Defaults to false. Set to true to enable automated worktree cleanup. |
 | `auto_reap_closed_bead_worktrees_dry_run` | boolean |  | `false` | AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the full worktree-reap classification each tick — discovery, closed-bead match, liveness gate, and git-safety probes — but emit bead.worktree.reap_skipped events describing what it WOULD reap and what it protected, without removing anything. This is the safe staged-rollout surface: an operator enables dry-run first, confirms via `gc events` that no live worktree appears in the would-reap set, then enables AutoReapClosedBeadWorktrees for real removal. Those events are edge-triggered: each worktree is reported when the patrol first classifies it and again whenever its verdict changes, not once per tick, so the would-reap set is complete right after dry-run is enabled rather than reprinted every sweep. Dry-run has no effect when AutoReapClosedBeadWorktrees is already true (real removal supersedes it). Defaults to false. |
@@ -350,8 +382,8 @@ DoctorConfig holds settings for the gc doctor surface.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `worktree_rig_warn_size` | string |  | `10GB` | WorktreeRigWarnSize is the per-rig warning threshold for the total disk footprint under .gc/worktrees/&lt;rig&gt;/. Reported by the worktree-disk-size check. Go-style human size string ("10GB", "500MB"). Empty or unparseable falls back to the default (10 GB). |
-| `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When any rig exceeds this, the worktree-disk-size check reports an error rather than a warning. Empty or unparseable falls back to the default (50 GB). |
+| `worktree_rig_warn_size` | string |  | `10GB` | WorktreeRigWarnSize is the per-rig warning threshold for a worktree population's total disk footprint. Reported by the worktree-disk-size check for .gc/worktrees/&lt;rig&gt;/, and by the rig:&lt;rig&gt;:worktrees check for the per-bead worktrees at &lt;rig&gt;/worktrees/. Go-style human size string ("10GB", "500MB"). Empty or unparseable falls back to the default (10 GB). |
+| `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When a rig worktree population exceeds this, the reporting check errors rather than warns. Empty or unparseable falls back to the default (50 GB). |
 | `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
 
@@ -514,7 +546,7 @@ MailConfig holds mail provider settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
-| `retention_ttl` | string |  |  | RetentionTTL is how long read messages are retained before purge. Empty or "0" disables read-message retention. |
+| `retention_ttl` | string |  |  | RetentionTTL has two consumers: it is how long read messages are retained before purge, and how long a read mail bead stays open before the nudge-mail sweep closes it. Empty or "0" disables read-message purge. The sweep distinguishes the two: empty leaves it at its own 60-minute default, while "0" disables its mail-close phase. |
 
 ## MaintenanceConfig
 
@@ -598,7 +630,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
-| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many orders the supervisor dispatches per tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron and event triggers) the supervisor dispatches per orders-lane pass, in a rotation that resumes where the previous pass stopped. The key keeps its historical name from when order dispatch ran once per controller tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one per pass at cold start instead of firing several concurrent goroutines at once. Condition-triggered orders are outside this budget: a passing check means work is pending right now, so they dispatch on the pass that observes it. The open-tracking and open-work gates still run for them (unless the order sets no_work_gate), but those gates are keyed per order and only hold back a redispatch of an order whose previous run is still moving, so they do not bound the pass as a whole: a pass launches at most this budget plus one dispatch per condition order whose check passed on that pass. That second term grows with how many condition orders a city defines, not with this setting, and at cold start, before any tracking bead exists, neither gate holds a simultaneously-due set back. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -653,6 +685,7 @@ ProviderOption declares a single configurable option for a provider.
 | `type` | string | **yes** |  | "select" only (v1) |
 | `default` | string | **yes** |  | Default is the Value of the choice selected when the user makes none. |
 | `choices` | []OptionChoice | **yes** |  | Choices are the allowed values; selecting one injects its FlagArgs into the agent command line (how the Model axis renders to a harness CLI flag). |
+| `flag_template` | []string |  |  | FlagTemplate makes this option OPEN: a value that is not one of Choices is still honored by substituting it for OptionValuePlaceholder in this template. Options with no template are CLOSED — an undeclared value cannot be turned into flags at all.  Model ids are an open, fast-moving set: every provider ships new ones between gc releases. Modeling them as a closed enum meant a pin the catalog had not caught up to produced no FlagArgs and the launch path silently omitted the flag, unpinning the agent onto whatever the CLI defaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6). Choices stay as the curated suggestion list for pickers; the template is what guarantees an explicit pin is never discarded.  json:"-" for the same reason as OptionChoice.FlagArgs: CLI flag shapes are server-side only and must not reach the public API DTO. |
 | `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. |
 
 ## ProviderPatch
@@ -725,6 +758,7 @@ Rig defines an external project registered in the city.
 | `path` | string |  |  | Path is the absolute filesystem path to the rig's repository. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived bead ID prefix for this rig. |
 | `default_branch` | string |  |  | DefaultBranch is the rig repository's mainline branch (e.g. "main", "master", "develop"). When set, routing formulas use this as the default merge target instead of probing origin/HEAD at sling time. Captured by `gc rig add` from the rig's git config; set manually for rigs whose mainline isn't reachable via origin/HEAD. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead routed into this rig when the caller passes no --merge flag. One of "direct", "mr", or "local"; empty leaves the bead unstamped, which consumers read as their own implicit default. Set it to "mr" on rigs that deliver work through a pull request instead of a push to the target branch, so a bare `gc sling` records the shape the rig actually uses rather than one every caller has to remember to pass. |
 | `suspended` | boolean |  |  | Suspended is the deprecated pre-runtime-state suspension flag. Parsed for backwards compatibility and treated as an alias for SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing cities with `suspended = true` continue to start their rigs suspended after upgrade. Live suspend/resume commands no longer write this field. `gc doctor` flags it and offers `--fix` to rename to suspended_on_start. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart is the rig's desired suspension state at city start. When true and no explicit entry exists for this rig in .gc/runtime/suspension-state.json, the rig is treated as suspended. Once the user has explicitly suspended or resumed the rig via `gc rig suspend/resume`, the runtime state wins. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory — the highest-priority formula layer, above city pack formulas, the city formulas/ directory, and rig pack formulas. Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
@@ -739,6 +773,7 @@ Rig defines an external project registered in the city.
 | `dolt_host` | string |  |  | DoltHost overrides the city-level Dolt host for this rig's beads. Use when the rig's database lives on a different Dolt server (e.g., shared from another city). |
 | `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. |
 | `formula_vars` | map[string]string |  |  | FormulaVars provides rig-scoped defaults for formula vars. Keys match var names declared in formula `[vars.&lt;name&gt;]` blocks. Values are used when a formula runs in this rig and the caller did not pass an explicit --var override. Takes precedence over formula-level defaults but loses to --var flags. |
+| `beads_proxied_idle_timeout` | string |  |  | BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this rig's bd-owned proxied scope. Go duration; "0" means never. Ignored, with a warning, for a rig that shares the city's proxy root: one proxy serves every scope on that root and carries the city's value. |
 
 ## RigPatch
 
@@ -750,9 +785,11 @@ RigPatch modifies an existing rig identified by Name.
 | `path` | string |  |  | Path overrides the rig's filesystem path. |
 | `prefix` | string |  |  | Prefix overrides the bead ID prefix. |
 | `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on beads routed into this rig. Set to "" to clear the rig's default and go back to leaving merge_strategy unstamped. |
 | `suspended` | boolean |  |  | Suspended is the deprecated, pre-runtime-state suspension override. Parsed for backwards compatibility; `gc doctor` surfaces it as a warning and recommends the rename to SuspendedOnStart. No behavioral code path reads it. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart overrides the rig's desired suspension state at city start. Mirrors Rig.SuspendedOnStart. |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |
+| `beads_proxied_idle_timeout` | string |  |  | BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout. |
 
 ## Service
 

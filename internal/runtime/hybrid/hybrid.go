@@ -4,6 +4,7 @@ package hybrid
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -21,11 +22,25 @@ var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
+	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.BackendListingProvider        = (*Provider)(nil)
+	_ runtime.BackendsProvider              = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.Router                        = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.DialogProvider                = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -34,11 +49,46 @@ func New(local, remote runtime.Provider, isRemote func(string) bool) *Provider {
 	return &Provider{local: local, remote: remote, isRemote: isRemote}
 }
 
-func (p *Provider) route(name string) runtime.Provider {
+// RouteFor implements [runtime.Router]. The route is a pure function of the
+// session name, so it is always known.
+func (p *Provider) RouteFor(name string) runtime.Route {
 	if p.isRemote(name) {
-		return p.remote
+		return runtime.Route{Backend: p.remoteBackend(), Known: true}
 	}
-	return p.local
+	return runtime.Route{Backend: p.localBackend(), Known: true}
+}
+
+func (p *Provider) localBackend() runtime.Backend {
+	return runtime.Backend{Label: "local", Provider: p.local}
+}
+
+func (p *Provider) remoteBackend() runtime.Backend {
+	return runtime.Backend{Label: "remote", Provider: p.remote}
+}
+
+func (p *Provider) route(name string) runtime.Provider {
+	return p.RouteFor(name).Provider
+}
+
+// StopUnattendedSession forwards the bound unattended stop only to the backend
+// selected for name. Evidence from another backend cannot prove or stop the
+// pending target, so unsupported or failed stops never fall through.
+func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
+	selected := p.local
+	label := "local"
+	if p.isRemote(name) {
+		selected = p.remote
+		label = "remote"
+	}
+
+	stopper, ok := selected.(runtime.UnattendedSessionStopper)
+	if !ok {
+		return fmt.Errorf("hybrid %s backend does not support unattended-session stop for %q", label, name)
+	}
+	if err := stopper.StopUnattendedSession(name, expectedToken); err != nil {
+		return fmt.Errorf("hybrid %s backend stopping unattended session %q: %w", label, name, err)
+	}
+	return nil
 }
 
 // Start delegates to the routed backend.
@@ -49,6 +99,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop delegates to the routed backend.
 func (p *Provider) Stop(name string) error {
 	return p.route(name).Stop(name)
+}
+
+// ServerConfirmedDead implements [runtime.ServerDeathConfirmer] by forwarding
+// to the backends that confirm server death (local tmux), so StopForCleanup
+// keeps its confirmed-dead rule for a missing-server answer Stop returns.
+func (p *Provider) ServerConfirmedDead() bool {
+	return runtime.ServersConfirmedDead(p.local, p.remote)
 }
 
 // Interrupt delegates to the routed backend.
@@ -74,6 +131,13 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 // IsAttached delegates to the routed backend.
 func (p *Provider) IsAttached(name string) bool {
 	return p.route(name).IsAttached(name)
+}
+
+// IsAttachedWithError forwards the error-bearing attachment probe to the
+// routed backend, so a probe failure is not lost behind the bool. A backend
+// without the capability answers through its IsAttached with a nil error.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return runtime.IsAttachedWithError(p.route(name), name)
 }
 
 // Attach delegates to the routed backend.
@@ -112,6 +176,18 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 		return wp.WaitForIdle(ctx, name, timeout)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// SnapshotIdle delegates to the routed backend when it can take a
+// point-in-time idle observation. Like WaitForIdle this must be forwarded
+// explicitly: this Provider enumerates the optional interfaces it supports
+// rather than embedding a backend, so a local tmux session would otherwise
+// lose SnapshotIdle for every session in a local/remote split city.
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	if sp, ok := p.route(name).(runtime.IdleSnapshotProvider); ok {
+		return sp.SnapshotIdle(name)
+	}
+	return false, runtime.ErrInteractionUnsupported
 }
 
 // NudgeNow delegates to the routed backend when it supports immediate
@@ -169,6 +245,60 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 	return runtime.ErrInteractionUnsupported
 }
 
+// DismissKnownDialogs delegates to the routed backend when it can dismiss
+// startup dialogs.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
+		return dp.DismissKnownDialogs(ctx, name, timeout)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// GetAllEnvironment delegates to the routed backend when it has a batched
+// environment read.
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	if ep, ok := p.route(name).(runtime.EnvironmentBatchProvider); ok {
+		return ep.GetAllEnvironment(name)
+	}
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrEnvironmentBatchUnsupported, name)
+}
+
+// ConfigureServer configures the server of every backend that has one.
+func (p *Provider) ConfigureServer() error {
+	return runtime.ConfigureServers(p.Backends())
+}
+
+// TeardownServer tears down the server of every backend that has one, so a
+// full stop through the composite still ends the local tmux server.
+func (p *Provider) TeardownServer() error {
+	return runtime.TeardownServers(p.Backends())
+}
+
+// SessionRoster merges the backends' rosters ([runtime.MergeSessionRosters]).
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return runtime.MergeSessionRosters(p, p.Backends())
+}
+
+// KillCorpseObject forwards to the routed backend when it kills session
+// objects by id (local tmux). The route is a pure function of the name, so no
+// other backend can host the object.
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillCorpseObject(name, objectID, created)
+}
+
+// KillZombieObject forwards like KillCorpseObject.
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillZombieObject(name, objectID, created, panePID)
+}
+
 // SetMeta delegates to the routed backend.
 func (p *Provider) SetMeta(name, key, value string) error {
 	return p.route(name).SetMeta(name, key, value)
@@ -192,12 +322,24 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // ListRunning queries both backends and returns best-effort results plus a
 // partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	local, lErr := p.local.ListRunning(prefix)
-	remote, rErr := p.remote.ListRunning(prefix)
-	return runtime.MergeBackendListResults(
-		runtime.BackendListResult{Label: "local", Names: local, Err: lErr},
-		runtime.BackendListResult{Label: "remote", Names: remote, Err: rErr},
-	)
+	return runtime.MergeBackendListings(p.ListRunningByBackend(prefix))
+}
+
+// ListRunningByBackend implements [runtime.BackendListingProvider]: one
+// ListRunning call per backend, local first.
+func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing {
+	return runtime.ListBackends(p.Backends(), prefix)
+}
+
+// Backends implements [runtime.BackendsProvider] without listing.
+func (p *Provider) Backends() []runtime.Backend {
+	return []runtime.Backend{p.localBackend(), p.remoteBackend()}
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]: the merged
+// listing is complete only when both backends attest theirs.
+func (p *Provider) ListRunningComplete() bool {
+	return runtime.ListRunningAttested(p.local) && runtime.ListRunningAttested(p.remote)
 }
 
 // GetLastActivity delegates to the routed backend.
@@ -241,10 +383,27 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports idle sleep capability for the routed backend.
+// SleepCapability reports idle sleep capability for the routed backend,
+// derived from its capabilities when it does not report one itself.
 func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
-	if scp, ok := p.route(name).(runtime.SleepCapabilityProvider); ok {
+	routed := p.route(name)
+	if scp, ok := routed.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)
 	}
-	return runtime.SessionSleepCapabilityDisabled
+	return runtime.SleepCapabilityFromCapabilities(routed.Capabilities())
+}
+
+// SubscribeSessionEvents forwards the session-event streams of the backends
+// that implement runtime.SessionEventProvider. Without this method,
+// wrapping an event-capable local backend behind hybrid for remote routing
+// would fail the runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the event-driven reconcile
+// poke. When both backends publish events, both streams are merged, so
+// neither backend's session deaths wait for the patrol scan; a nested
+// composite without an event-capable backend is skipped. See
+// runtime.SubscribeSessionEventSources.
+func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	return runtime.SubscribeSessionEventSources(ctx,
+		runtime.SessionEventSource{Name: "local", Provider: p.local},
+		runtime.SessionEventSource{Name: "remote", Provider: p.remote})
 }

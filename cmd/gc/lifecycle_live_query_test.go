@@ -65,6 +65,20 @@ func TestCollectAssignedWorkBeads_UsesCachedReadyEventStateForAssignedOpenHandof
 	}
 }
 
+// depEventPayload is a bead.updated payload carrying b with an explicit edge
+// set, empty included, the shape a class binding's event has.
+func depEventPayload(t *testing.T, b beads.Bead, deps []beads.Dep) json.RawMessage {
+	t.Helper()
+	payload, err := json.Marshal(struct {
+		beads.Bead
+		Dependencies []beads.Dep `json:"dependencies"`
+	}{b, deps})
+	if err != nil {
+		t.Fatalf("Marshal(%s): %v", b.ID, err)
+	}
+	return payload
+}
+
 func TestCollectAssignedWorkBeads_UsesExplicitDepEventsForCachedReady(t *testing.T) {
 	t.Parallel()
 
@@ -97,7 +111,7 @@ func TestCollectAssignedWorkBeads_UsesExplicitDepEventsForCachedReady(t *testing
 		if err := backing.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
 			t.Fatalf("backing DepAdd(%s <- %s): %v", handoff.ID, blocker.ID, err)
 		}
-		cache.ApplyDepEvent(handoff.ID, []beads.Dep{{IssueID: handoff.ID, DependsOnID: blocker.ID, Type: "blocks"}})
+		cache.ApplyEvent("bead.updated", depEventPayload(t, handoff, []beads.Dep{{IssueID: handoff.ID, DependsOnID: blocker.ID, Type: "blocks"}}))
 
 		got, _ := collectAssignedWorkBeads(&config.City{}, cache)
 		if len(got) != 0 {
@@ -137,7 +151,7 @@ func TestCollectAssignedWorkBeads_UsesExplicitDepEventsForCachedReady(t *testing
 		if err := backing.DepRemove(handoff.ID, blocker.ID); err != nil {
 			t.Fatalf("backing DepRemove(%s <- %s): %v", handoff.ID, blocker.ID, err)
 		}
-		cache.ApplyDepEvent(handoff.ID, nil)
+		cache.ApplyEvent("bead.updated", depEventPayload(t, handoff, []beads.Dep{}))
 
 		got, _ := collectAssignedWorkBeads(&config.City{}, cache)
 		if len(got) != 1 || got[0].ID != handoff.ID {
@@ -171,12 +185,12 @@ func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {
 	}
 
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
 	}
 	if hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStore() = true, want false after external open-work reassignment")
+		t.Fatal("sessionHasOpenAssignedWorkInStoreByIdentifiers() = true, want false after external open-work reassignment")
 	}
 }
 
@@ -223,12 +237,12 @@ func TestSessionHasOpenAssignedWorkInStore_UsesCachedWispOwnership(t *testing.T)
 	backing.setFail(true)
 
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
 	}
 	if !hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStore() = false, want cached wisp ownership to count")
+		t.Fatal("sessionHasOpenAssignedWorkInStoreByIdentifiers() = false, want cached wisp ownership to count")
 	}
 }
 
@@ -252,12 +266,12 @@ func TestSessionHasOpenAssignedWorkInStore_FallsBackToLiveForCachedWispMiss(t *t
 	}
 
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStore(cache, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
 	}
 	if !hasAssignedWork {
-		t.Fatalf("sessionHasOpenAssignedWorkInStore() = false, want live wisp %s after cached miss", wisp.ID)
+		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers() = false, want live wisp %s after cached miss", wisp.ID)
 	}
 }
 

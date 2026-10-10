@@ -32,9 +32,9 @@ const (
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
-	attempt, err := strconv.Atoi(bead.Metadata[beadmeta.AttemptMetadataKey])
+	attempt, err := strconv.Atoi(beadmeta.RetryAttemptValue(bead.Metadata))
 	if err != nil || attempt < 1 {
-		return ControlResult{}, fmt.Errorf("%s: invalid gc.attempt %q", bead.ID, bead.Metadata[beadmeta.AttemptMetadataKey])
+		return ControlResult{}, fmt.Errorf("%s: invalid gc.retry_attempt/gc.attempt %q", bead.ID, beadmeta.RetryAttemptValue(bead.Metadata))
 	}
 	maxAttempts, err := strconv.Atoi(bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	if err != nil || maxAttempts < 1 {
@@ -53,11 +53,22 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
 	}
-	if closedBy, _ := strconv.Atoi(logical.Metadata[beadmeta.ClosedByAttemptMetadataKey]); closedBy >= attempt {
+	// gc.closed_by_attempt names the attempt whose eval settled the logical
+	// bead. Every terminal branch below records it in the same batch as the
+	// rest of the verdict, settles the logical bead, and closes this eval last,
+	// so the open eval is what re-drives an interrupted settle.
+	closedBy, _ := strconv.Atoi(logical.Metadata[beadmeta.ClosedByAttemptMetadataKey])
+	switch {
+	case closedBy > attempt:
+		// A later attempt settled the logical bead: this eval is superseded.
 		if err := finalizeRetryEval(store, logicalID, bead.ID); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: finalizing stale retry eval: %w", bead.ID, err)
 		}
 		return ControlResult{Processed: true, Action: "noop"}, nil
+	case closedBy == attempt:
+		// This eval's own settle was interrupted. Finish it from the durable
+		// verdict without re-evaluating the subject, which could disagree.
+		return finishInterruptedRetrySettle(store, bead, logical)
 	}
 
 	subject, err := resolveRetryRunSubject(store, bead, logicalID, attempt)
@@ -81,98 +92,59 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 		return ControlResult{}, fmt.Errorf("%s: persisting retry eval result: %w", bead.ID, err)
 	}
 
+	// Every terminal branch settles the logical bead first and closes the eval
+	// last. A crash in between is finished by the closed_by_attempt guard above.
 	switch result.Outcome {
 	case "pass":
-		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
-			if err := store.SetMetadata(logicalID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
-			}
-		}
-		if err := propagateRetrySubjectMetadata(store, logicalID, subject); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating subject metadata to logical bead: %w", logicalID, err)
-		}
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		verdict := map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomePass,
 			beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionPass,
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical pass: %w", logicalID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing passed eval: %w", bead.ID, err)
+		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+			verdict[beadmeta.OutputJSONMetadataKey] = outputJSON
 		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
-		}
-		return ControlResult{Processed: true, Action: "pass"}, nil
+		copyNonGCMetadata(verdict, subject.Metadata)
+		return settleRetryEval(store, bead, logicalID, verdict, beadmeta.OutcomePass, "pass")
 
 	case "hard":
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		return settleRetryEval(store, bead, logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 			beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
 			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:    result.Reason,
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed eval: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
-		}
-		return ControlResult{Processed: true, Action: "hard-fail"}, nil
+		}, beadmeta.OutcomeFail, "hard-fail")
 
 	case "canceled":
-		// The run was canceled: close the eval and its logical bead as canceled
-		// (an explicit terminal non-failure) rather than scheduling another
+		// The run was canceled: settle the logical bead as canceled (an
+		// explicit terminal non-failure) rather than scheduling another
 		// attempt. The cancellation gate normally closes retry-eval beads before
 		// they reach here; this is the defensive terminal path when an eval does
 		// classify a canceled subject.
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeCanceled); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing canceled eval: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeCanceled); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing canceled logical bead: %w", logicalID, err)
-		}
-		return ControlResult{Processed: true, Action: "canceled"}, nil
+		return settleRetryEval(store, bead, logicalID, map[string]string{
+			beadmeta.OutcomeMetadataKey:         beadmeta.OutcomeCanceled,
+			beadmeta.ClosedByAttemptMetadataKey: strconv.Itoa(attempt),
+		}, beadmeta.OutcomeCanceled, "canceled")
 
 	case "transient":
 		if attempt >= maxAttempts {
-			if onExhausted == beadmeta.DispositionSoftFail {
-				if err := store.SetMetadataBatch(logicalID, map[string]string{
-					beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
-					beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
-					beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
-					beadmeta.FailureReasonMetadataKey:    result.Reason,
-					beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionSoftFail,
-				}); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: marking logical soft-fail: %w", logicalID, err)
-				}
-				if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
-				}
-				if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-					return ControlResult{}, fmt.Errorf("%s: closing soft-failed logical bead: %w", logicalID, err)
-				}
-				return ControlResult{Processed: true, Action: "soft-fail"}, nil
-			}
-			if err := store.SetMetadataBatch(logicalID, map[string]string{
+			exhausted := map[string]string{
+				beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 				beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
 				beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 				beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
 				beadmeta.FailureReasonMetadataKey:    result.Reason,
 				beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
-			}); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: marking exhausted logical failure: %w", logicalID, err)
 			}
-			if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
+			action := "fail"
+			if onExhausted == beadmeta.DispositionSoftFail {
+				exhausted[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
+				exhausted[beadmeta.FinalDispositionMetadataKey] = beadmeta.DispositionSoftFail
+				action = "soft-fail"
 			}
-			if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: closing exhausted logical bead: %w", logicalID, err)
-			}
-			return ControlResult{Processed: true, Action: "fail"}, nil
+			return settleRetryEval(store, bead, logicalID, exhausted, beadmeta.OutcomeFail, action)
 		}
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported retry eval outcome %q", bead.ID, result.Outcome)
@@ -270,7 +242,7 @@ func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string
 			if candidate.Metadata[beadmeta.LogicalBeadIDMetadataKey] != logicalID {
 				continue
 			}
-			if candidate.Metadata[beadmeta.AttemptMetadataKey] != attemptStr {
+			if beadmeta.RetryAttemptValue(candidate.Metadata) != attemptStr {
 				continue
 			}
 			return candidate, nil
@@ -458,7 +430,7 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	if result.Outcome != "pass" {
 		return result, nil
 	}
-	reason, err := validateRequiredArtifacts(store, subject, opts.RequiredArtifactStat)
+	reason, err := validateRequiredArtifacts(store, subject, opts)
 	if err != nil {
 		return retryEvalResult{}, err
 	}
@@ -468,12 +440,13 @@ func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bea
 	return result, nil
 }
 
-func validateRequiredArtifacts(store beads.Store, subject beads.Bead, stat func(string) (os.FileInfo, error)) (string, error) {
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, opts ProcessOptions) (string, error) {
+	stat := opts.RequiredArtifactStat
 	if stat == nil {
 		stat = os.Stat
 	}
 	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
-		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath)
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath, opts)
 		if err != nil {
 			return "", err
 		}
@@ -541,21 +514,24 @@ func requiredArtifactWorkDir(meta map[string]string) string {
 //	{worktree}          the resolved worktree root (also the implicit base for
 //	                    a relative template)
 //	{root} / {root_id}  the workflow root bead ID
-//	{attempt}           gc.attempt — this step's own retry counter
+//	{attempt}           gc.attempt — the v1.4.2 value: the loop iteration
+//	                    inside a ralph body, the retry counter outside one
 //	{iteration}         gc.iteration — the loop iteration the step ran in
+//	{retry_attempt}     gc.retry_attempt — this step's own retry counter
 //
-// {attempt} and {iteration} are NOT interchangeable. A directory shared by the
-// steps of one loop iteration is named by {iteration}; only {attempt} advances
-// when a single step retries. Any token left unexpanded fails the template
-// loudly rather than resolving to a partial path.
-func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string) (string, string, string, error) {
+// A directory shared by the steps of one loop iteration is named by
+// {iteration} (or, for packs that must also run on v1.4.2, {attempt}); only
+// {retry_attempt} advances when a single step retries. Any token left
+// unexpanded fails the template loudly rather than resolving to a partial path.
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, opts ProcessOptions) (string, string, string, error) {
 	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
 	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
 	iteration := strings.TrimSpace(subject.Metadata[beadmeta.IterationMetadataKey])
+	retryAttempt := beadmeta.RetryAttemptValue(subject.Metadata)
 	worktree := requiredArtifactWorkDir(subject.Metadata)
 
 	if worktree == "" {
-		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID)
+		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID, opts)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -573,14 +549,17 @@ func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath 
 	path = strings.ReplaceAll(path, "{root}", rootID)
 	path = strings.ReplaceAll(path, "{root_id}", rootID)
 	path = strings.ReplaceAll(path, "{attempt}", attempt)
+	// {retry_attempt} is one step's own retry counter. It falls back to
+	// gc.attempt on a bead minted before the key existed.
+	if retryAttempt != "" {
+		path = strings.ReplaceAll(path, "{retry_attempt}", retryAttempt)
+	}
 	// {iteration} names the loop iteration a whole sub-DAG ran in, which is the
-	// directory a set of sibling steps share. {attempt} names one step's own
-	// retry counter, which only the step that retried advances — so a template
-	// built from it sends a retried reader to a directory its siblings never
-	// wrote. Substituted only when the bead actually carries the value: an empty
-	// replacement would produce a silently wrong path segment and the gate would
-	// then blame the step for the resolver's gap, where falling through to the
-	// unresolved-template check below names the real fault (ga-la0py).
+	// directory a set of sibling steps share. Substituted only when the bead
+	// actually carries the value: an empty replacement would produce a silently
+	// wrong path segment and the gate would then blame the step for the
+	// resolver's gap, where falling through to the unresolved-template check
+	// below names the real fault (ga-la0py).
 	if iteration != "" {
 		path = strings.ReplaceAll(path, "{iteration}", iteration)
 	}
@@ -644,7 +623,7 @@ func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
 	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
 }
 
-func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, string, error) {
+func resolveRequiredArtifactWorktree(store beads.Store, rootID string, opts ProcessOptions) (string, string, error) {
 	if rootID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
@@ -664,24 +643,88 @@ func resolveRequiredArtifactWorktree(store beads.Store, rootID string) (string, 
 		return worktree, "", nil
 	}
 	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	fromSourceBead := sourceID != ""
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	}
 	if sourceID == "" {
 		return "", "missing_required_artifact_context", nil
 	}
-	source, err := store.Get(sourceID)
-	if errors.Is(err, beads.ErrNotFound) {
-		return "", "missing_required_artifact_context", nil
-	}
+	source, found, err := resolveRequiredArtifactSourceBead(store, root, sourceID, fromSourceBead, opts)
 	if err != nil {
-		return "", "", fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+		return "", "", err
+	}
+	if !found {
+		return "", "missing_required_artifact_context", nil
 	}
 	worktree := requiredArtifactWorkDir(source.Metadata)
 	if worktree == "" {
 		return "", "missing_required_artifact_context", nil
 	}
 	return worktree, "", nil
+}
+
+// resolveRequiredArtifactSourceBead reads the worktree-bearing source bead a
+// workflow root points at, across store boundaries. The root lives in the
+// subject's own (graph) store, but on a split city the bead it points at does
+// not: a gc.source_bead_id source lives in the scope named by
+// gc.source_store_ref, and a gc.input_convoy_id convoy is a work bead in the
+// work store. Reading either through the ambient store gets a clean
+// ErrNotFound and misclassifies a genuinely-passing attempt as transient
+// missing_required_artifact_context, burning attempts until exhaustion. Two
+// doors, matching the finalize lane's walkSourceBeadChain:
+//
+//   - A non-empty gc.source_store_ref names another scope's store; resolve it
+//     via opts.ResolveStoreRef and read there. A ref with no resolver wired
+//     fails LOUD rather than silently narrowing to the ambient store.
+//   - With no ref, resolve over the same residency frame the drain uses
+//     (opts.MemberStores as the work leg). With no member stores — every
+//     single-store caller — this is byte-identical to the ambient store.Get
+//     it replaces.
+//
+// found=false is a clean not-found on every probed store; the caller maps it
+// to missing_required_artifact_context exactly as before.
+func resolveRequiredArtifactSourceBead(store beads.Store, root beads.Bead, sourceID string, fromSourceBead bool, opts ProcessOptions) (beads.Bead, bool, error) {
+	if fromSourceBead {
+		if ref := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey]); ref != "" {
+			if opts.ResolveStoreRef == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source bead %s (ref %s): no store-ref resolver provided", sourceID, ref)
+			}
+			resolved, err := opts.ResolveStoreRef(ref)
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: %w", ref, markTransientControllerBoundaryError(err))
+			}
+			if resolved == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: nil store", ref)
+			}
+			source, err := resolved.Get(sourceID)
+			if errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, false, nil
+			}
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s in %s: %w", sourceID, ref, markTransientControllerBoundaryError(err))
+			}
+			return source, true, nil
+		}
+	}
+	if len(opts.MemberStores) == 0 {
+		source, err := store.Get(sourceID)
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+		}
+		return source, true, nil
+	}
+	owner, found, err := resolveDrainMember(store, sourceID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+	}
+	if !found {
+		return beads.Bead{}, false, nil
+	}
+	return owner.Bead, true, nil
 }
 
 func retryFailureReason(subject beads.Bead) string {
@@ -717,6 +760,66 @@ func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalRe
 	return store.SetMetadataBatch(beadID, batch)
 }
 
+// settleRetryEval finishes a terminal retry-eval branch: it settles the logical
+// bead with the whole verdict (one metadata batch, then a forced close), and
+// only then closes the eval with evalOutcome. The verdict must carry
+// gc.closed_by_attempt so a re-drive after a crash between the two writes
+// recognizes the settle as its own (finishInterruptedRetrySettle).
+func settleRetryEval(store beads.Store, eval beads.Bead, logicalID string, verdict map[string]string, evalOutcome, action string) (ControlResult, error) {
+	if err := settleLogicalBead(store, logicalID, verdict); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: settling logical bead (%s): %w", logicalID, action, err)
+	}
+	if err := updateMetadataAndClose(store, eval.ID, controlCompletionMetadata(eval, evalOutcome)); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing eval (%s): %w", eval.ID, action, err)
+	}
+	return ControlResult{Processed: true, Action: action}, nil
+}
+
+// finishInterruptedRetrySettle completes a terminal settle that this eval
+// started and a crash or failed write cut short: the logical bead already
+// carries gc.closed_by_attempt for this eval's attempt. The verdict is durable
+// on the logical bead, so the subject is not re-evaluated. The logical bead is
+// closed if the close was the lost write, then the eval closes with the
+// outcome persistRetryEvalResult recorded on it before the settle began. The
+// logical->eval edge is kept, exactly as an uninterrupted settle leaves it.
+func finishInterruptedRetrySettle(store beads.Store, eval, logical beads.Bead) (ControlResult, error) {
+	evalOutcome := strings.TrimSpace(eval.Metadata[beadmeta.OutcomeMetadataKey])
+	if evalOutcome == "" {
+		return ControlResult{}, fmt.Errorf("%s: logical bead %s settled by attempt %s but eval has no recorded gc.outcome", eval.ID, logical.ID, logical.Metadata[beadmeta.ClosedByAttemptMetadataKey])
+	}
+	if logical.Status != "closed" {
+		verdict := map[string]string{}
+		if strings.TrimSpace(logical.Metadata[beadmeta.OutcomeMetadataKey]) == "" {
+			// A settle stamped before gc.outcome joined the verdict batch.
+			outcome, ok := retryLogicalOutcomeForDisposition(logical.Metadata[beadmeta.FinalDispositionMetadataKey])
+			if !ok {
+				return ControlResult{}, fmt.Errorf("%s: logical bead %s settled by this attempt without gc.outcome or a known gc.final_disposition %q", eval.ID, logical.ID, logical.Metadata[beadmeta.FinalDispositionMetadataKey])
+			}
+			verdict[beadmeta.OutcomeMetadataKey] = outcome
+		}
+		if err := settleLogicalBead(store, logical.ID, verdict); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: finishing interrupted settle of logical bead: %w", logical.ID, err)
+		}
+	}
+	if err := updateMetadataAndClose(store, eval.ID, controlCompletionMetadata(eval, evalOutcome)); err != nil {
+		return ControlResult{}, fmt.Errorf("%s: closing eval of settled logical bead %s: %w", eval.ID, logical.ID, err)
+	}
+	return ControlResult{Processed: true, Action: "logical-settled"}, nil
+}
+
+// retryLogicalOutcomeForDisposition maps a retry logical bead's
+// gc.final_disposition to the gc.outcome its terminal branch closes it with.
+func retryLogicalOutcomeForDisposition(disposition string) (string, bool) {
+	switch disposition {
+	case beadmeta.DispositionPass, beadmeta.DispositionSoftFail:
+		return beadmeta.OutcomePass, true
+	case beadmeta.DispositionHardFail:
+		return beadmeta.OutcomeFail, true
+	default:
+		return "", false
+	}
+}
+
 func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject beads.Bead) error {
 	batch := map[string]string{}
 	for key, value := range subject.Metadata {
@@ -732,9 +835,9 @@ func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject 
 }
 
 func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval beads.Bead, nextAttempt int, routeCfg *config.City) error {
-	oldAttempt, err := strconv.Atoi(prevRun.Metadata[beadmeta.AttemptMetadataKey])
+	oldAttempt, err := strconv.Atoi(beadmeta.RetryAttemptValue(prevRun.Metadata))
 	if err != nil || oldAttempt < 1 {
-		return fmt.Errorf("%s: invalid gc.attempt %q", prevRun.ID, prevRun.Metadata[beadmeta.AttemptMetadataKey])
+		return fmt.Errorf("%s: invalid gc.retry_attempt/gc.attempt %q", prevRun.ID, beadmeta.RetryAttemptValue(prevRun.Metadata))
 	}
 	rootID := prevRun.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -790,7 +893,7 @@ func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, r
 	if assignee == "" {
 		clearSessionAffinityMetadata(meta)
 	}
-	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
+	beadmeta.StampRetryAttempt(meta, attempt)
 	meta[beadmeta.RetryFromMetadataKey] = prev.ID
 	meta[beadmeta.StepRefMetadataKey] = stepRef
 	meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
@@ -811,7 +914,7 @@ func retryEvalBead(prev beads.Bead, logicalID, stepRef string, attempt int) bead
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
 	clearSessionAffinityMetadata(meta)
-	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
+	beadmeta.StampRetryAttempt(meta, attempt)
 	meta[beadmeta.RetryFromMetadataKey] = prev.ID
 	meta[beadmeta.StepRefMetadataKey] = stepRef
 	meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID

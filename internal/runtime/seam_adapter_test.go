@@ -15,6 +15,8 @@ type fakeSeamRuntime struct {
 	openOK      bool     // does Open report the box as running?
 	teardowns   []string // names passed to Teardown, in order
 	teardownErr error    // when non-nil, Teardown fails with this
+	listNames   []string // List result
+	listErr     error    // List error
 }
 
 func (r *fakeSeamRuntime) Provision(context.Context, string, ProvisionRequest) (Place, error) {
@@ -33,8 +35,10 @@ func (r *fakeSeamRuntime) Teardown(_ context.Context, name string) error {
 	return r.teardownErr
 }
 
-func (r *fakeSeamRuntime) List(context.Context, string) ([]string, error) { return nil, nil }
-func (r *fakeSeamRuntime) Capabilities() PlaceCapabilities                { return PlaceCapabilities{} }
+func (r *fakeSeamRuntime) List(context.Context, string) ([]string, error) {
+	return r.listNames, r.listErr
+}
+func (r *fakeSeamRuntime) Capabilities() PlaceCapabilities { return PlaceCapabilities{} }
 
 type fakeSeamPlace struct{}
 
@@ -188,5 +192,37 @@ func TestSeamProviderStartSucceedsWithoutTeardown(t *testing.T) {
 	}
 	if len(rt.teardowns) != 0 {
 		t.Fatalf("a successful start must not tear down the box; got %v", rt.teardowns)
+	}
+}
+
+// Every seam-backed provider's ListRunning is the seam adapter's, so a listing
+// attestation forwarded by a cut-over is only honest if the adapter hands the
+// runtime's error through unchanged: a partial list keeps its names and its
+// ServerAbsent flag, and a plain error stays plain.
+// Kills: a seam adapter that drops or rewraps the List error.
+func TestSeamProviderListRunningPropagatesListError(t *testing.T) {
+	absent := &PartialListError{Err: errors.New("server unreachable"), ServerAbsent: true}
+	plain := errors.New("list timed out")
+	cases := []struct {
+		name  string
+		names []string
+		err   error
+	}{
+		{name: "complete", names: []string{"a", "b"}},
+		{name: "partial server absent", names: []string{"a"}, err: absent},
+		{name: "plain error", err: plain},
+	}
+	for _, tc := range cases {
+		rt := &fakeSeamRuntime{listNames: tc.names, listErr: tc.err}
+		names, err := NewProviderFromSeams(rt, &fakeSeamTransport{}).ListRunning("")
+		if !errors.Is(err, tc.err) {
+			t.Errorf("%s: ListRunning err = %v, want %v unchanged", tc.name, err, tc.err)
+		}
+		if IsRuntimeServerAbsent(err) != IsRuntimeServerAbsent(tc.err) {
+			t.Errorf("%s: ServerAbsent = %v, want %v", tc.name, IsRuntimeServerAbsent(err), IsRuntimeServerAbsent(tc.err))
+		}
+		if len(names) != len(tc.names) {
+			t.Errorf("%s: ListRunning names = %q, want %q", tc.name, names, tc.names)
+		}
 	}
 }

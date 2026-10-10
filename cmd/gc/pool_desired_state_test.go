@@ -786,11 +786,12 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
 	}
-	// 3 assigned beads with different priorities, max=2. Highest priority wins.
+	// 3 assigned beads with different bd priorities, max=2. bd priorities are
+	// ascending-urgent (P0 is the most urgent), so the most urgent two win.
 	work := []beads.Bead{
-		workBead("w-low", "claude", "s1", "in_progress", 1),
-		workBead("w-high", "claude", "s2", "in_progress", 10),
-		workBead("w-mid", "claude", "s3", "in_progress", 5),
+		workBead("w-low", "claude", "s1", "in_progress", 4),
+		workBead("w-high", "claude", "s2", "in_progress", 0),
+		workBead("w-mid", "claude", "s3", "in_progress", 1),
 	}
 	sessions := []beads.Bead{
 		sessionBead("s1", "open"),
@@ -803,12 +804,18 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
 	}
-	// Highest priority resume requests should be accepted.
-	if result[0].Requests[0].BeadPriority != 10 {
-		t.Errorf("first priority = %d, want 10", result[0].Requests[0].BeadPriority)
+	// Most urgent resume requests should be accepted, P0 first.
+	if got, want := result[0].Requests[0].WorkBeadID, "w-high"; got != want {
+		t.Errorf("first work bead = %q, want %q (P0 schedules first)", got, want)
 	}
-	if result[0].Requests[1].BeadPriority != 5 {
-		t.Errorf("second priority = %d, want 5", result[0].Requests[1].BeadPriority)
+	if got, want := result[0].Requests[0].BeadPriority, beadPriorityRank(0); got != want {
+		t.Errorf("first rank = %d, want %d (P0)", got, want)
+	}
+	if got, want := result[0].Requests[1].WorkBeadID, "w-mid"; got != want {
+		t.Errorf("second work bead = %q, want %q (P1 schedules second)", got, want)
+	}
+	if got, want := result[0].Requests[1].BeadPriority, beadPriorityRank(1); got != want {
+		t.Errorf("second rank = %d, want %d (P1)", got, want)
 	}
 }
 

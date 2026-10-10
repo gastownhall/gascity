@@ -1,0 +1,73 @@
+--- a/validate/BUILD
++++ b/validate/BUILD
+@@ -1,56 +1,27 @@
+-load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+-load("@com_google_protobuf//bazel:java_proto_library.bzl", "java_proto_library")
+-load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+-load("@com_google_protobuf//bazel:py_proto_library.bzl", "py_proto_library")
+ load("@io_bazel_rules_go//go:def.bzl", "go_library")
+-load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+-load("@rules_cc//cc:defs.bzl", "cc_library")
++
++# gascity: third_party/patches/protoc_gen_validate_build.patch. The upstream
++# file regenerates validate.pb.go with go_proto_library (and declares cc, py
++# and java rules), which pulls the C++ protoc and abseil into the
++# analysis of every target linking the dolt driver. Build the checked-in
++# validate.pb.go instead.
+ 
+ package(
+     default_visibility =
+         ["//visibility:public"],
+ )
+ 
+-proto_library(
+-    name = "validate_proto",
+-    srcs = ["validate.proto"],
+-    deps = [
+-        "@com_google_protobuf//:descriptor_proto",
+-        "@com_google_protobuf//:duration_proto",
+-        "@com_google_protobuf//:timestamp_proto",
+-    ],
+-)
+-
+-cc_proto_library(
+-    name = "validate_cc",
+-    deps = [":validate_proto"],
+-)
+-
+-py_proto_library(
+-    name = "validate_py",
+-    deps = [":validate_proto"],
+-)
+-
+-go_proto_library(
+-    name = "validate_go_proto",
+-    importpath = "github.com/envoyproxy/protoc-gen-validate/validate",
+-    proto = ":validate_proto",
+-)
+-
+-cc_library(
+-    name = "cc_validate",
+-    hdrs = ["validate.h"],
+-)
+-
+ go_library(
+     name = "validate_go",
+-    embed = [":validate_go_proto"],
++    srcs = ["validate.pb.go"],
+     importpath = "github.com/envoyproxy/protoc-gen-validate/validate",
+-)
+-
+-java_proto_library(
+-    name = "validate_java",
+-    deps = [":validate_proto"],
++    deps = [
++        "@org_golang_google_protobuf//reflect/protoreflect",
++        "@org_golang_google_protobuf//runtime/protoimpl",
++        "@org_golang_google_protobuf//types/descriptorpb",
++        "@org_golang_google_protobuf//types/known/durationpb",
++        "@org_golang_google_protobuf//types/known/timestamppb",
++    ],
+ )
+ 
+ filegroup(

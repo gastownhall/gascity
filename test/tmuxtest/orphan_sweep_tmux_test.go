@@ -58,13 +58,22 @@ func TestSweepOrphanPIDPrefixedDirsKillsLiveTmuxServerBeforeRemoval(t *testing.T
 	if err != nil {
 		t.Fatalf("parsing tmux server pid %q: %v", pidOut, err)
 	}
+	// Capture the start-time identity token now, while the PID is known to
+	// still be this server: by cleanup time the process is expected to be
+	// dead and its PID reusable, so every later check has to re-attribute
+	// the PID rather than merely ask whether something holds it.
+	serverStart, _ := pidutil.StartTime(serverPID)
 	t.Cleanup(func() {
 		// The socket may already be unlinked by the sweep under test, so
 		// killing by socket path can't be relied on alone -- fall back to a
 		// direct PID kill of the exact server this test spawned and
-		// verified, never a bare/default-socket kill-server.
-		_ = exec.Command("tmux", "-S", socket, "kill-server").Run()
-		if pidutil.Alive(serverPID) {
+		// verified, never a bare/default-socket kill-server. The socket kill
+		// goes through the package's bounded helper: this cleanup runs after
+		// a sweep that may have left the server wedged, and an unbounded
+		// client call to such a peer stalls the whole package until the outer
+		// go-test timeout instead of failing here.
+		_ = killTmuxServerAtSocket(socket)
+		if pidutil.AliveWithStartTime(serverPID, serverStart) && pidutil.AliveWithCmdline(serverPID, isTmuxArgv) {
 			_ = syscall.Kill(serverPID, syscall.SIGKILL)
 		}
 	})
@@ -85,7 +94,7 @@ func TestSweepOrphanPIDPrefixedDirsKillsLiveTmuxServerBeforeRemoval(t *testing.T
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("socket parent dir survived sweep, fixture invalid: %s", dir)
 	}
-	if pidutil.Alive(serverPID) {
+	if pidutil.AliveWithStartTime(serverPID, serverStart) {
 		t.Errorf("tmux server pid %d at %s is still alive after its socket parent dir was swept -- orphaned, matches ga-t33q83", serverPID, socket)
 	}
 }

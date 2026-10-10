@@ -156,6 +156,11 @@ case "$1" in
     printf '[]'
     exit 0
     ;;
+  hooks)
+    # `bd hooks run <hook>`, chained from .githooks. Model a beads install that
+    # accepts the hook and does nothing, so these tests stay about the guard.
+    exit 0
+    ;;
   *)
     exit 1
     ;;
@@ -1130,17 +1135,26 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 # tests catch a future edit to either file breaking the wiring. A trivial
 # Makefile stands in for the real one: pushing a brand-new branch makes the
 # hook's `go_changed` gate trip (no remote counterpart to diff against) and
-# fall through to `exec make test-fast-parallel`, which these tests don't
+# fall through to the push-time suite (make test-fast-parallel under GC_PREPUSH_SUITE=go), which these tests don't
 # want to actually run — only the ownership guard's wiring is under test
 # here.
 # ---------------------------------------------------------------------------
 
 install_guard_hook() {
     local repo="$1"
-    mkdir -p "$repo/scripts" "$repo/.githooks"
+    mkdir -p "$repo/scripts" "$repo/.githooks/lib"
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
+    # .githooks owns core.hooksPath, so pre-push forwards to beads through this
+    # helper before the guard runs. Copy the real one for the same reason the
+    # hook itself is copied rather than re-implemented.
+    cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" "$repo/.githooks/lib/beads-chain.sh"
+    chmod +x "$repo/.githooks/lib/beads-chain.sh"
+    # The pushes below pin GC_PREPUSH_SUITE=go so the suite is the trivial
+    # make target, never a real bazel run on a machine that has bazel.
+    cp "$REPO_ROOT/.githooks/lib/push-suite.sh" "$repo/.githooks/lib/push-suite.sh"
+    chmod +x "$repo/.githooks/lib/push-suite.sh"
     printf 'test-fast-parallel:\n\t@true\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }
@@ -1172,7 +1186,7 @@ setup_hook_push_scenario() {
 test_hook_blocks_push_on_stale_claim() {
     local remote work fbd branch out rc
     read -r remote work fbd branch <<<"$(setup_hook_push_scenario closed)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_PREPUSH_SUITE=go GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]] && [[ -z "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/blocks-push-on-stale-claim (rejected, remote untouched)"
     else
@@ -1184,7 +1198,7 @@ test_hook_blocks_push_on_stale_claim() {
 test_hook_no_verify_bypasses_guard() {
     local remote work fbd branch out rc
     read -r remote work fbd branch <<<"$(setup_hook_push_scenario closed)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push --no-verify origin "$branch" 2>&1)"; rc=$?
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_PREPUSH_SUITE=go GIT_TERMINAL_PROMPT=0 git push --no-verify origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/no-verify-bypasses-guard (push succeeded despite stale claim)"
     else
@@ -1196,7 +1210,7 @@ test_hook_no_verify_bypasses_guard() {
 test_hook_allows_push_on_clean_claim() {
     local remote work fbd branch out rc
     read -r remote work fbd branch <<<"$(setup_hook_push_scenario in_progress)"
-    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_PREPUSH_SUITE=go GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
         record_pass "hook/allows-push-on-clean-claim"
     else

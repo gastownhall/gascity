@@ -1,0 +1,62 @@
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "dashport_test",
+    srcs = [
+        # fixtures.go and harness.go are integration-tagged non-test files in
+        # package dashport_test, which gazelle cannot place in a go_library.
+        "fixtures.go",  # keep
+        "harness.go",  # keep
+        "projection_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    deps = [
+        "//internal/api",  # keep
+        "//internal/api/genclient",
+        "//internal/runproj",
+        "//internal/testenv",
+        "//test/dashport/corpus",  # keep
+    ],
+)
+
+# The seeded corpus the dashboard's Playwright render smoke serves through
+# //test/dashport/cmd/fakesupervisor (in the output tree, as rules_js wants
+# every data file of a js_test).
+copy_to_bin(
+    name = "corpus",
+    srcs = glob(["testdata/dashport/**"]),
+    visibility = ["//internal/api/dashboardspa/web/frontend:__pkg__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

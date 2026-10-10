@@ -74,8 +74,8 @@ func TestApplyRalph_IterationOneStampsIterationAndPreservesChildAttempts(t *test
 		}
 	})
 
-	t.Run("retry control keeps its own counter", func(t *testing.T) {
-		// Trivially true while iteration 1 is the only compile-time iteration,
+	t.Run("retry attempt carries its own counter under gc.retry_attempt", func(t *testing.T) {
+		// Trivially equal while iteration 1 is the only compile-time iteration,
 		// since both counters read 1 — but it is the same rule the runtime path
 		// applies at iteration 3, and the two must not drift apart.
 		control := mustGet(t, "review-loop.iteration.1.scorecard")
@@ -85,8 +85,15 @@ func TestApplyRalph_IterationOneStampsIterationAndPreservesChildAttempts(t *test
 		if attempt := control.Metadata["gc.attempt"]; attempt != "1" {
 			t.Errorf("retry control gc.attempt = %q, want 1", attempt)
 		}
-		if attempt := mustGet(t, "review-loop.iteration.1.scorecard.attempt.1").Metadata["gc.attempt"]; attempt != "1" {
+		first := mustGet(t, "review-loop.iteration.1.scorecard.attempt.1")
+		if attempt := first.Metadata["gc.attempt"]; attempt != "1" {
 			t.Errorf("first attempt gc.attempt = %q, want 1", attempt)
+		}
+		if retryAttempt := first.Metadata["gc.retry_attempt"]; retryAttempt != "1" {
+			t.Errorf("first attempt gc.retry_attempt = %q, want 1", retryAttempt)
+		}
+		if _, ok := control.Metadata["gc.retry_attempt"]; ok {
+			t.Errorf("retry control carries gc.retry_attempt; only attempt roots count retries")
 		}
 	})
 }
@@ -94,38 +101,49 @@ func TestApplyRalph_IterationOneStampsIterationAndPreservesChildAttempts(t *test
 // TestRalphBodyChildAttempt pins the shared rule directly, at the iteration
 // numbers the compile-time path can never reach. dispatch.buildAttemptRecipe
 // calls this for every ralph body child on iterations 2+, which is where the
-// two counters actually diverge.
+// two counters actually diverge. gc.attempt is the iteration on EVERY body
+// child (the v1.4.2 contract pack gates join on); only a retry attempt root has
+// a retry counter, and it lives in gc.retry_attempt.
 func TestRalphBodyChildAttempt(t *testing.T) {
 	tests := []struct {
-		name  string
-		child *Step
-		want  string
+		name          string
+		child         *Step
+		wantRetryAttr string
 	}{
 		{
-			name:  "retry control starts its own counter",
+			name:  "retry control",
 			child: &Step{ID: "scorecard", Retry: &RetrySpec{MaxAttempts: 3}},
-			want:  "1",
 		},
 		{
-			name:  "nested ralph control starts its own counter",
+			name:  "nested ralph control",
 			child: &Step{ID: "inner", Ralph: &RalphSpec{MaxAttempts: 3}},
-			want:  "1",
 		},
 		{
-			name:  "expanded attempt keeps the attempt its spec carries",
-			child: &Step{ID: "scorecard.attempt.1", Metadata: map[string]string{"gc.attempt": "1"}},
-			want:  "1",
+			name:          "expanded attempt keeps the retry counter its spec carries",
+			child:         &Step{ID: "scorecard.attempt.1", Metadata: map[string]string{"gc.attempt": "1", "gc.retry_attempt": "1", "gc.control_for": "scorecard"}},
+			wantRetryAttr: "1",
 		},
 		{
-			name:  "plain body step inherits the iteration",
+			name:          "attempt frozen before gc.retry_attempt existed reads it from its ID",
+			child:         &Step{ID: "scorecard.attempt.1", Metadata: map[string]string{"gc.attempt": "1", "gc.control_for": "scorecard"}},
+			wantRetryAttr: "1",
+		},
+		{
+			name:  "plain body step",
 			child: &Step{ID: "publish"},
-			want:  "4",
+		},
+		{
+			name:  "plain step whose ID merely ends in attempt.N",
+			child: &Step{ID: "report.attempt.2"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RalphBodyChildAttempt(tc.child, 4); got != tc.want {
-				t.Errorf("RalphBodyChildAttempt(%s, 4) = %q, want %q", tc.child.ID, got, tc.want)
+			if got := RalphBodyChildAttempt(tc.child, 4); got != "4" {
+				t.Errorf("RalphBodyChildAttempt(%s, 4) = %q, want 4 (the iteration)", tc.child.ID, got)
+			}
+			if got := RalphBodyChildRetryAttempt(tc.child); got != tc.wantRetryAttr {
+				t.Errorf("RalphBodyChildRetryAttempt(%s) = %q, want %q", tc.child.ID, got, tc.wantRetryAttr)
 			}
 		})
 	}

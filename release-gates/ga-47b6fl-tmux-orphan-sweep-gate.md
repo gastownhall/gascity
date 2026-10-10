@@ -140,3 +140,25 @@ retried into green.
 Gate PASS. Cut `deploy/ga-47b6fl-gate` from the exact reviewed source, commit
 this checklist there, push the isolated branch, and open a pull request. Merge
 authority remains with mayor/mpr; the deployer does not merge.
+
+## Addendum 2026-09-12: the merged head is not the gated head
+
+Everything above is the record of a gate evaluated on 2026-09-11 against
+commit `1dacc4f3` over base `41edfbef`. Both SHAs are accurate and are left
+unchanged: they name what was actually run, and rewriting them to the merged
+head would assert that the 40-job local CI union, its preserved logs, and its
+failure attributions were collected against content they never saw.
+
+The gate's PASS does not extend to what landed. PR #6296 squash-merged as
+`a1deacc6` on 2026-09-12, and its `test/tmuxtest/orphan_sweep.go`
+(blob `cd3ff9c9`) matches neither the gated tree nor the remediation authored
+for the review's request_changes findings — `git log --all --find-object`
+finds that blob in exactly one commit, the merge itself. The remediation
+commit was authored 89 seconds after the merge and never reached the branch,
+so #6296 merged while its remediation was still being written; this was not a
+merge-queue race against an already-pushed approved head.
+
+The post-merge review of the landed range re-raised those findings. The
+follow-up PR that carries the remediation onto main is the current record of
+this change's reviewed state; this checklist is retained as the historical
+gate artifact for `1dacc4f3` only.

@@ -576,7 +576,7 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
 	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})
-	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "gc-1"})
+	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "tc-1"})
 
 	t.Run("list", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
@@ -598,7 +598,7 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 
 	t.Run("status", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"convoy", "status", "gc-1", "--json"}, &stdout, &stderr)
+		code := run([]string{"convoy", "status", "tc-1", "--json"}, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("run convoy status --json = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 		}
@@ -609,8 +609,8 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 			t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 		}
-		if result.SchemaVersion != "1" || result.Convoy.ID != "gc-1" || len(result.Children) != 1 {
-			t.Fatalf("result = %+v, want gc-1 with one child", result)
+		if result.SchemaVersion != "1" || result.Convoy.ID != "tc-1" || len(result.Children) != 1 {
+			t.Fatalf("result = %+v, want tc-1 with one child", result)
 		}
 	})
 }
@@ -1349,6 +1349,69 @@ func TestHasLabel(t *testing.T) {
 }
 
 // --- gc convoy autoclose ---
+
+func TestConvoyAutocloseStoreRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		cwd  string
+		want string
+	}{
+		{
+			name: "no env falls back to cwd",
+			cwd:  "/work/dir",
+			want: "/work/dir",
+		},
+		{
+			name: "GC_STORE_ROOT wins outright, absolute",
+			env:  map[string]string{"GC_STORE_ROOT": "/store/root"},
+			cwd:  "/work/dir",
+			want: "/store/root",
+		},
+		{
+			name: "GC_STORE_ROOT relative is joined against cwd",
+			env:  map[string]string{"GC_STORE_ROOT": "rel/root"},
+			cwd:  "/work/dir",
+			want: "/work/dir/rel/root",
+		},
+		{
+			name: "BEADS_DIR absolute resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads"},
+			cwd:  "/work/dir",
+			want: "/city/root",
+		},
+		{
+			// filepath.Dir on a trailing-slash path does not strip the final
+			// element the way a shell's dirname would, so an unclean BEADS_DIR
+			// must not silently resolve to itself instead of its parent.
+			name: "BEADS_DIR absolute with a trailing slash still resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads/"},
+			cwd:  "/work/dir",
+			want: "/city/root",
+		},
+		{
+			name: "BEADS_DIR relative is joined against cwd before taking its parent",
+			env:  map[string]string{"BEADS_DIR": ".beads"},
+			cwd:  "/work/dir",
+			want: "/work/dir",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"GC_STORE_ROOT", "BEADS_DIR"} {
+				t.Setenv(k, "")
+				_ = os.Unsetenv(k)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			got := convoyAutocloseStoreRoot(tc.cwd)
+			if got != tc.want {
+				t.Fatalf("convoyAutocloseStoreRoot(%q) with env %v = %q, want %q", tc.cwd, tc.env, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestConvoyAutocloseHappyPath(t *testing.T) {
 	store := beads.NewMemStore()

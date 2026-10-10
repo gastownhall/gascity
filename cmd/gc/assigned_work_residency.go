@@ -55,47 +55,45 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// assignedWorkSweepPlan is the leg set every assigned-work scan reads: the work
-// legs it was handed, then every relocated class binding.
+// assignedWorkSweepPlan is the leg set every assigned-work scan reads, and it is
+// the census's: the city work store, the SERVING rigs, then every relocated
+// class binding.
+//
+// The work leg is censusWorkLeg(cityPath, leading), not leading. The reconciler
+// hands every close, release and stranded scan its SESSIONS store, which on a
+// split city is the binding. Taken as the work leg, the binding stood in for the
+// city work store, and every claim on the work store was invisible to the
+// pool-slot close, B1's killed-seat release and the stranded repair: seats
+// closed holding claims, and only the orphan backstop released them, started
+// work included (mc-3ixn3.16). The census closed the same hole in #5280. A
+// one-shot caller registers nothing, so its leading store stays the work leg.
+//
+// The rigs are servingRigStores', the census's frame: a suspended rig is never
+// read, and a rig store city.toml does not declare is no leg.
 //
 // identifiers are the assignee spellings the caller will query for. The resolver
 // does not read them — WHICH stores answer does not depend on WHOSE claims are
 // asked about — but carrying them keeps the intent self-describing at the call
 // site, which is where a future per-identity narrowing would land.
-func assignedWorkSweepPlan(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store, identifiers []string) (storeref.ResolvedPlan, error) {
+func assignedWorkSweepPlan(cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store, identifiers []string) (storeref.ResolvedPlan, error) {
+	serving := servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
 	return storeref.Plan(
 		storeref.AssignedWork{Identifiers: identifiers},
-		residencyTopologyForCity(cityPath, cfg, work, rigs),
+		residencyTopologyForCity(cityPath, cfg, censusWorkLeg(cityPath, leading), serving),
 	)
 }
 
 // assignedWorkPlanForSessionInfo is the plan the session-reachability scans
-// read: the work legs this session's agent can claim in, plus every binding.
+// read for one seat: assignedWorkSweepPlan, whatever the seat's scope.
 //
-// A cross-store-eligible (city-scoped) session federates across the leading
-// store and every rig store (vp-kvp); a session whose template/agent cannot be
-// resolved takes the same fan-out (the legacy keep-on-match fail-safe); a
-// rig-bound session gets its ONE rig store; a rig-less agent gets the leading
-// store. Only the work legs differ between those arms — the binding is in all
-// four, because a claim this session holds can live there whatever its scope.
-//
-// It errors only when a resolved rig store is missing, or when the city's
-// storage is refused.
+// The agent's scope used to pick the work legs here: a rig-bound seat read only
+// its rig, a rig-less one only the city store. The census and the close
+// cascade read every leg, so a gate could decide "no work" on legs the cascade
+// then released from, and a rig agent's city-store claim (which rig agents do
+// make, and the wake filter counts) was released at close instead of holding
+// the seat. One leg set for every seat removes that disagreement.
 func assignedWorkPlanForSessionInfo(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (storeref.ResolvedPlan, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	agentCfg := sessionAgentConfigInfo(cfg, info)
-	if agentCfg == nil || agentIsCrossStoreEligible(agentCfg) {
-		return assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
-	}
-	storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-	if storeRef == "" {
-		return assignedWorkSweepPlan(cityPath, cfg, store, nil, identifiers)
-	}
-	rigStore, ok := rigStores[storeRef]
-	if !ok || rigStore == nil {
-		return storeref.ResolvedPlan{}, fmt.Errorf("rig store %q unavailable for session %q", storeRef, info.SessionNameMetadata)
-	}
-	return assignedWorkSweepPlan(cityPath, cfg, rigStore, nil, identifiers)
+	return assignedWorkSweepPlan(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg))
 }
 
 // assignedWorkClaimRefs returns the store-refs a claim held by ONE session can

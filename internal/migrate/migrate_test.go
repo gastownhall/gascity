@@ -1104,6 +1104,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 	trueVal := true
 	intVal := 42
 	formula := "mol-work"
+	advisoryMessage := "advisory {{.Pct}}"
 	src := config.Agent{
 		Name:                   "worker",
 		Description:            "test agent description",
@@ -1117,6 +1118,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		Nudge:                  "nudge text",
 		Session:                "acp",
 		Provider:               "claude",
+		ContextAdvisory:        &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: &advisoryMessage, Enabled: &trueVal}}},
 		Upstream:               "anthropic",
 		StartCommand:           "claude --dangerously",
 		Lifecycle:              config.AgentLifecycleOneShot,
@@ -1142,6 +1144,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		MaxSessionAge:          "5h",
 		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
+		AutoReclaimStaleClaims: true,
 		AssignedWorkDeferLimit: intPtr(4),
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,
@@ -1241,4 +1244,14 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("ReadFile(%q): %v", path, err)
 	}
 	return string(data)
+}
+
+// TestAgentConfigFromAgentCarriesAutoReclaimStaleClaims covers ga-7rj87d
+// NFR4: the new opt-in flag must survive the persisted-config projection
+// (agentConfigFromAgent) alongside the rest of Agent's patchable surface.
+func TestAgentConfigFromAgentCarriesAutoReclaimStaleClaims(t *testing.T) {
+	got := agentConfigFromAgent(config.Agent{AutoReclaimStaleClaims: true})
+	if !got.AutoReclaimStaleClaims {
+		t.Error("agentConfigFromAgent should carry AutoReclaimStaleClaims through to the persisted agentFile")
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,6 +41,16 @@ type CleanupReport struct {
 	Reaped        CleanupReapedReport    `json:"reaped"`
 	Summary       CleanupSummary         `json:"summary"`
 	Errors        []CleanupError         `json:"errors"`
+	// Skipped is set when the command declined to run any cleanup stage at
+	// all — today only for scopes whose Dolt lifecycle belongs to bd.
+	// Additive optional field; gc.dolt.cleanup.v1 is not bumped.
+	Skipped *CleanupSkipped `json:"skipped,omitempty"`
+}
+
+// CleanupSkipped explains a whole-command no-op.
+type CleanupSkipped struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 // CleanupPortReport is the resolved-port section of the JSON envelope.
@@ -141,6 +152,13 @@ type CleanupSummary struct {
 	BytesFreedDisk int64 `json:"bytes_freed_disk"`
 	BytesFreedRSS  int64 `json:"bytes_freed_rss"`
 	ErrorsTotal    int   `json:"errors_total"`
+	// ProtectedTotal and ProtectedByKind roll up Reaped.Protected so a
+	// 100%-protected population (zero reap targets) is surfaced here
+	// instead of collapsing into an indistinguishable orphans:0
+	// (ga-xkc9mo). Additive to gc.dolt.cleanup.v1 — schema version is not
+	// bumped.
+	ProtectedTotal  int            `json:"protected_total"`
+	ProtectedByKind map[string]int `json:"protected_by_kind"`
 }
 
 // CleanupError is a single error entry tagged with the stage that produced
@@ -201,6 +219,9 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	if r.Errors == nil {
 		r.Errors = []CleanupError{}
 	}
+	if r.Summary.ProtectedByKind == nil {
+		r.Summary.ProtectedByKind = map[string]int{}
+	}
 	return json.Marshal(alias(r))
 }
 
@@ -220,13 +241,20 @@ type cleanupOptions struct {
 	PortResolution PortResolution
 	Rigs           []resolverRig
 	FS             fsys.FS
-	JSON           bool
-	Probe          bool
-	Force          bool
-	Host           string
-	HomeDir        string
-	TempDir        string
-	MaxOrphanDBs   int
+	// CityPath roots the live managed-dolt resolution (runtime handle +
+	// process table) used by the port resolver, the reaper's protected-port
+	// set, and the purge scoping. Empty disables the live steps.
+	CityPath string
+	// LiveResolve overrides the live managed-dolt resolution chain in
+	// tests. Nil uses newLiveDoltPortResolver().resolve.
+	LiveResolve  func(cityPath string) (liveDoltPortResolution, error)
+	JSON         bool
+	Probe        bool
+	Force        bool
+	Host         string
+	HomeDir      string
+	TempDir      string
+	MaxOrphanDBs int
 
 	// StalePrefixes overrides defaultStaleDatabasePrefixes when non-empty.
 	// Set by tests; production passes nil and falls back to the built-in.
@@ -349,10 +377,10 @@ func cleanupPortResolution(opts cleanupOptions) PortResolution {
 		return opts.PortResolution
 	}
 	return ResolveDoltPort(PortResolverInput{
-		Flag:     opts.Flag,
-		CityPort: opts.CityPort,
-		Rigs:     opts.Rigs,
-		FS:       opts.FS,
+		Flag:        opts.Flag,
+		CityPort:    opts.CityPort,
+		CityPath:    opts.CityPath,
+		LiveResolve: opts.LiveResolve,
 	})
 }
 
@@ -395,7 +423,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		return
 	}
 
-	rigPorts := protectedDoltPortsForReap(opts)
+	rigPorts := protectedDoltPortsForReap(opts, procs)
 	tempDir := opts.TempDir
 	if tempDir == "" {
 		tempDir = os.TempDir()
@@ -420,6 +448,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	if !opts.Force {
 		report.Reaped.Count = len(plan.Reap)
 		report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, nil)
+		rollupProtected(report)
 		return
 	}
 
@@ -498,10 +527,93 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Count = reaped
 	report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, gone)
+	rollupProtected(report)
 }
 
-func protectedDoltPortsForReap(opts cleanupOptions) map[int]string {
-	ports := loadRigDoltPorts(opts.Rigs, opts.FS)
+// rollupProtected recomputes Summary.ProtectedTotal and
+// Summary.ProtectedByKind from the fully-populated Reaped.Protected slice.
+// Called at every runReapStage exit point (after both the bulk assignment
+// from plan.Protected and any additional appends from the force-mode
+// SIGTERM/SIGKILL revalidation chain) so a 100%-protected population (zero
+// reap targets) is still surfaced instead of collapsing into an
+// indistinguishable orphans:0 (ga-xkc9mo).
+func rollupProtected(report *CleanupReport) {
+	report.Summary.ProtectedTotal = len(report.Reaped.Protected)
+	byKind := make(map[string]int, len(report.Reaped.Protected))
+	for _, p := range report.Reaped.Protected {
+		byKind[protectedKind(p)]++
+	}
+	report.Summary.ProtectedByKind = byKind
+}
+
+// protectedKind buckets a protected PID by why it was protected, deriving
+// the key from the existing Reason/ContainerRuntime fields the classifier
+// already set rather than adding a second classification pass.
+// Active rig servers get their own bucket, checked first because the
+// classifier's rig-port match comes first and planOrphanReap copies
+// ContainerRuntime onto every protected PID — a containerized rig server is
+// still the active-rig baseline. Other container-managed servers are keyed
+// by runtime (e.g. "container:podman"); everything else (bd-owned proxies,
+// active test roots, unidentified or non-allowlisted configs,
+// missing-config-but-live-cwd) falls into the catch-all "unreapable-config"
+// bucket.
+func protectedKind(p CleanupProtectedPID) string {
+	if strings.HasPrefix(p.Reason, "active rig dolt server") {
+		return "active-rig"
+	}
+	if p.ContainerRuntime != "" {
+		return "container:" + p.ContainerRuntime
+	}
+	return "unreapable-config"
+}
+
+// protectedDoltPortsForReap builds the reaper's protected port set from live
+// state (city-scale plan P1.7): the managed city dolt resolved via the live
+// chain, the ports of every discovered dolt process whose --config/--data-dir
+// argv sits under a registered rig root, and the resolved cleanup port.
+//
+// <rigRoot>/.beads/dolt-server.port is never used for TARGET SELECTION: that
+// status file has lied in production, and a lying file fails to protect the
+// REAL listener — live state cannot. It is read PROTECT-ONLY, and only when
+// live resolution is unavailable, so a degraded host still fences the
+// recorded port (see the else branch below).
+func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[int]string {
+	ports := map[int]string{}
+	liveResolve := opts.LiveResolve
+	if liveResolve == nil {
+		liveResolve = newLiveDoltPortResolverForExplicitCity().resolve
+	}
+	if live, err := liveResolve(opts.CityPath); err == nil && validDoltPort(live.Port) {
+		ports[live.Port] = "managed city dolt"
+	} else {
+		// Live resolution is unavailable (no runtime handle, unreadable process
+		// table, permissions). The rationale above — a lying status file fails to
+		// protect the REAL listener — compares a stale file against WORKING live
+		// state. It does not cover ABSENT live state, where the file is the only
+		// signal left, and where the managed city port would otherwise be in the
+		// reap set with a live server still on it.
+		//
+		// Read the recorded ports as a PROTECT-ONLY fallback: they can add a port
+		// to the protected set, never select a reap target and never override a
+		// live answer. A stale entry costs a skipped reap; the miss it covers
+		// costs a DataDir. These are exactly the conditions under which an
+		// operator reaches for `gc dolt cleanup`, so the degraded path is the one
+		// that most needs the guard.
+		for port, rig := range recordedScopeDoltPorts(opts.Rigs, opts.FS) {
+			ports[port] = rig + " (recorded port; live resolution unavailable)"
+		}
+	}
+	for _, proc := range procs {
+		owner, ok := doltProcRigOwner(proc, opts.Rigs)
+		if !ok {
+			continue
+		}
+		for _, port := range proc.Ports {
+			if validDoltPort(port) {
+				ports[port] = owner
+			}
+		}
+	}
 	if opts.PortResolution.Port <= 0 {
 		return ports
 	}
@@ -587,7 +699,7 @@ func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttemp
 		if attempt.Status != "error" {
 			continue
 		}
-		if attempt.Source != flagDoltPortSource && attempt.Source != cityConfigDoltPortSource && !isRigPortFileSource(attempt.Source) {
+		if attempt.Source != flagDoltPortSource && attempt.Source != cityConfigDoltPortSource && !isLiveDoltPortSource(attempt.Source) {
 			continue
 		}
 		if attempt.Detail != "" {
@@ -598,8 +710,8 @@ func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttemp
 	return PortResolutionAttempt{}, nil
 }
 
-func isRigPortFileSource(source string) bool {
-	return filepath.Base(source) == "dolt-server.port" && filepath.Base(filepath.Dir(source)) == ".beads"
+func isLiveDoltPortSource(source string) bool {
+	return source == liveDoltHandleSource || source == liveDoltProcessSource
 }
 
 func appendProtectedPID(report *CleanupReport, pid int, reason, containerRuntime string) {
@@ -826,9 +938,28 @@ func emitErrorsOrSummary(report CleanupReport, opts cleanupOptions, stdout io.Wr
 			purgeStatus = "failed"
 		}
 	}
-	fmt.Fprintf(stdout, "  Purge:         %s\n", purgeStatus)                                                           //nolint:errcheck
-	fmt.Fprintf(stdout, "  Reaped:        %d (protected: %d)\n", report.Reaped.Count, len(report.Reaped.ProtectedPIDs)) //nolint:errcheck
-	fmt.Fprintf(stdout, "  Errors:        %d\n", report.Summary.ErrorsTotal)                                            //nolint:errcheck
+	fmt.Fprintf(stdout, "  Purge:         %s\n", purgeStatus)                                                                                                                    //nolint:errcheck
+	fmt.Fprintf(stdout, "  Reaped:        %d (protected: %d [%s])\n", report.Reaped.Count, report.Summary.ProtectedTotal, formatProtectedByKind(report.Summary.ProtectedByKind)) //nolint:errcheck
+	fmt.Fprintf(stdout, "  Errors:        %d\n", report.Summary.ErrorsTotal)                                                                                                     //nolint:errcheck
+}
+
+// formatProtectedByKind renders Summary.ProtectedByKind as a deterministic,
+// sorted "kind:count, kind:count" fragment so the text summary and the JSON
+// report always agree on the protected breakdown (ga-xkc9mo).
+func formatProtectedByKind(byKind map[string]int) string {
+	if len(byKind) == 0 {
+		return "none"
+	}
+	kinds := make([]string, 0, len(byKind))
+	for k := range byKind {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%s:%d", k, byKind[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatBytes formats a byte count as "N B", "N.N KiB", "N.N MiB", or
@@ -901,14 +1032,18 @@ func newDoltCleanupCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Find and remove orphaned Dolt databases (Go-side core)",
 		Long: `gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port > city dolt.port > <rigRoot>/.beads/dolt-server.port > 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port > city dolt.port > live managed dolt [runtime handle, then
+process table] > 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -960,6 +1095,32 @@ can still return successfully after emitting the report.`,
 				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
 				return errExit
 			}
+			// bd owns the sql-server for a proxied scope: it starts it, keeps
+			// it resident and stops it. There is no managed-Dolt port to probe
+			// and nothing of ours to drop or purge, so those stages are
+			// skipped before anything touches the scope — but the host-wide
+			// orphan reap is not about this city at all and still runs.
+			// Metadata gc cannot parse is a refusal rather than a
+			// fall-through: running the managed-Dolt stages against a scope
+			// whose owner is unknown is how a scope ends up with two owners.
+			bdOwned, err := scopeBindingIsProviderOwnedProxied(cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if bdOwned {
+				homeDir, _ := os.UserHomeDir()
+				if code := runProxiedScopeDoltCleanup(cleanupOptions{
+					FS:      fsys.OSFS{},
+					JSON:    jsonOut,
+					Force:   force,
+					HomeDir: homeDir,
+					TempDir: os.TempDir(),
+				}, stdout, stderr); code != 0 {
+					return errExit
+				}
+				return nil
+			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
@@ -972,6 +1133,7 @@ can still return successfully after emitting the report.`,
 				CityPort:     cfg.Dolt.Port,
 				Rigs:         rigs,
 				FS:           fsys.OSFS{},
+				CityPath:     cityPath,
 				JSON:         jsonOut,
 				Probe:        probe,
 				Force:        force,
@@ -985,7 +1147,7 @@ can still return successfully after emitting the report.`,
 			// right address. Failed opens are reported by runDoltCleanup inside
 			// the typed cleanup envelope.
 			resolution := ResolveDoltPort(PortResolverInput{
-				Flag: opts.Flag, CityPort: opts.CityPort, Rigs: opts.Rigs, FS: opts.FS,
+				Flag: opts.Flag, CityPort: opts.CityPort, CityPath: opts.CityPath,
 			})
 			opts.PortResolution = resolution
 			host := opts.Host
@@ -1146,12 +1308,11 @@ func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution
 	}
 }
 
-// loadResolverRigs builds the resolver's rig list from a city config. The HQ
-// rig (the city itself) is added first so it wins the AD-04 §4.1 tie when
-// multiple <rigRoot>/.beads/dolt-server.port files exist; non-HQ rigs follow
-// in city.toml order. Paths are resolved to absolute form via
-// resolveRigPaths so the resolver's filesystem reads work regardless of how
-// the rig was registered.
+// loadResolverRigs builds the cleanup command's rig list from a city config.
+// The HQ rig (the city itself) is added first so HQ-first ordering holds for
+// rig protections; non-HQ rigs follow in city.toml order. Paths are resolved
+// to absolute form via resolveRigPaths so per-rig filesystem reads and
+// process-table path matching work regardless of how the rig was registered.
 func loadResolverRigs(cityPath string, cfg *config.City) []resolverRig {
 	rigs := make([]config.Rig, len(cfg.Rigs))
 	copy(rigs, cfg.Rigs)

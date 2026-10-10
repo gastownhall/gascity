@@ -3,9 +3,15 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
@@ -34,6 +40,47 @@ type nudgeMailSweepResult struct {
 	MailClosed  int
 }
 
+// nudgeMailSweepMailTTLForConfig resolves the mail-close TTL for the
+// controller watchdog and the sweep-nudge-mail order command from
+// cfg.Mail.RetentionTTL. An empty (unset) value preserves
+// nudgeMailSweepDefaultMailTTL, so a city that has never touched [mail] sees
+// no behavior change. An explicitly configured value is honored as-is,
+// including "0" — which sweepStaleNudgeMail treats as "skip the mail-close
+// phase" rather than a zero-length window. A malformed value falls back to
+// the default (with a stderr note) rather than silently disabling the sweep.
+func nudgeMailSweepMailTTLForConfig(cfg *config.City, stderr io.Writer) time.Duration {
+	if cfg == nil || strings.TrimSpace(cfg.Mail.RetentionTTL) == "" {
+		return nudgeMailSweepDefaultMailTTL
+	}
+	d, err := cfg.Mail.RetentionTTLDuration()
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; using default %s\n", err, nudgeMailSweepDefaultMailTTL) //nolint:errcheck // best-effort stderr
+		}
+		return nudgeMailSweepDefaultMailTTL
+	}
+	return d
+}
+
+// nudgeMailSweepMailTTLForCity resolves the mail-close TTL for the
+// sweep-nudge-mail order command by reading cityPath's city.toml, returning
+// fallback when that config cannot be loaded. A city with no city.toml is a
+// legitimate no-config case and stays silent; a config that exists and will not
+// parse gets a stderr note, because it would otherwise leave a configured
+// retention_ttl looking applied when it is not. It warns and falls back rather
+// than failing: this runs as a 5-minute order, and failing it closed would stop
+// the sweep entirely for a condition the loader only warns about.
+func nudgeMailSweepMailTTLForCity(cityPath string, fallback time.Duration, stderr io.Writer) time.Duration {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		if stderr != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; using default %s\n", err, fallback) //nolint:errcheck // best-effort stderr
+		}
+		return fallback
+	}
+	return nudgeMailSweepMailTTLForConfig(cfg, stderr)
+}
+
 // sweepStaleNudgeMail closes stale consumed nudge beads and read mail beads.
 //
 // Nudge candidates are open beads with label gc:nudge created before now-nudgeTTL
@@ -42,6 +89,8 @@ type nudgeMailSweepResult struct {
 // so the bead audit trail is intact.
 //
 // Mail candidates are open message beads with label "read" created before now-mailTTL.
+// mailTTL <= 0 skips the mail-close phase entirely (rather than closing every
+// read mail bead immediately).
 //
 // limit caps total closes (nudge + mail combined). Pass 0 for no cap.
 // Per-bead errors do not abort the sweep; they are returned via errors.Join so
@@ -86,19 +135,21 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 	// budget is passed in. mailBudget is the remaining share of the combined
 	// limit, so a fatal listing failure early-returns (discarding accumulated
 	// per-bead errors) exactly as the inline loop did.
-	mailCutoff := now.Add(-mailTTL)
-	remaining := limit - result.NudgeClosed - result.MailClosed
-	if limit == 0 || remaining > 0 {
-		mailBudget := remaining
-		if limit == 0 {
-			mailBudget = 0
+	if mailTTL > 0 {
+		mailCutoff := now.Add(-mailTTL)
+		remaining := limit - result.NudgeClosed - result.MailClosed
+		if limit == 0 || remaining > 0 {
+			mailBudget := remaining
+			if limit == 0 {
+				mailBudget = 0
+			}
+			mailClosed, mailCloseErrs, mailListErr := beadmail.SweepReadMessagesBefore(mailStore, mailCutoff, mailBudget, nudgeMailSweepMailCloseReason)
+			if mailListErr != nil {
+				return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", mailListErr)
+			}
+			result.MailClosed += mailClosed
+			beadErrs = append(beadErrs, mailCloseErrs...)
 		}
-		mailClosed, mailCloseErrs, mailListErr := beadmail.SweepReadMessagesBefore(mailStore, mailCutoff, mailBudget, nudgeMailSweepMailCloseReason)
-		if mailListErr != nil {
-			return result, fmt.Errorf("nudge-mail-sweep: listing read mail beads: %w", mailListErr)
-		}
-		result.MailClosed += mailClosed
-		beadErrs = append(beadErrs, mailCloseErrs...)
 	}
 
 	return result, errors.Join(beadErrs...)
@@ -131,18 +182,20 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		result.NudgeClosed++
 	}
 
-	mailCutoff := now.Add(-mailTTL)
-	remaining := limit - result.NudgeClosed - result.MailClosed
-	if limit == 0 || remaining > 0 {
-		mailBudget := remaining
-		if limit == 0 {
-			mailBudget = 0
+	if mailTTL > 0 {
+		mailCutoff := now.Add(-mailTTL)
+		remaining := limit - result.NudgeClosed - result.MailClosed
+		if limit == 0 || remaining > 0 {
+			mailBudget := remaining
+			if limit == 0 {
+				mailBudget = 0
+			}
+			mailCount, err := beadmail.CountReadMessagesBefore(mailStore, mailCutoff, mailBudget)
+			if err != nil {
+				return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
+			}
+			result.MailClosed += mailCount
 		}
-		mailCount, err := beadmail.CountReadMessagesBefore(mailStore, mailCutoff, mailBudget)
-		if err != nil {
-			return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
-		}
-		result.MailClosed += mailCount
 	}
 	return result, nil
 }

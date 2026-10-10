@@ -55,24 +55,32 @@ type backstopPredicate interface {
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
 }
 
-// activityDecayingBackstop is an optional backstopPredicate extension. A
-// predicate whose outstanding condition LOOKS like a working agent — an
-// in-progress claim, which a busy seat holds by design — implements it to
-// re-arm its pacing when the runtime reports fresh activity since the last
-// attempt. A human-paced interactive seat answers a nudge, works in a burst,
-// and pauses again; without this the accumulated quiet marches it to the
-// terminal drain even though it is plainly alive. The open-bead predicates do
-// NOT implement it: their condition vanishes the instant the agent acts, so
-// they never need to tell "working" from "stalled" by activity.
-type activityDecayingBackstop interface {
-	// decay re-arms the predicate's pacing window for target and reports
-	// whether it did. The implementation owns BOTH halves of that judgement:
-	// whether sessName showed runtime activity after last (the persisted time
-	// of the last attempt), and whether its own bounded re-arm budget for this
-	// assignment still allows one. A false answer hands the session to the
-	// ordinary ladder below, so a predicate can never trade convergence away
-	// for an activity signal it cannot fully trust.
-	decay(store beads.Store, s *beads.Bead, target backstopTarget, sessName string, last, now time.Time, stdout io.Writer) bool
+// backstopHoldObserver is an optional predicate extension. A predicate that
+// implements it is told which engine-level gate held a session this tick
+// (backstopHold* reasons) and when the session became actionable again, so it
+// can leave a durable breadcrumb. Without one, a backstop that is holding looks
+// exactly like one that is broken.
+type backstopHoldObserver interface {
+	observeHold(store beads.Store, s *beads.Bead, reason string, stdout io.Writer)
+	clearHold(store beads.Store, s *beads.Bead, stdout io.Writer)
+}
+
+// Engine-level hold reasons passed to backstopHoldObserver.observeHold.
+const (
+	backstopHoldRuntimeNotRunning = "runtime_not_running"
+	backstopHoldRevalidate        = "revalidate_hold"
+)
+
+func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
+	if ho, ok := pred.(backstopHoldObserver); ok {
+		ho.observeHold(store, s, reason, stdout)
+	}
+}
+
+func clearBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, stdout io.Writer) {
+	if ho, ok := pred.(backstopHoldObserver); ok {
+		ho.clearHold(store, s, stdout)
+	}
 }
 
 // backstopTarget is the durable identity of one outstanding delivery target.
@@ -135,36 +143,6 @@ func decideBackstopAction(attempts int, last, now time.Time) backstopAction {
 	return backstopActionNudge
 }
 
-// decayedWindow gives a predicate that tracks a working-looking seat the chance
-// to re-arm its own pacing window instead of taking another step toward the
-// terminal action — the seat answered the previous nudge and paused again on its
-// own cadence, so it has earned a fresh window (see activityDecayingBackstop,
-// which owns the decision and its bound). Reports whether the window was
-// re-armed, in which case this tick is done.
-//
-// attempts>0 is the gate: at attempts==0 decideBackstopAction's grace check
-// already grants the first free pass, and there is no accumulated budget to
-// shed. Predicates that do not implement the extension never decay.
-func decayedWindow(
-	pred backstopPredicate,
-	store beads.Store,
-	s *beads.Bead,
-	target backstopTarget,
-	sessName string,
-	attempts int,
-	last, now time.Time,
-	stdout io.Writer,
-) bool {
-	if attempts == 0 {
-		return false
-	}
-	decayer, ok := pred.(activityDecayingBackstop)
-	if !ok {
-		return false
-	}
-	return decayer.decay(store, s, target, sessName, last, now, stdout)
-}
-
 // runNudgeBackstop drives pred over sessionBeads: for each session it governs
 // that is running and has outstanding work, it paces re-delivery of pred's
 // nudge content through the shared grace → nudge → backoff → give-up engine,
@@ -196,6 +174,7 @@ func runNudgeBackstop(
 		}
 		sessName := strings.TrimSpace(s.Metadata["session_name"])
 		if sessName == "" || !sp.IsRunning(sessName) {
+			observeBackstopHold(pred, store, s, backstopHoldRuntimeNotRunning, stdout)
 			continue
 		}
 
@@ -205,9 +184,13 @@ func runNudgeBackstop(
 			continue
 		case backstopResolutionClear:
 			pred.clear(store, s, stdout)
+			clearBackstopHold(pred, store, s, stdout)
 			continue
 		case backstopResolutionOutstanding:
-			// Continue below.
+			// Continue below. The hold breadcrumb is cleared where the engine
+			// actually advances, not here: clearing on every outstanding tick
+			// would flap it against a standing revalidate hold, costing two
+			// writes per tick for as long as that hold lasts.
 		default:
 			continue
 		}
@@ -217,49 +200,47 @@ func runNudgeBackstop(
 			// First observation of this assignment: start the grace clock,
 			// don't nudge yet — a normal claim/confirmation almost always
 			// lands within the grace window.
+			clearBackstopHold(pred, store, s, stdout)
 			pred.observe(store, s, target, now, stdout)
-			continue
-		}
-
-		if decayedWindow(pred, store, s, target, sessName, attempts, last, now, stdout) {
 			continue
 		}
 
 		switch decideBackstopAction(attempts, last, now) {
 		case backstopActionWait:
+			clearBackstopHold(pred, store, s, stdout)
 			continue
 		case backstopActionExhausted:
+			clearBackstopHold(pred, store, s, stdout)
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
 			switch pred.revalidate(target) {
 			case backstopResolutionHold:
+				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
 				continue
 			case backstopResolutionClear:
 				pred.clear(store, s, stdout)
+				clearBackstopHold(pred, store, s, stdout)
 				continue
 			case backstopResolutionOutstanding:
+				clearBackstopHold(pred, store, s, stdout)
 				// Deliver below.
 			default:
 				continue
 			}
 			content := pred.content(*s)
 			if content == "" {
-				// Nothing is deliverable for this session — an ordinary path
-				// rather than an exotic one in every lane, though for different
-				// reasons. The lanes that resolve content through the
-				// default-nudge fallback (the claim and execution backstops)
-				// reach it only when the template or agent cannot be resolved
-				// at all; the continuation lane reads the configured nudge
-				// directly, and `agent.Nudge` is optional and routinely unset.
-				// Skipping silently parks the state machine on its observe
-				// marker forever: no attempt is ever reserved, the cap is never
-				// reached, and the predicate's terminal action never runs —
-				// which for the execution backstop is the drain that is the only
-				// thing that releases the claim. The bounded attempts exist to
-				// give the agent a chance to ANSWER a nudge; with no nudge to
-				// send there is nothing to wait for, so go straight to the
-				// terminal action after the same grace window.
+				// Nothing is deliverable for this session. `agent.Nudge` is
+				// optional and pool templates routinely leave it unset, so this
+				// is the common case, not the exotic one. Skipping silently
+				// parks the state machine on its observe marker forever: no
+				// attempt is ever reserved, the cap is never reached, and the
+				// predicate's terminal action never runs — which for the
+				// execution backstop is the drain that is the only thing that
+				// releases the claim. The bounded attempts exist to give the
+				// agent a chance to ANSWER a nudge; with no nudge to send there
+				// is nothing to wait for, so go straight to the terminal action
+				// after the same grace window.
 				pred.exhausted(store, s, stdout)
 				continue
 			}
