@@ -314,7 +314,7 @@ func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdS
 	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(
 		dir,
-		bdCommandRunnerForCity(cityPath),
+		withBdReadMemo(cityPath, bdCommandRunnerForCity(cityPath)),
 		issuePrefixForScope(dir, cityPath, cfg),
 		bdStoreOptionsForConfig(cfg)...,
 	)
@@ -336,7 +336,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
-		bdCommandRunnerForRig(cityPath, cfg, rigDir),
+		withBdReadMemo(cityPath, bdCommandRunnerForRig(cityPath, cfg, rigDir)),
 		prefix,
 		bdStoreOptionsForConfig(cfg)...,
 	)
@@ -453,7 +453,7 @@ func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStor
 	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(
 		dir,
-		controlBdCommandRunnerForCity(cityPath),
+		withBdReadMemo(cityPath, controlBdCommandRunnerForCity(cityPath)),
 		issuePrefixForScope(dir, cityPath, cfg),
 		bdStoreOptionsForConfig(cfg)...,
 	)
@@ -472,7 +472,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
-		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
+		withBdReadMemo(cityPath, controlBdCommandRunnerForRig(cityPath, cfg, rigDir)),
 		prefix,
 		bdStoreOptionsForConfig(cfg)...,
 	)
