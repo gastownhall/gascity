@@ -64,7 +64,8 @@ listed.`,
   gc doctor --check controller --check events-log
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(c *cobra.Command, _ []string) error {
+			opts.CommandRoot = c.Root()
 			if doDoctor(opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -92,6 +93,9 @@ type doctorOpts struct {
 	// Checks holds the raw --check values, still unsplit. Empty runs every
 	// registered check, which is what a plain `gc doctor` does.
 	Checks []string
+	// CommandRoot is the running gc's command tree, which prompt-gc-commands
+	// resolves prompt invocations against. Nil leaves that check unregistered.
+	CommandRoot *cobra.Command
 }
 
 // splitDoctorCheckNames expands the raw --check values into one name each.
@@ -196,6 +200,12 @@ type buildDoctorChecksOpts struct {
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
 	RolloutResolveErr error
+	// CommandRoot is the running gc's command tree (see doctorOpts). Nil
+	// leaves prompt-gc-commands unregistered.
+	CommandRoot *cobra.Command
+	// CheckTimeout is doctor's per-check timeout, which a Fix that writes
+	// after slow network resolution (import-version-pins) stays within.
+	CheckTimeout time.Duration
 }
 
 // doctorOrderFiringCurrentLastRunFunc answers "when did this order last run"
@@ -323,12 +333,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
 		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
+		if opts.CommandRoot != nil {
+			register(newPromptGCCommandsDoctorCheck(cityPath, cfg, opts.CommandRoot))
+		}
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))
+		register(newImportVersionPinsDoctorCheck(cityPath, opts.CheckTimeout))
 		register(newImportStateDoctorCheck(cityPath))
+		register(newNestedPackCommitsDoctorCheck(cityPath))
 		register(newGascityPackBindingDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
@@ -683,6 +698,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		SkipRigDoltChecks:       skipRigDoltChecks,
 		RolloutFlags:            rolloutFlags,
 		RolloutResolveErr:       rolloutResolveErr,
+		CommandRoot:             opts.CommandRoot,
+		CheckTimeout:            opts.CheckTimeout,
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {
