@@ -4522,11 +4522,28 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 // capture themselves should capture this many lines.
 const PromptObservationLines = 120
 
+// ReadyPromptEnvKey is the tmux session environment variable that carries the
+// session's ready-prompt prefix. Runtimes that observe a tmux pane themselves
+// publish and read the prefix under this key, so idle detection scans for the
+// agent's own prompt.
+const ReadyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
+
+// IdlePollInterval is the pause between two pane observations in idle
+// detection.
+const IdlePollInterval = 200 * time.Millisecond
+
+// IdleRequiredObservations is how many consecutive idle pane observations idle
+// detection needs: a single observation can land in the gap between two tool
+// calls, when the prompt is visible but the agent is still working.
+const IdleRequiredObservations = 2
+
 // DefaultReadyPromptPrefix is the Claude Code prompt prefix used for idle detection.
 // Claude Code uses ❯ (U+276F) as the prompt character.
 const (
 	DefaultReadyPromptPrefix = "❯ "
-	sessionReadyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
+	// sessionReadyPromptEnvKey is the in-package name for ReadyPromptEnvKey,
+	// kept so existing call sites stay unchanged.
+	sessionReadyPromptEnvKey = ReadyPromptEnvKey
 	// promptObservationLines is the in-package name for
 	// PromptObservationLines, kept so existing call sites stay unchanged.
 	promptObservationLines = PromptObservationLines
@@ -4627,10 +4644,15 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // To avoid false positives during inter-tool-call gaps (where the prompt is
 // visible in scrollback but the agent is actively processing), this function:
 //  1. Checks for "esc to interrupt" in the pane — if present, the agent is busy.
-//  2. Requires 2 consecutive idle polls before confirming idle state.
+//  2. Requires IdleRequiredObservations consecutive idle polls before
+//     confirming idle state.
 //
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
+//
+// Its twin is the exec provider's waitForPaneIdle loop
+// (internal/runtime/exec/idle.go), which runs the same check over the exec
+// connection; change the two together.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
 	// and re-reading it per tick would add a tmux show-environment exec to
@@ -4638,7 +4660,6 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	promptPrefix := t.resolveIdlePromptPrefix(session)
 
 	consecutiveIdle := 0
-	const requiredConsecutive = 2
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -4661,7 +4682,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		}
 		if idle {
 			consecutiveIdle++
-			if consecutiveIdle >= requiredConsecutive {
+			if consecutiveIdle >= IdleRequiredObservations {
 				return nil
 			}
 		} else {
@@ -4675,7 +4696,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 }
 
 func waitForIdlePoll(ctx context.Context) error {
-	timer := time.NewTimer(200 * time.Millisecond)
+	timer := time.NewTimer(IdlePollInterval)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

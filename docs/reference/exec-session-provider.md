@@ -80,7 +80,11 @@ No shell invocation — the script is exec'd directly.
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
 it as a no-op success. Scripts only need to implement the operations they
-care about.
+care about. An operation a script declares in its
+[handshake](#protocol-handshake-protocol) cannot be unknown, so two declared
+operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
+as the command's own exit code, and under `report-attachment`, `is-attached`
+reports it as a failure.
 
 ## Cancellation
 
@@ -180,7 +184,7 @@ Capabilities:
 
 | Capability | Effect |
 |------------|--------|
-| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
+| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
@@ -212,21 +216,22 @@ in the middle of a turn. A runtime that declares all three must:
   indicator such as `esc to interrupt`. This is the same check a local tmux
   session gets.
 - **Answer `is-attached` honestly.** Print `false` and exit 0 for a session
-  that does not exist. Exit non-zero only when you cannot tell; that keeps the
-  session awake.
+  that does not exist. Exit non-zero only when you cannot tell; any non-zero
+  exit, 2 included, keeps the session awake.
 - **Treat `stop` as the sleep.** Sleeping a session calls `stop`, and waking it
   calls `start`. Anything the runtime keeps only inside the box, such as the
   agent's conversation, is lost across a sleep unless `stop` preserves it.
 
 Each capture is a full round trip to the box, so the orchestrator gives one
 idle check 5 s, not the 1 s a local tmux session gets. Two captures and the
-pause between them fit in 5 s when each capture finishes in under about
-2.4 s. A check in a process that has not yet remembered the session's ready
-prompt (see below) first reads it from the box within the same 5 s, so that
-check needs three round trips, each under about 1.6 s. Every check needs the
-read while `GC_READY_PROMPT_PREFIX` is absent from the session. A slower check
-fails closed: the session stays awake, and the check runs again on the next
-orchestrator tick.
+pause between them fit in 5 s when each capture finishes in under 2.4 s. A
+check in a process that has not yet remembered the session's ready prompt
+(see below) first reads it from the box within the same 5 s, so that check
+needs three round trips, each under 1.6 s. Every check needs the read while
+`GC_READY_PROMPT_PREFIX` is absent from the session. Treat 2.4 s and 1.6 s as
+limits, not targets: a capture that ends exactly at the 5 s mark does not
+count. A slower check fails closed: the session stays awake, and the check
+runs again on the next orchestrator tick.
 
 Once the agent's tmux session exists, the orchestrator stores the session's
 `ready_prompt_prefix` in that session's environment as
@@ -247,8 +252,8 @@ reports an error.
 
 The `is-attached` rule above applies to every runtime that declares
 `report-attachment`, even without the other two capabilities. gc runs the op
-directly and treats a non-zero exit as "attached": the session stays awake and
-destructive actions on it are held.
+directly and treats any non-zero exit, including 2, as "attached": the session
+stays awake and destructive actions on it are held.
 
 ```toml
 [session_sleep]

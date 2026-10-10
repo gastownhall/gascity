@@ -452,7 +452,8 @@ func TestWaitForIdleHonorsContext(t *testing.T) {
 
 // Kills: an attachment probe that runs for a pack that never declared it,
 // reads an op failure as "not attached" (a destructive gate would then
-// proceed), or misparses the answer.
+// proceed), or misparses the answer. Exit 2 is a failure here, not the
+// unknown-op success: the pack declared the op, so it cannot be unknown.
 func TestIsAttachedWithError(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -465,10 +466,13 @@ func TestIsAttachedWithError(t *testing.T) {
 		{"undeclared", `{"version":0,"capabilities":["report-activity"]}`, `echo true`, false, nil, false},
 		{"attachment only", `{"version":0,"capabilities":["report-attachment"]}`, `echo true`, true, nil, true},
 		{"attachment only op error", `{"version":0,"capabilities":["report-attachment"]}`, `exit 1`, false, runtime.ErrRuntimeUnavailable, true},
+		{"attachment only op exit 2", `{"version":0,"capabilities":["report-attachment"]}`, `exit 2`, false, runtime.ErrRuntimeUnavailable, true},
 		{"attached", idleHandshake, `echo true`, true, nil, true},
 		{"attached with whitespace", idleHandshake, `printf ' true \n'`, true, nil, true},
 		{"not attached", idleHandshake, `echo false`, false, nil, true},
 		{"op error", idleHandshake, `echo boom >&2; exit 1`, false, runtime.ErrRuntimeUnavailable, true},
+		{"op exit 2", idleHandshake, `echo boom >&2; exit 2`, false, runtime.ErrRuntimeUnavailable, true},
+		{"op exit 2 after printing true", idleHandshake, `echo true; exit 2`, false, runtime.ErrRuntimeUnavailable, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
