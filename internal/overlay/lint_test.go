@@ -103,6 +103,13 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"nested repetition", "PreToolUse", "**", SeverityError, "does not compile"},
 		{"invalid regex on a non-tool event", "SessionStart", "[startup", SeverityError, "does not compile"},
 
+		// JavaScript-only syntax Go cannot compile: advisory, not a failure.
+		{"JS negative lookahead only warns", "PreToolUse", "^(?!Bash$).*", SeverityWarning, "JavaScript"},
+		{"JS positive lookahead only warns", "PreToolUse", "^Read(?=$)", SeverityWarning, "JavaScript"},
+		{"JS lookbehind only warns", "PreToolUse", "(?<=Notebook)Edit", SeverityWarning, "JavaScript"},
+		{"JS backreference only warns", "PreToolUse", "^(Bash)\\1?$", SeverityWarning, "JavaScript"},
+		{"permission-shaped JS lookahead warns, not errors", "PreToolUse", "Bash(?!Output)", SeverityWarning, "JavaScript"},
+
 		// Compiles, but names nothing Claude Code has.
 		{"unknown tool", "PreToolUse", "^Frobnicate$", SeverityWarning, "no known Claude Code tool"},
 		{"typo of a real tool", "PostToolUse", "^Bahs$", SeverityWarning, "no known Claude Code tool"},
@@ -125,6 +132,8 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"grouped prefix regex over Task tools", "PreToolUse", "Task(Create|Update)", "", ""},
 		{"regex is searched, not anchored", "PreToolUse", "Bas.*", "", ""},
 		{"grouped anchored alternation", "PreToolUse", "^(Read|Glob|Grep)$", "", ""},
+		{"word then group-any is a regex", "PreToolUse", "Bash(.*)", "", ""},
+		{"word then anchored empty group", "PreToolUse", "Read($)", "", ""},
 		{"MCP tool regex", "PreToolUse", "mcp__memory__.*", "", ""},
 		{"exact MCP tool name", "PostToolUse", "mcp__memory__create_entities", "", ""},
 

@@ -98,6 +98,12 @@ type HookMatcherFinding struct {
 // Tool(args), which is not a regular expression over tool names.
 var permissionSyntaxMatcher = regexp.MustCompile(`^[A-Za-z|]+\(`)
 
+// jsOnlyRegexSyntax matches constructs JavaScript regexes support and Go
+// RE2 rejects: lookaround and backreferences. Claude Code evaluates
+// matchers as JavaScript regexes, so a matcher using them may work there
+// and lint cannot call it broken.
+var jsOnlyRegexSyntax = regexp.MustCompile(`\(\?<?[=!]|\\[1-9]`)
+
 // exactNameMatcher matches a matcher Claude Code reads as a list of exact tool
 // names instead of a regex: only letters, digits, underscores, hyphens, spaces,
 // commas and pipes.
@@ -133,10 +139,13 @@ var knownToolNames = []string{
 // meant:
 //
 //   - an error when the matcher is permission-rule syntax such as
-//     Bash(*bd mol pour*), which is not a regex over tool names;
-//   - an error when the matcher does not compile as a regular expression;
+//     Bash(*bd mol pour*) and either fails to compile or, on an event that
+//     matches tool names, selects no known Claude Code tool;
+//   - an error when any other matcher does not compile as a regular expression;
+//   - a warning when the matcher uses JavaScript-only regex syntax (lookaround
+//     or backreferences) that Go cannot compile, so lint cannot check it;
 //   - a warning, on events that match tool names, when the matcher compiles but
-//     matches no known Claude Code tool.
+//     selects no known Claude Code tool.
 //
 // The empty matcher and "*" mean all tools and are always valid. An entry with
 // no matcher is not this function's concern (see FindBareHookEntries). Findings
@@ -166,15 +175,21 @@ func FindInvalidHookMatchers(data []byte) ([]HookMatcherFinding, error) {
 }
 
 // hookMatcherProblem classifies matcher, found under the given hook event. It
-// returns an empty severity when the matcher is usable. A matcher shaped like a
-// permission rule, Tool(args), is flagged as such only when it fails to compile
-// or, on a tool event, selects no known tool: the author needs that specific
-// explanation, not a parse error or a typo warning. A valid grouped regex such
-// as Notebook(Edit|Read) selects real tools and lints clean.
+// returns an empty severity when the matcher is usable. A matcher that fails to
+// compile only warns when it uses JavaScript-only syntax, since Claude Code may
+// accept it; this check runs first, so it also covers a permission-shaped
+// matcher such as Bash(?!Output). Otherwise a matcher shaped like a permission
+// rule, Tool(args), is flagged as such when it fails to compile or, on a tool
+// event, selects no known tool: the author needs that specific explanation, not
+// a parse error or a typo warning. A valid grouped regex such as
+// Notebook(Edit|Read) selects real tools and lints clean.
 func hookMatcherProblem(category, matcher string) (Severity, string) {
 	permissionSyntax := permissionSyntaxMatcher.MatchString(matcher)
 	re, err := regexp.Compile(matcher)
 	if err != nil {
+		if jsOnlyRegexSyntax.MatchString(matcher) {
+			return SeverityWarning, fmt.Sprintf("uses JavaScript-only regex syntax Go cannot check (%v); Claude Code evaluates matchers as JavaScript regexes, so verify it by hand", err)
+		}
 		if permissionSyntax {
 			return SeverityError, permissionSyntaxProblem
 		}
