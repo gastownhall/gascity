@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
@@ -238,10 +239,17 @@ func acquireSupervisorLock() (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close() //nolint:errcheck
-		return nil, fmt.Errorf("supervisor already running")
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errSupervisorLockHeld
+		}
+		return nil, fmt.Errorf("locking supervisor lock: %w", err)
 	}
 	return f, nil
 }
+
+// errSupervisorLockHeld is acquireSupervisorLock's error when another
+// supervisor instance holds the single-instance lock.
+var errSupervisorLockHeld = errors.New("supervisor already running")
 
 func guardSupervisorSocketDir(dir string) {
 	if !isTestBinary() {
@@ -841,10 +849,16 @@ func stopSupervisorViaSocket(stdout, stderr io.Writer, wait bool, waitTimeout ti
 }
 
 func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
-	sockPath, _ := runningSupervisorSocket()
+	sockPath, pid := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
 		return 1
+	}
+	// Identify the process now, while it is alive, so --wait can tell when
+	// that process — not a recycled PID — has exited.
+	var processAlive func() bool
+	if wait {
+		processAlive = supervisorProcessWatch(pid)
 	}
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
@@ -895,6 +909,10 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 				return 1
 			}
+			if err := waitForSupervisorProcessExitUntil(pid, processAlive, deadline); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
 			if serviceErr != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 				return 1
@@ -933,6 +951,10 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if err := waitForSupervisorProcessExitUntil(pid, processAlive, deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if serviceErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 		return 1
@@ -946,6 +968,54 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 	return 0
+}
+
+// supervisorProcessWatch identifies the supervisor process pid while it is
+// alive and returns a probe that reports whether that same process is still
+// running. It returns nil — nothing to wait for — when pid is not a running
+// `gc supervisor run` process this host can see (a supervisor in another PID
+// namespace answering on a shared socket, a PID already gone). A variable so
+// tests can model a supervisor's exit.
+var supervisorProcessWatch = func(pid int) func() bool {
+	if pid <= 0 {
+		return nil
+	}
+	if !pidutil.AliveWithCmdline(pid, func(argv []string) bool {
+		return pidutil.ArgvContainsSequence(argv, "supervisor", "run")
+	}) {
+		return nil
+	}
+	startTime, err := pidutil.StartTime(pid)
+	if err != nil {
+		return nil
+	}
+	return func() bool { return pidutil.AliveWithStartTime(pid, startTime) }
+}
+
+// waitForSupervisorProcessExitUntil waits for the supervisor process to exit.
+// Its control socket closes before it has finished shutting down — the HTTP
+// server still drains open streams, and the single-instance lock is released
+// only when the process exits — so a stop that returned on the socket alone
+// let the next `gc supervisor start` find the lock held. alive is
+// supervisorProcessWatch's probe; nil means there is nothing to wait for.
+func waitForSupervisorProcessExitUntil(pid int, alive func() bool, deadline time.Time) error {
+	if alive == nil {
+		return nil
+	}
+	budget := time.Until(deadline)
+	for alive() {
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out after %s waiting for supervisor PID %d to exit", budget.Round(time.Millisecond), pid)
+		}
+		sleep := 50 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < sleep {
+			sleep = remaining
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
+	}
+	return nil
 }
 
 func writeSupervisorStopSuccess(stdout, stderr io.Writer, wait bool) int {

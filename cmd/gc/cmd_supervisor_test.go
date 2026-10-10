@@ -4659,6 +4659,11 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close() //nolint:errcheck // test cleanup
+	// A lock holder that never answers on the control socket is waited for
+	// (ga-96smfk.85) only as long as the readiness budget.
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
 
 	var stdout, stderr bytes.Buffer
 	code := doSupervisorStart(&stdout, &stderr)

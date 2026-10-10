@@ -547,11 +547,23 @@ func defaultSupervisorBeadsActor() {
 	}
 }
 
+// doSupervisorStart is `gc supervisor start` without JSON output.
 func doSupervisorStart(stdout, stderr io.Writer) int {
 	return doSupervisorStartJSON(stdout, stderr, false)
 }
 
+// doSupervisorStartJSON is `gc supervisor start`: a supervisor that is
+// already running is reported, with exit status 1.
 func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
+	return startBareSupervisor(stdout, stderr, jsonOut, false)
+}
+
+// startBareSupervisor forks `gc supervisor run` and waits for it to answer
+// on its control socket. joinRunning says what a supervisor that is already
+// running — found at once, or once an instance holding the lock finished
+// starting — means: success for a caller that only needs one running, or the
+// operator-facing "already running" failure.
+func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) int {
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -564,17 +576,24 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if pid := supervisorAlive(); pid != 0 {
+	alreadyRunning := func(pid int) int {
+		if joinRunning {
+			return 0
+		}
 		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	lock, err := acquireSupervisorLock()
+	if pid := supervisorAlive(); pid != 0 {
+		return alreadyRunning(pid)
+	}
+	pid, err := awaitSupervisorLockOrInstance()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	lock.Close() //nolint:errcheck // release probe lock
+	if pid != 0 {
+		return alreadyRunning(pid)
+	}
 
 	gcPath, err := os.Executable()
 	if err != nil {
@@ -718,12 +737,51 @@ func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHin
 // supervisorInstanceLockHeld reports whether some supervisor instance holds
 // the single-instance lock. A variable so tests can model a concurrent start.
 var supervisorInstanceLockHeld = func() bool {
+	free, err := tryAcquireSupervisorLock()
+	return err != nil || !free
+}
+
+// tryAcquireSupervisorLock probes the single-instance lock: free reports
+// whether it could be taken (and was released again at once). err is a
+// failure to open or lock the file other than another holder. A variable so
+// tests can model a holder.
+var tryAcquireSupervisorLock = func() (free bool, err error) {
 	lock, err := acquireSupervisorLock()
+	if errors.Is(err, errSupervisorLockHeld) {
+		return false, nil
+	}
 	if err != nil {
-		return true
+		return false, err
 	}
 	lock.Close() //nolint:errcheck // release probe lock
-	return false
+	return true, nil
+}
+
+// awaitSupervisorLockOrInstance resolves a start that found no supervisor
+// answering on the control socket. A held single-instance lock then means an
+// instance is between taking the lock and binding its socket — starting up,
+// or shutting down after it closed the socket — so rather than fail, it waits
+// up to supervisorReadyTimeout for that instance to either answer (its PID
+// is returned) or let go of the lock (0 is returned, and the caller starts
+// its own).
+func awaitSupervisorLockOrInstance() (int, error) {
+	deadline := time.Now().Add(supervisorReadyTimeout)
+	for {
+		free, err := tryAcquireSupervisorLock()
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return 0, nil
+		}
+		if pid := supervisorAliveHook(); pid != 0 {
+			return pid, nil
+		}
+		if !time.Now().Before(deadline) {
+			return 0, fmt.Errorf("supervisor already running: another instance holds the supervisor lock but its control socket did not answer within %s; see %s", supervisorReadyTimeout, supervisorLogPath())
+		}
+		time.Sleep(supervisorReadyPollInterval)
+	}
 }
 
 // supervisorStartFailureLogLines is how much of supervisor.log a failed start
@@ -908,7 +966,7 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		if supervisorAliveHook() != 0 {
 			return 0
 		}
-		return doSupervisorStart(stdout, stderr)
+		return startBareSupervisor(stdout, stderr, false, true)
 	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
@@ -917,7 +975,7 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 			return 0
 		}
 		// Fall back to bare start if install fails (e.g., unsupported OS).
-		return doSupervisorStart(stdout, stderr)
+		return startBareSupervisor(stdout, stderr, false, true)
 	}
 	if supervisorAliveHook() != 0 {
 		return 0
