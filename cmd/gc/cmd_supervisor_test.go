@@ -5301,7 +5301,7 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		cr: &CityRuntime{
 			cfg: &config.City{
 				Daemon: config.DaemonConfig{
-					ShutdownTimeout: "20ms",
+					ShutdownTimeout: "100ms",
 				},
 			},
 			sp:                hangingListProvider{Provider: runtime.NewFake()},
@@ -5321,14 +5321,17 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 
 	select {
 	case err := <-result:
-		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
-		// 100ms: the promised ceiling is grace(20ms) + forced(100ms) =
-		// 120ms. A double wait on the forced timeout — the regression
-		// this test guards against — pushes that to ~220ms, so the bound
-		// here must sit strictly below that, not at the old, much looser
-		// 500ms that a doubled wait still passed.
-		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
-			t.Fatalf("stopManagedCity took %s, want bounded near grace+forced (~120ms) even when CityRuntime.shutdown hangs", elapsed)
+		// The promised ceiling is grace + forced. A double wait on the
+		// forced timeout — the regression this test guards against — adds
+		// a second forced timeout. The bound sits halfway between the two,
+		// so the fixed cost after the waits (shutdownBeadsProvider execs
+		// the spy script, ~80ms on macOS) cannot push a correct run past
+		// it, while a doubled wait still fails.
+		grace := managedCityStopTimeout(mc)
+		forced := managedCityForcedStopTimeout(mc)
+		bound := grace + forced + forced/2
+		if elapsed := time.Since(start); elapsed > bound {
+			t.Fatalf("stopManagedCity took %s, want <= %s (grace %s + forced %s, plus half a forced timeout of slack) even when CityRuntime.shutdown hangs", elapsed, bound, grace, forced)
 		}
 		if err == nil {
 			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
