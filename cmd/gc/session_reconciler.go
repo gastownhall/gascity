@@ -4242,6 +4242,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason, outcome := timerTraceCodes(dec)
 					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, reason, outcome, tp.TemplateName, name, nil)
 				}
+				if dec.TraceReason != string(TraceReasonAssignedWorkExhausted) {
+					// A claim made since the tick's read (the gather above read the
+					// index) defers the kill, as a claim the gather saw would have.
+					late, err := lateSeatWork(workLegs{cityPath, cfg, rigStores}, store, sessionAssignmentIdentifiersForConfigInfo(infoByID[id], cfg), []string{"in_progress"}, nil)
+					if err != nil || len(late) > 0 {
+						fmt.Fprintf(stderr, "session reconciler: idle timeout for %s deferred: work claimed since this tick's read (%v)\n", name, err) //nolint:errcheck // best-effort stderr
+						continue
+					}
+				}
 				if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 				} else {
@@ -4890,7 +4899,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBead(store, workLegs{cityPath, cfg, rigStores}, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr) {
+			if closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr, nil) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)

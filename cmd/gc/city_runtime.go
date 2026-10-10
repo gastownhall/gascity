@@ -3918,7 +3918,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(gcSweepSessionBeadsAt(cityPath, store.Store, rigStores, candidates, sweepTime))
+	return len(gcSweepSessionBeadsAt(cityPath, cfg, store.Store, rigStores, candidates, sweepTime))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
