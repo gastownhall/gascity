@@ -509,6 +509,18 @@ pin" below). An action runs only on a worker whose toolchain is the pinned
 one. gastownhall/beads shares the pools and carries a byte-identical copy of
 the manifest and the same pin.
 
+The pool workers also advertise `worker-env-base`, the sha256 of the
+manifest without its `go` and `dolt` lines, but only while action isolation
+is on (rbe-reexecution-design.md (c)). beads' actions send `worker-env-base`
+alone: beads builds with its own `go_sdk` and tests with a hermetic dolt, and
+rbe-west's action launcher hides the host's go and dolt from such an action
+(exit 127). So a gascity re-pin that moves only the `go` or `dolt` line
+leaves every beads key, and beads' pin, unchanged. gascity's platform keeps
+the full `worker-env` (`scripts/rbe_worker_env_base_policy_test.go`): its
+tests run the host go and dolt. To see whether a re-pin moves beads too,
+compare `grep -v -E '^(go|dolt) ' tools/rbe/worker-env.txt | sha256sum`
+before and after.
+
 The manifest records what can change an action's result, and nothing else.
 We don't control the Blacksmith image, and it takes Ubuntu security updates
 on its own schedule:
