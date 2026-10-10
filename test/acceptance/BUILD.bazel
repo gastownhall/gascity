@@ -48,6 +48,8 @@ ACCEPTANCE_ENV = {
 # share of its subtests (SOLO_SUBTESTS).
 SOLO_TESTS = {
     "beads_proxied_default_init_test": "TestBeadsProxiedDefaultInit",
+    "beads_proxied_default_legacy_managed_city_unchanged_test": "TestBeadsProxiedDefaultLegacyManagedCityUnchanged",
+    "beads_proxied_default_native_lane_test": "TestBeadsProxiedDefaultNativeLane",
     "beads_proxied_default_restart_test": "TestBeadsProxiedDefaultRestart",
     "beads_proxied_default_rig_test": "TestBeadsProxiedDefaultRig",
     "beads_proxied_default_start_test": "TestBeadsProxiedDefaultStart",

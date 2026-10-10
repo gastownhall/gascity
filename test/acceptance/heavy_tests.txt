@@ -10,6 +10,4 @@
 # Add a test here when it takes more than about 40 s. A test much over 90 s is
 # better split into independent top-level tests: Go shards per top-level test,
 # never per subtest.
-TestBeadsProxiedDefaultNativeLane 55
-TestBeadsProxiedDefaultLegacyManagedCityUnchanged 55
 TestProxiedNativeSafety 41
