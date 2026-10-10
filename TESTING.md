@@ -141,7 +141,7 @@ inventory does not scan.
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides the controller backstop cadences that go through `internal/clock.Backstop` (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. Other cadences (the supervisor patrol, the proxied guard tick, the Dolt scope watchdog, the lanes' intervals and retries) keep their real periods, so they come round fewer times in the shortened window; the nightly real-timer rows cover them. |
+| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N, clamped to 30, divides every controller duration that goes through `internal/clock.Backstop`, directly or by deriving from the city's patrol interval (which `DaemonConfig.PatrolIntervalDuration` returns divided). The `BackstopSpeedupEnv` doc in `internal/clock/backstop.go` is the inventory of what is divided and what keeps its real period. The rows divide their 3-minute window by the same N. A cadence that keeps its real period comes round fewer times in the shortened window; the nightly real-timer rows cover it. |
 | `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures: 20 s when unset; a value that is not a duration of at least 5 s fails the row. |
 
 `GC_TEST_BACKSTOP_SPEEDUP` cannot be turned on in a binary users run: gc
@@ -152,7 +152,9 @@ only the testonly `//cmd/gc:gc_testhooks` target does
 `.goreleaser.yml` and the Makefile). Any gc run with the variable set prints a
 `gc: WARNING: GC_TEST_BACKSTOP_SPEEDUP=...` line on stderr at startup saying
 whether the hook is active or ignored, and the quiescence rows fail unless gc
-reports it active. `test/acceptance/BUILD.bazel` sets both variables
+reports it active. They also fail unless the `gc` on their PATH, the one exec
+orders and pack scripts run, is the binary under test, and whenever an order
+they run fails. `test/acceptance/BUILD.bazel` sets both variables
 (`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
 
 ### Merge queue

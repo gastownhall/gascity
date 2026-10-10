@@ -270,3 +270,41 @@ func TestNewCityKeepsInheritedClaudeConfigDir(t *testing.T) {
 	}
 	assertClaudeProjectTrustedForTest(t, filepath.Join(inherited, ".claude.json"), city.Dir, nil, nil)
 }
+
+// gc's exec orders and pack scripts run bare `gc` through PATH, so the env
+// built from BuildGC's override must resolve that gc to the binary under test.
+func TestVerifyPathGCAcceptsTheEnvBuiltFromBuildGC(t *testing.T) {
+	t.Setenv("GC_ACCEPTANCE_GC_BIN", writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external")))
+
+	env := NewEnv(BuildGC(t.TempDir()), t.TempDir(), t.TempDir())
+
+	if err := VerifyPathGC(env); err != nil {
+		t.Fatalf("VerifyPathGC() = %v, want nil", err)
+	}
+}
+
+func TestVerifyPathGCRefusesAPathWhoseGCIsNotTheBinaryUnderTest(t *testing.T) {
+	unnamed := writeFakeGC(t, filepath.Join(t.TempDir(), "gc-external"))
+	underTest := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	host := writeFakeGC(t, filepath.Join(t.TempDir(), "gc"))
+	for name, vars := range map[string]map[string]string{
+		// Exec orders exit 127: only the binary's own directory is on PATH,
+		// and the binary is not named gc.
+		"no gc on PATH": {"GC_ACCEPTANCE_GC_BIN": unnamed, "PATH": filepath.Dir(unnamed)},
+		// Exec orders test the host's gc while RunGC tests the binary.
+		"another gc first": {
+			"GC_ACCEPTANCE_GC_BIN": underTest,
+			"PATH":                 filepath.Dir(host) + string(os.PathListSeparator) + filepath.Dir(underTest),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := VerifyPathGC(&Env{vars: vars})
+			if err == nil {
+				t.Fatal("VerifyPathGC() = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), vars["GC_ACCEPTANCE_GC_BIN"]) {
+				t.Fatalf("VerifyPathGC() = %v, want it to name the binary under test %s", err, vars["GC_ACCEPTANCE_GC_BIN"])
+			}
+		})
+	}
+}
