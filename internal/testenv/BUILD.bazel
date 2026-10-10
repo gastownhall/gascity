@@ -15,6 +15,7 @@ go_test(
     srcs = [
         "bazel_tools_internal_test.go",
         "gc_env_baseline_test.go",
+        "gittemplate_contract_test.go",
         "legacy_flag_freeze_test.go",
         "lint_test.go",
         "rollout_leak_vector_test.go",

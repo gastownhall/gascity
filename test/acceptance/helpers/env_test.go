@@ -182,6 +182,21 @@ func passwdHomeForTest(t *testing.T) string {
 // the host — e.g. a bd shared server under ~/.beads/shared-server — and a cached
 // PASS would depend on which machine ran it. Under Bazel the action HOME is
 // TEST_TMPDIR, which the env used to swap for the passwd home.
+// TestNewEnvForwardsGitTemplateDir pins the host-env allowlist entry for the
+// hermetic git template internal/testenv installs. NewEnv builds the child's
+// environment from an allowlist, so a gc or git the child runs makes repos
+// carrying maintenance.auto=false only if GIT_TEMPLATE_DIR is on it.
+func TestNewEnvForwardsGitTemplateDir(t *testing.T) {
+	template := filepath.Join(t.TempDir(), "gc-test-gittemplate")
+	t.Setenv("GIT_TEMPLATE_DIR", template)
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("GIT_TEMPLATE_DIR"); got != template {
+		t.Fatalf("NewEnv() GIT_TEMPLATE_DIR = %q, want %q", got, template)
+	}
+}
+
 func TestNewEnvIsolatesHomeFromTheHost(t *testing.T) {
 	for _, mode := range []string{"go-test", "bazel"} {
 		t.Run(mode, func(t *testing.T) {

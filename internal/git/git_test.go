@@ -134,6 +134,34 @@ func TestHermeticEnvStripsDiscoveryAndConfigVarsAndPinsHermeticConfig(t *testing
 	}
 }
 
+// TestSanitizedAndHermeticEnvPreserveGitTemplateDir pins the coupling to
+// internal/testenv, which points GIT_TEMPLATE_DIR at a template carrying
+// maintenance.auto=false so no repo a test creates spawns detached
+// auto-maintenance. A repo made through a SanitizedEnv or HermeticEnv command
+// is covered only while the variable survives, so stripping it as
+// "git-locating" or "config-location" would silently drop that coverage.
+func TestSanitizedAndHermeticEnvPreserveGitTemplateDir(t *testing.T) {
+	const template = "/pinned/gc-test-gittemplate"
+	t.Setenv("GIT_TEMPLATE_DIR", template)
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{"SanitizedEnv", SanitizedEnv()},
+		{"HermeticEnv", HermeticEnv()},
+	} {
+		var got []string
+		for _, e := range tc.env {
+			if v, ok := strings.CutPrefix(e, "GIT_TEMPLATE_DIR="); ok {
+				got = append(got, v)
+			}
+		}
+		if len(got) != 1 || got[0] != template {
+			t.Errorf("%s GIT_TEMPLATE_DIR entries = %q, want exactly [%q]", tc.name, got, template)
+		}
+	}
+}
+
 func TestIsRepo(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
