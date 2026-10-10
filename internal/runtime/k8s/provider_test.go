@@ -939,6 +939,7 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		"GC_DIR":                              "/host/city/rig",
 		"GC_RIG_ROOT":                         "/host/city/rig",
 		"GC_STORE_ROOT":                       "/host/city/rig",
+		"GC_BEADS_SCOPE_ROOT":                 "/host/city/rig",
 		"BEADS_DIR":                           "/host/city/rig/.beads",
 		"GT_ROOT":                             "/host/city",
 		"GC_CITY_RUNTIME_DIR":                 "/host/city/.gc/runtime",
@@ -991,6 +992,9 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	// GC_STORE_ROOT should be remapped from controller city path to /workspace.
 	if envMap["GC_STORE_ROOT"] != "/workspace/rig" {
 		t.Errorf("GC_STORE_ROOT = %q, want /workspace/rig", envMap["GC_STORE_ROOT"])
+	}
+	if envMap["GC_BEADS_SCOPE_ROOT"] != "/workspace/rig" {
+		t.Errorf("GC_BEADS_SCOPE_ROOT = %q, want /workspace/rig", envMap["GC_BEADS_SCOPE_ROOT"])
 	}
 
 	// BEADS_DIR should be remapped from controller city path to /workspace.
