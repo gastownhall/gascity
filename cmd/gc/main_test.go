@@ -202,7 +202,7 @@ type cleanupTestingM struct {
 type noCityGuardTestingM struct{ m testscript.TestingM }
 
 func (m noCityGuardTestingM) Run() int {
-	return sessionpkg.FailOnNoCityRefusals(m.m.Run(), os.Stderr)
+	return sessionpkg.FailOnNoCityRefusals(m.m.Run, os.Stderr)
 }
 
 func (m cleanupTestingM) Run() int {
@@ -213,6 +213,13 @@ func (m cleanupTestingM) Run() int {
 		}
 	}
 	return code
+}
+
+// testscriptGC is the testscript "gc" command, the test binary re-executed
+// as gc: it runs under the no-city gate, as the parent's tests do.
+func testscriptGC() {
+	configureTestscriptEnvDefaults()
+	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
 }
 
 func TestMain(m *testing.M) {
@@ -227,10 +234,7 @@ func TestMain(m *testing.M) {
 		configureFSPressureForTests()
 		configureSupervisorHooksForTests()
 		testscript.Main(m, map[string]func(){
-			"gc": func() {
-				configureTestscriptEnvDefaults()
-				os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-			},
+			"gc": testscriptGC,
 			"bd": bdTestCmd,
 		})
 		return
@@ -336,10 +340,7 @@ func TestMain(m *testing.M) {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
 	testscript.Main(testRunner, map[string]func(){
-		"gc": func() {
-			configureTestscriptEnvDefaults()
-			os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-		},
+		"gc": testscriptGC,
 		"bd": bdTestCmd,
 	})
 }

@@ -295,6 +295,15 @@ type reconcilerTestEnv struct {
 	stops        *asyncStartTracker // the drain-ack's async stops the reconcile helpers queue
 }
 
+// waitAsyncStopsForTest waits for stops' queued drain-ack stops, bounded: a
+// stop still running after it fails the test instead of hanging it.
+func waitAsyncStopsForTest(t *testing.T, stops *asyncStartTracker) {
+	t.Helper()
+	if !stops.wait(10 * time.Second) {
+		t.Fatal("async drain-ack stops did not finish within 10s")
+	}
+}
+
 func newReconcilerTestEnv(t testing.TB) *reconcilerTestEnv {
 	sessionCircuitBreakerMu.Lock()
 	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
@@ -1230,7 +1239,7 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 		&env.stderr,
 		withAsyncDrainAckStopTracker(stops),
 	)
-	stops.wait(-1) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
+	waitAsyncStopsForTest(t, stops) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -1605,7 +1614,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		"", env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		env.city, env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
@@ -4436,10 +4445,10 @@ func TestReconcileSessionBeads_StrandedCarrierThreadedThroughTick(t *testing.T) 
 	driveTwice := func(env *reconcilerTestEnv, snap *sessionBeadSnapshot, failing *throttleKeySetMetadataFailStore, carrier *sessionBeadSnapshot) {
 		for i := 0; i < 2; i++ {
 			reconcileSessionBeadsTracedWithNamedDemand(
-				context.Background(), "", snap.OpenForReconcile(), carrier, env.desiredState, map[string]bool{"worker": true},
+				context.Background(), env.city, snap.OpenForReconcile(), carrier, env.desiredState, map[string]bool{"worker": true},
 				env.cfg, env.sp, beads.SessionStore{Store: failing}, newFakeDrainOps(), nil, nil, nil,
 				env.dt, nil, map[string]int{"worker": 1}, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
-				&env.stdout, &env.stderr, nil,
+				&env.stdout, &env.stderr, nil, env.startOptions...,
 			)
 		}
 	}
@@ -4493,10 +4502,10 @@ func TestReconcileSessionBeads_Phase0HealVisibleOnSnapshot(t *testing.T) {
 	snap := newSessionBeadSnapshot([]beads.Bead{session})
 	poolDesired := map[string]int{"worker": 1}
 	reconcileSessionBeadsTracedWithNamedDemand(
-		context.Background(), "", snap.OpenForReconcile(), snap, env.desiredState, map[string]bool{"worker": true},
+		context.Background(), env.city, snap.OpenForReconcile(), snap, env.desiredState, map[string]bool{"worker": true},
 		env.cfg, env.sp, beads.SessionStore{Store: env.store}, newFakeDrainOps(), nil, nil, nil,
 		env.dt, nil, poolDesired, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
-		&env.stdout, &env.stderr, nil,
+		&env.stdout, &env.stderr, nil, env.startOptions...,
 	)
 
 	// The POST-TICK carrier (via WriteBackReconcileInfos ← infoByID) must show the
@@ -5450,7 +5459,7 @@ func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(
 		&env.stderr,
 		withAsyncDrainAckStopTracker(stops),
 	)
-	stops.wait(-1) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
+	waitAsyncStopsForTest(t, stops) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0", woken)
 	}
@@ -7656,7 +7665,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 		&env.stderr,
 		withAsyncDrainAckStopTracker(stops),
 	)
-	stops.wait(-1) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
+	waitAsyncStopsForTest(t, stops) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
 
 	if len(dops.clearDrainCalls) != 0 {
 		t.Fatalf("clearDrain calls = %v, want no assigned-work cancellation for blocked open work", dops.clearDrainCalls)
@@ -12728,7 +12737,7 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 	}
 
 	env.stderr.Reset()
-	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != "" {
 		t.Fatalf("second stalled pass stderr = %q, want debounce silence", got)
 	}
@@ -12740,13 +12749,13 @@ func TestReconcileSessionBeads_RecordsResetStallDiagnostic(t *testing.T) {
 		"continuation_reset_pending":   "",
 		sessionpkg.ResetCommittedAtKey: "",
 	})
-	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
 	})
 	env.stderr.Reset()
-	recordResetStallIfDue("", env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
+	recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, session), "worker", "worker", false, false, env.cfg.Session.StartupTimeoutDuration(), env.clk.Now().UTC(), env.dt, rec, &env.stderr, trace)
 	if got := strings.TrimSpace(env.stderr.String()); got != wantMessage {
 		t.Fatalf("re-stalled pass stderr = %q, want %q", got, wantMessage)
 	}

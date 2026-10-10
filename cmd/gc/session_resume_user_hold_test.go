@@ -185,7 +185,7 @@ func TestAttachSurvivesATickAndItsFollowUpDuringStart(t *testing.T) {
 			!strings.Contains(env.stderr.String(), "stop-pending worker deferred") {
 			t.Errorf("follow-up tick left reason=%q; stderr=%q; want the marker deferred on the attach's lease", info.StateReason, env.stderr.String())
 		}
-		stops.wait(-1) // any queued stop runs to completion inside the Start window
+		waitAsyncStopsForTest(t, stops) // any queued stop runs to completion inside the Start window
 		if !env.sp.IsRunning("worker") {
 			t.Error("the follow-up tick's stop killed the runtime the attach is starting")
 		}
@@ -251,7 +251,7 @@ func TestAttachSurvivesAStaleSnapshotDrainAck(t *testing.T) {
 			stops := &asyncStartTracker{}
 			env.clk.Time = env.clk.Time.Add(time.Minute)
 			env.userHoldTickOn(t, city, before, dops, withAsyncDrainAckStopTracker(stops))
-			stops.wait(-1)
+			waitAsyncStopsForTest(t, stops)
 			if !env.sp.IsRunning("worker") {
 				t.Fatalf("the stale-snapshot drain-ack stopped the resumed runtime; stdout:\n%s", env.stdout.String())
 			}

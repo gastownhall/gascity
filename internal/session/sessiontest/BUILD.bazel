@@ -14,11 +14,13 @@ go_library(
 go_test(
     name = "sessiontest_test",
     srcs = [
+        "nocity_unarmed_test.go",
         "sessiontest_test.go",
         "testenv_import_test.go",
     ],
     deps = [
         ":sessiontest",
+        "//internal/bazeltest",
         "//internal/beads",
         "//internal/session",
         "//internal/testenv",

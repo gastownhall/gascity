@@ -267,7 +267,7 @@ func TestResetStallEvictionDecidesOnItsRow(t *testing.T) {
 		})
 		decided := sessionInfoFromBead(mustGetBead(t, env.store, session.ID))
 		env.setSessionMetadata(&session, c.move)
-		recordResetStallIfDue("", env.store, env.sp, env.cfg, decided, "worker", "worker", true, false, time.Minute, env.clk.Now().UTC(), env.dt, nil, &env.stderr, nil)
+		recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, decided, "worker", "worker", true, false, time.Minute, env.clk.Now().UTC(), env.dt, nil, &env.stderr, nil)
 		if evicted := env.sp.CountCalls("Stop", "worker") > 0; evicted != c.evict {
 			t.Errorf("moved %v: evicted %v, want %v (stderr %q)", c.move, evicted, c.evict, env.stderr.String())
 		}

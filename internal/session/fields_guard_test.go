@@ -15,7 +15,7 @@ func init() { GuardSessionKeys(func(msg string) { panic(msg) }) }
 // TestMain fails the run on a violation a recover() swallowed, and on a start
 // or stop refused for want of a city that no test expected.
 func TestMain(m *testing.M) {
-	os.Exit(FailOnNoCityRefusals(FailOnKeyViolations(m.Run(), os.Stderr), os.Stderr))
+	os.Exit(FailOnNoCityRefusals(func() int { return FailOnKeyViolations(m.Run(), os.Stderr) }, os.Stderr))
 }
 
 // TestGuardSessionKeys pins the guard: any write of an unregistered key to a

@@ -171,6 +171,22 @@ func TestControllerStopSequencesRefuseWithoutACity(t *testing.T) {
 	}
 }
 
+// TestTryRuntimeLeaseRefusesWithoutACity: a legacy starter or stopper handed
+// no absolute city path, the empty one included, is refused and holds
+// nothing: the empty path is not a "no city" that locks nothing.
+func TestTryRuntimeLeaseRefusesWithoutACity(t *testing.T) {
+	sessionpkg.ExpectNoCityRefusalsForTest(t)
+	store := beads.NewMemStore()
+	for _, city := range []string{"", "relative/city"} {
+		for _, id := range []string{"", "sess-1"} {
+			lease, release, err := tryRuntimeLease(store, city, "worker", id, sessionpkg.RuntimeLeaseTTL(0))
+			if !errors.Is(err, sessionpkg.ErrRuntimeLeaseNoCity) || lease != nil || release != nil {
+				t.Fatalf("tryRuntimeLease(%q, id %q) = (%v, release %t, %v), want ErrRuntimeLeaseNoCity holding nothing", city, id, lease, release != nil, err)
+			}
+		}
+	}
+}
+
 // TestConfigDriftResetDefersOnABusyLease: a config-drift reset whose stop is
 // refused by another holder's lease decides nothing this tick: no patch, the
 // runtime and the row as they were.

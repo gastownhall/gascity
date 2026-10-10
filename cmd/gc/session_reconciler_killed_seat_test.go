@@ -172,7 +172,7 @@ func (e *killedSeatEnv) tickWith(t *testing.T, seat beads.Bead, assigned []beads
 		e.cfg, e.sp, e.store, dops, assigned, nil, nil, e.dt, ds.PoolDesiredCounts, false, nil, "kill-town",
 		nil, e.clk, events.Discard, 0, 0, io.Discard, io.Discard, append([]startExecutionOption{withAsyncDrainAckStopTracker(stops)}, opts...)...,
 	)
-	stops.wait(-1)
+	waitAsyncStopsForTest(t, stops)
 }
 
 func (e *killedSeatEnv) reload(t *testing.T, id string) beads.Bead {

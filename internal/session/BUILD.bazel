@@ -139,6 +139,7 @@ go_test(
         "named_config_test.go",
         "named_session_ineligible_conflict_test.go",
         "names_test.go",
+        "nocity_guard_test.go",
         "orphan_auto_test.go",
         "orphan_infrastructure_fence_linux_test.go",
         "overlay_test.go",
