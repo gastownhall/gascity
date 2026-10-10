@@ -931,13 +931,18 @@ func (s namedGuardedStore) Close(id string) error {
 	return s.Store.Close(id)
 }
 
-// namedTreeSnapshot lists every path under dir with its size and mode.
+// namedTreeSnapshot lists every path under dir with its size and mode,
+// except the session-name locks, where the AdoptLive stamp's runtime lease
+// takes its flock.
 func namedTreeSnapshot(t *testing.T, dir string) []string {
 	t.Helper()
 	var out []string
 	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
+		switch {
+		case err != nil:
 			return err
+		case path == citylayout.SessionNameLocksDir(dir):
+			return filepath.SkipDir
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -1033,6 +1038,9 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 			target := ""
 			if tc.reopen {
 				target = seedClosedNamedRow(t, mem, cfg, nil).ID
+			}
+			if err := os.MkdirAll(citylayout.SessionNameLocksDir(dir), 0o755); err != nil {
+				t.Fatal(err)
 			}
 			before := namedTreeSnapshot(t, dir)
 			h := newNamedHarness(t, dir, func(host *createEffectHost) {
@@ -1806,9 +1814,15 @@ func TestReadOnlyResolveMatchesLegacyCreateMetadataRichCity(t *testing.T) {
 // never fails the create.
 func adoptLiveRun(t *testing.T, store beads.Store, prep func(sp *stampFake, name string)) (beads.Bead, *stampFake, string, string) {
 	t.Helper()
+	return adoptLiveRunIn(t, t.TempDir(), store, prep)
+}
+
+// adoptLiveRunIn is adoptLiveRun in city dir.
+func adoptLiveRunIn(t *testing.T, dir string, store beads.Store, prep func(sp *stampFake, name string)) (beads.Bead, *stampFake, string, string) {
+	t.Helper()
 	cfg := mayorCity()
 	var stderr strings.Builder
-	h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) { host.stderr = &stderr })
+	h := newNamedHarness(t, dir, func(host *createEffectHost) { host.stderr = &stderr })
 	createToken := h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
 	plan.Named.AdoptLive = true
@@ -1971,7 +1985,12 @@ func (s *namedRowCASStore) Get(id string) (beads.Bead, error) {
 	return s.MemStore.Get(id)
 }
 
+// UpdateIfMatch counts, and with lose fails, the instance_token writes; the
+// runtime lease record's writes pass through.
 func (s *namedRowCASStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if _, token := opts.Metadata["instance_token"]; !token {
+		return s.MemStore.UpdateIfMatch(id, rev, opts)
+	}
 	s.updates++
 	if s.lose {
 		return &beads.PreconditionFailedError{}
@@ -2139,4 +2158,75 @@ func TestNamedAdoptLiveLeavesRuntimeNamingTheRowAlone(t *testing.T) {
 	if n := sp.CountCalls("SetMeta", mayorRuntime(t)) - before; n != 0 || !strings.Contains(stderr, "identity not stamped") {
 		t.Fatalf("SetMeta calls %d, stderr %q; want the runtime untouched and the refusal logged", n, stderr)
 	}
+}
+
+// namedLeaseCheckStore records, at each instance_token write, the row's
+// runtime lease holder.
+type namedLeaseCheckStore struct {
+	*beads.MemStore
+	holders []string
+}
+
+func (s *namedLeaseCheckStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if _, token := opts.Metadata["instance_token"]; token {
+		row, err := s.Get(id)
+		if err != nil {
+			return err
+		}
+		s.holders = append(s.holders, row.Metadata[session.RuntimeLeaseHolderKey])
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *namedLeaseCheckStore) ConditionalWritesResolveTarget() beads.Store { return s }
+
+// Kills an AdoptLive stamp outside the runtime lease (mc-9wo5j): the token
+// is recorded while the row holds the lease's record, which is released
+// after; a record taken over before the write, or a name another holder
+// leases, stamps nothing, logged.
+func TestNamedAdoptLiveStampsUnderTheRuntimeLease(t *testing.T) {
+	own := func(sp *stampFake, name string) {
+		setRuntimeMeta(t, sp, name, map[string]string{"GC_INSTANCE_TOKEN": "rt-own-token"})
+	}
+	t.Run("leased", func(t *testing.T) {
+		dir := t.TempDir()
+		store := &namedLeaseCheckStore{MemStore: fencedMemStore(t)}
+		row, sp, stderr, _ := adoptLiveRunIn(t, dir, store, own)
+		if len(store.holders) != 1 || store.holders[0] == "" || row.Metadata["instance_token"] != "rt-own-token" || sp.meta(t, mayorRuntime(t), "GC_SESSION_ID") != row.ID {
+			t.Fatalf("lease holders at the token write %q, row token %q, stderr %q; want one write under a held record, stamped", store.holders, row.Metadata["instance_token"], stderr)
+		}
+		lease, release, err := tryRuntimeLease(nil, dir, mayorRuntime(t), "", 0)
+		if err != nil || lease == nil {
+			t.Fatalf("the name's lease after the stamp: %v, want released", err)
+		}
+		release()
+	})
+	t.Run("taken over", func(t *testing.T) {
+		store := &namedRowCASStore{MemStore: fencedMemStore(t)}
+		row, sp, stderr, createToken := adoptLiveRun(t, store, func(sp *stampFake, name string) {
+			own(sp, name)
+			store.beforeGet = func(id string) {
+				if b, _ := store.MemStore.Get(id); b.Metadata[session.RuntimeLeaseHolderKey] != "" {
+					_ = store.SetMetadata(id, session.RuntimeLeaseHolderKey, "another-host/1/x")
+					store.beforeGet = nil
+				}
+			}
+		})
+		if row.Metadata["instance_token"] != createToken || store.updates != 0 || sp.meta(t, mayorRuntime(t), "GC_SESSION_ID") != "" || !strings.Contains(stderr, "lease") {
+			t.Fatalf("row token %q, updates %d, stderr %q; want no token write and no stamp once the record moved", row.Metadata["instance_token"], store.updates, stderr)
+		}
+	})
+	t.Run("busy", func(t *testing.T) {
+		dir := t.TempDir()
+		_, release, err := tryRuntimeLease(nil, dir, mayorRuntime(t), "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		row, sp, stderr, createToken := adoptLiveRunIn(t, dir, fencedMemStore(t), own)
+		if row.Metadata["instance_token"] != createToken || sp.meta(t, mayorRuntime(t), "GC_SESSION_ID") != "" || !strings.Contains(stderr, "lease") {
+			t.Fatalf("row token %q (want the create's %q), runtime ID %q, stderr %q; want nothing stamped under a busy lease, logged",
+				row.Metadata["instance_token"], createToken, sp.meta(t, mayorRuntime(t), "GC_SESSION_ID"), stderr)
+		}
+	})
 }
