@@ -2899,9 +2899,9 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
 // Defaults to 30s if empty or unparseable. A test-hooks gc run with
-// clock.BackstopSpeedupEnv set returns it already divided, so callers that
-// derive other durations from it (the startup retry delay, the restart
-// timeout) compute those from the divided value too.
+// clock.BackstopSpeedupEnv set returns it already divided, so every duration
+// a caller derives from it is divided too. That constant's doc lists those
+// callers; a new caller is added to it.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	return clock.Backstop(durationOr(d.PatrolInterval, 30*time.Second))
 }

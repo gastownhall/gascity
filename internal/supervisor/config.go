@@ -149,7 +149,10 @@ func (s Section) PortOrDefault() int {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 10s on empty or unparseable values.
+// Defaults to 10s on empty or unparseable values. Unlike the city's
+// config.DaemonConfig.PatrolIntervalDuration it is never divided by
+// clock.BackstopSpeedupEnv: the knob shortens city controller backstops
+// only.
 func (s Section) PatrolIntervalDuration() time.Duration {
 	if s.PatrolInterval == "" {
 		return 10 * time.Second
