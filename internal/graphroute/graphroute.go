@@ -726,14 +726,19 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 	// Resolve agent if not provided (order dispatch path).
 	if a == nil {
 		rigContext := GraphRouteRigContext(routedTo)
-		baseName := routedTo
-		if i := strings.LastIndex(routedTo, "/"); i >= 0 {
-			baseName = routedTo[i+1:]
-		}
 		if deps.Resolver == nil {
 			return nil
 		}
-		resolved, ok := deps.Resolver.ResolveAgent(cfg, baseName, rigContext)
+		// Pass the full qualified routedTo (not a rig-prefix-stripped bare
+		// name) as the resolver's name argument. Stripping the rig prefix
+		// here and relying on the resolver to reconstruct it from rigContext
+		// alone loses information for resolvers that match only on the
+		// qualified identity, causing rig-scoped one-shot targets to fail
+		// resolution and fall through the `!ok` early-return below without
+		// ever stamping gc.routed_to or clearing stale session-affinity
+		// metadata. Passing routedTo preserves existing behavior for bare
+		// (unscoped) names, since routedTo == baseName in that case.
+		resolved, ok := deps.Resolver.ResolveAgent(cfg, routedTo, rigContext)
 		if !ok {
 			return nil
 		}
