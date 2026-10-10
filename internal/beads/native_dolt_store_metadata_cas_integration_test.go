@@ -487,3 +487,276 @@ func TestNativeDoltStoreAtomicConditionalCloseAcrossIndependentHandles(t *testin
 		t.Fatalf("stale close mutated real row: before=%#v after=%#v", before, after)
 	}
 }
+
+// TestNativeDoltStoreCloseWithMetadataIfMatchMidBatchFailureLeavesZeroRows
+// proves the ONE-REQUEST atomicity CloseWithMetadataIfMatch's own doc comment
+// claims ("ONE REQUEST, TWO ITEMS, ONE FENCE") against the REAL backend, the
+// same way TestNativeDoltStoreApplyGraphPlanMidPlanFailureLeavesZeroRows pins
+// it for ApplyGraphPlanWithStorage.
+//
+// This used to drive the failure through the CLOSE item (an unforced close
+// refusing an issue with an open parent-child dependent,
+// issueops.ErrCloseOpenChildren, after the update item had already landed).
+// The G3 review's HIGH 1 fix gave the close item Force: true -- matching
+// every other close this store issues, and restoring the old CloseIssueInTx
+// path's policy-free behavior -- so that refusal is gone on purpose; see
+// TestNativeDoltStoreCloseWithMetadataIfMatchForcesPastOpenChildren below for
+// the proof that the fix works. Force also removes any second guard the
+// close item could still fail on: CloseItem has no ExpectedVersion of its
+// own, and UpdateItem's "already-touched" rule forbids this request's update
+// item and close item from fencing the same row twice. So the only real
+// refusal left reachable in this two-item, one-id shape is the UPDATE item's
+// own ExpectedVersion, driven stale by a genuine intervening write from an
+// independent handle against the same real backend -- proving a precondition
+// miss on the FIRST item still refuses the WHOLE request and leaves the real
+// row completely untouched, not just the metadata key the update item would
+// have written.
+func TestNativeDoltStoreCloseWithMetadataIfMatchMidBatchFailureLeavesZeroRows(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), ".beads")
+	openHandle := func(actor string) *NativeDoltStore {
+		t.Helper()
+		storage, err := beadslib.OpenBestAvailable(ctx, dir)
+		if err != nil {
+			t.Fatalf("open upstream native beads storage (%s): %v", actor, err)
+		}
+		t.Cleanup(func() {
+			if err := storage.Close(); err != nil {
+				t.Errorf("close upstream storage (%s): %v", actor, err)
+			}
+		})
+		if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+			t.Fatalf("set issue prefix (%s): %v", actor, err)
+		}
+		return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+	}
+
+	writerA := openHandle("close-with-metadata-midfail-A")
+	writerB := openHandle("close-with-metadata-midfail-B")
+
+	created, err := writerA.Create(Bead{Title: "real mid-batch close", Metadata: map[string]string{"sibling": "before"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	before, err := writerA.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before stale close: %v", err)
+	}
+
+	// Independent handle, genuine write: bumps the row's real revision out
+	// from under writerA's snapshot before writerA's close request builds
+	// its update item's ExpectedVersion.
+	if err := writerB.SetMetadata(created.ID, "intervening", "write"); err != nil {
+		t.Fatalf("intervening SetMetadata: %v", err)
+	}
+
+	closed, err := writerA.CloseWithMetadataIfMatch(created.ID, before.Revision, map[string]string{"state": "drained"})
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("CloseWithMetadataIfMatch error = %v, want precondition failure", err)
+	}
+	if closed.ID != "" {
+		t.Fatalf("CloseWithMetadataIfMatch result = %#v, want zero bead on failure", closed)
+	}
+
+	after, err := writerB.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after refused close: %v", err)
+	}
+	if after.Status != before.Status || after.Metadata["sibling"] != "before" || after.Metadata["intervening"] != "write" || after.Metadata["state"] != "" {
+		t.Fatalf("refused close left a partial mutation against the real backend:\n got: %#v\nwant status=%q sibling=before intervening=write state=\"\"", after, before.Status)
+	}
+}
+
+// TestNativeDoltStoreCloseWithMetadataIfMatchForcesPastOpenChildren pins the
+// G3 review's HIGH 1 fix: CloseWithMetadataIfMatch's close item now carries
+// Force: true, so a parent with a real, open parent-child dependent (the
+// exact row shape issueops.ErrCloseOpenChildren guards against) closes
+// instead of refusing -- matching the old CloseIssueInTx path this method
+// replaced, which was policy-free. The child itself must stay untouched:
+// Force on the parent's close item bypasses the PARENT close's own policy,
+// not a cascading close of its children.
+func TestNativeDoltStoreCloseWithMetadataIfMatchForcesPastOpenChildren(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "close-with-metadata-open-children")
+
+	parent, err := store.Create(Bead{Title: "real forced close parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	child, err := store.Create(Bead{Title: "real forced close child", ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	if child.ParentID != parent.ID {
+		t.Fatalf("child.ParentID = %q, want %q", child.ParentID, parent.ID)
+	}
+
+	closed, err := store.CloseWithMetadataIfMatch(parent.ID, parent.Revision, map[string]string{"state": "drained"})
+	if err != nil {
+		t.Fatalf("CloseWithMetadataIfMatch with an open child: %v", err)
+	}
+	if closed.Status != "closed" || closed.Metadata["state"] != "drained" {
+		t.Fatalf("closed = %#v, want status closed and metadata state=drained", closed)
+	}
+
+	fresh, err := store.Get(parent.ID)
+	if err != nil {
+		t.Fatalf("Get parent after forced close: %v", err)
+	}
+	if fresh.Status != "closed" {
+		t.Fatalf("parent.Status = %q, want closed", fresh.Status)
+	}
+
+	childAfter, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get child after parent's forced close: %v", err)
+	}
+	if childAfter.Status == "closed" {
+		t.Fatalf("child.Status = %q, want untouched by the parent's forced close", childAfter.Status)
+	}
+}
+
+// TestNativeDoltStoreDeleteIfMatchRewritesNeighborTextThroughFacade pins the
+// G3 MED-3 behavioral change, documented on DeleteIfMatch: routing the
+// delete through issueops.Deleter now rewrites a surviving GRAPH NEIGHBOR's
+// text that cites the deleted id to `[deleted:<id>]`, bumping the neighbor's
+// own revision — something the raw tx.DeleteIssue this replaced never did.
+// issueops.DeleteRequest has no option to suppress this (checked against the
+// pinned beads v1.3.1 Deleter doc), so it is kept as a deliberate alignment
+// with bd's own delete semantics rather than worked around.
+func TestNativeDoltStoreDeleteIfMatchRewritesNeighborTextThroughFacade(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "delete-if-match-neighbor-rewrite")
+
+	parent, err := store.Create(Bead{Title: "real delete rewrite parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	child, err := store.Create(Bead{
+		Title:       "real delete rewrite child",
+		ParentID:    parent.ID,
+		Description: "see " + parent.ID + " for context",
+	})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	if child.ParentID != parent.ID {
+		t.Fatalf("child.ParentID = %q, want %q", child.ParentID, parent.ID)
+	}
+	childBeforeRevision := child.Revision
+
+	if err := store.DeleteIfMatch(parent.ID, parent.Revision); err != nil {
+		t.Fatalf("DeleteIfMatch parent: %v", err)
+	}
+
+	if _, err := store.Get(parent.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get parent after delete: err = %v, want ErrNotFound", err)
+	}
+
+	childAfter, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get child after parent's delete: %v", err)
+	}
+	wantDescription := "see [deleted:" + parent.ID + "] for context"
+	if childAfter.Description != wantDescription {
+		t.Fatalf("child.Description = %q, want %q (the role's neighbor-text rewrite)", childAfter.Description, wantDescription)
+	}
+	if childAfter.Revision == childBeforeRevision {
+		t.Fatalf("child.Revision = %d, unchanged from before the delete; want it bumped by the rewrite", childAfter.Revision)
+	}
+}
+
+// nativeTransferIfCurrentFixture creates a bead and, through UpdateIfMatch,
+// stamps it in_progress and assigned to assignee -- the state TransferIfCurrent
+// requires of ExpectedAssignee/ExpectedStatus to authorize a move.
+func nativeTransferIfCurrentFixture(t *testing.T, store *NativeDoltStore, title, assignee string) Bead {
+	t.Helper()
+	bead, err := store.Create(Bead{Title: title})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := store.UpdateIfMatch(bead.ID, bead.Revision, UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
+		t.Fatalf("UpdateIfMatch (fixture setup): %v", err)
+	}
+	fixture, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after fixture setup: %v", err)
+	}
+	if fixture.Assignee != assignee || fixture.Status != status {
+		t.Fatalf("fixture = %+v, want Assignee=%q Status=%q", fixture, assignee, status)
+	}
+	return fixture
+}
+
+// TestNativeDoltStoreTransferIfCurrentMovesAnInProgressBeadThroughFacade pins
+// the success path against real Dolt: an in_progress bead assigned to
+// fromAssignee moves to toAssignee, and the move is NOT the ordinary
+// anti-steal-fenced write -- ExpectedAssignee alone authorizes it (see the
+// method's own doc).
+func TestNativeDoltStoreTransferIfCurrentMovesAnInProgressBeadThroughFacade(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "transfer-if-current-success")
+	bead := nativeTransferIfCurrentFixture(t, store, "transfer success", "claude-gcg-1")
+
+	moved, err := store.TransferIfCurrent(bead.ID, "claude-gcg-1", "gcg-1")
+	if err != nil || !moved {
+		t.Fatalf("TransferIfCurrent = (%v, %v), want (true, nil)", moved, err)
+	}
+
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after transfer: %v", err)
+	}
+	if after.Assignee != "gcg-1" {
+		t.Fatalf("after.Assignee = %q, want gcg-1", after.Assignee)
+	}
+	if after.Status != "in_progress" {
+		t.Fatalf("after.Status = %q, want in_progress (unchanged)", after.Status)
+	}
+}
+
+// TestNativeDoltStoreTransferIfCurrentSameAssigneeShortCircuitsThroughFacade
+// pins the fromAssignee==toAssignee short circuit: it reports (true, nil)
+// without ever reaching the backend, so it succeeds even for a bead this
+// store has never heard of.
+func TestNativeDoltStoreTransferIfCurrentSameAssigneeShortCircuitsThroughFacade(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "transfer-if-current-same")
+	moved, err := store.TransferIfCurrent("gc-does-not-exist", "gcg-1", "gcg-1")
+	if err != nil || !moved {
+		t.Fatalf("TransferIfCurrent = (%v, %v), want (true, nil)", moved, err)
+	}
+}
+
+// TestNativeDoltStoreTransferIfCurrentPreconditionMissThroughFacade pins the
+// two readback outcomes of a lost precondition: a foreign holder reports
+// (false, nil), and a bead already carrying toAssignee (a retried write whose
+// first attempt already committed) reports (true, nil) -- both without error,
+// matching BdStore.TransferIfCurrent's bd-exit-13 readback contract.
+func TestNativeDoltStoreTransferIfCurrentPreconditionMissThroughFacade(t *testing.T) {
+	for _, tc := range []struct {
+		name, holder string
+		want         bool
+	}{
+		{name: "foreign holder", holder: "someone-else", want: false},
+		{name: "already transferred", holder: "gcg-1", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openRealNativeDoltStoreForCAS(t, "transfer-if-current-miss-"+tc.name)
+			bead := nativeTransferIfCurrentFixture(t, store, "transfer precondition miss", tc.holder)
+
+			moved, err := store.TransferIfCurrent(bead.ID, "claude-gcg-1", "gcg-1")
+			if err != nil || moved != tc.want {
+				t.Fatalf("TransferIfCurrent = (%v, %v), want (%v, nil)", moved, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestNativeDoltStoreTransferIfCurrentUnresolvableIDThroughFacade pins the
+// not-found case: an id this store has never minted reports (false, nil),
+// matching BdStore.TransferIfCurrent's isBdIssueNotFound branch.
+func TestNativeDoltStoreTransferIfCurrentUnresolvableIDThroughFacade(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "transfer-if-current-not-found")
+	moved, err := store.TransferIfCurrent("gc-does-not-exist", "claude-gcg-1", "gcg-1")
+	if err != nil || moved {
+		t.Fatalf("TransferIfCurrent = (%v, %v), want (false, nil)", moved, err)
+	}
+}

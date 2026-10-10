@@ -62,6 +62,9 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 		return cat
 	}
 
+	skipPass := stage1SkillSkipLog.beginPass(cityPath)
+	defer skipPass.finish()
+
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if !canStage1Materialize(cfg.Session.Provider, agent) {
@@ -114,13 +117,19 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 			LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 		})
 		if merr != nil {
+			skipPass.markIncomplete(agent.QualifiedName())
 			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q at %s: %v\n", //nolint:errcheck // best-effort stderr
 				agent.QualifiedName(), sinkDir, merr)
 			continue
 		}
 		for _, s := range res.Skipped {
-			fmt.Fprintf(stderr, "gc: agent %q skipped skill %q at %s — %s\n", //nolint:errcheck // best-effort stderr
-				agent.QualifiedName(), s.Name, s.Path, s.Reason)
+			// A skip is the standing outcome for user content at a sink
+			// path; report it once per episode, not on every pass
+			// (skill_skip_log.go).
+			msg := fmt.Sprintf("gc: agent %q skipped skill %q at %s — %s", agent.QualifiedName(), s.Name, s.Path, s.Reason)
+			if skipPass.shouldReport(agent.QualifiedName(), s.Path, msg) {
+				fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+			}
 		}
 		for _, w := range res.Warnings {
 			fmt.Fprintf(stderr, "gc: agent %q stage-1 materialize warning: %s\n", //nolint:errcheck // best-effort stderr

@@ -5,10 +5,12 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // TestResolveConsultsExactlyRegisteredEnvVars pins the env var NAMES Resolve
@@ -57,6 +59,45 @@ func TestConfigPathAddressesTheFieldResolveReads(t *testing.T) {
 			if f.OriginOf(s.Key) != OriginConfig {
 				t.Errorf("%s: set the field at ConfigPath %q to a non-default value but the gate origin is %q, not config — "+
 					"ConfigPath does not address the field Resolve reads", s.Key, s.ConfigPath, f.OriginOf(s.Key))
+			}
+		})
+	}
+}
+
+// TestConfigPathSurvivesAFragmentDefiningItsSection composes, for every
+// registered gate, a root city.toml that sets the field at Spec.ConfigPath to a
+// non-default value with an included fragment that defines the field's section
+// without setting the field. A fragment that defines a section replaces it
+// wholesale unless the merge preserves the gate (mergeFragment's IsDefined
+// branches), so a gate whose field the merge forgets silently reverts to its
+// built-in default for any city that layers config; the gate must still
+// resolve as config-origin.
+func TestConfigPathSurvivesAFragmentDefiningItsSection(t *testing.T) {
+	t.Parallel()
+	for _, s := range Specs() {
+		s := s
+		t.Run(s.Key, func(t *testing.T) {
+			t.Parallel()
+			segs := strings.Split(s.ConfigPath, ".")
+			if len(segs) < 2 {
+				t.Fatalf("ConfigPath %q names no config section", s.ConfigPath)
+			}
+			section, key := strings.Join(segs[:len(segs)-1], "."), segs[len(segs)-1]
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("include = [\"fragment.toml\"]\n\n[workspace]\nname = \"test\"\n\n" +
+				"[" + section + "]\n" + key + " = " + nonDefaultTOMLValue(t, s.Default) + "\n")
+			fs.Files["/city/fragment.toml"] = []byte("[" + segs[0] + "]\n")
+			cfg, _, err := config.LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			f, err := Resolve(cfg, ResolveOptions{LookupEnv: func(string) (string, bool) { return "", false }})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if f.OriginOf(s.Key) != OriginConfig {
+				t.Errorf("%s: city.toml sets %q, but after an included fragment defines [%s] without it the gate origin is %q, not config — "+
+					"the config merge drops the gate; preserve it in mergeFragment", s.Key, s.ConfigPath, segs[0], f.OriginOf(s.Key))
 			}
 		})
 	}
@@ -149,12 +190,7 @@ func setNonDefault(t *testing.T, f reflect.Value, def Default) {
 	t.Helper()
 	switch {
 	case def.Mode != nil:
-		for _, m := range []Mode{Require, Auto, Off} {
-			if m != *def.Mode {
-				f.SetString(string(m))
-				return
-			}
-		}
+		f.SetString(string(nonDefaultMode(*def.Mode)))
 	case def.Bool != nil:
 		want := !*def.Bool
 		if f.Kind() == reflect.Pointer {
@@ -167,6 +203,31 @@ func setNonDefault(t *testing.T, f reflect.Value, def Default) {
 	default:
 		t.Fatalf("Default sets no arm")
 	}
+}
+
+// nonDefaultTOMLValue renders, as a TOML value, the non-default value
+// setNonDefault assigns.
+func nonDefaultTOMLValue(t *testing.T, def Default) string {
+	t.Helper()
+	switch {
+	case def.Mode != nil:
+		return strconv.Quote(string(nonDefaultMode(*def.Mode)))
+	case def.Bool != nil:
+		return strconv.FormatBool(!*def.Bool)
+	default:
+		t.Fatalf("Default sets no arm")
+		return ""
+	}
+}
+
+// nonDefaultMode returns the first valid mode that differs from def.
+func nonDefaultMode(def Mode) Mode {
+	for _, m := range []Mode{Require, Auto, Off} {
+		if m != def {
+			return m
+		}
+	}
+	return def
 }
 
 func depsEnvHasKey(path, key string) (bool, error) {

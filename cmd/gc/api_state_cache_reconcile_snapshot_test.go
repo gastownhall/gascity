@@ -20,7 +20,15 @@ import (
 // is_blocked verdict reconciliation just installed — the divergence that makes
 // every later pass re-emit. Routing on the actor is what tells the cache the
 // payload is its own snapshot.
+// Both cache actors carry the cache's own snapshot: a cache-local echo routed
+// as a hook patch is the same flood.
 func TestApplyBeadEventRoutesCacheReconcileEventsAsSnapshots(t *testing.T) {
+	for _, actor := range []string{cacheReconcileActor, cacheLocalActor} {
+		t.Run(actor, func(t *testing.T) { testCacheEventAppliesAsSnapshot(t, actor) })
+	}
+}
+
+func testCacheEventAppliesAsSnapshot(t *testing.T, actor string) {
 	backing := beads.NewMemStore()
 	unblocked := false
 	created, err := backing.Create(beads.Bead{Title: "backlog issue", IsBlocked: &unblocked})
@@ -46,7 +54,7 @@ func TestApplyBeadEventRoutesCacheReconcileEventsAsSnapshots(t *testing.T) {
 	}
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadUpdated,
-		Actor:   cacheReconcileActor,
+		Actor:   actor,
 		Subject: created.ID,
 		Payload: payload,
 	})
@@ -56,6 +64,6 @@ func TestApplyBeadEventRoutesCacheReconcileEventsAsSnapshots(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if got.IsBlocked == nil {
-		t.Fatalf("re-absorbing a cache-reconcile snapshot nilled %s's is_blocked verdict", created.ID)
+		t.Fatalf("re-absorbing a %s snapshot nilled %s's is_blocked verdict", actor, created.ID)
 	}
 }

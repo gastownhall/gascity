@@ -289,9 +289,24 @@ For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
-rig `.beads/hooks/` directory to allow native store adoption. Keep
-`GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
-scripts directly.
+rig `.beads/hooks/` directory to allow native store adoption.
+
+While a city still depends on those hook scripts directly, keep its stores on
+the subprocess-backed store by turning native transport off in `city.toml`:
+
+```toml
+[beads]
+native_transport = "off"
+```
+
+Restart a running city after the change: the stores it holds open keep the
+value it read at boot. `gc` commands, and the stores the city opens for a
+single tick, read the current `city.toml` every time. This setting replaces
+the `GC_BEADS_FORCE_FALLBACK=1` environment variable, which still works but is
+deprecated and applies to every city the process serves. With either one,
+`gc start` refuses a `[storage]` binding served by `beads-workspace`, because
+that provider opens the native store. Turn native transport off only in cities
+that have no such binding, or remove the binding first.
 
 ## Native Store Falls Back Because Dolt Is in Embedded Mode
 
@@ -434,15 +449,83 @@ The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
 an optional `export ` prefix, and optional surrounding quotes. Only keys that
 are already eligible for the supervisor environment are merged — provider
 credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
-`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
-other key in the file is ignored. A value exported in the calling shell still
-takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
-suppresses provider credentials from both sources.
+`OPENAI_`, `GEMINI_`), a short built-in list of settings (among them the Dolt
+credential and logging settings `GC_DOLT_USER`, `GC_DOLT_PASSWORD`, and
+`GC_DOLT_LOGLEVEL`, and the beads pool deadlines below), plus any keys you opt
+in via `GC_SUPERVISOR_ENV`; any other key in the file is ignored. A value
+exported in the calling shell still takes precedence over the file, and
+`GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
+sources.
+
+The same file is the durable home for the beads connection-pool deadlines.
+`gc` reads `BEADS_DOLT_POOL_READ_TIMEOUT` and `BEADS_DOLT_POOL_WRITE_TIMEOUT`
+for its own store connections only from its process environment; the
+`dolt.pool-*-timeout` keys in `.beads/config.yaml` and entries in `.beads/.env`
+reach the `bd` CLI, not `gc`. If the 10-second default is too tight for a
+loaded shared Dolt server (store operations fail with `i/o timeout` or
+`invalid connection`), raise both here:
+
+```bash
+# ~/.gc/secrets.env
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+```
+
+These values also reach the `bd` commands and agent sessions that inherit the
+supervisor's environment, where they take precedence over the per-workspace
+`.beads/` settings.
 
 Apply the change by regenerating the service file:
 
 ```bash
-gc service restart     # restarts the launchd/systemd service
+gc supervisor install  # rewrites the service file; restarts on change
+```
+
+## A Custom Environment Variable Doesn't Reach Agent Sessions
+
+Symptom: a non-`GC_`-prefixed variable you've exported and confirmed is set
+(e.g. in your shell, `~/.bash_env`, or a systemd/launchd unit) never shows up
+inside a spawned agent session's environment, even though `gc supervisor
+run` itself can see it.
+
+Cause: `passthroughEnv` only forwards a variable into a session if it is
+either `GC_`-prefixed, part of the small fixed provider/locale/XDG set, or
+named in `GC_SUPERVISOR_ENV` — the same opt-in `gc supervisor install` uses to
+widen the persisted service-file env (see above). Everything else is dropped
+silently, by design: an unbounded sweep of the calling environment would leak
+whatever secrets happen to be sitting in the supervisor's process, into every
+agent session.
+
+Fix: name the variable in `GC_SUPERVISOR_ENV` in the environment the
+supervisor daemon itself runs with, then restart it so the daemon process
+picks up both the opt-in list and the variable's value:
+
+```bash
+export GC_SUPERVISOR_ENV=GC_SUPERVISOR_ENV,MY_CUSTOM_VAR   # the list names itself so it survives restarts; comma or space separated
+export MY_CUSTOM_VAR=/path/to/thing
+gc supervisor install   # regenerates the service file with both persisted
+gc supervisor stop && gc supervisor start   # restart the supervisor so it inherits them
+```
+
+Sessions that are already running keep their old environment; restart them to
+receive a newly forwarded variable.
+
+`GC_SUPERVISOR_ENV` itself needs to be present in the supervisor daemon's own
+environment for this to survive a later restart — it is not automatically
+persisted into the generated service file the way `PATH`/`GC_HOME` are. If
+you rely on a managed service file, either list `GC_SUPERVISOR_ENV` among its
+own opted-in names (`GC_SUPERVISOR_ENV=GC_SUPERVISOR_ENV,MY_CUSTOM_VAR`) or
+set it directly in the unit's `Environment=` lines.
+
+For a value that's the same on every city, `[workspace.env]` in `city.toml` is
+usually simpler than an opt-in — it doesn't depend on the supervisor's own
+process environment at all:
+
+```toml
+[workspace.env]
+MY_CUSTOM_VAR = "/path/to/thing"
+# or, to read it from whatever the supervisor's own environment holds:
+MY_CUSTOM_VAR = "$MY_CUSTOM_VAR"
 ```
 
 ## Supervisor Log Written Twice (journald + supervisor.log)
@@ -550,19 +633,21 @@ same kind of hard error — delegation is a systemd contract.
 
 ## JSONL Archive Push Failures
 
-The core pack runs `jsonl-export` every 15 minutes to dump each bead
-database to a text-diffable JSONL snapshot inside a local git repository
-(the "JSONL archive"). The archive serves as a disaster-recovery backup:
-if the live Dolt server loses data, the last-known-good bead graph can be
-reconstructed from the archive's commit history.
+The core pack runs `jsonl-export` every 15 minutes to export each bead
+store (the city and every rig) with `bd export` into a text-diffable JSONL
+snapshot inside a local git repository (the "JSONL archive"): one issue per
+line, with its labels, dependencies and comments. The archive serves as a
+disaster-recovery backup: a snapshot from any commit restores with
+`gc bd import <file>`.
 
 `jsonl-export` (every 15 minutes) and `reaper` (every 30 minutes) ship in
 the core pack, so they are active in every city by default — including
 cities that previously ran them only via the opt-in gastown maintenance
-pack. On cities without a Dolt target (for example `[beads]
-provider = "file"`), both orders skip with a one-line `no managed dolt
-target for this city` message instead of running. To turn them off
-entirely, skip them by name in `city.toml`:
+pack. Both reach every bead store through `gc bd`, so they work the same on
+bd-owned proxied, gc-managed and mixed cities. On cities whose beads
+provider is not bd (for example `[beads] provider = "file"`), both orders
+skip with a one-line message and an `order.skipped` event instead of
+running. To turn them off entirely, skip them by name in `city.toml`:
 
 ```toml
 [orders]

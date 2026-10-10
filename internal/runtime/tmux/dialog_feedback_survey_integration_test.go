@@ -12,60 +12,80 @@ import (
 	"time"
 )
 
-// buildFeedbackSurveyAgent compiles a fake agent TUI that renders Claude
-// Code's post-turn feedback survey and holds it until it receives the
-// dismiss key ("0" then Enter) -- mirroring the bundle-verified onDigit
-// contract from ga-zg7fjq: an option only fires once inputValue is exactly
-// one digit, and Enter confirms immediately without waiting out the
-// debounce. Once dismissed it behaves like a normal composer: it echoes
-// stdin back and prints an "esc to interrupt" busy footer on Enter (the same
-// signal paneContainsBusyIndicator checks for), so a test can prove a nudge
-// message survived the survey instead of being swallowed by it.
 func buildFeedbackSurveyAgent(t *testing.T, dir, name string) string {
 	t.Helper()
 	bin := dir + "/" + name
 	src := dir + "/" + name + ".go"
 	prog := `package main
-import ("bufio";"fmt";"os")
+import ("fmt";"os";"os/exec";"strings";"sync";"time")
 func main(){
-	fmt.Println("⏺ Done — pushed the branch and replied on the PR.")
-	fmt.Println()
-	fmt.Println("● How is Claude doing this session? (optional)")
-	fmt.Println("  1: Bad    2: Fine   3: Good   0: Dismiss")
-	fmt.Println()
-	fmt.Println("╭──────────────────────────────────────────────────────────╮")
-	fmt.Println("│ ❯                                                        │")
-	fmt.Println("╰──────────────────────────────────────────────────────────╯")
-	fmt.Println("  ⏵⏵ bypass permissions on (shift+tab to cycle)")
-
-	dismissed := false
-	pendingZero := false
-	r := bufio.NewReader(os.Stdin)
+	stty := exec.Command("stty", "-icanon", "-echo", "-isig", "-ixon", "min", "1")
+	stty.Stdin = os.Stdin
+	if err := stty.Run(); err != nil {
+		panic(err)
+	}
+	stale := os.Args[1] == "stale"
+	keyLog, err := os.Create(os.Args[2])
+	if err != nil {
+		panic(err)
+	}
+	survey := "● How is Claude doing this session? (optional)\n  1: Bad    2: Fine   3: Good   0: Dismiss\n\n"
+	var mu sync.Mutex
+	visible := !stale
+	input := ""
+	var timer *time.Timer
+	composer := func() { fmt.Print("\r\x1b[2K│ ❯ " + input) }
+	if stale {
+		fmt.Print(survey + "SURVEY_DISMISSED" + strings.Repeat("\n", 40))
+	} else {
+		fmt.Print("⏺ Done — pushed the branch and replied on the PR.\n\n" + survey)
+	}
+	composer()
+	shown := time.Now()
+	accepts := func() bool { return visible && input == "0" && time.Since(shown) >= 600*time.Millisecond }
+	dismiss := func() {
+		visible = false
+		input = ""
+		fmt.Print("\x1b[2J\x1b[HSURVEY_DISMISSED\n")
+		composer()
+	}
+	buf := make([]byte, 1)
 	for {
-		b, err := r.ReadByte()
-		if err != nil {
+		if _, err := os.Stdin.Read(buf); err != nil {
 			return
 		}
-		if !dismissed {
-			switch b {
-			case '0':
-				pendingZero = true
-			case '\r', '\n':
-				if pendingZero {
-					dismissed = true
-					fmt.Println()
-					fmt.Println("SURVEY_DISMISSED")
-				}
-				pendingZero = false
+		b := buf[0]
+		mu.Lock()
+		_, _ = keyLog.Write(buf)
+		if timer != nil {
+			timer.Stop()
+			timer = nil
+		}
+		switch {
+		case b == 0x15:
+			input = ""
+		case b == '\r' || b == '\n':
+			if accepts() {
+				dismiss()
+				mu.Unlock()
+				continue
 			}
-			continue
+			fmt.Print("\nSUBMITTED:" + input + "\nesc to interrupt\n")
+			input = ""
+		case b >= 0x20:
+			input += string(b)
 		}
-		if b == '\r' || b == '\n' {
-			fmt.Println()
-			fmt.Println("esc to interrupt")
-			continue
+		composer()
+		if accepts() {
+			timer = time.AfterFunc(400*time.Millisecond, func() {
+				mu.Lock()
+				defer mu.Unlock()
+				if visible && input == "0" {
+					dismiss()
+				}
+			})
 		}
-		_, _ = os.Stdout.Write([]byte{b})
+		mu.Unlock()
 	}
 }
 `
@@ -80,6 +100,42 @@ func main(){
 	return bin
 }
 
+func startFeedbackSurveyAgent(t *testing.T, tm *Tmux, mode string) (session, keyLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	fake := buildFeedbackSurveyAgent(t, dir, "fakesurvey")
+	keyLog = dir + "/keys.log"
+	session = fmt.Sprintf("gt-test-feedback-survey-%d", time.Now().UnixNano()%100000)
+	_ = tm.KillSession(session)
+	if err := tm.NewSessionWithCommandAndEnv(session, dir, fake+" "+mode+" "+keyLog, map[string]string{
+		"GC_PROVIDER": "claude",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(session) })
+	ready := map[string]string{"survey": "0: Dismiss", "stale": "SURVEY_DISMISSED"}[mode]
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		pane, err := tm.CapturePaneAll(session)
+		if err == nil && strings.Contains(pane, ready) {
+			return session, keyLog
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake survey agent never drew %q (capture err %v):\n%s", ready, err, pane)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func readFeedbackSurveyKeyLog(t *testing.T, path string) string {
+	t.Helper()
+	keys, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return string(keys)
+}
+
 // TestNudgeSessionDismissesFeedbackSurveyBeforeDelivering proves ga-zg7fjq's
 // fix end-to-end on real tmux. A pane parked on Claude Code's feedback-survey
 // modal reads idle -- documenting why the bug was invisible to WaitForIdle --
@@ -91,18 +147,7 @@ func TestNudgeSessionDismissesFeedbackSurveyBeforeDelivering(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
-	dir := t.TempDir()
-	fake := buildFeedbackSurveyAgent(t, dir, "fakesurvey")
-	sessionName := fmt.Sprintf("gt-test-feedback-survey-%d", time.Now().UnixNano()%100000)
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
-		"GC_PROVIDER": "claude",
-	}); err != nil {
-		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+	sessionName, keyLog := startFeedbackSurveyAgent(t, tm, "survey")
 
 	// Precondition: the pane shows the feedback survey.
 	pre, err := tm.CapturePaneAll(sessionName)
@@ -128,17 +173,48 @@ func TestNudgeSessionDismissesFeedbackSurveyBeforeDelivering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	found := false
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "feedback-nudge-message" {
-			found = true
-			break
-		}
+	if !strings.Contains(out, "SURVEY_DISMISSED") {
+		t.Fatalf("survey was never dismissed; keys %q:\n%s", readFeedbackSurveyKeyLog(t, keyLog), out)
 	}
-	if !found {
-		t.Fatalf("expected the nudge message delivered as its own line after the survey was dismissed, got:\n%s", out)
+	if !strings.Contains(out, "SUBMITTED:feedback-nudge-message\n") {
+		t.Fatalf("expected the nudge message submitted on its own after the survey was dismissed, got:\n%s", out)
 	}
-	if !strings.Contains(out, "esc to interrupt") {
-		t.Fatalf("pane never reached submitted/busy state after the nudge:\n%s", out)
+	if keys := readFeedbackSurveyKeyLog(t, keyLog); strings.Count(keys, "0") != 1 {
+		t.Fatalf("agent received %q, want exactly one dismiss digit", keys)
+	}
+}
+
+func TestNudgeSessionIgnoresFeedbackSurveyOnlyInScrollback(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := testTmux()
+	sessionName, keyLog := startFeedbackSurveyAgent(t, tm, "stale")
+
+	history, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	visible, err := tm.CaptureVisiblePane(sessionName)
+	if err != nil {
+		t.Fatalf("CaptureVisiblePane: %v", err)
+	}
+	if !strings.Contains(history, "0: Dismiss") || strings.Contains(visible, "0: Dismiss") {
+		t.Fatalf("precondition: want the survey in scrollback only; history:\n%s\nvisible:\n%s", history, visible)
+	}
+
+	if err := tm.NudgeSession(sessionName, "feedback-nudge-message"); err != nil {
+		t.Fatalf("NudgeSession: %v", err)
+	}
+
+	if keys := readFeedbackSurveyKeyLog(t, keyLog); strings.Contains(keys, "0") {
+		t.Fatalf("agent received %q, want no dismiss digit for a survey that is only in scrollback", keys)
+	}
+	out, err := tm.CapturePaneAll(sessionName)
+	if err != nil {
+		t.Fatalf("CapturePaneAll: %v", err)
+	}
+	if !strings.Contains(out, "SUBMITTED:feedback-nudge-message\n") {
+		t.Fatalf("expected the nudge message submitted, got:\n%s", out)
 	}
 }

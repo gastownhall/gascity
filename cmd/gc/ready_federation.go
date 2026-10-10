@@ -20,10 +20,8 @@ package main
 //   - Legs, in order: the city store, then the rigs by name ascending, then the
 //     relocated graph store LAST.
 //   - Within a leg: whatever order that leg's own Ready reader emits. That is
-//     canonical (priority, created_at, id) for a caching-wrapped work store, but
-//     NOT for the graph leg — the canonical relocated binding is a
-//     beads.SQLiteStore whose ready SQL orders by (created_at, id) with no
-//     priority term. Per-leg order is deterministic, not canonical.
+//     canonical (priority, created_at, id) for a caching-wrapped work store and
+//     for the canonical relocated binding (beads.SQLiteStore) alike.
 //   - Dedupe: the FIRST leg to return an id wins. The graph leg runs last, so a
 //     bead co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where `gc storage migrate` preserves ids and

@@ -28,6 +28,36 @@ func OrderSuppressedPayloadJSON(p OrderSuppressedPayload) json.RawMessage {
 	return b
 }
 
+// OrderSkippedPayload is the typed payload for order.skipped events: which
+// order declared it, whether nothing ("skipped") or only some ("partial") of
+// its work ran, and the scopes or steps that did not run.
+type OrderSkippedPayload struct {
+	OrderName string              `json:"order_name"`
+	Outcome   string              `json:"outcome"`
+	Reason    string              `json:"reason"`
+	Scopes    []OrderSkippedScope `json:"scopes"`
+}
+
+// OrderSkippedScope is one scope or step an exec order reports as not run.
+type OrderSkippedScope struct {
+	Scope  string `json:"scope"`
+	Reason string `json:"reason"`
+}
+
+// IsEventPayload marks OrderSkippedPayload as an events.Payload variant.
+func (OrderSkippedPayload) IsEventPayload() {}
+
+// OrderSkippedPayloadJSON builds the JSON wire form for attachment to an
+// Event.Payload field.
+func OrderSkippedPayloadJSON(p OrderSkippedPayload) json.RawMessage {
+	if p.Scopes == nil {
+		p.Scopes = []OrderSkippedScope{}
+	}
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of strings and string slices cannot fail to marshal
+	return b
+}
+
 func init() {
 	RegisterPayload(OrderSuppressed, OrderSuppressedPayload{})
+	RegisterPayload(OrderSkipped, OrderSkippedPayload{})
 }

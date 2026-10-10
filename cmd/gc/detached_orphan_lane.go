@@ -67,6 +67,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -165,7 +166,7 @@ func newDetachedOrphanLane() *detachedOrphanLane {
 		pending:  map[string]struct{}{},
 		interval: detachedOrphanBackstopInterval,
 		retry:    detachedOrphanBackstopRetryInterval,
-		poll:     backstopPollInterval,
+		poll:     clock.Backstop(backstopPollInterval),
 		// Nothing has converged yet, so the first thing this lane does is scan.
 		forced:       true,
 		forcedReason: backstopReasonStartup,
@@ -487,6 +488,10 @@ func (cr *CityRuntime) sweepDetachedHandoffOrphansDelta() detachedOrphanReport {
 
 // runDetachedOrphanBackstop executes one authoritative pass and reports it.
 func (cr *CityRuntime) runDetachedOrphanBackstop(reason string) detachedOrphanReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume.
+		return detachedOrphanReport{lane: "backstop", reason: reason}
+	}
 	lane := cr.detachedOrphanLaneOf()
 	if !lane.beginBackstop() {
 		// Another pass is already reading the same state. On a large city the

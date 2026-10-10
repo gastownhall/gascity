@@ -26,8 +26,8 @@ jobs:
     if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0"
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

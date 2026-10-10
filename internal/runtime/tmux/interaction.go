@@ -179,10 +179,21 @@ func (t *Tmux) Pending(name string) (*runtime.PendingInteraction, error) {
 	if err != nil {
 		// Pane might not exist (session not started yet or already stopped).
 		// Check for known "can't find" errors vs unexpected failures.
-		if errors.Is(err, ErrSessionNotFound) {
+		// A server that answered with no sessions (ErrNoCurrentTarget) proves
+		// the pane is gone. Any other ErrNoServer ("no tmux server running",
+		// "error connecting to") is a failed observation, not proof of absence,
+		// as in ListRunning. Its message omits the tmux text, which matches
+		// runtime.IsSessionGone and would read "unknown" as "gone".
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget) {
 			return nil, fmt.Errorf("capturing pane: %w: %w", runtime.ErrSessionNotFound, err)
 		}
-		if strings.Contains(err.Error(), "can't find") || strings.Contains(err.Error(), "no server") {
+		if errors.Is(err, ErrNoServer) {
+			return nil, &quietCauseError{
+				msg:  fmt.Sprintf("capturing pane of %q: tmux server unreachable: %v", name, runtime.ErrRuntimeUnavailable),
+				errs: []error{runtime.ErrRuntimeUnavailable, err},
+			}
+		}
+		if strings.Contains(err.Error(), "can't find") {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("capturing pane: %w", err)
@@ -271,7 +282,7 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	t.cancelCopyModeIfParked(name)
 
 	// Send the keystroke once.
-	if _, err := t.run("send-keys", "-t", name, "-l", key); err != nil {
+	if _, err := t.run("send-keys", "-t", paneTarget(name), "-l", key); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
 		}

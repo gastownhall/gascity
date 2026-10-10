@@ -351,11 +351,21 @@ func TestConditionalWritesRequiredErrorIdentity(t *testing.T) {
 	}
 }
 
+// valueKindStore is a non-pointer Store, so the type-name fallback is pinned
+// for value types as well as pointers.
+type valueKindStore struct{ Store }
+
 func TestConditionalStoreKindFallsBackToTypeName(t *testing.T) {
 	t.Parallel()
-	s := &stampedNoCASStore{Store: NewMemStore()}
-	if got := conditionalStoreKind(s); !strings.Contains(got, "stampedNoCASStore") {
-		t.Fatalf("conditionalStoreKind = %q, want the %%T fallback naming the concrete type", got)
+	for _, s := range []Store{
+		&stampedNoCASStore{Store: NewMemStore()},
+		valueKindStore{Store: NewMemStore()},
+	} {
+		// Exactly the %T spelling: cmd/gc's conditionalWritesEventStoreKind
+		// matches it verbatim for the build-tagged *beads.DoltliteReadStore.
+		if got, want := conditionalStoreKind(s), fmt.Sprintf("%T", s); got != want {
+			t.Fatalf("conditionalStoreKind = %q, want the %%T spelling %q", got, want)
+		}
 	}
 }
 
@@ -533,5 +543,186 @@ func TestCachingStoreForwardsDegradeCallbackToBacking(t *testing.T) {
 	_, _, _ = ResolveConditionalWriter(mem)   // degrade via the backing: SAME latch
 	if fired != 1 {
 		t.Fatalf("callback fired %d times across cache+backing resolves, want 1 (one shared latch)", fired)
+	}
+}
+
+// modeSourcedWrapper is the one-shot CLI's emitting class store shape: an
+// interface-embedding wrapper outside the stamp's reach that performs the
+// conditional verbs itself (here by embedding a writer) and names its stamped
+// inner store as the mode source. Resolution must hand back the WRAPPER, so the
+// behavior it adds around each fenced write survives.
+type modeSourcedWrapper struct {
+	Store
+	ConditionalWriter
+	source Store
+}
+
+func (w *modeSourcedWrapper) ConditionalWritesModeSource() Store { return w.source }
+
+// modeSourcedNoCASWrapper declares a mode source but implements no conditional
+// verb of its own: there is nothing to hand back, whatever the source can do.
+type modeSourcedNoCASWrapper struct {
+	Store
+	source Store
+}
+
+func (w *modeSourcedNoCASWrapper) ConditionalWritesModeSource() Store { return w.source }
+
+func sourcedOver(source Store) *modeSourcedWrapper {
+	writer, _ := ConditionalWriterFor(source)
+	return &modeSourcedWrapper{Store: source, ConditionalWriter: writer, source: source}
+}
+
+// TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper pins the
+// split-city CLI seam: a wrapper that carries no stamp but declares its
+// stamped engine as the mode source resolves by the ENGINE's stamp, liveness,
+// capability and latch, and resolves to ITSELF as the writer. Without the
+// source branch every row here resolved unset→legacy.
+func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testing.T) {
+	t.Run("auto over a capable source resolves the wrapper", func(t *testing.T) {
+		engine := openSQLiteLayoutForTest(t, true, false)
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		w := sourcedOver(engine)
+		writer, diag, err := ResolveConditionalWriter(w)
+		if err != nil || diag != nil {
+			t.Fatalf("ResolveConditionalWriter = (%T, %v, %v), want the wrapper", writer, diag, err)
+		}
+		if got, ok := writer.(*modeSourcedWrapper); !ok || got != w {
+			t.Fatalf("writer = %T, want the WRAPPER (the stamped engine as writer bypasses what the wrapper adds)", writer)
+		}
+	})
+
+	t.Run("a source behind a resolve target is followed", func(t *testing.T) {
+		mem := NewMemStore()
+		mem.stampConditionalWritesMode(gate.Require, false)
+		w := sourcedOver(mem)
+		w.source = &resolveTargetWrapper{Store: mem, target: mem}
+		if writer, _, err := ResolveConditionalWriter(w); err != nil || writer != ConditionalWriter(w) {
+			t.Fatalf("ResolveConditionalWriter = (%T, %v), want the wrapper", writer, err)
+		}
+	})
+
+	t.Run("a wrapper reached through a resolve target still resolves itself", func(t *testing.T) {
+		mem := NewMemStore()
+		mem.stampConditionalWritesMode(gate.Auto, false)
+		w := sourcedOver(mem)
+		if writer, _, err := ResolveConditionalWriter(GraphStore{Store: w}); err != nil || writer != ConditionalWriter(w) {
+			t.Fatalf("ResolveConditionalWriter(GraphStore{wrapper}) = (%T, %v), want the wrapper", writer, err)
+		}
+	})
+
+	t.Run("require over an incapable source refuses with the source's reason", func(t *testing.T) {
+		engine := openSQLiteLayoutForTest(t, false, false)
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Require, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		writer, diag, err := ResolveConditionalWriter(sourcedOver(engine))
+		if writer != nil || diag == nil || !IsConditionalWritesRequired(err) {
+			t.Fatalf("ResolveConditionalWriter = (%T, %v, %v), want the typed require refusal", writer, diag, err)
+		}
+		if diag.Store != "SQLiteStore" || !strings.Contains(err.Error(), "revision column") {
+			t.Fatalf("refusal = (%q, %v), want the source's kind and reason", diag.Store, err)
+		}
+	})
+
+	t.Run("require over a source with no conditional verbs refuses", func(t *testing.T) {
+		src := &stampedNoCASStore{Store: NewMemStore()}
+		src.stampConditionalWritesMode(gate.Require, false)
+		w := &modeSourcedWrapper{Store: src, ConditionalWriter: NewMemStore(), source: src}
+		if writer, _, err := ResolveConditionalWriter(w); writer != nil || !IsConditionalWritesRequired(err) {
+			t.Fatalf("ResolveConditionalWriter = (%T, %v), want the typed require refusal: the wrapper's verbs forward to a source that has none", writer, err)
+		}
+	})
+
+	t.Run("require on a wrapper with no conditional verbs refuses", func(t *testing.T) {
+		mem := NewMemStore()
+		mem.stampConditionalWritesMode(gate.Require, false)
+		w := &modeSourcedNoCASWrapper{Store: mem, source: mem}
+		if writer, _, err := ResolveConditionalWriter(w); writer != nil || !IsConditionalWritesRequired(err) {
+			t.Fatalf("ResolveConditionalWriter = (%T, %v), want the typed require refusal", writer, err)
+		}
+	})
+
+	t.Run("off, unstamped, nil and self sources take the legacy write", func(t *testing.T) {
+		off := NewMemStore()
+		off.stampConditionalWritesMode(gate.Off, false)
+		self := sourcedOver(NewMemStore())
+		self.source = self
+		for name, w := range map[string]Store{
+			"off":       sourcedOver(off),
+			"unstamped": sourcedOver(NewMemStore()),
+			"nil":       &modeSourcedWrapper{Store: off, ConditionalWriter: off},
+			"self":      self,
+		} {
+			if writer, diag, err := ResolveConditionalWriter(w); writer != nil || diag != nil || err != nil {
+				t.Errorf("%s: ResolveConditionalWriter = (%T, %v, %v), want legacy", name, writer, diag, err)
+			}
+		}
+	})
+
+	t.Run("a closed source reports closed", func(t *testing.T) {
+		for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
+			engine := openSQLiteLayoutForTest(t, true, false)
+			degrades := 0
+			if err := StampOpenedStore(engine, "SQLiteStore", mode, func(ConditionalWritesDegrade) { degrades++ }, nil); err != nil {
+				t.Fatalf("StampOpenedStore: %v", err)
+			}
+			w := sourcedOver(engine)
+			if err := engine.CloseStore(); err != nil {
+				t.Fatalf("CloseStore: %v", err)
+			}
+			writer, diag, err := ResolveConditionalWriter(w)
+			if writer != nil || diag != nil || !errors.Is(err, ErrStoreClosed) || IsConditionalWritesRequired(err) {
+				t.Errorf("%s: ResolveConditionalWriter = (%T, %v, %v), want (nil, nil, ErrStoreClosed)", mode, writer, diag, err)
+			}
+			if degrades != 0 {
+				t.Errorf("%s: a closed source fired %d degrade event(s), want none", mode, degrades)
+			}
+		}
+	})
+
+	t.Run("the degrade fires once, on the source's latch", func(t *testing.T) {
+		var fired []ConditionalWritesDegrade
+		mem := NewMemStore()
+		mem.DisableConditionalWrites = true
+		mem.stampConditionalWritesMode(gate.Auto, false)
+		mem.setConditionalWritesDegradeCallback(func(d ConditionalWritesDegrade) { fired = append(fired, d) })
+		w := sourcedOver(mem)
+		for range 3 {
+			if writer, diag, err := ResolveConditionalWriter(w); writer != nil || diag == nil || err != nil {
+				t.Fatalf("ResolveConditionalWriter = (%T, %v, %v), want a loud degrade on every resolve", writer, diag, err)
+			}
+		}
+		_, _, _ = ResolveConditionalWriter(mem) // the source itself: SAME latch
+		if len(fired) != 1 {
+			t.Fatalf("degrade callback fired %d times, want exactly 1 (one latch, the source's)", len(fired))
+		}
+		if fired[0].StoreKind != "MemStore" || fired[0].Mode != "auto" {
+			t.Fatalf("degrade notification = %+v, want the source's kind and the auto mode", fired[0])
+		}
+	})
+}
+
+// uncomparableValueStore is a store passed BY VALUE whose dynamic type cannot
+// be compared with ==: the slice field makes any interface comparison against
+// it panic at run time.
+type uncomparableValueStore struct {
+	*MemStore
+	calls []string
+}
+
+// TestResolveConditionalWriterNeverComparesAnUndeclaredStore pins that the
+// mode-source branch is gated on the declaration, not on an interface
+// comparison: a store that declares no source must resolve on every
+// auto/require call without comparing itself to anything.
+func TestResolveConditionalWriterNeverComparesAnUndeclaredStore(t *testing.T) {
+	mem := NewMemStore()
+	mem.stampConditionalWritesMode(gate.Auto, false)
+	store := uncomparableValueStore{MemStore: mem, calls: []string{"seed"}}
+	writer, diag, err := ResolveConditionalWriter(store)
+	if err != nil || diag != nil || writer == nil {
+		t.Fatalf("ResolveConditionalWriter(value store) = (%T, %v, %v), want its writer", writer, diag, err)
 	}
 }

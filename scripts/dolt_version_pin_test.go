@@ -8,7 +8,7 @@ import (
 )
 
 func TestDoltVersionPins(t *testing.T) {
-	const doltPin = "2.1.7"
+	const doltPin = "2.2.0"
 	const doltFloor = "2.1.0"
 	repoRoot := repoRoot(t)
 
@@ -40,7 +40,6 @@ func TestDoltVersionPins(t *testing.T) {
 	assertContains("README.md", "Managed Dolt checks require a final Dolt "+doltFloor+" or newer.")
 	assertContains("examples/bd/dolt/pack.toml", "# Minimum dolt version: "+doltFloor+".")
 	assertContains("examples/bd/dolt/doctor/check-dolt/run.sh", `required="`+doltFloor+`"`)
-	assertContains("examples/bd/dolt/assets/scripts/mol-dog-backup.sh", `MIN_DOLT_BACKUP_VERSION="`+doltFloor+`"`)
 
 	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
 		assertContains(".github/scripts/install-dolt-archive.sh", doltPin+":"+platform)

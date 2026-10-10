@@ -139,13 +139,53 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
-	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
-		sp, _, _ := newSession(t)
-		if err := sp.Stop("never-started-conformance-session"); err != nil {
-			t.Errorf("Stop on never-started session: %v", err)
+	// Optional capability: a provider that reports liveness with an error must
+	// answer a session it stopped as confirmed absent, never as "unknown".
+	t.Run("ObserveLivenessWithError_StoppedIsAbsent", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		observer, ok := sp.(runtime.LivenessObserverWithError)
+		if !ok {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		obs, err := observer.ObserveLivenessWithError(name, nil)
+		if err != nil {
+			t.Fatalf("ObserveLivenessWithError after Stop: %v, want confirmed absence (nil error)", err)
+		}
+		if obs.Running || obs.Alive {
+			t.Errorf("ObserveLivenessWithError after Stop = %+v, want absent", obs)
 		}
 	})
 
+	// Stop answers a missing session with nil only while the provider can see
+	// its inventory. The running sentinel holds the provider's backend up, so
+	// the never-started name is a missing session on a responsive provider.
+	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
+		sp, cfg, sentinel := newSession(t)
+		startOrSkip(t, opts, sp, sentinel, cfg, "Start sentinel")
+		if err := sp.Stop("never-started-conformance-session"); err != nil {
+			t.Errorf("Stop on never-started session beside running %q: %v", sentinel, err)
+		}
+	})
+
+	// A provider whose backend is not running at all may report that from
+	// Stop rather than certify absence — tmux does when it has no server — so
+	// the never-started case on a fresh provider is the teardown contract:
+	// runtime.StopForCleanup must find nothing left to fail on.
+	t.Run("StopForCleanup_NeverStarted", func(t *testing.T) {
+		sp, _, _ := newSession(t)
+		if err := runtime.StopForCleanup(sp, "never-started-conformance-session"); err != nil {
+			t.Errorf("StopForCleanup on never-started session: %v", err)
+		}
+	})
+
+	// Both Stops are held to the strict contract. Stopping a provider's last
+	// session must leave its backend responsive — tmux keeps an empty server up
+	// (exit-empty off) — so the second Stop meets a missing session on a
+	// responsive provider.
 	t.Run("Stop_Idempotent_AlreadyStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
@@ -577,6 +617,24 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 			t.Errorf("ClearScrollback: %v", err)
 		}
 	})
+
+	// Optional capability: an error-bearing attachment probe separates "no
+	// client" from "could not tell", so on a healthy runtime it must not error.
+	if observer, ok := sp.(runtime.AttachmentObserverWithError); ok {
+		t.Run("IsAttachedWithError_UnattachedSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError(name)
+			if err != nil || attached {
+				t.Errorf("IsAttachedWithError = (%v, %v), want (false, nil)", attached, err)
+			}
+		})
+
+		t.Run("IsAttachedWithError_MissingSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError("nonexistent-conformance-session")
+			if attached || (err != nil && !errors.Is(err, runtime.ErrSessionNotFound)) {
+				t.Errorf("IsAttachedWithError on missing session = (%v, %v), want (false, nil) or ErrSessionNotFound", attached, err)
+			}
+		})
+	}
 
 	// --- Group 4b: CopyTo (best-effort) ---
 

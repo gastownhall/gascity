@@ -10,7 +10,6 @@ go_library(
         "assets/scripts/_bd_trace.sh",
         "assets/scripts/cascade-nudge-on-blocker-close.sh",
         "assets/scripts/cross-rig-deps.sh",
-        "assets/scripts/dolt-target.sh",
         "assets/scripts/escalate.sh",
         "assets/scripts/gate-sweep.sh",
         "assets/scripts/jsonl-export.sh",
@@ -69,6 +68,8 @@ go_library(
         "skills/gc-rigs/SKILL.md",
         "skills/gc-work/SKILL.md",
         "template-fragments/claim-protocol.template.md",
+        "assets/scripts/order_outcome.sh",
+        "assets/scripts/scope_bd.sh",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],
@@ -77,6 +78,7 @@ go_library(
 go_test(
     name = "core_test",
     srcs = [
+        "cascade_nudge_script_test.go",
         "escalate_script_test.go",
         "pack_assets_test.go",
         "pack_formulas_test.go",
@@ -119,6 +121,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

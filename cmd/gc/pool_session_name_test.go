@@ -2165,21 +2165,23 @@ func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *te
 
 // conditionalReleaseProbeStore wraps a MemStore for the orphan-release TOCTOU
 // tests. It records the store writes the release path performs, can report the
-// conditional release unsupported (forcing the recheck fallback), and can
-// inject a concurrent re-claim at controlled points: right after the
-// pre-release live-work gate (a claim landing between the staleness check and
-// the release write) or right after the release write (a claim that survives
-// the race and should be observable in the verify-after read).
+// conditional release unsupported (forcing the fenced fallback), can withhold
+// its conditional writer (a store that cannot fence, such as BdStore without
+// --if-revision), and can inject a concurrent re-claim at controlled points:
+// right after the pre-release live-work gate (a claim landing between the
+// staleness check and the release write) or right before the release write
+// lands (a claim between the fallback's re-read and its write).
 type conditionalReleaseProbeStore struct {
 	beads.Store
 	t   *testing.T
 	mem *beads.MemStore
 
 	releaseUnsupported bool
+	casUnsupported     bool
 	claimID            string
 	claimAssignee      string
 	claimAfterLiveGate bool
-	claimAfterWrite    bool
+	claimBeforeRelease bool
 
 	releaseCalls      []releaseProbeCall
 	assignmentUpdates []beads.UpdateOpts
@@ -2256,13 +2258,42 @@ func (s *conditionalReleaseProbeStore) List(query beads.ListQuery) ([]beads.Bead
 func (s *conditionalReleaseProbeStore) Update(id string, opts beads.UpdateOpts) error {
 	if opts.Assignee != nil || opts.Status != nil {
 		s.assignmentUpdates = append(s.assignmentUpdates, opts)
+		s.reclaimBeforeRelease(opts)
 	}
-	err := s.Store.Update(id, opts)
-	if err == nil && s.claimAfterWrite && opts.Assignee != nil && *opts.Assignee == "" {
-		s.claimAfterWrite = false
+	return s.Store.Update(id, opts)
+}
+
+// ConditionalWriterHandle exposes the MemStore's conditional writer through a
+// recorder, unless casUnsupported withholds it.
+func (s *conditionalReleaseProbeStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	if s.casUnsupported {
+		return nil, false
+	}
+	return releaseProbeWriter{ConditionalWriter: s.mem, probe: s}, true
+}
+
+// releaseProbeWriter records fenced assignment writes exactly as the probe's
+// Update records plain ones.
+type releaseProbeWriter struct {
+	beads.ConditionalWriter
+	probe *conditionalReleaseProbeStore
+}
+
+func (w releaseProbeWriter) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if opts.Assignee != nil || opts.Status != nil {
+		w.probe.assignmentUpdates = append(w.probe.assignmentUpdates, opts)
+		w.probe.reclaimBeforeRelease(opts)
+	}
+	return w.ConditionalWriter.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// reclaimBeforeRelease injects the concurrent re-claim once, right before a
+// release write (assignee cleared) reaches the store.
+func (s *conditionalReleaseProbeStore) reclaimBeforeRelease(opts beads.UpdateOpts) {
+	if s.claimBeforeRelease && opts.Assignee != nil && *opts.Assignee == "" {
+		s.claimBeforeRelease = false
 		s.reclaim()
 	}
-	return err
 }
 
 func (s *conditionalReleaseProbeStore) reclaim() {
@@ -2414,29 +2445,135 @@ func TestReleaseOrphanedPoolAssignments_UnsupportedStoreRechecksBeforeWrite(t *t
 	}
 }
 
-func TestReleaseOrphanedPoolAssignments_UnsupportedStoreLogsRacedClaimAfterRelease(t *testing.T) {
+// TestReleaseOrphanedPoolAssignments_FallbackFencesAClaimAfterTheReRead is the
+// stale-read regression for the release fallback. The re-read passes, and a
+// fresh worker claims the bead before the release write lands. Before the fix
+// that write was unconditional and un-assigned the new claim; the verify-after
+// read could not even see it, because the clobbered claim read back empty.
+// The write is now fenced on the re-read's revision, so the claim survives.
+func TestReleaseOrphanedPoolAssignments_FallbackFencesAClaimAfterTheReRead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "conditional release unsupported"},
+		{name: "continuation group", extra: map[string]string{"gc.root_bead_id": "root-1", "gc.continuation_group": "grp-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, work := newConditionalReleaseProbeStoreWithMetadata(t, tc.extra)
+			store.releaseUnsupported = true
+			store.claimBeforeRelease = true
+
+			released := releaseProbeAssignments(store, work)
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none when a claim lands after the re-read", released)
+			}
+			got, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatalf("Get work bead: %v", err)
+			}
+			if got.Status != "in_progress" || got.Assignee != "worker-live" {
+				t.Fatalf("work = status %q assignee %q, want the concurrent claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+			}
+		})
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_FallbackRefusesWithoutAConditionalWrite
+// pins the store-without-CAS contract: a snapshot ReleaseIfCurrent cannot take
+// is never released by an unconditional write. The release is refused and
+// logged, and the bead stays assigned for an operator or a capable store.
+func TestReleaseOrphanedPoolAssignments_FallbackRefusesWithoutAConditionalWrite(t *testing.T) {
 	store, work := newConditionalReleaseProbeStore(t)
 	store.releaseUnsupported = true
-	store.claimAfterWrite = true
+	store.casUnsupported = true
 
 	var buf bytes.Buffer
 	restore := captureLogOutput(&buf)
 	defer restore()
 
 	released := releaseProbeAssignments(store, work)
-	if len(released) != 1 || released[0].ID != work.ID {
-		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none on a store that cannot fence the release", released)
 	}
-	if !strings.Contains(buf.String(), "raced the orphan release") {
-		t.Fatalf("log output = %q, want a loud raced-claim detection after the release write", buf.String())
+	if len(store.assignmentUpdates) != 0 {
+		t.Fatalf("assignment-shaped writes = %+v, want none", store.assignmentUpdates)
 	}
-
+	if !strings.Contains(buf.String(), "cannot release it conditionally") {
+		t.Fatalf("log output = %q, want the refusal logged", buf.String())
+	}
 	got, err := store.Get(work.ID)
 	if err != nil {
 		t.Fatalf("Get work bead: %v", err)
 	}
-	if got.Status != "in_progress" || got.Assignee != "worker-live" {
-		t.Fatalf("work = status %q assignee %q, want the surviving claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" {
+		t.Fatalf("work = status %q assignee %q, want it left as it was", got.Status, got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_FallbackRefusesAWriterThatCannotFence is
+// the BdStore-shaped "unsupported" path: the store hands out a conditional
+// writer, but the writer refuses at call time (conditional writes disabled,
+// as on a bd without --if-revision), and there is no guarded update either.
+// The release must stop at the refused fenced write, never follow it with a
+// blind one.
+func TestReleaseOrphanedPoolAssignments_FallbackRefusesAWriterThatCannotFence(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	store.mem.DisableConditionalWrites = true
+	if _, ok := beads.ConditionalWriterForTarget(store); !ok {
+		t.Fatal("probe store hands out no conditional writer; the case needs one that refuses at call time")
+	}
+
+	var buf bytes.Buffer
+	restore := captureLogOutput(&buf)
+	defer restore()
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none when the writer cannot fence", released)
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped writes = %+v, want only the refused fenced attempt, no blind follow-up", store.assignmentUpdates)
+	}
+	if !strings.Contains(buf.String(), "cannot release it conditionally") {
+		t.Fatalf("log output = %q, want the refusal logged", buf.String())
+	}
+	got, err := store.mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" || got.Metadata["gc.session_affinity"] != "require" {
+		t.Fatalf("work = status %q assignee %q affinity %q, want it left as it was", got.Status, got.Assignee, got.Metadata["gc.session_affinity"])
+	}
+}
+
+// TestReleaseOrphanedPoolAssignment_FencedFallbackFollowsAResolveTarget
+// releases through a wrapper that declares its conditional-writes resolution
+// target instead of promoting the capability, as the cmd/gc policy store and
+// the typed class wrappers do. The fenced fallback must find the writer
+// behind it; looking only at the wrapper itself would refuse every release
+// made through one.
+func TestReleaseOrphanedPoolAssignment_FencedFallbackFollowsAResolveTarget(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	wrapper := beads.WorkStore{Store: store}
+	if _, ok := beads.ConditionalWriterFor(wrapper); ok {
+		t.Fatal("the wrapper promotes the writer itself; the case needs one that only declares a target")
+	}
+
+	if !releaseOrphanedPoolAssignment(wrapper, work, false) {
+		t.Fatal("release through the wrapper = false, want the fenced release to land on its target")
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped writes = %+v, want exactly the fenced release", store.assignmentUpdates)
+	}
+	got, err := store.mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" || got.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("work = status %q assignee %q affinity %q, want released with affinity cleared", got.Status, got.Assignee, got.Metadata["gc.session_affinity"])
 	}
 }
 
@@ -2453,10 +2590,10 @@ func TestReleaseOrphanedPoolAssignments_UnsupportedStoreReleasesNormalOrphan(t *
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
 	if len(store.assignmentUpdates) != 1 {
-		t.Fatalf("assignment-shaped Update calls = %+v, want exactly the release write", store.assignmentUpdates)
+		t.Fatalf("assignment-shaped writes = %+v, want exactly the release write", store.assignmentUpdates)
 	}
-	if strings.Contains(buf.String(), "raced the orphan release") {
-		t.Fatalf("log output = %q, want no raced-claim detection for an uncontended release", buf.String())
+	if strings.Contains(buf.String(), "skipping release") {
+		t.Fatalf("log output = %q, want no skip for an uncontended release", buf.String())
 	}
 
 	got, err := store.Get(work.ID)
