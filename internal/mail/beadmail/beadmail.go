@@ -429,11 +429,24 @@ func (p *Provider) Archive(id string) error {
 	if b.Status == "closed" {
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Close(id); err != nil {
+	if err := p.closeArchived(id); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
+	}
+	return nil
+}
+
+// closeArchived stamps ArchiveCloseReason and closes the message bead.
+// BdStore.Close forwards the stamped reason as bd close --reason. Errors keep
+// their cause, so callers still see beads.ErrNotFound through errors.Is.
+func (p *Provider) closeArchived(id string) error {
+	if err := p.store.SetMetadata(id, "close_reason", ArchiveCloseReason); err != nil {
+		return fmt.Errorf("stamping close_reason on %s: %w", id, err)
+	}
+	if err := p.store.Close(id); err != nil {
+		return fmt.Errorf("closing %s: %w", id, err)
 	}
 	return nil
 }
@@ -496,7 +509,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Close(id); err != nil {
+		if err := p.closeArchived(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue
@@ -943,6 +956,12 @@ func readMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads
 // closeReason, keeping the writer and the direct-ID reader in lockstep. The
 // 20-character floor satisfies validation.on-close=error.
 const RetentionSweepCloseReason = "mail gc-swept: read mail bead past gc retention window"
+
+// ArchiveCloseReason is the close reason an archive records. Cities running
+// bd's validation.on-close=error refuse a close with no reason, so an archive
+// through BdStore failed without one. It differs from RetentionSweepCloseReason,
+// so an archived message stays user-removed to every read path.
+const ArchiveCloseReason = "mail archived: message closed by mail archive"
 
 // SweepReadMessagesBefore closes read message beads created before cutoff,
 // oldest first, stamping closeReason as "close_reason" metadata on each bead

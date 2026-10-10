@@ -15,6 +15,7 @@ go_library(
 go_test(
     name = "beadmail_test",
     srcs = [
+        "archive_close_reason_test.go",
         "beadmail_bench_test.go",
         "beadmail_retention_test.go",
         "beadmail_test.go",
