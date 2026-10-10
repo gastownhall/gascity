@@ -134,6 +134,98 @@ func TestEvaluatePullRequestsCleanWithPendingChecksIsNotRepairActionable(t *test
 	}
 }
 
+func TestEvaluatePullRequestsPrefersConcreteCheckEvidence(t *testing.T) {
+	monitor := config.GitHubPRMonitor{
+		Name:         "main",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+	}
+
+	tests := []struct {
+		name       string
+		mergeState string
+		checks     []Check
+		wantState  string
+		wantKind   string
+		wantAction bool
+	}{
+		{
+			name:       "blocked queued is pending",
+			mergeState: "BLOCKED",
+			checks:     []Check{{Name: "ci", Status: "QUEUED"}},
+			wantState:  StatePending,
+		},
+		{
+			name:       "unstable in progress is pending",
+			mergeState: "UNSTABLE",
+			checks:     []Check{{Name: "ci", Status: "IN_PROGRESS"}},
+			wantState:  StatePending,
+		},
+		{
+			name:       "failed check takes precedence over pending check",
+			mergeState: "UNSTABLE",
+			checks: []Check{
+				{Name: "failed", Status: "COMPLETED", Conclusion: "FAILURE"},
+				{Name: "pending", Status: "QUEUED"},
+			},
+			wantState:  StateFailed,
+			wantKind:   FailureKindChecksFailed,
+			wantAction: true,
+		},
+		{
+			name:       "dirty takes precedence over pending check",
+			mergeState: "DIRTY",
+			checks:     []Check{{Name: "ci", Status: "QUEUED"}},
+			wantState:  StateConflicted,
+			wantKind:   FailureKindMergeConflict,
+			wantAction: true,
+		},
+		{
+			name:       "behind takes precedence over pending check",
+			mergeState: "BEHIND",
+			checks:     []Check{{Name: "ci", Status: "QUEUED"}},
+			wantState:  StateBehind,
+			wantKind:   FailureKindBehindBase,
+			wantAction: true,
+		},
+		{
+			name:       "blocked without checks remains actionable",
+			mergeState: "BLOCKED",
+			wantState:  StateBlocked,
+			wantKind:   FailureKindBlocked,
+			wantAction: true,
+		},
+		{
+			name:       "unstable without checks remains actionable",
+			mergeState: "UNSTABLE",
+			wantState:  StateFailed,
+			wantKind:   FailureKindChecksFailed,
+			wantAction: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			results := EvaluatePullRequests(monitor, []PullRequest{{
+				Number:           1,
+				BaseRefName:      "main",
+				MergeStateStatus: tc.mergeState,
+				Checks:           tc.checks,
+			}})
+			if len(results) != 1 {
+				t.Fatalf("len(results) = %d, want 1", len(results))
+			}
+			got := results[0]
+			if got.State != tc.wantState || got.FailureKind != tc.wantKind || got.Actionable != tc.wantAction {
+				t.Fatalf("result = %#v, want state=%q failure_kind=%q actionable=%t", got, tc.wantState, tc.wantKind, tc.wantAction)
+			}
+		})
+	}
+}
+
 func TestGraphQLDecodePullRequests(t *testing.T) {
 	body := strings.NewReader(`{
 		"data": {

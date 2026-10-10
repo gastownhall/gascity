@@ -197,21 +197,23 @@ func classifyPullRequest(pr PullRequest, failed, pending []string) (state, failu
 		return StateFailed, FailureKindChecksFailed, true
 	}
 
-	switch strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus)) {
+	mergeState := strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus))
+	switch mergeState {
 	case "DIRTY":
 		return StateConflicted, FailureKindMergeConflict, true
 	case "BEHIND":
 		return StateBehind, FailureKindBehindBase, true
-	case "UNSTABLE":
-		return StateFailed, FailureKindChecksFailed, true
-	case "BLOCKED":
-		return StateBlocked, FailureKindBlocked, true
 	}
 
 	if len(pending) > 0 {
 		return StatePending, "", false
 	}
-	switch strings.ToUpper(strings.TrimSpace(pr.MergeStateStatus)) {
+
+	switch mergeState {
+	case "UNSTABLE":
+		return StateFailed, FailureKindChecksFailed, true
+	case "BLOCKED":
+		return StateBlocked, FailureKindBlocked, true
 	case "", "UNKNOWN":
 		return StateUnknown, "", false
 	default:
