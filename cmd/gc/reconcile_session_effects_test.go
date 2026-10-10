@@ -350,7 +350,7 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		if !pausedAtCancel.Load() || cr.v2.planner.startsPaused() {
 			t.Fatalf("starts paused at the cancel = %v, after the abort = %v; want paused, then resumed", pausedAtCancel.Load(), cr.v2.planner.startsPaused())
 		}
-		if _, err := (&CityRuntime{}).beforeProviderSwap(cfg); err != nil {
+		if _, err := (&CityRuntime{}).beforeProviderSwap(context.Background(), cfg); err != nil {
 			t.Fatalf("a legacy controller waits on nothing: %v", err)
 		}
 	})
@@ -369,7 +369,7 @@ func TestBeforeProviderSwapWaitsTheDefaultStartupForZero(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "0s"}}
-		resume, err := cr.beforeProviderSwap(cfg)
+		resume, err := cr.beforeProviderSwap(context.Background(), cfg)
 		resume()
 		if err != nil {
 			t.Fatalf("beforeProviderSwap = %v, want the minute-long start waited for", err)

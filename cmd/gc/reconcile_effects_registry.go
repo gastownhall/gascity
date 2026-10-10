@@ -1,8 +1,7 @@
 package main
 
 import (
-	"context"
-
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -18,30 +17,53 @@ import (
 // handles. The pass never mutates them after submit.
 type effectPass struct {
 	Writers map[string]fencedWriter // by census leg
-	// Runtime is the composite provider. Fresh reads and C8.8 go through it,
-	// never a routed leaf alone (mc-zndi7.24). An effect calls no provider
-	// verb on it directly: destructive verbs go through the fence
-	// (fenceDestructive, stopFenced) and SessionObjectKiller, and only the
-	// start effect calls Start (the effect lint).
+	// Runtime is the composite provider. The transaction's runtime read
+	// (readRuntime) reads presence and identity on its routed leaf and
+	// confirms absence through its fall-through hops. An effect calls no
+	// provider verb on it: destructive verbs go through the fence and
+	// SessionObjectKiller, and only a Call starts a runtime (the effect lint).
 	Runtime runtime.Provider
 	World   *World
 	Alloc   *allocDecision
-	// create is what the pass hands its creates, raw stores included: a
-	// create's guarded row write is v5 R1's exception 1 (§13), and only
-	// createEffect reads it. creates runs them. The planner sets both, the
-	// first on its first admitted create (planner.submit).
+	Clock   plannerClock // stamps each section's since: the planner's
+	// held are the capabilities the pass holds beyond its writers; an
+	// effect reaches each only through txCaps, as its spec grants (capsFor).
+	held heldCaps
+	// reads are the read-only city and rig stores of the live work read.
+	reads effectReads
+	seam  txSeamFunc // the planner's: runs at the effect's seams (tests, staging)
+}
+
+// effectReads are read-only city and rig stores.
+type effectReads struct {
+	city beads.Store
+	rigs map[string]beads.Store
+}
+
+// heldCaps are a pass's capabilities. create is what the pass hands its
+// creates, raw stores included: a create's guarded row write is v5 R1's
+// exception 1 (§13). creates runs them. The planner sets both, the first on
+// its first admitted create (planner.submit).
+type heldCaps struct {
 	create  *createPass
 	creates *createEffects
 }
 
 // newEffectPass is w's and a's effectPass.
 func newEffectPass(w *World, a *allocDecision) *effectPass {
-	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a}
+	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a, Clock: realPlannerClock{}}
 	if w.Env != nil {
 		p.Runtime = w.Env.SP
 	}
 	for leg, store := range w.LegStores {
 		p.Writers[leg] = fencedWriter{store: store}
+	}
+	if w.SessionsStore != nil {
+		p.reads.city = readOnlyStore{blindWriteRefusingStore{inner: w.SessionsStore}}
+	}
+	p.reads.rigs = make(map[string]beads.Store, len(w.RigStores))
+	for rig, store := range w.RigStores {
+		p.reads.rigs[rig] = readOnlyStore{blindWriteRefusingStore{inner: store}}
 	}
 	stripped := *w
 	stripped.LegStores, stripped.Demand.AssignedStores = nil, nil
@@ -55,13 +77,23 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	return p
 }
 
-// effectBuilder builds an admitted intent's Run for one pass.
-type effectBuilder func(p *effectPass, it intent) func(context.Context) settlement
-
-var effectRegistry = map[string]effectBuilder{
-	intentRowHeal:     rowWriteEffect,   // A6
-	intentCreate:      createEffect,     // C1, C2
-	intentDrainCancel: drainClearEffect, // A19 (C6a)
-	intentDrainVoid:   drainClearEffect, // A19 (C6a)
-	intentRekey:       rekeyEffect,      // A3
+var effectSpecs = map[string]effectSpec{
+	intentStart:           {class: capStarts, tokens: 1},
+	intentAdopt:           {class: capProbing},
+	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                    // C1, C2
+	intentRekey:           {class: capProbing, needs: needs{Runtime: true}, sections: rekeySections}, // A3
+	intentZombie:          {class: capProbing, bootGated: true},
+	intentDrainBegin:      {class: capRowWrites, bootGated: true},
+	intentDrainBeginFresh: {class: capProbing, bootGated: true},
+	intentSignal:          {class: capRowWrites, bootGated: true},
+	intentSignalFresh:     {class: capProbing, bootGated: true},
+	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
+	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
+	intentStop:            {class: capProbing, bootGated: true},
+	intentClose:           {class: capProbing, bootGated: true},
+	intentRollback:        {class: capProbing, bootGated: true},
+	intentRowMetadata:     {class: capRowWrites},
+	intentBaseline:        {class: capRowWrites},
+	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                        // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections}, // A6
 }

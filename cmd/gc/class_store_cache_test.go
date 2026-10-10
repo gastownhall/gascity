@@ -111,7 +111,6 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// Engine-only (see above). CloseStore is also lifecycle: the storage
 	// routes stop the cache and close the engine once (storageRoutes.close).
 	"CloseStore":           nil,
-	"Claim":                nil,
 	"CreateWithForeignID":  nil,
 	"DepAddWithMetadata":   nil,
 	"HasResidentOutside":   nil,
@@ -120,6 +119,14 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"AdvanceSequenceFloor": nil,
 	"StoreHealthPath":      nil,
 	"ReadOnly":             nil,
+	// Engine-only (see above): the batch dep-edge read exists for
+	// `gc storage recover-stranded`, which opens the engine itself. A live
+	// cache answers per-anchor down-dep reads from memory, and the scope-skip
+	// dispatch path falls back to them when the assertion misses, so
+	// forwarding DepListBatch on every CachingStore would advertise a batch
+	// capability over backings (e.g. a cached bd store) that do not actually
+	// have it.
+	"DepListBatch": nil,
 	// A declaration about what a cache over the engine holds: the v2
 	// demand reads ask the cache's backing (demandLegCache), and a cache
 	// carrying it would advertise exactness over a bd backing.
@@ -488,23 +495,30 @@ func containsBeadID(rows []beads.Bead, id string) bool {
 	return false
 }
 
-// The control dispatcher's passive control-ready snapshot reads a split city's
-// binding through the one-shot funnel, whose leg is the emitter. Kills: a
-// snapshot cache stacked on the emitter, which hides the engine's ready
-// projection from it and offers control beads the engine holds back.
-func TestControlReadySnapshotCachesTheBindingEngine(t *testing.T) {
+// The control dispatcher's control-ready scan reads a split city's binding
+// through the one-shot funnel, whose leg is the emitter. The scan never writes,
+// so it reads the engine under the emitter. Kills: a scan that stops reaching
+// the engine's ready answer through the emitter leg.
+func TestControlReadyScanReadsTheBindingEngine(t *testing.T) {
 	dir := t.TempDir()
 	engine := openBindingEngineForTest(t)
+	seeded, err := engine.Create(beads.Bead{Title: "ready control", Type: "task"})
+	if err != nil {
+		t.Fatalf("seed engine: %v", err)
+	}
 	leg := splitClassRoutes(engine).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
-	installControlReadyCacheSourcesFn(t, dir, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
+	if bindingEngine(leg) != beads.Store(engine) {
+		t.Fatalf("premise: the graph leg does not unwrap to the engine")
+	}
+	installControlReadyLegSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{leg}, nil, nil
 	})
-	caches := controlReadyCachesFor(dir, t.TempDir(), &config.City{})
-	if len(caches) != 1 {
-		t.Fatalf("control-ready caches = %d, want 1", len(caches))
+	ready, opened, err := controlReadyLegsReady(dir, t.TempDir(), &config.City{})
+	if err != nil || !opened {
+		t.Fatalf("controlReadyLegsReady = opened %t, err %v", opened, err)
 	}
-	if got := caches[0].Backing(); got != beads.Store(engine) {
-		t.Fatalf("control-ready snapshot backs onto %T, want the raw engine", got)
+	if len(ready) != 1 || ready[0].ID != seeded.ID {
+		t.Fatalf("control-ready scan = %v, want the engine's ready bead %s", ready, seeded.ID)
 	}
 }
 

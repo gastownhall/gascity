@@ -296,6 +296,45 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// CloseAllLeavesAnAlreadyClosedBeadClosed pins the part of CloseAll's
+	// contract every store honors when one of the ids is already closed: no
+	// error, both beads end closed, and the open one carries the metadata. It
+	// pins neither the count nor whether the closed bead was stamped, because
+	// stores answer both differently (see the Store.CloseAll doc).
+	t.Run("CloseAllLeavesAnAlreadyClosedBeadClosed", func(t *testing.T) {
+		s := newStore()
+		open, err := s.Create(beads.Bead{Title: "close in the batch"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done, err := s.Create(beads.Bead{Title: "closed before the batch"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(done.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CloseAll([]string{open.ID, done.ID}, map[string]string{"closed_by": "conformance"}); err != nil {
+			t.Fatalf("CloseAll over an open and an already-closed bead: %v", err)
+		}
+		for _, id := range []string{open.ID, done.ID} {
+			got, err := s.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "closed" {
+				t.Errorf("%s Status = %q, want %q", id, got.Status, "closed")
+			}
+		}
+		got, err := s.Get(open.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata["closed_by"] != "conformance" {
+			t.Errorf("closed_by = %q on the bead the batch closed, want %q", got.Metadata["closed_by"], "conformance")
+		}
+	})
+
 	t.Run("CloseRemovesFromReady", func(t *testing.T) {
 		s := newStore()
 		b1, err := s.Create(beads.Bead{Title: "first"})

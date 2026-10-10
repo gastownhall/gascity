@@ -58,13 +58,33 @@ type sessionEffect struct {
 	// back it off (P4).
 	Finalize bool
 	Deadline time.Time
-	Run      func(ctx context.Context) settlement
+	Latch    *writeLatch // closed if the executor abandons the effect; nil never writes
+	// BackoffKey and Fingerprint, set for a create, are what its
+	// abandonment backs off: its identity, as a stage refusal would.
+	BackoffKey, Fingerprint string
+	Run                     func(ctx context.Context) settlement
 }
 
-// finalizeCause is s's cause as a finalize records it: a refusal or failure
-// carries causeFinalizePrefix once.
+// errSwapCanceled is the cause waitStarts cancels a start with (P7).
+var errSwapCanceled = errors.New("session effect: canceled for a provider swap")
+
+// causeSwapCancel settles an effect a provider swap canceled.
+const causeSwapCancel = "swap-cancel"
+
+// canceledCause labels an effect whose context was canceled: by a provider
+// swap, or at shutdown.
+func canceledCause(ctx context.Context) string {
+	if errors.Is(context.Cause(ctx), errSwapCanceled) {
+		return causeSwapCancel
+	}
+	return causeShutdown
+}
+
+// finalizeCause is s's cause as a finalize records it: a refusal, failure
+// or ambiguous abandonment carries causeFinalizePrefix once, so its own
+// abandonment paces it.
 func finalizeCause(s settlement) string {
-	if (s.Outcome != settledRefused && s.Outcome != settledFailed) || strings.HasPrefix(s.Cause, causeFinalizePrefix) {
+	if (s.Outcome != settledRefused && s.Outcome != settledFailed && s.Outcome != settledAmbiguous) || strings.HasPrefix(s.Cause, causeFinalizePrefix) {
 		return s.Cause
 	}
 	return causeFinalizePrefix + s.Cause
@@ -74,8 +94,8 @@ func finalizeCause(s settlement) string {
 type inflightEffect struct {
 	kind     string
 	deadline time.Time
-	cancel   context.CancelFunc
-	returned chan struct{} // closed when Run returns, which may be after the settle
+	cancel   context.CancelCauseFunc // errSwapCanceled from waitStarts
+	returned chan struct{}           // closed when Run returns, which may be after the settle
 }
 
 // effectKey is an effect's single-flight key: its row, or a create's token.
@@ -121,20 +141,20 @@ func (x *effectExecutor) inFlight(k rowKey) bool {
 	return x.inflight[effectKey{row: k}] != nil
 }
 
-// submitIntent submits the registered effect of it for one pass, under the
-// in-flight entry's seq. The effect is built inside Run, off the planner
-// goroutine. The pass submits registered kinds only; a kind with no
-// registered effect settles refused with cause no-effect (a finalize's with
-// the finalize prefix, as run adds it).
+// submitIntent submits the effect of it for one pass, under the in-flight
+// entry's seq and a write-begun latch of its own: its kind's transaction
+// (runTx), off the planner goroutine. A create carries its identity's
+// backoff key, which its abandonment backs off. The pass submits registered
+// kinds only; a kind with no registered effect settles refused with cause
+// no-effect (a finalize's with the finalize prefix, as run adds it).
 func (x *effectExecutor) submitIntent(p *effectPass, it intent, seq uint64) error {
-	build := effectRegistry[it.Kind]
-	run := func(ctx context.Context) settlement {
-		if build == nil {
-			return settlement{Outcome: settledRefused, Cause: causeNoEffect}
-		}
-		return build(p, it)(ctx)
+	spec, latch := effectSpecs[it.Kind], new(writeLatch)
+	e := sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Token: it.CreatePlan.Token, Finalize: it.Finalize, Deadline: it.Deadline, Latch: latch}
+	if it.Kind == intentCreate {
+		e.BackoffKey, e.Fingerprint = createBackoffKey(it.CreatePlan.identity().key()), it.CreatePlan.ConfigRev
 	}
-	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Token: it.CreatePlan.Token, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
+	e.Run = func(ctx context.Context) settlement { return runTx(ctx, p, it, spec, latch) }
+	return x.submit(it.Key, e)
 }
 
 // submit starts e for k, or for e's token when it has one (a create). It
@@ -157,7 +177,7 @@ func (x *effectExecutor) submit(k rowKey, e sessionEffect) error {
 		x.post(settlement{Key: k, Kind: e.Kind, Seq: e.Seq, Token: e.Token, Outcome: settledRefused, Cause: causeSwapPause})
 		return nil
 	}
-	ctx, cancel := context.WithCancel(x.ctx)
+	ctx, cancel := context.WithCancelCause(x.ctx)
 	f := &inflightEffect{kind: e.Kind, deadline: e.Deadline, cancel: cancel, returned: make(chan struct{})}
 	x.inflight[key], x.running[f] = f, true
 	x.wg.Add(1)
@@ -182,11 +202,14 @@ func (x *effectExecutor) setStartsClosed(closed bool) {
 // run performs e and settles it when Run returns or its deadline or the
 // shutdown deadline comes, whichever is first; a result that is ready then
 // wins. A Run that ignores its context is abandoned at the deadline; it keeps
-// any name lock it holds, so it still serializes its runtime name, and if it
-// lands later its event is still posted, alone. An abandoned create settles
-// ambiguous, never failed: its row write may have begun (P5). A panic in Run
-// is recovered and logged, and settles failed: one bad effect never takes
-// the process down.
+// any name lock it holds, so it still serializes its runtime name. It settles
+// ambiguous once its latch says a write began, and can begin none after
+// (P5); a create settles ambiguous regardless, so its entry holds its
+// identity until the census shows it or the hard bound passes, and its
+// identity backs off. What it returns later is posted whole, marked late. A
+// shutdown's abandonment says so. A panic in Run is recovered and logged,
+// and settles failed, or ambiguous once a write began: one bad effect never
+// takes the process down.
 func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffect, f *inflightEffect) {
 	k := key.row
 	defer x.wg.Done()
@@ -195,12 +218,16 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 	ctx, stopDeadline := x.clock.WithDeadline(base, e.Deadline)
 	result := make(chan settlement, 1)
 	x.spawn(func() {
-		defer f.cancel()
+		defer f.cancel(nil)
 		defer stopDeadline()
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(x.stderr, "v2 reconciler: effect for %s/%s panicked: %v\n%s", k.Leg, k.ID, r, debug.Stack()) //nolint:errcheck // best-effort stderr
-				result <- settlement{Outcome: settledFailed, Cause: causePanic, Err: fmt.Errorf("session effect for %s/%s panicked: %v", k.Leg, k.ID, r)}
+				s := settlement{Outcome: settledFailed, Cause: causePanic, Err: fmt.Errorf("session effect for %s/%s panicked: %v", k.Leg, k.ID, r)}
+				if e.Latch.begun() {
+					s.Outcome = settledAmbiguous
+				}
+				result <- s
 			}
 			x.mu.Lock()
 			delete(x.running, f)
@@ -223,19 +250,22 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 		select {
 		case s = <-result:
 		default:
-			err := base.Err()
-			if err == nil {
-				err = context.DeadlineExceeded
+			s = settlement{Outcome: settledFailed, Cause: causeDeadline, Err: context.DeadlineExceeded, BackoffKey: e.BackoffKey, Fingerprint: e.Fingerprint}
+			if err := base.Err(); err != nil {
+				s.Cause, s.Err = canceledCause(base), err
 			}
-			s = settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}
-			if e.Kind == intentCreate {
+			if e.Latch.abandon() || e.Kind == intentCreate {
 				s.Outcome = settledAmbiguous
 			}
 			fmt.Fprintf(x.stderr, "v2 reconciler: effect for %s/%s still running when its context ended; settled as %v\n", k.Leg, k.ID, s.Err) //nolint:errcheck // best-effort stderr
+			// What it returns, whole and marked late, when it carries facts.
 			x.spawn(func() {
-				if late := <-result; late.Event != nil {
-					x.post(settlement{Event: late.Event})
+				late := <-result
+				if late.Facts.empty() {
+					return
 				}
+				late.Key, late.Kind, late.Reason, late.Seq, late.Token, late.Late = k, e.Kind, e.Reason, e.Seq, e.Token, true
+				x.post(late)
 			})
 		}
 	}
@@ -269,7 +299,7 @@ func (x *effectExecutor) waitStarts(bound time.Duration) error {
 		return nil
 	}
 	for _, f := range starts {
-		f.cancel()
+		f.cancel(errSwapCanceled)
 	}
 	if x.returnedWithin(starts, effectCancelBound) {
 		return nil

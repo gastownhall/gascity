@@ -30,7 +30,7 @@ func drainRow(meta ...string) beads.Bead {
 // intentAt is a controller half of reason at incarnation inc, begun a
 // minute before gatherNow.
 func intentAt(reason, inc string) []string {
-	return []string{drainIntentReasonKey, reason, drainIntentAtKey, rowAt(-time.Minute), drainIntentIncarnationKey, inc}
+	return []string{session.DrainIntentReasonKey, reason, session.DrainIntentAtKey, rowAt(-time.Minute), session.DrainIntentIncarnationKey, inc}
 }
 
 // ackAt is a request half at incarnation inc.
@@ -93,7 +93,7 @@ func TestActiveStopTableOverNineRowShapes(t *testing.T) {
 func TestDrainIntentIncarnationIsGeneration(t *testing.T) {
 	row := censusRowOf(t, drainRow())
 	patch := stopBeginPatch(row, "orphaned", gatherNow)
-	if patch[drainIntentIncarnationKey] != "3" || patch[drainIntentAtKey] != gatherNow.Format(time.RFC3339) {
+	if patch[session.DrainIntentIncarnationKey] != "3" || patch[session.DrainIntentAtKey] != gatherNow.Format(time.RFC3339) {
 		t.Fatalf("begin patch %v, want incarnation 3 (the generation) at gatherNow", patch)
 	}
 	var meta []string
@@ -107,7 +107,7 @@ func TestDrainIntentIncarnationIsGeneration(t *testing.T) {
 		t.Fatal("a generation bump kept the request")
 	}
 	empty := censusRowOf(t, drainRow("generation", ""))
-	if inc := stopBeginPatch(empty, "orphaned", gatherNow)[drainIntentIncarnationKey]; inc != "0" {
+	if inc := stopBeginPatch(empty, "orphaned", gatherNow)[session.DrainIntentIncarnationKey]; inc != "0" {
 		t.Fatalf("an empty generation's incarnation = %q, want legacy's 0", inc)
 	}
 	if _, ok := activeStop(censusRowOf(t, drainRow(append([]string{"generation", ""}, intentAt("orphaned", "0")...)...))); !ok {
@@ -158,7 +158,7 @@ func stopKeyFields() []string {
 // projection, and rawStopKeys' fields.
 func stopKeyNames() []string {
 	return append([]string{
-		"drainIntentReasonKey", "drainIntentAtKey", "drainIntentIncarnationKey", "DrainAckIncarnationKey",
+		"DrainIntentReasonKey", "DrainIntentAtKey", "DrainIntentIncarnationKey", "DrainAckIncarnationKey",
 		"DrainAckAtKey", "StopKeys", "readStopKeys",
 	}, stopKeyFields()...)
 }
@@ -197,7 +197,7 @@ func lintStopKeys(t *testing.T, path string, src any) []string {
 // TestStopRequestLintBansDirectKeyReads (I6, I14). Kills a second reader
 // of the stop request: a seeded effect naming each key, field and spelling
 // trips the lint; no effect or step file trips it; and no production file
-// but the accessor's, the key constants' and E3's CLI names a key, a
+// but the accessor's and E3's CLI names a key, a
 // spelling or a rawStopKeys field.
 func TestStopRequestLintBansDirectKeyReads(t *testing.T) {
 	var src strings.Builder
@@ -221,7 +221,7 @@ func TestStopRequestLintBansDirectKeyReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owners := []string{"reconcile_stop_request.go", "reconcile_stop_keys.go", "cmd_runtime_drain.go"}
+	owners := []string{"reconcile_stop_request.go", "cmd_runtime_drain.go"}
 	plumbing := []string{"StopKeys", "readStopKeys"} // the census's projection, outside effects
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") || slices.Contains(owners, f) {
@@ -249,7 +249,7 @@ func TestResidueVoidSurvivesSameGenerationResume(t *testing.T) {
 	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive}}}}
 	it, _ := decideRow(w, a, k)
-	if s := effectRegistry[it.Kind](newEffectPass(w, a), it)(context.Background()); it.Reason != decideStopResidue || s.Outcome != settledLanded {
+	if s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil); it.Reason != decideStopResidue || s.Outcome != settledLanded {
 		t.Fatalf("void %+v settled %+v, want the residue void landed", it, s)
 	}
 	got, _ := store.Get(b.ID)

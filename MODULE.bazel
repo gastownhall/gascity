@@ -50,12 +50,26 @@ bazel_dep(name = "bazel_lib", version = "3.7.2")
 # to the host compiler; scripts/bazel_hermetic_cc_test.go guards both.
 deb_sysroot = use_repo_rule("//third_party/cc_toolchain:deb_sysroot.bzl", "deb_sysroot")
 
+# Where every pinned Ubuntu 24.04 package below comes from, tried in order
+# (the sha256 pins, not the source, decide what is accepted):
+#   - gascity's own content-addressed mirror, a release holding each pinned
+#     .deb as <sha256>.deb (tools/cc_toolchain/mirror_debs.sh publishes it),
+#     so a cold fetch does not depend on Canonical's servers;
+#   - the snapshot these packages were pinned from (immutable, but a single
+#     host that returns 503 for minutes at a time);
+#   - Launchpad's librarian, which keeps every file ever published to the
+#     primary archive, superseded versions included;
+#   - archive.ubuntu.com, which drops superseded versions.
+NOBLE_DEB_URLS = [
+    "https://github.com/gastownhall/gascity/releases/download/toolchain-noble-debs-20261001/{sha256}.deb",
+    "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/{path}",
+    "https://launchpad.net/ubuntu/+archive/primary/+files/{file}",
+    "https://archive.ubuntu.com/ubuntu/{path}",
+]
+
 deb_sysroot(
     name = "cc_sysroot_noble_amd64",
-    mirrors = [
-        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
-        "https://archive.ubuntu.com/ubuntu/",
-    ],
+    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a",
         "pool/main/g/gcc-13/libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "ee5633e863e19c3381ed97842ce35ed32ede96a3d1ae4e94c051d3036fe21347",
@@ -190,7 +204,7 @@ register_toolchains("@llvm_toolchain//:all")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.26.6",
+    version = "1.26.9",
 )
 use_repo(go_sdk, "go_sdk")
 
@@ -201,6 +215,22 @@ use_repo(go_sdk, "go_sdk")
 go_sdk.nogo(
     includes = ["//:__subpackages__"],
     nogo = "//tools/nogo",
+)
+
+# gazelle compiles fetch_repo and gazelle, which every go_deps repository
+# runs, with `go build` in a repository rule before any go_deps fetch can
+# start (13-24 s of every CI lane's loading). This substitute serves those
+# reproducible binaries from the repository cache by pinned sha256 and builds
+# them from source on a miss (tools/bazel/rules/go_repository_tools.bzl).
+gazelle_non_module_deps = use_extension("@gazelle//internal/bzlmod:non_module_deps.bzl", "non_module_deps")
+
+go_repository_tools = use_repo_rule("//tools/bazel/rules:go_repository_tools.bzl", "go_repository_tools")
+
+go_repository_tools(name = "gazelle_go_repository_tools")
+
+override_repo(
+    gazelle_non_module_deps,
+    bazel_gazelle_go_repository_tools = "gazelle_go_repository_tools",
 )
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
@@ -537,10 +567,7 @@ exports_files(["chromium_headless_shell-1228/chrome-headless-shell-linux64/chrom
 # put on LD_LIBRARY_PATH by the test. glibc and libstdc++ come from the host.
 deb_sysroot(
     name = "chromium_runtime_noble_amd64",
-    mirrors = [
-        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
-        "https://archive.ubuntu.com/ubuntu/",
-    ],
+    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/a/alsa-lib/libasound2t64_1.2.11-1ubuntu0.3_amd64.deb": "5d17bfb5683eb99f1be951fe48e1be5bf3c52391913b6b74a8aecf9b4f5e779f",
         "pool/main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb": "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",

@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // defaultBackupFreshnessMaxAge is how stale a rig's last bd backup sync may be
@@ -21,13 +23,16 @@ import (
 // into a near-permanent one when the only surviving backup is weeks stale.
 const defaultBackupFreshnessMaxAge = 24 * time.Hour
 
-// BdBackupFreshnessCheck warns when a rig that HAS a local bd backup
-// (.beads/backup/backup_state.json) has not synced within maxAge. It is the
+// BdBackupFreshnessCheck warns when a rig that HAS a bd backup has not synced
+// within maxAge. A scope with a registered Dolt destination is judged on
+// .beads/dolt-backup-state.json and any other on the legacy
+// .beads/backup/backup_state.json, whose finding a fresh sync in the city's
+// managed destination withdraws (see scanBackupFreshness). It is the
 // freshness complement to the existing backup checks: DoltBackupCheck verifies
 // a backup is registered, BdBackupSizeCheck guards the backup footprint, and
 // BdBackupStateCheck flags quarantines and stale registrations — none notice
-// that a configured backup has simply stopped running. Reading only the
-// on-disk backup_state.json keeps the check DB-free.
+// that a configured backup has simply stopped running. Reading on-disk state
+// rather than querying the store keeps the check DB-free.
 //
 // A backup that exists but stopped syncing is invisible to every other signal:
 // the registration still looks healthy and the artifact dir is still present,
@@ -77,17 +82,20 @@ func (c *BdBackupFreshnessCheck) CanFix() bool { return false }
 // Fix is a no-op; the check is report-only.
 func (c *BdBackupFreshnessCheck) Fix(_ *CheckContext) error { return nil }
 
-// Run reads each scope's .beads/backup/backup_state.json and warns on any whose
-// last sync is older than maxAge (or whose timestamp is missing or
-// unparseable). Scopes with no backup_state.json are skipped — "no backup at
-// all" is reported by DoltBackupCheck / BdBackupSizeCheck, not here.
+// Run reads each scope's active backup state (see scanBackupFreshness) and
+// warns on any whose last sync is older than maxAge (or whose timestamp is
+// missing or unparseable), unless a sync of the scope completed within maxAge
+// in the city's managed Dolt destination withdraws a finding on its legacy
+// state file (see managedDoltBackupIsFresh). Scopes with no backup state are
+// skipped — "no backup at all" is reported by DoltBackupCheck /
+// BdBackupSizeCheck, not here.
 func (c *BdBackupFreshnessCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	now := c.now()
 
 	var findings []string
 	for _, target := range c.freshnessScanTargets() {
-		if finding, ok := scanBackupFreshness(target.Label, target.BeadsDir, now, c.maxAge); ok {
+		if finding, ok := scanBackupFreshness(c.cityPath, target, now, c.maxAge); ok {
 			findings = append(findings, finding)
 		}
 	}
@@ -110,8 +118,9 @@ func (c *BdBackupFreshnessCheck) Run(_ *CheckContext) *CheckResult {
 }
 
 type bdBackupFreshnessTarget struct {
-	Label    string
-	BeadsDir string
+	Label     string
+	ScopeRoot string
+	BeadsDir  string
 }
 
 func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarget {
@@ -136,8 +145,9 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 		}
 		seen[scopeRoot] = struct{}{}
 		targets = append(targets, bdBackupFreshnessTarget{
-			Label:    bdBackupScopeLabel(c.cityPath, scopeRoot),
-			BeadsDir: filepath.Join(scopeRoot, ".beads"),
+			Label:     bdBackupScopeLabel(c.cityPath, scopeRoot),
+			ScopeRoot: scopeRoot,
+			BeadsDir:  filepath.Join(scopeRoot, ".beads"),
 		})
 	}
 	return targets
@@ -153,15 +163,19 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 // not re-derive it, so the gate and BdBackupFreshnessCheck can never disagree
 // about whether a scope is protected. Concretely that means a scope with a
 // registered Dolt destination is judged on its Dolt sync state (including the
-// registered-but-never-synced case, which is unsafe), and only a scope that
-// never migrated is judged on the legacy embedded-store state.
+// registered-but-never-synced case, which is unsafe), a scope that never
+// migrated is judged on the legacy embedded-store state, and only a fresh sync
+// of that scope in the city's managed destination waives a legacy verdict.
 //
 // The gate is fail-closed on doubt: an unreadable, unparseable, or
 // timestamp-less state file blocks the deletion rather than being ignored,
-// because it leaves the recovery point unknown. The one deliberate exception is
-// a scope with NO backup state at all, which is treated as safe — "no backup
-// configured" is DoltBackupCheck's concern, and failing closed there would
-// block bulk deletion on every unbacked city.
+// because it leaves the recovery point unknown. There are two deliberate
+// exceptions. A scope with NO backup state at all is treated as safe — "no
+// backup configured" is DoltBackupCheck's concern, and failing closed there
+// would block bulk deletion on every unbacked city. And doubt about a scope's
+// legacy state file does not block when managedDoltBackupIsFresh proves a sync
+// of the scope within maxAge: that sync is a known recovery point, whatever the
+// legacy file holds.
 //
 // maxAge is used as given and is not clamped, so a non-positive value reads
 // every scope as stale and blocks every deletion.
@@ -175,7 +189,7 @@ func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now
 		check = NewBdBackupFreshnessCheckForScopeRoots(cityPath, managedDoltScopeRoots(cityPath), maxAge, nil)
 	}
 	for _, target := range check.freshnessScanTargets() {
-		if finding, ok := scanBackupFreshness(target.Label, target.BeadsDir, now, maxAge); ok {
+		if finding, ok := scanBackupFreshness(cityPath, target, now, maxAge); ok {
 			return false, finding
 		}
 	}
@@ -223,16 +237,101 @@ func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now
 // incident responder restoring from that pointer recovers a pre-migration
 // snapshot while believing the scope is current.
 //
+// One more writer backs a scope up without touching either file until it has
+// registered the scope: mol-dog-backup syncs the city's managed destination,
+// <city>/.dolt-backup/<db>. It registers each scope it reaches (bd backup init,
+// then bd backup sync), after which the registration above decides. A scope it
+// has not registered is still in the frozen-legacy shape — during the window
+// before its first run after an upgrade, under a dolt pack that predates the
+// registration step, or when bd failed to save the registration. Its database
+// is being synced while its legacy file stays frozen, so it reads as the same
+// unclearable warning and, because BulkDeleteSafe shares this function, blocks
+// order-tracking retention on a city whose backup is current.
+//
+// The managed destination may therefore withdraw a legacy finding, and do
+// nothing else. It never raises a finding of its own: when it is stale, absent,
+// unreadable, or not this scope's to judge, the legacy verdict stands exactly as
+// it would without it. Its own staleness is for the dolt pack's health probe and
+// mol-dog-doctor to report against the backup order's interval; here it answers
+// only whether the scope holds a recovery point within maxAge, the horizon this
+// check and BulkDeleteSafe apply to every store.
+//
 // So: prefer the Dolt backup state whenever a Dolt destination is registered,
-// and fall back to the legacy file only for scopes that never migrated. Each
-// finding names the store it describes, so the reader is never left guessing
-// which of the two a message is about. A scope with neither file returns
-// ("", false) — "no backup at all" is DoltBackupCheck's job, not this one's.
-func scanBackupFreshness(label, beadsDir string, now time.Time, maxAge time.Duration) (string, bool) {
-	if _, err := os.Stat(filepath.Join(beadsDir, "dolt-backup.json")); err == nil {
-		return scanDoltBackupFreshness(label, beadsDir, now, maxAge)
+// and fall back to the legacy file only for scopes that never migrated, unless a
+// fresh managed sync shows that file is merely frozen. Each finding names the
+// store it describes, so the reader is never left guessing which of the two a
+// message is about. A scope with neither file returns ("", false) — "no backup
+// at all" is DoltBackupCheck's job, not this one's.
+func scanBackupFreshness(cityPath string, target bdBackupFreshnessTarget, now time.Time, maxAge time.Duration) (string, bool) {
+	if _, err := os.Stat(filepath.Join(target.BeadsDir, "dolt-backup.json")); err == nil {
+		return scanDoltBackupFreshness(target.Label, target.BeadsDir, now, maxAge)
 	}
-	return scanLegacyBackupFreshness(label, beadsDir, now, maxAge)
+	finding, isFinding := scanLegacyBackupFreshness(target.Label, target.BeadsDir, now, maxAge)
+	if isFinding && managedDoltBackupIsFresh(cityPath, target, now, maxAge) {
+		return "", false
+	}
+	return finding, isFinding
+}
+
+// managedDoltBackupIsFresh reports whether the city's managed Dolt backup
+// destination holds a sync of the scope's database that completed within
+// maxAge. Every condition must be proven; any doubt answers false, which leaves
+// the caller's legacy verdict in force.
+//
+// The database is the one the scope's metadata.json names, and it must pass
+// isManagedDoltUserDatabase: an unnamed database is not guessed at, since a
+// wrong guess would read another scope's backup, and a name outside that class
+// could join a path that escapes .dolt-backup.
+//
+// Completion is dated by <db>/manifest alone, as the dolt pack's health probe
+// dates it. `dolt backup sync` writes chunk files first and adopts them by
+// rewriting the manifest last, so a chunk newer than the manifest belongs to a
+// sync that never finished, and chunks with no manifest are no backup at all.
+// DoltBackupCheck reads the same directory only for presence, which says
+// nothing about when the last sync completed.
+//
+// The directory is evidence only where DoltBackupCheck would read it: not for a
+// scope bd owns, and not for one whose endpoint resolves as external, since
+// both keep their backups outside gc's managed destination. A resolution error
+// is doubt and answers false. The common one is a stopped city: resolving a
+// scope on gc's managed server needs that server's live runtime state, and
+// without it the resolver returns contract.ErrManagedRuntimeUnavailable, so the
+// legacy finding stands until the city is back up. DoltBackupCheck reads the
+// directory on the same error, but only for presence; withdrawing a finding
+// needs the scope proven to back up there.
+func managedDoltBackupIsFresh(cityPath string, target bdBackupFreshnessTarget, now time.Time, maxAge time.Duration) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	dbName := scopeDoltDatabaseName(target.BeadsDir)
+	if !isManagedDoltUserDatabase(dbName) {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(cityPath, ".dolt-backup", dbName, "manifest"))
+	if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) > maxAge {
+		return false
+	}
+	if scopeIsProviderOwned(cityPath, target.ScopeRoot) {
+		return false
+	}
+	resolved, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, target.ScopeRoot)
+	return err == nil && !resolved.External
+}
+
+// scopeDoltDatabaseName returns the Dolt database a scope's metadata.json names,
+// or "" when the file is absent, unparseable, or carries no name.
+func scopeDoltDatabaseName(beadsDir string) string {
+	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(meta.DoltDatabase)
 }
 
 // scanDoltBackupFreshness reads <beadsDir>/dolt-backup-state.json, the file a

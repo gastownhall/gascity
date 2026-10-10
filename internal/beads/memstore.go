@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -118,6 +119,7 @@ func cloneBead(b Bead) Bead {
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	noteSessionKeys(b, b.Metadata)
 
 	explicit := strings.TrimSpace(b.ID)
 	if m.HonorExplicitIDs && explicit != "" {
@@ -127,8 +129,15 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
 		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
 		// the very next store-minted id re-issues the pinned one.
-		if n := numericIDSuffix(explicit); n > m.seq {
-			m.seq = n
+		prefix := m.IDPrefix
+		if prefix == "" {
+			prefix = "gc"
+		}
+		// A suffix past math.MaxInt is out of mintIDLocked's reach, so skip it
+		// instead of letting int(n) wrap seq negative on a 32-bit int (CodeQL
+		// go/incorrect-integer-conversion).
+		if n, ok := parseSQLiteAutoIDSuffix(prefix, explicit); ok && n > 0 && n <= math.MaxInt && n > int64(m.seq) {
+			m.seq = int(n)
 		}
 		b.ID = explicit
 	} else {
@@ -228,6 +237,7 @@ func isOwnershipTransition(oldStatus, oldAssignee string, opts UpdateOpts) bool 
 // caller must hold m.mu. It is shared by Update and UpdateIfMatch so both bump
 // identically.
 func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
+	noteSessionKeys(m.beads[i], opts.Metadata)
 	oldStatus, oldAssignee := m.beads[i].Status, m.beads[i].Assignee
 	if opts.Title != nil {
 		m.beads[i].Title = *opts.Title
@@ -382,6 +392,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
 			continue
 		}
+		noteSessionKeys(m.beads[i], metadata)
 		setBeadStatus(&m.beads[i], "closed")
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
@@ -589,6 +600,7 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			noteSessionKeys(b, map[string]string{key: value})
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -610,6 +622,7 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			noteSessionKeys(b, kvs)
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}

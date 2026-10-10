@@ -136,7 +136,12 @@ func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 
 func eventBeadPayloadScopeRoot() (string, error) {
 	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
-		return cleanAbsPath(filepath.Dir(beadsDir))
+		// filepath.Clean beadsDir before Dir: a trailing-slash BEADS_DIR
+		// (e.g. "/root/.beads/") makes filepath.Dir return beadsDir itself
+		// rather than its parent, since Split treats the trailing slash as
+		// already naming an (empty) final component. cleanAbsPath's own
+		// Clean runs on the (already wrong) Dir result, too late to fix it.
+		return cleanAbsPath(filepath.Dir(filepath.Clean(beadsDir)))
 	}
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
 		return cleanAbsPath(rigRoot)

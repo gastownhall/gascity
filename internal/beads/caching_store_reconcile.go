@@ -81,9 +81,9 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		case <-timer.C:
 		}
 
-		c.reconcileIfDue(time.Now())
+		c.reconcileIfDue(c.clockNow())
 
-		next := c.nextReconcileDelay(time.Now())
+		next := c.nextReconcileDelay(c.clockNow())
 		if next <= 0 || next > cacheReconcilePollInterval {
 			next = cacheReconcilePollInterval
 		}
@@ -369,7 +369,7 @@ func (c *CachingStore) runReconciliation() {
 		c.mu.Unlock()
 		return
 	}
-	now := time.Now()
+	now := c.clockNow()
 	res := c.mergeSnapshotLocked(freshByID, confirmedClosed, deferred, depMap, useFreshDeps, depErr != nil, startSeq, now)
 	durMs := float64(time.Since(start).Microseconds()) / 1000.0
 	c.stats.LastReconcileMs = durMs

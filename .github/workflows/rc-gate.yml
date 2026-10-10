@@ -43,7 +43,13 @@ jobs:
     permissions:
       contents: read
       actions: write # bazel.yml's rbe job pre-warms the worker pool
-      issues: read # worker-env drift issues
+      # issues: write and id-token: write are requested by bazel.yml's
+      # rrc-verify and repo contents cache seed jobs; GitHub validates a called
+      # workflow's permissions at startup even for jobs that skip, so the
+      # caller must grant them (startup_failure otherwise). Neither job runs
+      # for RC Gate's events, and the mint refuses non-main-push tokens.
+      issues: write
+      id-token: write
     uses: ./.github/workflows/bazel.yml
     with:
       rbe: "on"

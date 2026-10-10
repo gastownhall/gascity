@@ -3518,6 +3518,11 @@ type Agent struct {
 	//   3. ready unassigned work with gc.routed_to=<qualified-name>
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
+	// A custom query that looks up assigned work should read $GC_ALIAS: under
+	// gc hook --claim, a single-slot pool session the supervisor collapsed onto
+	// the agent's canonical [[named_session]] identity runs the query with
+	// $GC_ALIAS set to that identity, while $GC_AGENT keeps the session's
+	// runtime value.
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same

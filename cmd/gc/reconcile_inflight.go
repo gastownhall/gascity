@@ -201,7 +201,7 @@ func (v inflightView) uncensusedCreates(c inflightCensus) int {
 // (AM-N8); a failure past the stages (failed worktree evidence) throttles
 // only the work item.
 func (s createSettlement) settlement() settlement {
-	out := settlement{Kind: inflightCreate, Seq: s.Seq, Token: s.Token, Outcome: settledFailed, Cause: s.Stage, Work: s.Work, Err: s.Err, At: s.At}
+	out := settlement{Kind: inflightCreate, Seq: s.Seq, Token: s.Token, Outcome: settledFailed, Cause: s.Stage, Facts: effectFacts{Work: s.Work}, Err: s.Err, At: s.At}
 	switch {
 	case s.Landed:
 		out.Outcome = settledLanded

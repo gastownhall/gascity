@@ -88,8 +88,11 @@ func (SessionCreateSucceededPayload) IsEventPayload() {}
 
 // SessionMessageSucceededPayload is emitted on request.result.session.message.
 type SessionMessageSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the message."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the message."`
+	Queued             bool   `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.
@@ -97,10 +100,12 @@ func (SessionMessageSucceededPayload) IsEventPayload() {}
 
 // SessionSubmitSucceededPayload is emitted on request.result.session.submit.
 type SessionSubmitSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the submission."`
-	Queued    bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
-	Intent    string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the submission."`
+	Queued             bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
+	Intent             string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.

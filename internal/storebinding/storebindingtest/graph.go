@@ -215,6 +215,31 @@ func RunGraphStoreTests(r Runner, suite GraphSuite) {
 		}
 	})
 
+	// CloseAllLeavesAnAlreadyClosedBeadClosed pins the part of CloseAll's
+	// contract every store honors when one of the ids is already closed: no
+	// error, both beads end closed, and the open one carries the metadata. It
+	// pins neither the count nor whether the closed bead was stamped, because
+	// stores answer both differently (see the beads.Store CloseAll doc).
+	r.Run("CloseAllLeavesAnAlreadyClosedBeadClosed", func(r Runner) {
+		store := suite.NewStore(r)
+		open := mustCreateBead(r, store, beads.Bead{Title: "close in the batch", Type: "task", Status: "open"})
+		done := mustCreateBead(r, store, beads.Bead{Title: "closed before the batch", Type: "task", Status: "open"})
+		if err := store.Close(done.ID); err != nil {
+			r.Fatalf("Close: %v", err)
+		}
+		if _, err := store.CloseAll([]string{open.ID, done.ID}, map[string]string{"closed_by": "conformance"}); err != nil {
+			r.Fatalf("CloseAll over an open and an already-closed bead: %v", err)
+		}
+		for _, id := range []string{open.ID, done.ID} {
+			if got := mustGetBead(r, store, id); got.Status != "closed" {
+				r.Errorf("%s Status = %q, want closed", id, got.Status)
+			}
+		}
+		if got := mustGetBead(r, store, open.ID); got.Metadata["closed_by"] != "conformance" {
+			r.Errorf("closed_by = %q on the bead the batch closed, want %q", got.Metadata["closed_by"], "conformance")
+		}
+	})
+
 	r.Run("DeleteRemovesTheBead", func(r Runner) {
 		store := suite.NewStore(r)
 		created := mustCreateBead(r, store, beads.Bead{Title: "transient", Type: "task", Status: "open"})

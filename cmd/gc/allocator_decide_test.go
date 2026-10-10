@@ -839,6 +839,31 @@ func TestAllocator_ConfigSleepSuppressionDeadUsesDetachedAtLiveNeedsActivity(t *
 	}
 }
 
+// Kills: stage 6b dropping legacy's explicit-wake override
+// (wakeDemandOverridesSleepSuppression). A durable explicit wake request that
+// is still pending outranks the idle latch, whatever reason the awake set
+// labels the wake with; one requested before the row's last sleep was served
+// and leaves the latch in force.
+func TestAllocator_ConfigSleepSuppressionHonorsPendingExplicitWake(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "chat"}}}
+	latched := func(id, requestedAt string) beads.Bead {
+		return sessionRow(id, "template", "chat", "state", "asleep", "session_name", "s-"+id,
+			"manual_session", "true", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+			"slept_at", ago(10*time.Minute), "wake_request", "explicit", "wake_requested_at", requestedAt)
+	}
+	f := newAllocFixture(t, cfg).sessions(latched("gc-pending", ago(time.Minute)), latched("gc-served", ago(20*time.Minute)))
+	policy := resolvedSessionSleepPolicy{Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}
+	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-pending": policy, "gc-served": policy}
+	d := f.decideSelecting("gc-pending", "gc-served")
+	if e := entryOf(t, d, "gc-pending"); e.Desired != desireWake {
+		t.Errorf("idle-latched row with a pending explicit wake = %s/%s, want a wake", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-served"); e.Desired != desireSleep || e.Reason != reasonConfigSleep {
+		t.Errorf("idle-latched row whose explicit wake predates its sleep = %s/%s, want %s/%s",
+			e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+	}
+}
+
 // Kills: a missing census read as an empty city (§4.2 census errors): with
 // no census the pass is refused.
 func TestAllocator_NoCensusIsRefusedNotEmpty(t *testing.T) {
