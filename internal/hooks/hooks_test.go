@@ -2101,7 +2101,8 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 9",
+		"const GC_PI_HOOK_VERSION = 10",
+		`const GC_BIN = process.env.GC_BIN || "gc"`,
 		"gc hook --inject",
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
 		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
@@ -2119,6 +2120,15 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)
+		}
+	}
+	for _, unwanted := range []string{
+		`execFileSync("gc", args`,
+		"const PATH_PREFIX =",
+		"PATH: PATH_PREFIX",
+	} {
+		if strings.Contains(data, unwanted) {
+			t.Errorf("Pi hook must preserve the configured gc and runtime PATH; found %q:\n%s", unwanted, data)
 		}
 	}
 	for _, legacy := range []string{
@@ -2167,7 +2177,8 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 9;
+const GC_PI_HOOK_VERSION = 10;
+const GC_BIN = process.env.GC_BIN || "gc";
 pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
@@ -2179,13 +2190,15 @@ GC_HOOK_EVENT_NAME;
 stdio: ["ignore", "pipe", "inherit"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 9"), []byte("GC_PI_HOOK_VERSION = 10"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 10"), []byte("GC_PI_HOOK_VERSION = 9"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 10"), []byte("GC_PI_HOOK_VERSION = 11"), 1)
 	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
 `), nil, 1)
 	missingManagedHookMarkers := bytes.Replace(current, []byte(`GC_MANAGED_SESSION_HOOK;
 `), nil, 1)
 	missingPendingPrimeContext := bytes.Replace(current, []byte("pendingPrimeContext = "), nil, 1)
+	missingGCBin := bytes.Replace(current, []byte(`const GC_BIN = process.env.GC_BIN || "gc";
+`), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
 		t.Fatal("stale Pi hook version did not request upgrade")
@@ -2204,6 +2217,9 @@ function providerSessionEnv(ctx) {}
 	}
 	if !piHookNeedsUpgrade(missingPendingPrimeContext) {
 		t.Fatal("Pi hook that discards the SessionStart prime output did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingGCBin) {
+		t.Fatal("Pi hook without GC_BIN selection did not request upgrade")
 	}
 }
 
