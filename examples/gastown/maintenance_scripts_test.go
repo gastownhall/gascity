@@ -7051,6 +7051,13 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 	return remoteRepo
 }
 
+func initEmptyArchiveRemoteOnBranch(t *testing.T, archiveRepo string, prevCount int, branch string) string {
+	t.Helper()
+	remoteRepo := initEmptyArchiveRemote(t, archiveRepo, prevCount)
+	runGit(t, archiveRepo, "branch", "-m", branch)
+	return remoteRepo
+}
+
 // initSeedArchiveWithUnreachableRemote seeds the archive and adds an `origin`
 // that points at a nonexistent path, so any `git fetch`/`git push` fails.
 // Used by tests that specifically exercise the push-failure recovery paths:
@@ -8153,6 +8160,28 @@ func TestJsonlExportPushBootstrapCreatesRemoteMainWhenMissing(t *testing.T) {
 	}
 	if strings.Contains(string(stateData), `"pending_archive_push":true`) {
 		t.Fatalf("expected pending_archive_push to clear after bootstrap push, got:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushUsesExistingArchiveBranch(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	remoteRepo := initEmptyArchiveRemoteOnBranch(t, archiveRepo, 3, "archive")
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	localHead := runGitOut(t, archiveRepo, "rev-parse", "HEAD")
+	remoteHead := runGitOut(t, remoteRepo, "rev-parse", "refs/heads/archive")
+	if remoteHead != localHead {
+		t.Fatalf("remote archive branch = %s, want local HEAD %s", remoteHead, localHead)
 	}
 }
 
