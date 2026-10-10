@@ -198,8 +198,8 @@ func TestNativeDoltStoreListUnionsFannedOutRowsByID(t *testing.T) {
 	if !slices.Equal(ids, []string{"gc-1", "gc-2", "gc-shared"}) {
 		t.Fatalf("List = %v, want the union by id", ids)
 	}
-	if stats := store.ListRequestStats(); stats.Requests != 2 || stats.Unkeyed != 0 || stats.Lists != 1 {
-		t.Fatalf("ListRequestStats = %+v, want 1 list of 2 keyed requests", stats)
+	if stats := listRequestStatsForTest(t, store); stats.Requests != 2 || stats.Unkeyed != 0 || stats.Lists != 1 {
+		t.Fatalf("ListRequestStatsOf = %+v, want 1 list of 2 keyed requests", stats)
 	}
 }
 
@@ -243,8 +243,8 @@ func TestNativeDoltStoreListRetriesWithoutARefusedType(t *testing.T) {
 			if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
 				t.Fatalf("warned %d times, want once:\n%s", n, logs.String())
 			}
-			if stats := store.ListRequestStats(); stats.Requests != 3 || stats.Lists != 2 {
-				t.Fatalf("ListRequestStats = %+v, want 2 lists of 3 requests, the refused one counted", stats)
+			if stats := listRequestStatsForTest(t, store); stats.Requests != 3 || stats.Lists != 2 {
+				t.Fatalf("ListRequestStatsOf = %+v, want 2 lists of 3 requests, the refused one counted", stats)
 			}
 		})
 	}
@@ -446,8 +446,8 @@ func TestNativeDoltStoreListCountsOnlyItsLastAttempt(t *testing.T) {
 	if reopens == 0 {
 		t.Fatal("the transient failure did not reconnect; the test exercises nothing")
 	}
-	if stats := store.ListRequestStats(); stats.Requests != 2 || stats.Rows != 2 || stats.Lists != 1 {
-		t.Fatalf("ListRequestStats = %+v, want 1 list of 2 requests returning 2 rows", stats)
+	if stats := listRequestStatsForTest(t, store); stats.Requests != 2 || stats.Rows != 2 || stats.Lists != 1 {
+		t.Fatalf("ListRequestStatsOf = %+v, want 1 list of 2 requests returning 2 rows", stats)
 	}
 }
 
@@ -487,8 +487,8 @@ func TestNativeDoltStoreListLogsAnUnkeyedPlan(t *testing.T) {
 	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "wisp") {
 		t.Fatalf("an unkeyed list did not log its query at debug:\n%s", logs.String())
 	}
-	if stats := store.ListRequestStats(); stats.Unkeyed != 1 {
-		t.Fatalf("ListRequestStats.Unkeyed = %d, want 1", stats.Unkeyed)
+	if stats := listRequestStatsForTest(t, store); stats.Unkeyed != 1 {
+		t.Fatalf("ListRequestStatsOf.Unkeyed = %d, want 1", stats.Unkeyed)
 	}
 }
 

@@ -86,7 +86,6 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"Count":                       nativeStoreRead,
 	"DepMetadata":                 nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
-	"ListRequestStats":            nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,
 	"AtomicTx":                    nativeStoreLifecycle,
 	"SupportsEphemeralGraphApply": nativeStoreLifecycle,

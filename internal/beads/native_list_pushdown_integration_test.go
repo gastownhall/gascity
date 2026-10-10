@@ -128,8 +128,8 @@ func TestNativeDoltStoreListPushdownAgainstRealStorage(t *testing.T) {
 			}
 		}
 	}
-	if stats := store.ListRequestStats(); stats.Unkeyed != wantUnkeyed {
-		t.Fatalf("ListRequestStats = %+v, want %d whole-ledger reads", stats, wantUnkeyed)
+	if stats := listRequestStatsForTest(t, store); stats.Unkeyed != wantUnkeyed {
+		t.Fatalf("ListRequestStatsOf = %+v, want %d whole-ledger reads", stats, wantUnkeyed)
 	}
 }
 
