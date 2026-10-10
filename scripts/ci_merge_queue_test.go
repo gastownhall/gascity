@@ -237,6 +237,8 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.rbe.steps[decide].env.FORK":                                            "false",                      // ...never the mint
 	"bazel.yml jobs.rbe.steps[decide].env.PR_NUMBER":                                       "",                           // read in the fork arm only
 	"bazel.yml jobs.rbe.steps[lanes].env.EVENT":                                            "merge_group",                // the PR lane set
+	"bazel.yml jobs.rrc-seed.if":                                                           "false",                      // seeds on push to main only
+	"bazel.yml jobs.rrc-verify.if":                                                         "false",                      // nightly and dispatch only
 	"bazel.yml jobs.rbe.steps[base].if":                                                    "false",                      // the queue ref is already the merge
 	"bazel.yml jobs.rbe.steps[base].env.BASE_REF":                                          "",                           // (step skipped)
 	"bazel.yml jobs.rbe.steps[Pre-warm the OSS worker pool (rbe-west)].env.DEFAULT_BRANCH": "main",

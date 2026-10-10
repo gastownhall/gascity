@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -33,13 +35,14 @@ import (
 //   - the runtime stops that skip the destructive fence (v5 O2).
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
-	"Sleep", "BeginDrainAckStopPending", "RequestRestart", "ResetConfigDrift", "SetWaitHold", "RecordCurrentBead",
+	"Sleep", "SetWaitHold", "RecordCurrentBead",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CloseWithTerminalPatch",
-	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch",
+	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder", "CloseWithTerminalPatchUnder",
+	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder", "Commit",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
-	"WakeSession", "RequestWakeUnlessHeld", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
+	"WakeSession", "RequestWakeUnlessHeld", "OperatorSuspend", "ApplyKeepingUserHold", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
@@ -248,7 +251,7 @@ var effectLintSessionReads = []string{
 	"ListByMetadataInfos", "ListLabeledSessionInfosUnfiltered", "ListStartupHealthEpisodes", "ListWaits",
 	"LoadStartupHealthEpisode", "LookupConfiguredNamed", "MailboxAddress", "MailboxAddresses", "PersistedMarkers",
 	"ResolveAddress", "ResolveID", "ResolveIDAllowClosed", "ResolveIDByExactID", "ResolveMailboxAddress", "Store",
-	"WaitNudgeIDs", "WaitsForSession",
+	"WaitNudgeIDs", "WaitsForSession", "Holds",
 	"UpdateRowFenced",
 }
 
@@ -332,5 +335,34 @@ func TestEffectLintBansMechanicsOutsideTheTransaction(t *testing.T) {
 	const writer = "package main\n\nfunc probe(s store) {\n\tw, _, _ := beads.ResolveConditionalWriter(s)\n\t_ = w.UpdateIfMatch(\"id\", 1, opts)\n}\n"
 	if got := lintEffectSource(t, "reconcile_effect_seeded.go", writer); len(got) != 2 {
 		t.Errorf("a conditional writer resolved in an effect file: %v, want both uses reported", got)
+	}
+}
+
+// The seal (EFFECT-STRUCTURE §2.2) is v2purity's typed rule, checked on
+// every compile through nogo (tools/nogo/analyzers/v2purity): a value of a
+// proof type is built, or a field of one written, only in its minting file.
+// Each one's zero value proves nothing, which this test holds.
+
+// Kills a sealed type whose zero value proves something, which a value
+// minted by declaration alone would then forge: the zero runtime read
+// proves nothing (Unsupported), the zero legs read none and hold, the zero
+// work read counts as work, the zero verdict holds, and the zero census
+// closes nothing.
+func TestSealedZeroValuesProveNothing(t *testing.T) {
+	var rt txRuntime
+	if rt.Class != rtUnsupported || rt.Alive() {
+		t.Errorf("zero txRuntime: class %d alive %t, want unsupported", rt.Class, rt.Alive())
+	}
+	if v := fenceDestructive(&rt, txFence{}, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legAttach}); v.Proceed {
+		t.Errorf("zero reads: %+v, want held", v)
+	}
+	if v := fenceDestructive(&txRuntime{Class: rtAlive, Same: true}, txFence{Work: &txWork{}}, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legAttach | legWork}); v.Proceed {
+		t.Errorf("zero legs and work: %+v, want held", v)
+	}
+	if v, confirmed := stopFenced(context.Background(), nil, fenceVerdict{}, nil, time.Now); v.Proceed || confirmed {
+		t.Errorf("zero verdict: %+v confirmed %t, want held", v, confirmed)
+	}
+	if (completeCensus{}).Closed(rowKey{Leg: "sessions", ID: "gc-1"}) {
+		t.Error("zero census closed a row")
 	}
 }

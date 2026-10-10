@@ -22,22 +22,58 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-// idleTimeoutUnderTest is short so the test finishes; it is below config's
-// 1m floor, which only the environment override may cross.
-const idleTimeoutUnderTest = 20 * time.Second
+// defaultIdleTimeoutUnderTest is short so the test finishes; it is below
+// config's 1m floor, which only the environment override may cross.
+const defaultIdleTimeoutUnderTest = 20 * time.Second
 
-// idleRetireWait bounds one idle retirement: bd's sampled watcher exits T to
-// 1.5T after the last connection it saw, and then runs a shutdown GC before it
-// removes proxy.pid.
-const idleRetireWait = idleTimeoutUnderTest*3/2 + 45*time.Second
+// idleTimeoutUnderTestEnv shortens the idle timeout further: Bazel's PR target
+// sets it, so each of the test's three idle retirements waits seconds rather
+// than half a minute; the nightly proxied_idle_timeout_realtime_test target
+// leaves it unset. Every assertion is relative to the value in force (the
+// sidecar, the proxy's argv, bd's "idleWatcher expired after" line).
+const idleTimeoutUnderTestEnv = "GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT"
+
+// idleTimeoutUnderTest returns the idle timeout the test gives every scope:
+// idleTimeoutUnderTestEnv if it is set and not empty, else
+// defaultIdleTimeoutUnderTest. A set value that is not a duration of at least
+// minIdleTimeoutUnderTest fails the test rather than quietly running it at
+// the default.
+func idleTimeoutUnderTest(t *testing.T) time.Duration {
+	t.Helper()
+	raw := os.Getenv(idleTimeoutUnderTestEnv)
+	if raw == "" {
+		return defaultIdleTimeoutUnderTest
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < minIdleTimeoutUnderTest {
+		t.Fatalf("%s=%q: want a duration of at least %s (unset it for the %s default)",
+			idleTimeoutUnderTestEnv, raw, minIdleTimeoutUnderTest, defaultIdleTimeoutUnderTest)
+	}
+	return d
+}
+
+// minIdleTimeoutUnderTest keeps the timeout above the gap between two of the
+// test's back-to-back commands, so a proxy never retires between a command
+// and the read of the record it left.
+const minIdleTimeoutUnderTest = 5 * time.Second
+
+// idleRetireWait bounds one idle retirement under idleTimeout (T): bd's
+// sampled watcher exits T to 1.5T after the last connection it saw, and then
+// runs a shutdown GC before it removes proxy.pid.
+func idleRetireWait(idleTimeout time.Duration) time.Duration {
+	return idleTimeout*3/2 + 45*time.Second
+}
 
 func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	// Several idle retirements of a real proxy and Dolt child take minutes:
 	// not Tier A smoke material. Bazel's acceptance lane opts in and runs it
 	// as a target of its own (test/acceptance/BUILD.bazel).
 	helpers.RequireTopologyMatrix(t)
+	idleTimeout := idleTimeoutUnderTest(t)
+	retireWait := idleRetireWait(idleTimeout)
+	t.Logf("idle timeout under test: %s", idleTimeout)
 	bdPath, doltPath := requireProxiedTooling(t)
-	env := proxiedEnv(t, bdPath, doltPath).With(config.ProxiedIdleTimeoutEnv, idleTimeoutUnderTest.String())
+	env := proxiedEnv(t, bdPath, doltPath).With(config.ProxiedIdleTimeoutEnv, idleTimeout.String())
 
 	city := helpers.NewCity(t, env)
 	cityRoot := city.Dir
@@ -60,7 +96,7 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	}
 	const rigName = "testrig"
 
-	want := int(idleTimeoutUnderTest)
+	want := int(idleTimeout)
 	for label, scope := range map[string]string{"city": cityRoot, "rig": rigDir} {
 		var sidecar proxiedSidecar
 		readJSONFile(t, filepath.Join(scope, ".beads", "proxied_server_client_info.json"), &sidecar)
@@ -81,19 +117,19 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the rig proxy's argv: %v", err)
 	}
-	if policy := proxyendpoint.ArgvIdlePolicy(argv); policy.Kind != proxyendpoint.IdleFinite || policy.Timeout != idleTimeoutUnderTest {
-		t.Fatalf("rig proxy runs with %s (argv %q), want finite(%s)", policy, argv, idleTimeoutUnderTest)
+	if policy := proxyendpoint.ArgvIdlePolicy(argv); policy.Kind != proxyendpoint.IdleFinite || policy.Timeout != idleTimeout {
+		t.Fatalf("rig proxy runs with %s (argv %q), want finite(%s)", policy, argv, idleTimeout)
 	}
 
 	t.Run("reaped-after-the-idle-timeout", func(t *testing.T) {
 		start := time.Now()
-		waitForProxyRecordGone(t, proxyRoot, idleRetireWait)
+		waitForProxyRecordGone(t, proxyRoot, retireWait)
 		t.Logf("rig proxy retired %s after the last command", time.Since(start).Round(time.Second))
 		if leaked := waitForNoDoltProcesses(t, rigDir, 15*time.Second); len(leaked) > 0 {
 			t.Fatalf("the rig's proxy record is gone but its processes are not:\n%s", strings.Join(leaked, "\n"))
 		}
-		if n := countIdleExits(t, rigDir); n == 0 {
-			t.Fatalf("no %q line in the rig's proxy.log", "idleWatcher expired after "+idleTimeoutUnderTest.String())
+		if n := countIdleExits(t, rigDir, idleTimeout); n == 0 {
+			t.Fatalf("no %q line in the rig's proxy.log", "idleWatcher expired after "+idleTimeout.String())
 		}
 	})
 
@@ -122,11 +158,11 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	})
 
 	t.Run("read-in-the-exit-window", func(t *testing.T) {
-		before := countIdleExits(t, rigDir)
-		deadline := time.Now().Add(idleRetireWait)
-		for countIdleExits(t, rigDir) == before {
+		before := countIdleExits(t, rigDir, idleTimeout)
+		deadline := time.Now().Add(retireWait)
+		for countIdleExits(t, rigDir, idleTimeout) == before {
 			if time.Now().After(deadline) {
-				t.Fatalf("the restarted proxy did not reach its idle exit within %s", idleRetireWait)
+				t.Fatalf("the restarted proxy did not reach its idle exit within %s", retireWait)
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -145,9 +181,9 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	})
 
 	t.Run("doctor-on-the-stopped-city-starts-nothing", func(t *testing.T) {
-		waitForProxyRecordGone(t, proxyRoot, idleRetireWait)
+		waitForProxyRecordGone(t, proxyRoot, retireWait)
 		for _, root := range []string{cityRoot, rigDir} {
-			if leaked := waitForNoDoltProcesses(t, root, idleRetireWait); len(leaked) > 0 {
+			if leaked := waitForNoDoltProcesses(t, root, retireWait); len(leaked) > 0 {
 				t.Fatalf("processes under %s did not retire:\n%s", root, strings.Join(leaked, "\n"))
 			}
 		}
@@ -200,11 +236,11 @@ func waitForProxyRecordGone(t *testing.T, proxyRoot string, timeout time.Duratio
 	}
 }
 
-// countIdleExits counts bd's idle-exit lines in every proxy.log under a
-// scope's .beads directory.
-func countIdleExits(t *testing.T, scopeRoot string) int {
+// countIdleExits counts bd's idle-exit lines for idleTimeout in every
+// proxy.log under a scope's .beads directory.
+func countIdleExits(t *testing.T, scopeRoot string, idleTimeout time.Duration) int {
 	t.Helper()
-	needle := "idleWatcher expired after " + idleTimeoutUnderTest.String()
+	needle := "idleWatcher expired after " + idleTimeout.String()
 	count := 0
 	err := filepath.WalkDir(filepath.Join(scopeRoot, ".beads"), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || d.Name() != "proxy.log" {

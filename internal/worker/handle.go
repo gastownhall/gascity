@@ -41,6 +41,9 @@ type LifecycleHandle interface {
 	// no live turn to suspend (notably draining), which a targeted operator Stop
 	// must keep rejecting.
 	StopForShutdown(context.Context) error
+	// StopIdle is Stop for the chat idle auto-suspend: the operator's
+	// transition rules, no operator hold.
+	StopIdle(context.Context) error
 	Kill(context.Context) error
 	Close(context.Context) error
 	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)

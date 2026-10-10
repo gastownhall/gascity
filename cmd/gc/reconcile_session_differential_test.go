@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,8 +71,11 @@ type parityFixture struct {
 	Behaviors []string
 	Rows      []parityRow
 	Work      []parityRow
-	Runtimes  []simRuntime
-	City      func() *config.City
+	// Rig seeds the rig leg: census-only rows, which legacy's ticks read as a
+	// rig work store and v2's census as a leg (timeline fixtures only).
+	Rig      []parityRow
+	Runtimes []simRuntime
+	City     func() *config.City
 	// Drains is a drain requested at generation 1, by row ID to reason:
 	// legacy's drain tracker holds it, and the row its v2 stop request
 	// (CONTRACT v5 D1), which legacy ignores. Legacy's outcome projects its
@@ -96,6 +101,14 @@ type parityEntry struct {
 // parityAccepted are CONTRACT v5 §12.2's items the fixtures show; the rest
 // come with the arms that own them (#6 with A3, #15-#17 with A21).
 var parityAccepted = map[string]parityEntry{
+	"§12.2#37 current-bead-lag": {
+		"CONTRACT v5 §12.2 #37 (A6; mc-d4atw)", "v2 stamps currently_processing_bead_id one pass after legacy: A6 decides on the pass's read and stamps only rows AL1 wants awake, so a row whose quarantine just cleared is stamped a pass later",
+		[]string{session.CurrentBeadIDKey},
+	},
+	"§12.2#35 fenced-timer-heal": {
+		"CONTRACT v5 §12.2 #35 (A2 before A6; mc-uyclc)", "an expired quarantine is not cleared while a kill fence is live: v2 holds the row until the fence expires; legacy clears it (and zeroes wake_attempts and churn_count) under the live fence",
+		[]string{"quarantined_until", "wake_attempts", "churn_count"},
+	},
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
@@ -130,6 +143,12 @@ var parityFindings = map[string]parityEntry{
 		"C6d, BEHAVIORS DRAIN-044", "legacy cancels an idle-respawn drain no longer eligible; A19 holds it until C6d completes its policy row",
 		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
+	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy", []string{"state"}},
+	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
+	"stability-accrual": {
+		"DIF-L1, BEHAVIORS SESS-537/538 (S3 abandon table + S6 #46)", "legacy counts a death inside the 30s stability threshold as a wake failure and one before the productivity threshold as churn (quarantining it); no v2 arm or effect accrues either, yet §12.2 row 18 claims them",
+		[]string{"wake_attempts", "churn_count", "quarantined_until", "sleep_reason"},
+	},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
@@ -139,6 +158,10 @@ var parityUnported = map[string]parityEntry{
 	"A18 start":       {"C5a1 (#7320, #7321), C5b", "legacy starts a wanted row in the same tick; v2 registers no start arm yet", parityStartKeys},
 	"A21 close":       {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A21 stranded":    {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
+	"A7 identity":     {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
+	"A20 idle-sleep":  {"C6a2, BEHAVIORS SESS-532", "legacy drains an idle row (its probe answers idle) and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input; v2 registers no drain-policy arm yet", []string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at"}},
+	"A20 drain-begin": {"C6a2 (A20 + D2)", "legacy begins a drain v2 does not: on a live row its quarantine keeps from waking (canceled again once its work vetoes it), on an unwanted row past the INC-003 grace, and on a managed suspend; v2 registers no drain-begin arm yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
+	"A21 killed-seat": {"C5c1 (#7314), owner ruling B1 (CONTRACT C3 killed pool seats)", "past the kill grace legacy releases a killed seat's open claim and closes it, and the freed demand creates and starts a fresh seat; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
@@ -239,7 +262,7 @@ func (p twinProvider) actions() map[string]int {
 // place puts f's runtimes on p, each under its row's session name.
 func (f parityFixture) place(p *simProvider) {
 	for _, rt := range f.Runtimes {
-		for _, b := range f.Rows {
+		for _, b := range append(slices.Clone(f.Rows), f.Rig...) {
 			if b.ID == rt.id {
 				p.put(b.Metadata["session_name"], rt.id, rt.epoch, rt.token)
 				placed := *p.rts[b.Metadata["session_name"]]
@@ -270,6 +293,9 @@ type parityOutcome struct {
 	work    map[string]beads.Bead // other beads by ID
 	actions map[string]int
 	events  map[string]int // "type subject [payload keys]"
+	// payloads are the events with their payloads' values, "type subject
+	// {json}", for the timeline differential.
+	payloads map[string]int
 }
 
 // parityRandom are metadata keys whose values each side mints at random; only
@@ -277,12 +303,19 @@ type parityOutcome struct {
 var parityRandom = map[string]bool{"instance_token": true}
 
 func newParityOutcome(all []beads.Bead, sp twinProvider, rec *memRecorder) parityOutcome {
-	out := parityOutcome{rows: map[string]beads.Bead{}, work: map[string]beads.Bead{}, actions: sp.actions(), events: map[string]int{}}
+	out := parityOutcome{rows: map[string]beads.Bead{}, work: map[string]beads.Bead{}, actions: sp.actions(), events: map[string]int{}, payloads: map[string]int{}}
 	for _, b := range all {
 		b.Metadata = maps.Clone(b.Metadata)
 		for k, v := range b.Metadata {
 			if parityRandom[k] && v != "" {
 				b.Metadata[k] = "<set>"
+			}
+			// The runtime lease record's epoch is a holder's bookkeeping
+			// (SESSION-RUNTIME-012): legacy's start takes one, and v2 takes
+			// its own per effect (PR B). A released record's cleared keys
+			// are too; a held one still differs, which is a leaked lease.
+			if strings.HasPrefix(k, "runtime_lease_") && (k == session.RuntimeLeaseEpochKey || v == "") {
+				delete(b.Metadata, k)
 			}
 		}
 		if slices.Contains(b.Labels, session.LabelSession) || b.Type == session.BeadType {
@@ -296,6 +329,8 @@ func newParityOutcome(all []beads.Bead, sp twinProvider, rec *memRecorder) parit
 		var payload map[string]any
 		_ = json.Unmarshal(e.Payload, &payload)
 		out.events[fmt.Sprintf("%s %s %v", e.Type, e.Subject, slices.Sorted(maps.Keys(payload)))]++
+		values, _ := json.Marshal(payload) // map keys marshal sorted
+		out.payloads[fmt.Sprintf("%s %s %s", e.Type, e.Subject, values)]++
 	}
 	rec.mu.Unlock()
 	return out
@@ -353,20 +388,31 @@ type legacyWorld struct {
 	clk      *clock.Fake
 	rec      *memRecorder
 	dt       *drainTracker
+	rigs     map[string]beads.Store // the rig work stores a timeline fixture seeds; nil otherwise
+	dops     drainOps
+	stops    asyncStartTracker // the drain-ack's async stops, as the controller's asyncStops
+	pokes    *atomic.Int64     // the async stops' completion pokes, when the timeline counts them
 }
 
 func newLegacyWorld(f parityFixture, cityPath string, rows []beads.Bead) *legacyWorld {
 	sessionCircuitBreakerMu.Lock()
 	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
 	sessionCircuitBreakerMu.Unlock()
-	sim := &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: func() time.Time { return parityNow }}
+	clk := &clock.Fake{Time: parityNow}
+	sim := &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: clk.Now}
 	f.place(sim)
 	w := &legacyWorld{
 		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, nil), sp: twinProvider{sim},
-		clk: &clock.Fake{Time: parityNow}, rec: &memRecorder{}, dt: newDrainTracker(),
+		clk: clk, rec: &memRecorder{}, dt: newDrainTracker(),
 	}
+	w.dops = newDrainOps(w.sp)
 	for id, reason := range f.Drains {
-		w.dt.set(id, &drainState{startedAt: parityDrainAt, reason: reason, generation: 1})
+		// The drain's basis is the seeded row, as beginSessionDrainInfo records it.
+		var basis session.Decided
+		if i := slices.IndexFunc(rows, func(b beads.Bead) bool { return b.ID == id }); i >= 0 {
+			basis = session.Decide(sessionInfoFromBead(rows[i]), session.FactsLegacyStopPending)
+		}
+		w.dt.set(id, &drainState{startedAt: parityDrainAt, reason: reason, generation: 1, basis: basis})
 	}
 	return w
 }
@@ -391,10 +437,18 @@ func (w *legacyWorld) projectDrains(all []beads.Bead) {
 	}
 }
 
+// list is the city store's beads, then each rig store's.
 func (w *legacyWorld) list(t *testing.T) []beads.Bead {
 	all, err := w.store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, rig := range slices.Sorted(maps.Keys(w.rigs)) {
+		rows, err := w.rigs[rig].List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, rows...)
 	}
 	return all
 }
@@ -408,25 +462,116 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := buildDesiredStateWithSessionBeadsAt(cfg.Workspace.Name, w.cityPath, now, now, cfg, w.sp, w.store, nil, snap, nil, io.Discard)
+	if reconcile {
+		// tickFinalizeDrainAckStopPending runs before the demand build.
+		finalizeDrainAckStopPendingSessions(w.cityPath, cfg, w.sp, beads.SessionStore{Store: w.store}, w.rigs, snap.OpenInfos(), w.dops, w.dt, &w.stops, w.clk, w.rec, io.Discard)
+		w.stops.wg.Wait()
+		if snap, err = loadSessionBeadSnapshot(w.store); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := buildDesiredStateWithSessionBeadsAt(cfg.Workspace.Name, w.cityPath, now, now, cfg, w.sp, w.store, w.rigs, snap, nil, io.Discard)
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cfg.Workspace.Name, snap)
-	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, nil, result.State, w.sp, cfgNames, cfg, w.clk, io.Discard, true, snap, nil)
+	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, w.rigs, result.State, w.sp, cfgNames, cfg, w.clk, io.Discard, true, snap, nil)
 	if !reconcile {
 		return
 	}
+	// beadReconcileTick (city_runtime.go), in its order: the orphan release
+	// over the wake candidates, the pool demand, the undesired-pool sweep,
+	// then the reconciler with the controller's inputs (the assigned work
+	// filtered for wake with its ready flags and legs, real drain ops, and
+	// the drain-ack's async stop tracker).
 	open := updated.OpenInfos()
-	work := filterAssignedWorkBeadsForPoolDemand(cfg, w.cityPath, w.store, open, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
-	poolDesired := retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(ComputePoolDesiredStatesAt(cfg, work, open, result.ScaleCheckCounts, now)),
-		updated, effectivePoolPartialRetentionTemplates(result))
+	assigned, refs, stores := result.AssignedWorkBeads, result.AssignedWorkStoreRefs, result.AssignedWorkStores
+	preWake, preWakeRefs := filterAssignedWorkBeadsForSessionWake(cfg, w.cityPath, w.store, open, assigned, refs)
+	result.AssignedWorkBeads = assigned
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(w.store, beads.SessionStore{Store: w.store}, cfg, w.cityPath, open, result, w.rigs, protectedWakeWorkKeys(preWake, preWakeRefs), nil); len(released) > 0 {
+		emitDeadAssigneeReopenedEvents(w.rec, assigned, released, now)
+		assigned, refs, stores = filterReleasedAssignedWorkSnapshot(assigned, refs, stores, released)
+	}
+	poolDesired := result.PoolDesiredCounts
+	if poolDesired == nil {
+		work := filterAssignedWorkBeadsForPoolDemand(cfg, w.cityPath, w.store, open, assigned, refs)
+		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(ComputePoolDesiredStatesAt(cfg, work, open, result.ScaleCheckCounts, now)),
+			updated, effectivePoolPartialRetentionTemplates(result))
+	}
 	if poolDesired == nil {
 		poolDesired = map[string]int{}
 	}
 	mergeNamedSessionDemand(poolDesired, result.NamedSessionDemand, cfg)
+	if sweepUndesiredPoolSessionBeads(w.cityPath, beads.SessionStore{Store: w.store}, w.rigs, updated, result.State, cfg, w.sp, result.snapshotQueryPartial(), w.clk) > 0 {
+		if updated, err = loadSessionBeadSnapshot(w.store); err != nil {
+			t.Fatal(err)
+		}
+		open = updated.OpenInfos()
+	}
+	gates := w.gateIdleProbes()
+	awake, awakeRefs, awakeStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, w.cityPath, w.store, open, assigned, refs, stores)
 	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store,
-		nil, result.AssignedWorkBeads, nil, nil, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
-		result.snapshotQueryPartial(), nil, cfg.Workspace.Name, nil, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
+		w.dops, awake, w.rigs, nil, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
+		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, nil, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,
+		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
+		withAsyncDrainAckStopTracker(&w.stops),
 		withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
+	for _, gate := range gates {
+		close(gate)
+	}
+	w.awaitIdleProbes(t)
+	w.stops.wg.Wait()
+}
+
+// followUp reports, and consumes, the controller's reasons for an
+// immediate follow-up tick: a deferred drain signal
+// (requestDeferredDrainFollowUpTick), or a drain-ack async stop's
+// completion poke (drainAckAsyncStopPokeController), which pokes counts.
+func (w *legacyWorld) followUp(pokesBefore int64) bool {
+	return w.dt.consumeFollowUpTick() || w.pokes != nil && w.pokes.Load() != pokesBefore
+}
+
+// pokesNow is the async stops' completion pokes so far.
+func (w *legacyWorld) pokesNow() int64 {
+	if w.pokes == nil {
+		return 0
+	}
+	return w.pokes.Load()
+}
+
+// gateIdleProbes holds every idle probe the fake answers until the tick
+// ends, as a real probe outlasts the tick that launched it; a probe that
+// finished inside its own tick would make the drain's begin tick a race.
+// The gate is deliberate: the probe's verdict lands a tick (a patrol in the
+// timeline) after its launch, so a timeline's legacy idle drain begins a
+// patrol late against an idle probe that answered at once. C6a2's
+// comparison of idle-drain begin times allows ±1 patrol for it.
+func (w *legacyWorld) gateIdleProbes() []chan struct{} {
+	// No probe runs between ticks, so the maps need no lock here.
+	var gates []chan struct{}
+	for name := range w.sp.WaitForIdleErrors {
+		gate := make(chan struct{})
+		w.sp.WaitForIdleGates[name] = gate
+		gates = append(gates, gate)
+	}
+	return gates
+}
+
+// awaitIdleProbes waits out the idle probes a tick launched, their gates
+// open: they finish on goroutines of the tick's, so the next tick sees each
+// probe finished whatever the scheduler does. It yields rather than sleeps;
+// simGuard turns a hang into a failure.
+func (w *legacyWorld) awaitIdleProbes(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(simGuard); ; goruntime.Gosched() {
+		w.dt.mu.Lock()
+		pending := slices.ContainsFunc(slices.Collect(maps.Values(w.dt.idleProbes)), func(p *idleProbeState) bool { return p != nil && !p.ready })
+		w.dt.mu.Unlock()
+		if !pending {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an idle probe never finished")
+		}
+	}
 }
 
 // sameParityBead is sameBead plus the type and assignee.
@@ -465,18 +610,56 @@ func (f parityFixture) converged(t *testing.T, cityPath string) []beads.Bead {
 // no provider verb.
 func legacyParity(t *testing.T, f parityFixture, cityPath string, rows []beads.Bead) parityOutcome {
 	t.Helper()
-	w := newLegacyWorld(f, cityPath, cloneDiffBeads(rows))
-	for tick := 0; ; tick++ {
-		before, acted := w.list(t), w.sp.actions()
-		w.tick(t, true)
-		if after := w.list(t); slices.EqualFunc(before, after, sameParityBead) && maps.Equal(acted, w.sp.actions()) {
-			w.projectDrains(after)
-			return newParityOutcome(after, w.sp, w.rec)
-		}
+	return newLegacyWorld(f, cityPath, cloneDiffBeads(rows)).settle(t, f.Name)
+}
+
+// settle runs legacy ticks until one changes no bead and calls no provider
+// verb, and returns the outcome: the city store's beads, then each rig
+// store's.
+func (w *legacyWorld) settle(t *testing.T, name string) parityOutcome {
+	t.Helper()
+	for tick := 0; w.once(t); tick++ {
 		if tick == parityTicks {
-			t.Fatalf("%s: legacy reached no fixed point in %d ticks", f.Name, parityTicks)
+			t.Fatalf("%s: legacy reached no fixed point in %d ticks", name, parityTicks)
 		}
 	}
+	return w.outcome(t)
+}
+
+// once runs one tick and reports whether it changed a bead on any leg,
+// called a provider verb, or moved the drain tracker.
+func (w *legacyWorld) once(t *testing.T) bool {
+	before, acted, drains := w.list(t), w.sp.actions(), w.drains()
+	for i := 0; ; i++ {
+		pokes := w.pokesNow()
+		w.tick(t, true)
+		if !w.followUp(pokes) {
+			break
+		}
+		if i == parityTicks {
+			t.Fatalf("legacy asked for a follow-up tick %d times at %s", parityTicks, w.clk.Now())
+		}
+	}
+	return !slices.EqualFunc(before, w.list(t), sameParityBead) || !maps.Equal(acted, w.sp.actions()) || !maps.Equal(drains, w.drains())
+}
+
+// drains is the drain tracker's drains, rendered. Its idle probes are not:
+// a steady tick relaunches and consumes them.
+func (w *legacyWorld) drains() map[string]string {
+	w.dt.mu.Lock()
+	defer w.dt.mu.Unlock()
+	out := map[string]string{}
+	for id, ds := range w.dt.drains {
+		out[id] = fmt.Sprintf("%+v", *ds)
+	}
+	return out
+}
+
+// outcome is legacy's outcome now, its drain tracker projected onto the rows.
+func (w *legacyWorld) outcome(t *testing.T) parityOutcome {
+	all := w.list(t)
+	w.projectDrains(all)
+	return newParityOutcome(all, w.sp, w.rec)
 }
 
 // v2Parity runs copy B from rows on the simulator, every effect released at
@@ -484,49 +667,111 @@ func legacyParity(t *testing.T, f parityFixture, cityPath string, rows []beads.B
 // invariants hold throughout.
 func v2Parity(t *testing.T, f parityFixture, cityPath string, rows []beads.Bead) parityOutcome {
 	t.Helper()
+	return newV2World(t, f, cityPath, rows, nil, "", nil).settle(t, f.Name)
+}
+
+// v2World is copy B: the simulator, its provider and its recorder.
+type v2World struct {
+	s       *sim
+	sp      twinProvider
+	rec     *memRecorder
+	pending []string
+	legs    int // the legs an outcome lists: the city leg, or every leg once a rig is seeded
+	// lane runs K1's steps the timeline needs after each pass, as the
+	// controller's lane does: orphan release every pass, and the demand
+	// repairs every externalReadsRepairInterval since repaired.
+	lane     *externalReadsLane
+	repaired time.Time
+}
+
+// newV2World seeds rows on the city leg and rig on the rig leg, whose path is
+// rigPath when set, and moves the clock to parityNow. arms, when set, edits
+// the row arms (a v2-only mutant).
+func newV2World(t *testing.T, f parityFixture, cityPath string, rows, rig []beads.Bead, rigPath string, arms func([]rowArm) []rowArm) *v2World {
+	t.Helper()
 	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
 		f.place(s.sp)
-		return cloneDiffBeads(rows), nil
-	}})
+		return cloneDiffBeads(rows), cloneDiffBeads(rig)
+	}, arms: arms})
 	s.lag, s.env.CityPath = false, cityPath
 	sp := twinProvider{s.sp}
 	cfg := f.city()
 	cfg.Daemon.PatrolInterval, cfg.Daemon.ProbeConcurrency, cfg.Rigs = s.cfg.Daemon.PatrolInterval, s.cfg.Daemon.ProbeConcurrency, s.cfg.Rigs
+	if rigPath != "" {
+		cfg.Rigs[0].Path = rigPath
+	}
 	*s.cfg = *cfg
 	s.env.Env().SP = sp
-	rec := &memRecorder{}
-	s.p.rec = rec
+	w := &v2World{s: s, sp: sp, rec: &memRecorder{}, pending: f.Pending, legs: 1}
+	if rig != nil {
+		w.legs = len(s.legs)
+	}
+	s.p.rec = w.rec
 	creates, err := newCreateEffects(createEffectHost{cityPath: cityPath, cityName: s.env.CityName, lookPath: s.env.LookPath, now: s.clk.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.p.creates = creates
+	w.lane = newExternalReadsLane(simPatrol, s.env.externalReadsEnv, nil, nil, w.rec, io.Discard)
+	w.lane.now = s.clk.Now
+	w.lane.addPoolSteps(s.p.out.summary.Load, nil)
 	s.advance(parityNow.Sub(s.clk.Now()))
-	for pass := 0; ; pass++ {
-		before := s.snapshot()
-		s.inventory()
-		for _, id := range f.Pending {
-			s.lane.cache.Note("s-"+id, FactPending, ObsYes, s.clk.Now(), SourceProbe, "")
-		}
-		s.pass()
-		admitted := intentKeys(s.p.out.record.Load().Admitted)
-		for len(s.parked) > 0 {
-			s.release(0)
-		}
-		s.audit("v2")
-		if len(admitted) == 0 && maps.EqualFunc(before, s.snapshot(), sameParityBead) {
-			break
-		}
+	return w
+}
+
+// settle runs passes, every effect released at once, until one admits
+// nothing and writes nothing. The simulator's invariants hold throughout.
+func (w *v2World) settle(t *testing.T, name string) parityOutcome {
+	t.Helper()
+	for pass := 0; w.once(t); pass++ {
 		if pass == parityTicks {
-			t.Fatalf("%s: v2 reached no fixed point in %d passes: admitted %v", f.Name, parityTicks, admitted)
+			t.Fatalf("%s: v2 reached no fixed point in %d passes", name, parityTicks)
 		}
 	}
-	s.noViolations(t)
-	all, err := s.legs[0].backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
-	if err != nil {
-		t.Fatal(err)
+	return w.outcome(t)
+}
+
+// once runs one pass, every effect released at once, and reports whether it
+// admitted an intent or changed a bead.
+func (w *v2World) once(t *testing.T) bool {
+	s := w.s
+	before := s.snapshot()
+	s.inventory()
+	for _, id := range w.pending {
+		s.lane.cache.Note("s-"+id, FactPending, ObsYes, s.clk.Now(), SourceProbe, "")
 	}
-	return newParityOutcome(all, sp, rec)
+	s.pass()
+	admitted := intentKeys(s.p.out.record.Load().Admitted)
+	for len(s.parked) > 0 {
+		s.release(0)
+	}
+	env, err := s.env.externalReadsEnv()
+	if err != nil {
+		t.Fatalf("v2 lane env: %v", err)
+	}
+	w.lane.orphanRelease(context.Background(), env)
+	if now := s.clk.Now(); w.repaired.IsZero() || now.Sub(w.repaired) >= externalReadsRepairInterval {
+		runBackstopDemandRepairs(context.Background(), env, io.Discard)
+		w.repaired = now
+	}
+	s.audit("v2")
+	return len(admitted) > 0 || !maps.EqualFunc(before, s.snapshot(), sameParityBead)
+}
+
+// outcome is v2's outcome now; the simulator's invariants must hold.
+func (w *v2World) outcome(t *testing.T) parityOutcome {
+	t.Helper()
+	s := w.s
+	s.noViolations(t)
+	var all []beads.Bead
+	for _, l := range s.legs[:w.legs] {
+		rows, err := l.backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, rows...)
+	}
+	return newParityOutcome(all, w.sp, w.rec)
 }
 
 // parityEntryOf finds id in the three tables.
@@ -540,15 +785,20 @@ func parityEntryOf(id string) (table string, e parityEntry, ok bool) {
 }
 
 // explains is the Explain key that accounts for aspect: the aspect itself,
-// or a wildcard "row:<id>:*<label>" whose entry lists the aspect's field.
+// or a wildcard "row:<id>:*<label>" whose entry lists the aspect's field. A
+// timeline fixture's aspect and key may lead with "@<step> ".
 func (f parityFixture) explains(aspect string) (string, bool) {
 	if _, ok := f.Explain[aspect]; ok {
 		return aspect, true
 	}
 	i := strings.LastIndex(aspect, ":")
 	for _, key := range slices.Sorted(maps.Keys(f.Explain)) {
-		if prefix, _, wild := strings.Cut(key, "*"); wild && strings.HasPrefix(aspect, "row:") && prefix == aspect[:i+1] {
-			if _, e, ok := parityEntryOf(f.Explain[key]); ok && slices.Contains(e.keys, aspect[i+1:]) {
+		if prefix, _, wild := strings.Cut(key, "*"); wild && (strings.Contains(prefix, "row:") || strings.Contains(prefix, "work:")) && prefix == aspect[:i+1] {
+			field := aspect[i+1:]
+			if strings.HasPrefix(field, "core_hash_breakdown.") { // a breakdown field is the breakdown's
+				field = "core_hash_breakdown"
+			}
+			if _, e, ok := parityEntryOf(f.Explain[key]); ok && slices.Contains(e.keys, field) {
 				return key, true
 			}
 		}
@@ -639,18 +889,30 @@ func parityFixtures() []parityFixture {
 			Explain: explain(nil),
 		},
 		{
-			Name: "an expired hold heals on a suspended row and keeps the suspend", Behaviors: []string{"INC-024"},
-			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
-			Explain: map[string]string{"row:gc-1:*close": "A21 close", "row:gc-1:*sync": "A7 row-metadata"},
+			// The undesired-pool sweep (MAINT-051) closes a workless dead pool
+			// row before the reconciler heals its expired hold.
+			Name: "a workless suspended pool row is swept before its hold heals", Behaviors: []string{"MAINT-051"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
+			Explain: map[string]string{
+				"row:gc-1:*close": "A21 close", "row:gc-1:*sync": "A7 row-metadata", "row:gc-1:held_until": "A21 close", "row:gc-1:sleep_reason": "A21 close",
+			},
+		},
+		{
+			// In a suspended city: legacy heals the expired hold from a fresh
+			// snapshot (SESS-009), then its state heal (SESS-531) turns the
+			// row asleep; v2 heals the hold and keeps the suspend.
+			Name: "a suspended named row's expired hold heals, and legacy turns it asleep", Behaviors: []string{"SESS-009", "SESS-531"}, City: chat(true),
+			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:state": "suspended-named-heal"},
 		},
 		{
 			Name: "an unknown state is skipped", Behaviors: []string{"SESS-044", "SESS-045"},
-			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "archived-v9")},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "archived-v9")}, Work: assigned,
 			Explain: map[string]string{"row:gc-1:*marker": "unknown-state-diagnostic", "event:session.unknown_state gc-1 [escalated first_seen session_id session_name state]": "unknown-state-diagnostic", "event:reconciler.alert gc-1 [alert]": "unknown-state-diagnostic"},
 		},
 		{
 			Name: "an unknown state first seen 31 minutes ago", Behaviors: []string{"SESS-046"},
-			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "archived-v9", "unknown_state_first_seen", at(-31*time.Minute), "unknown_state_value", "archived-v9")},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "archived-v9", "unknown_state_first_seen", at(-31*time.Minute), "unknown_state_value", "archived-v9")}, Work: assigned,
 			Explain: map[string]string{"row:gc-1:*marker": "unknown-state-diagnostic", "event:session.unknown_state gc-1 [escalated first_seen session_id session_name state]": "unknown-state-diagnostic", "event:reconciler.alert gc-1 [alert]": "unknown-state-diagnostic"},
 		},
 		{
@@ -728,6 +990,7 @@ func parityFixtures() []parityFixture {
 			Explain: explain(map[string]string{
 				"row:gc-1:*r16": "§12.2#3 R16", "provider:SetMeta s-gc-1": "§12.2#3 R16", "provider:Stop s-gc-1": "§12.2#3 R16",
 				"provider:Start s-gc-1": "§12.2#3 R16", "provider:RemoveMeta s-gc-1": "§12.2#3 R16", "event:session.woke worker-1 []": "§12.2#3 R16",
+				"event:session.drain_acked_with_assigned_work worker [bead_id bead_status reason session_id template]": "§12.2#3 R16", "event:session.stopped worker [reason session_id template]": "§12.2#3 R16",
 			}),
 		},
 		{
@@ -782,7 +1045,11 @@ func TestSessionDifferentialFixtures(t *testing.T) {
 // unported entry's owner is still unregistered.
 func TestSessionDifferentialEntriesHaveFixtures(t *testing.T) {
 	shown := map[string]bool{}
-	for _, f := range parityFixtures() {
+	fixtures := parityFixtures()
+	for _, f := range timelineFixtures() {
+		fixtures = append(fixtures, f.parityFixture)
+	}
+	for _, f := range fixtures {
 		for _, id := range f.Explain {
 			shown[id] = true
 		}
@@ -1080,5 +1347,19 @@ func createIntent() {}
 	write(kinds + "var rowArms = []rowArm{{\"A1\", armFake}}\nfunc armFake() { launch() }\nfunc launch() { _ = intentLaunch }\n")
 	if got := gate(); !maps.Equal(got, map[string]string{"FAKE-1": "S1 fake start (PreWake)"}) {
 		t.Fatalf("with a proposing arm the gate binds %v, want FAKE-1 only", got)
+	}
+}
+
+// Kills a step-blind Explain lookup: a key scoped to one step accounts for
+// its aspect at that step only.
+func TestTimelineExplainsAreStepScoped(t *testing.T) {
+	f := parityFixture{Explain: map[string]string{"@crash row:gc-1:*start": "A18 start", "@crash runtime:s-gc-1": "A18 start"}}
+	for aspect, want := range map[string]bool{
+		"@crash row:gc-1:generation": true, "@crash runtime:s-gc-1": true, "@crash row:gc-1:core_hash_breakdown.Command": true,
+		"@seed row:gc-1:generation": false, "@seed runtime:s-gc-1": false, "@crash row:gc-1:alias": false, "row:gc-1:generation": false,
+	} {
+		if _, got := f.explains(aspect); got != want {
+			t.Errorf("explains(%q) = %t, want %t", aspect, got, want)
+		}
 	}
 }

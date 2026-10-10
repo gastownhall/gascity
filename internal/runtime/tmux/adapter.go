@@ -126,6 +126,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if errors.Is(err, ErrServerDegraded) {
 		return err
 	}
+	if errors.Is(err, runtime.ErrSessionExists) {
+		// The name was already held, so this attempt created nothing of its
+		// own to tear down. The held session may postdate the cache's last
+		// list, so drop that snapshot.
+		p.cache.Invalidate()
+		return err
+	}
 	p.cleanupFailedStart(name, cfg)
 	return err
 }
@@ -231,6 +238,11 @@ func newInstanceToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// cleanupFailedStart tears down the session of a Start that failed after this
+// attempt created it. Call it only then, never for a refusal of a name that was
+// already held: the GC_INSTANCE_TOKEN fence it relies on is per bead, so a
+// session another attempt at the same bead started under that name carries the
+// same token and would read as this attempt's own.
 func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 	instanceToken := strings.TrimSpace(cfg.Env["GC_INSTANCE_TOKEN"])
 	if instanceToken == "" {

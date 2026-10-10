@@ -108,6 +108,9 @@ type World struct {
 	// ref is Census.sessionsLeg().
 	SessionsStore beads.Store
 	RigStores     map[string]beads.Store
+	// fresh is one row's fresh runtime read, which the fresh accessors read
+	// in its pass's stead (withRuntime): set only inside an effect.
+	fresh *freshRow
 }
 
 // gather builds the pass's World at now. It first drains the settlements

@@ -46,14 +46,23 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		if b.Status == "closed" {
 			return nil, false
 		}
+		// The kill clears a user-hold intent (SleepPatch); its held_until goes
+		// too, so no heartbeat-shaped hold is left behind.
+		write := make(map[string]string, len(patch)+1)
+		for key, value := range patch {
+			write[key] = value
+		}
+		if session.Holds(b.Metadata, now).In&session.HoldUser != 0 {
+			write["held_until"] = ""
+		}
 		// Capture the pre-image from the same observation the fenced write is
 		// conditioned on, so a rollback restores the row the kill replaced.
-		restore := make(map[string]string, len(patch))
-		for key := range patch {
+		restore := make(map[string]string, len(write))
+		for key := range write {
 			restore[key] = b.Metadata[key]
 		}
 		fence.restore = restore
-		return patch, true
+		return write, true
 	})
 	if err != nil {
 		return nil, err

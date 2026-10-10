@@ -23,6 +23,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/clock",
         "//internal/convergence",
         "//internal/events",
         "//internal/execenv",

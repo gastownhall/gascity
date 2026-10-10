@@ -15,10 +15,11 @@ import (
 // Each is bounded, and an unknown answer holds.
 
 // txWork is L5 read live: the row's open or in-progress assigned work over
-// every store its agent can reach. A failed or expired read counts as work.
+// every store its agent can reach. Only a clean read proves Free; a failed
+// or expired read, and the zero value, count as work.
 type txWork struct {
-	Has bool
-	Err error
+	Free bool // proven: no open or in-progress assigned work
+	Err  error
 }
 
 // errNoReadStore: the pass holds no city store to read L5 through.
@@ -37,38 +38,45 @@ func (t *tx) readFence(ctx context.Context) string {
 			return causeRouteUnknown
 		}
 	}
-	f := txFence{}
-	if t.needs.Legs&legAttach != 0 {
-		f.Attach, _ = attachLeg(ctx, leaf, t.name, false, t.view.Now)
+	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect) })
+	return ""
+}
+
+// readLegs reads the legs and the idle proof n asks for, for name on leaf:
+// L3 and L4 fresh on the leaf, L5 through work, each bounded; now stamps the
+// quiet window, passNow the idle proof's pass.
+func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, now, passNow time.Time, work func() *txWork) txFence {
+	f := txFence{Read: n.Legs & (legAttach | legPending | legWork)}
+	if n.Legs&legAttach != 0 {
+		f.Attach, f.AttachEscalate = attachLeg(ctx, leaf, name, n.Escalates, now)
 	}
-	if t.needs.Legs&legPending != 0 {
-		switch boundedPending(ctx, leaf, t.name) {
+	if n.Legs&legPending != 0 {
+		switch boundedPending(ctx, leaf, name) {
 		case pendingInteractionYes:
 			f.Pending = fencePending
 		case pendingInteractionUnknown:
 			f.Pending = fencePendingUnknown
 		}
 	}
-	if t.needs.Legs&legWork != 0 {
-		w, ok := boundedProbe(ctx, func() *txWork { return t.p.readWork(t.expect) })
+	if n.Legs&legWork != 0 {
+		w, ok := boundedProbe(ctx, work)
 		if !ok {
-			w = &txWork{Has: true, Err: errProbeExpired}
+			w = &txWork{Err: errProbeExpired}
 		}
 		f.Work = w
 	}
-	if t.needs.Idle {
-		f.Idle = provedIdle(ctx, leaf, t.name, t.view.World.Now)
+	if n.Idle {
+		f.Idle = provedIdle(ctx, leaf, name, passNow)
 	}
-	t.view.Fence = f
-	return ""
+	return f
 }
 
 func (p *effectPass) readWork(row session.Info) *txWork {
 	if p.reads.city == nil || p.World.Env == nil {
-		return &txWork{Has: true, Err: errNoReadStore}
+		return &txWork{Err: errNoReadStore}
 	}
 	has, err := sessionHasOpenAssignedWorkForReachableStore(p.World.CityPath, p.World.Env.Cfg, p.reads.city, p.reads.rigs, row)
-	return &txWork{Has: has || err != nil, Err: err}
+	return &txWork{Free: !has && err == nil, Err: err}
 }
 
 // provedIdle is legacy's idle probe (shouldBeginIdleDrainInfo) on leaf:

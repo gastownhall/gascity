@@ -97,7 +97,7 @@ func TestAdvanceSessionDrains_LivenessUnavailableDefersOrdinaryDrainCompletion(t
 		t.Fatalf("Get before: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
@@ -682,7 +682,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessionpkg.Decide(sessiontest.SeedBead(t, session), sessionpkg.FactsLegacyStopPending), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with matching token: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessionpkg.Decide(sessiontest.SeedBead(t, session), sessionpkg.FactsLegacyStopPending), store, sp, nil)
 	if err == nil {
 		t.Error("expected error for mismatched token")
 	}
@@ -735,7 +735,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop(sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop("", sessionpkg.Decide(sessiontest.SeedBead(t, session), sessionpkg.FactsLegacyStopPending), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with no token: %v", err)
 	}
@@ -769,7 +769,7 @@ func verifiedStopTokenFixture(t *testing.T, readErr error) (beads.Store, *runtim
 func TestVerifiedStopDefersOnUnverifiableToken(t *testing.T) {
 	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("show-environment timed out: %w", runtime.ErrRuntimeUnavailable))
 
-	err := verifiedStop(info, store, sp, nil)
+	err := verifiedStop("", sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), store, sp, nil)
 	if !errors.Is(err, errTokenUnverifiable) || errors.Is(err, errTokenMismatch) {
 		t.Fatalf("verifiedStop error = %v, want errTokenUnverifiable (not errTokenMismatch)", err)
 	}
@@ -783,7 +783,7 @@ func TestVerifiedStopDefersOnUnverifiableToken(t *testing.T) {
 func TestVerifiedStopProceedsOnMetaUnsupported(t *testing.T) {
 	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("exec get-meta: %w", runtime.ErrMetaUnsupported))
 
-	if err := verifiedStop(info, store, sp, nil); err != nil {
+	if err := verifiedStop("", sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), store, sp, nil); err != nil {
 		t.Fatalf("verifiedStop error = %v, want nil on ErrMetaUnsupported", err)
 	}
 	if sp.IsRunning(info.SessionNameMetadata) {
@@ -959,7 +959,9 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	// No session running (process exited).
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -978,7 +980,7 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1023,16 +1025,11 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 	})
 
 	// Drain deadline already passed.
-	dt.set(b.ID, &drainState{
-		startedAt:  now.Add(-60 * time.Second),
-		deadline:   now.Add(-10 * time.Second),
-		reason:     "pool-excess",
-		generation: 3,
-	})
+	beginDrainForTest(t, store, dt, b.ID, "pool-excess", now.Add(-60*time.Second), now.Add(-10*time.Second))
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1079,7 +1076,7 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	// A desired pool slot still has WakeConfig, which should cancel the drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1136,7 +1133,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 
 	// Simulate next tick: wake reasons reappear (store recovered) → cancel drain.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1204,7 +1201,7 @@ func TestAdvanceSessionDrains_OrphanedDrainCanceledForAssignedWork(t *testing.T)
 		generation: 3,
 		ackSet:     true,
 	})
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		dt,
 		sp,
 		store,
@@ -1276,7 +1273,7 @@ func TestAdvanceSessionDrains_NoWakeDrainCanceledForAssignedWork(t *testing.T) {
 		generation: 3,
 		ackSet:     true,
 	})
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		dt,
 		sp,
 		store,
@@ -1368,7 +1365,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 
 	// Simulate next tick: wake reasons reappear → cancel drain before interrupt.
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1418,7 +1415,7 @@ func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	})
 
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1456,16 +1453,11 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 	})
 
 	// Drain deadline already passed.
-	dt.set(b.ID, &drainState{
-		startedAt:  now.Add(-60 * time.Second),
-		deadline:   now.Add(-10 * time.Second),
-		reason:     "pool-excess",
-		generation: 3,
-	})
+	beginDrainForTest(t, store, dt, b.ID, "pool-excess", now.Add(-60*time.Second), now.Add(-10*time.Second))
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)
@@ -1511,15 +1503,10 @@ func TestAdvanceSessionDrains_TimeoutUnverifiableTokenKeepsDrain(t *testing.T) {
 			"instance_token": "tok-a",
 		},
 	})
-	dt.set(b.ID, &drainState{
-		startedAt:  now.Add(-60 * time.Second),
-		deadline:   now.Add(-10 * time.Second),
-		reason:     "pool-excess",
-		generation: 3,
-	})
+	beginDrainForTest(t, store, dt, b.ID, "pool-excess", now.Add(-60*time.Second), now.Add(-10*time.Second))
 	trace := newPoolDesiredStateTestTrace("worker")
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, trace)
@@ -1553,7 +1540,9 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"last_woke_at": now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
@@ -1581,7 +1570,9 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name":        "test-session",
 			"wake_mode":           "fresh",
@@ -1615,7 +1606,9 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name":        "test-session",
 			"wake_mode":           "resume",
@@ -1646,7 +1639,9 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name":         "test-session",
 			"pending_create_claim": "true",
@@ -1687,7 +1682,7 @@ func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 		generation: 3,
 	})
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{
@@ -1731,7 +1726,7 @@ func TestAdvanceSessionDrains_ClearsIdleProbeOnCompletion(t *testing.T) {
 		t.Fatal("expected idle probe to start")
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
@@ -1809,4 +1804,16 @@ func TestClearMissingIdleProbes(t *testing.T) {
 	// Nil-tracker fast path: the reconciler may run without a drain tracker in
 	// reduced configurations, so the call must be a safe no-op.
 	clearMissingIdleProbes(nil, infoByID)
+}
+
+// beginDrainForTest begins a drain on id's row as stored, as the reconciler
+// does (beginSessionDrainInfo), started at startedAt with deadline; the row
+// it read is the drain's basis.
+func beginDrainForTest(t *testing.T, store beads.Store, dt *drainTracker, id, reason string, startedAt, deadline time.Time) *drainState {
+	t.Helper()
+	info := sessionInfoFromBead(mustGetBead(t, store, id))
+	if !beginSessionDrainInfo(info, nil, dt, reason, &clock.Fake{Time: startedAt}, deadline.Sub(startedAt)) {
+		t.Fatalf("a drain of %s was already tracked", id)
+	}
+	return dt.get(id)
 }

@@ -351,11 +351,21 @@ func TestConditionalWritesRequiredErrorIdentity(t *testing.T) {
 	}
 }
 
+// valueKindStore is a non-pointer Store, so the type-name fallback is pinned
+// for value types as well as pointers.
+type valueKindStore struct{ Store }
+
 func TestConditionalStoreKindFallsBackToTypeName(t *testing.T) {
 	t.Parallel()
-	s := &stampedNoCASStore{Store: NewMemStore()}
-	if got := conditionalStoreKind(s); !strings.Contains(got, "stampedNoCASStore") {
-		t.Fatalf("conditionalStoreKind = %q, want the %%T fallback naming the concrete type", got)
+	for _, s := range []Store{
+		&stampedNoCASStore{Store: NewMemStore()},
+		valueKindStore{Store: NewMemStore()},
+	} {
+		// Exactly the %T spelling: cmd/gc's conditionalWritesEventStoreKind
+		// matches it verbatim for the build-tagged *beads.DoltliteReadStore.
+		if got, want := conditionalStoreKind(s), fmt.Sprintf("%T", s); got != want {
+			t.Fatalf("conditionalStoreKind = %q, want the %%T spelling %q", got, want)
+		}
 	}
 }
 

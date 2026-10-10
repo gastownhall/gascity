@@ -52,6 +52,33 @@ func (w fencedWriter) front() (*session.Store, error) {
 	return sessionFrontDoor(blindWriteRefusingStore{inner: w.store}), nil
 }
 
+// leaseFront is the session front door a runtime lease takes the row's
+// record through: the refusing store whose reads of the row go to the
+// backing (leaseRowStore), so the lease's own fresh reads see past the
+// leg's cache, or errNoConditionalWriter.
+func (w fencedWriter) leaseFront() (*session.Store, error) {
+	if _, err := w.front(); err != nil {
+		return nil, err
+	}
+	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
+		return sessionFrontDoor(leaseRowStore{freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}}), nil
+	}
+	return sessionFrontDoor(w.freshStore()), nil
+}
+
+// leaseRowStore is freshRowStore for the lease's own reads (its acquire,
+// Watch and Release): a refresh a newer write fenced reads the backing
+// instead, for the lease decides nothing a lost race would make stale.
+type leaseRowStore struct{ freshRowStore }
+
+func (s leaseRowStore) Get(id string) (beads.Bead, error) {
+	b, err := s.freshRowStore.Get(id)
+	if errors.Is(err, beads.ErrRowRefreshFenced) {
+		return s.cache.Backing().Get(id)
+	}
+	return b, err
+}
+
 // closeFront is front for a close verb: it also requires the atomic
 // conditional closer.
 func (w fencedWriter) closeFront() (*session.Store, error) {

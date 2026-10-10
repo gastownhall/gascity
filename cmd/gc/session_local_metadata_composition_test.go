@@ -80,7 +80,7 @@ func TestReconcileSessionBeads_SetMarkerAndSetLocalStringCoexistOnSameSessionBea
 	session := env.createSessionBead("s-gc-coexist", "worker")
 
 	infoStore := sessionpkg.NewStore(beads.SessionStore{Store: env.store})
-	if err := infoStore.SetMarker(session.ID, "throttle_marker", "queued"); err != nil {
+	if err := infoStore.SetMarker(session.ID, "test_throttle_marker", "queued"); err != nil {
 		t.Fatalf("SetMarker: %v", err)
 	}
 	if err := env.store.SetLocalString(session.ID, "synced_at", "2026-07-14T00:00:00Z"); err != nil {
@@ -91,8 +91,8 @@ func TestReconcileSessionBeads_SetMarkerAndSetLocalStringCoexistOnSameSessionBea
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Metadata["throttle_marker"] != "queued" {
-		t.Fatalf("durable throttle_marker = %q, want SetMarker's durable write intact", got.Metadata["throttle_marker"])
+	if got.Metadata["test_throttle_marker"] != "queued" {
+		t.Fatalf("durable throttle_marker = %q, want SetMarker's durable write intact", got.Metadata["test_throttle_marker"])
 	}
 	if _, ok := got.Metadata["synced_at"]; ok {
 		t.Fatalf("durable Metadata leaked the clone-local synced_at key: %+v", got.Metadata)

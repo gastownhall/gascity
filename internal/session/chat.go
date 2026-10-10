@@ -408,6 +408,10 @@ var (
 	// session's runtime down (see KillPendingReason). The caller should retry
 	// once the kill completes and the lifecycle rules have taken over again.
 	ErrSessionKillPending = errors.New("session is being killed")
+	// ErrSessionStopping reports that the controller is stopping the
+	// session's runtime (a drain-ack stop pending). The caller should retry
+	// once the stop completes.
+	ErrSessionStopping = errors.New("session is stopping, retry")
 )
 
 type sessionMutationLockEntry struct {
@@ -530,6 +534,12 @@ func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, 
 	return epoch, nil
 }
 
+// drainAckStopPendingMetadata reports whether a row's drain-ack stop is
+// pending: the controller's stop owns its runtime (ErrSessionStopping).
+func drainAckStopPendingMetadata(meta map[string]string) bool {
+	return State(strings.TrimSpace(meta["state"])) == StateDraining && strings.TrimSpace(meta["state_reason"]) == DrainAckStopPendingReason
+}
+
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
 	// A kill-fenced row reads asleep while its runtime is still being torn
 	// down. Treating that runtime as live would flip the row back to active
@@ -538,6 +548,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// the input with the process. Starting a replacement would race the kill.
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	}
+	// Likewise a row whose drain-ack stop is pending: the controller's stop
+	// owns its runtime, and a resume that flipped it back to active would
+	// race that stop (CONTRACT v5.9a, as the kill fence). Every policy.
+	if drainAckStopPendingMetadata(b.Metadata) {
+		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
 	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
@@ -550,6 +566,18 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
+		// An operator's resume of a live row the operator holds (a suspend
+		// whose drain has not stopped it yet) consumes the hold too, under the
+		// runtime lease (tried, not waited for: a busy lease is the
+		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
+		if premise := liveUserHoldPremise(b.Metadata, policy, m.now()); premise != nil {
+			_, release, err := m.leaseRuntime(ctx, id, sessName, 0)
+			if err != nil {
+				return err
+			}
+			defer release()
+			return m.consumeUserHold(id, premise, m.now())
+		}
 		if err := m.confirmLiveSessionState(id, &b); err != nil {
 			return err
 		}
@@ -557,6 +585,24 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+	}
+	// The start runs under the runtime lease, taken before its first write
+	// (withSessionStartLock reruns this on busy), or under its caller's, and
+	// its calls stop once the lease lapses or moves.
+	lease, release, err := m.leaseRuntime(ctx, id, sessName, 0)
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
+	defer release()
+	if lease != nil {
+		var cancel context.CancelFunc
+		if ctx, cancel, err = lease.Watch(ctx, runtimeLeaseWatchEvery); err != nil {
+			return err
+		}
+		defer cancel()
 	}
 
 	cfg := hints
@@ -595,6 +641,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	// An operator's resume of a row the operator holds consumes the hold, but
+	// only once the runtime is up (resume_user_hold.go).
+	var holdPremise map[string]string
+	if policy == ResumeOperator {
+		holdPremise = userHoldPremise(b.Metadata, m.now())
+	}
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
 	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
@@ -668,6 +720,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
+	}
+	if holdPremise != nil {
+		return m.consumeUserHold(id, holdPremise, m.now())
 	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
@@ -966,7 +1021,11 @@ func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string
 	if !ok {
 		return false
 	}
-	if err := dp.DismissKnownDialogs(ctx, sessName, timeout); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+	switch err := dp.DismissKnownDialogs(ctx, sessName, timeout); {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		// A composite whose backend for this session cannot dismiss dialogs.
+		return false
+	case errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed):
 		log.Printf("session: %q: %v", sessName, err)
 	}
 	return true
@@ -1009,7 +1068,7 @@ func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessN
 
 func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool, policy ResumePolicy) (SubmitOutcome, error) {
 	var outcome SubmitOutcome
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1046,7 +1105,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // other callers that need bounded startup without attaching a terminal. A
 // dormant row it may not resume under policy returns ErrResumeHeld.
 func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
-	return withSessionMutationLock(id, func() error {
+	return withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -1102,7 +1161,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // ErrResumeHeld, queueing nothing, so the caller queues it and says why.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
 	var delivered bool
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err

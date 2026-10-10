@@ -12,10 +12,11 @@ import (
 )
 
 // stopKeyOwners are the only production files that may name the stop
-// request's keys: the definitions, the C6a accessor and patch builders, and
-// E3's drain-ack CLI (the request half). Other writers clear them through
+// request's keys: the definitions, the C6a accessor and patch builders, E3's
+// drain-ack CLI (the request half), and the session field registry, which
+// declares those sites. Other writers clear them through
 // session.ClearStopRequestPatch, which lives with the definitions.
-var stopKeyOwners = []string{"internal/session/stop_request_keys.go", "cmd/gc/reconcile_stop_request.go", "cmd/gc/cmd_runtime_drain.go"}
+var stopKeyOwners = []string{"internal/session/stop_request_keys.go", "internal/session/fields.go", "cmd/gc/reconcile_stop_request.go", "cmd/gc/cmd_runtime_drain.go"}
 
 // Kills a legacy reader of the stop request's controller half (v5 R1's
 // rollback rule: legacy ignores the new keys): no production Go file under

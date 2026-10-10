@@ -8,6 +8,10 @@
 # workers register with the OSS scheduler (dedicated rbe-oss-worker cert);
 # developer and agent builds use the default instance and never run here.
 name: rbe-worker-pool
+# The pool scalers count floor workers by this name (oss-pool-scaler.py
+# ROLE_TITLE): "(floor, idle 15m)". A dispatch without the input (CI
+# pre-warm, by hand) is named burst and keeps the default idle_minutes.
+run-name: ${{ format('rbe-worker-pool ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}
 
 on:
   workflow_dispatch:
@@ -20,6 +24,13 @@ on:
         description: Retire after this many minutes regardless (recycles the VM)
         default: "300"
         type: string
+      role:
+        description: floor (keeps a warm worker, the longer idle window) or burst; the run's name only, the worker never reads it
+        default: burst
+        type: choice
+        options:
+          - burst
+          - floor
 
 permissions:
   contents: read
@@ -38,16 +49,13 @@ jobs:
         with:
           # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
           persist-credentials: false
-      # Cutover switch (D8, S3-S5): unset (today) takes in-tree, this
-      # checkout's own tools/rbe, byte-for-byte what ran before S3b. Set the
-      # repository variable RBE_WORKER_SOURCE_OSS to pinned to fetch
-      # gastownhall/rbe-worker instead (S4). No secret in this step.
+      # The worker code: gastownhall/rbe-worker at .github/actions/rbe-worker/pin,
+      # fetched anonymously from its main and verified there. No secret in
+      # this step.
       - name: Fetch the pinned rbe-worker
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: ${{ vars.RBE_WORKER_SOURCE_OSS || 'in-tree' }}
-      # worker-env (tools/rbe/worker-env-drift): provision and measure this
+      # worker-env (rbe-worker's worker-env-drift): provision and measure this
       # host against the pin before serving. Drift fails this step, never the
       # worker: a drifted worker still registers (advertising what it
       # measured) and serves the pool's actions that send no worker-env
@@ -119,8 +127,6 @@ jobs:
       - name: Fetch the pinned rbe-worker
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: ${{ vars.RBE_WORKER_SOURCE_OSS || 'in-tree' }}
       - name: Wait for the worker's measurement
         id: await
         env:
@@ -159,8 +165,6 @@ jobs:
         if: steps.drift.outcome == 'success'
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: ${{ vars.RBE_WORKER_SOURCE_OSS || 'in-tree' }}
       - name: Open or update the drift issue
         if: steps.drift.outcome == 'success'
         env:

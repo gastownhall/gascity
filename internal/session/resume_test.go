@@ -232,7 +232,7 @@ type wakeCASLoser struct {
 
 func (c *wakeCASLoser) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
 	c.n++
-	_ = c.backing.SetMetadataBatch(id, map[string]string{"nudge_at": fmt.Sprint(c.n)})
+	_ = c.backing.SetMetadataBatch(id, map[string]string{"test_nudge_at": fmt.Sprint(c.n)})
 	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
 }
 

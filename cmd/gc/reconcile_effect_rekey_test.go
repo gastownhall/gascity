@@ -23,6 +23,7 @@ type rekeyFixture struct {
 	leaf  *fenceLeaf
 	id    string
 	name  string
+	city  string
 }
 
 func newRekeyFixture(t *testing.T, rowMeta ...string) *rekeyFixture {
@@ -33,7 +34,7 @@ func newRekeyFixture(t *testing.T, rowMeta ...string) *rekeyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &rekeyFixture{t: t, store: store, leaf: newFenceLeaf(), id: b.ID, name: "s-rekey"}
+	return &rekeyFixture{t: t, store: store, leaf: newFenceLeaf(runtime.ProfileTmux), id: b.ID, name: "s-rekey", city: t.TempDir()}
 }
 
 // residue starts the row's runtime as a warm-reuse residue: the row's own
@@ -55,9 +56,9 @@ func (f *rekeyFixture) pass(rt runtimeIdentity) (*effectPass, intent) {
 	c := readCensus(f.t, gatherNow, censusLegs(rowLeg, f.store))
 	k := rowKey{Leg: rowLeg, ID: f.id}
 	w := &World{
-		Now: gatherNow, Census: c, Mislabelled: map[rowKey]bool{}, CityPath: f.t.Name(),
+		Now: gatherNow, Census: c, Mislabelled: map[rowKey]bool{}, CityPath: f.city,
 		Observed:  map[rowKey]rowObservation{k: {Identity: rt}},
-		Env:       &reconcileEnv{SP: f.leaf},
+		Env:       &reconcileEnv{SP: f.leaf.P},
 		LegStores: map[string]beads.Store{rowLeg: f.store},
 	}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive}}}}
@@ -91,7 +92,7 @@ func (f *rekeyFixture) stop() fenceVerdict {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	v, _ := stopFenced(context.Background(), f.leaf, fenceRequest{Row: row, Legs: legsFull}, time.Now())
+	v, _ := fenceRun(f.t, f.leaf.P, fenceRequest{Row: row, Legs: legsFull}, fenceOpts{stop: true})
 	return v
 }
 
@@ -176,7 +177,7 @@ func TestRekeyRefusesOnTokenChange(t *testing.T) {
 		{"token changed", func(f *rekeyFixture) { _ = f.leaf.SetMeta(f.name, "GC_INSTANCE_TOKEN", "tok-other") }, causeIdentityChanged},
 		{"runtime gone", func(f *rekeyFixture) { _ = f.leaf.Stop(f.name) }, causeNotPresent},
 		{"presence unreadable", func(f *rekeyFixture) { f.leaf.LivenessErrors[f.name] = errors.New("tmux: server busy") }, causeLivenessUnknown},
-		{"name busy", func(f *rekeyFixture) { f.t.Cleanup(runtimeNames.tryLock(f.t.Name(), f.name)) }, causeNameBusy},
+		{"name busy", func(f *rekeyFixture) { holdName(f.t, f.city, f.name) }, causeNameBusy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRekeyFixture(t)
@@ -236,12 +237,11 @@ func TestRekeyRefusedWhilePendingCreateClaim(t *testing.T) {
 	}
 }
 
-// hookLeaf is the fixture's leaf with a session object behind the name, and
-// a hook run once, on the effect's goroutine, when the second presence read
-// begins: after the rekey's identity read has completed (the sidecar read
-// compares two reads, so a hook inside it would only fail that read).
+// hookLeaf is the fixture leaf's reads with a session object behind the
+// name, and a hook run once, on the effect's goroutine, when the second
+// presence read begins: after the rekey's identity read has completed.
 type hookLeaf struct {
-	*fenceLeaf
+	leafReads
 	object, created string
 	reads           int
 	after           func()
@@ -251,9 +251,19 @@ func (l *hookLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.L
 	if l.reads++; l.reads == 2 && l.after != nil {
 		l.after()
 	}
-	live, err := l.fenceLeaf.ObserveLivenessWithError(name, pn)
+	live, err := l.leafReads.ObserveLivenessWithError(name, pn)
 	live.ObjectID, live.ObjectCreated = l.object, l.created
 	return live, err
+}
+
+func (l *hookLeaf) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
+	return l.ObserveLivenessWithError(name, pn)
+}
+
+// newHookLeaf is f's leaf as tmux, its reads hooked.
+func newHookLeaf(f *rekeyFixture, object, created string) (*hookLeaf, runtime.Provider) {
+	h := &hookLeaf{leafReads: leafReads{runtime.FullFake{Fake: f.leaf.Fake}, f.leaf}, object: object, created: created}
+	return h, runtime.NewFakeProfile(runtime.ProfileTmux, h)
 }
 
 // Kills an identity read not bracketed by presence (v5 O2), and a bracket on
@@ -269,9 +279,9 @@ func TestRekeyBracketsIdentityReadWithPresence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRekeyFixture(t)
 			rt := f.residue("2", "tok-old")
-			hook := &hookLeaf{fenceLeaf: f.leaf, object: "$1", created: "100"}
+			hook, sp := newHookLeaf(f, "$1", "100")
 			p, it := f.pass(rt)
-			p.Runtime = hook
+			p.Runtime = sp
 			hook.after = func() { hook.object, hook.created = tc.object, tc.created }
 			if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causeNotPresent {
 				t.Fatalf("settlement %+v, want refused %s", s, causeNotPresent)
@@ -292,9 +302,9 @@ func TestRekeyBracketsIdentityReadWithPresence(t *testing.T) {
 func TestRekeyHoldsTheMutationLockFromReadToCAS(t *testing.T) {
 	f := newRekeyFixture(t)
 	rt := f.residue("2", "tok-old")
-	hook := &hookLeaf{fenceLeaf: f.leaf, object: "$1"}
+	hook, sp := newHookLeaf(f, "$1", "")
 	p, it := f.pass(rt)
-	p.Runtime = hook
+	p.Runtime = sp
 	restarted := make(chan struct{})
 	hook.after = func() {
 		go func() {

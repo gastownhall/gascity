@@ -5,14 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -88,7 +86,10 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 // onExit registers f to run with the effect's final settlement at every
 // exit, a panic included (as a failed causePanic, then re-panicking): C5a1's
 // endpoint ticket, admitted only on Launch (SC N1), resolved however the
-// effect ends. The last registered runs first.
+// effect ends. The last registered runs first. A finalizer runs after the
+// effect has released its runtime lease and every lock: it may settle what
+// the effect admitted (a ticket, a count), and must not call the runtime or
+// write the row.
 func (c txCaps) onExit(f func(final settlement)) { *c.exits = append(*c.exits, f) }
 
 // exit runs every finalizer, last registered first, with s, or with a
@@ -211,11 +212,17 @@ func (s effectSpec) runs() bool { return s.body != nil || len(s.sections) > 0 }
 // needs are a kind's locks, fresh reads and CAS budget. Every read implies
 // the name lock, as does a Call.
 type needs struct {
-	NameLock bool      // held across every section
-	Runtime  bool      // the runtime read fresh each attempt
-	Legs     fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
-	Idle     bool      // the agent proved idle on the routed leaf
-	Attempts int       // CAS rounds per section, each deciding again; 0 is 3
+	NameLock  bool      // held across every section
+	Runtime   bool      // the runtime read fresh each attempt
+	Legs      fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
+	Idle      bool      // the agent proved idle on the routed leaf
+	Escalates bool      // a C8.5 escalation class: L3 escalates on a terminal-no-report leaf
+	Attempts  int       // CAS rounds per section, each deciding again; 0 is 3
+	// Lease takes the row's runtime lease record, not the name's flock
+	// alone: an effect that creates, destroys or restarts a runtime, or that
+	// writes the incarnation or the commit. Every section with a Call needs
+	// it (the registry test).
+	Lease bool
 }
 
 func (s effectSpec) needsOf(w *World, it intent) needs {
@@ -230,16 +237,21 @@ type premiseRule uint8
 
 const (
 	// premiseDefault: open, carrying the locked runtime name, at the
-	// incarnation and token expected, with the lifecycle facts
-	// (session.LifecycleInputFromInfo) of the expected row: the pass's, then
-	// the one the last landed section wrote.
+	// incarnation and token expected, with the premise facts
+	// (session.FactsOf, the registry's premise keys) of the expected row: the
+	// pass's, then the one the last landed section wrote. An effect that
+	// reads the row's work (L5) compares its assignment identity keys too.
+	// After a callStart, the facts compared are the registry's
+	// FactsAfterStart site's: the started runtime writes the keys it drops.
 	premiseDefault premiseRule = iota
 	// premiseOwnToken (v5 S2's commit): after an earlier section's write
-	// landed, open, creating, active or awake, and still carrying the token
-	// that write set; holds do not veto it.
+	// landed, the registry's FactsCommit site: open, creating, active or
+	// awake, and still carrying the token that write set; holds do not veto
+	// it.
 	premiseOwnToken
 	// premiseClose: a close section (txStep.Terminal). The default premise, and
-	// no kill fence; a row already closed is a no-op that ends the effect.
+	// no kill fence (tx.decide); a row already closed is a no-op that ends the
+	// effect.
 	premiseClose
 )
 
@@ -249,16 +261,24 @@ const (
 type section struct {
 	Premise premiseRule
 	// Decide decides on the attempt's fresh reads, under both locks, with no
-	// I/O; it runs once per attempt.
+	// I/O; it runs once per attempt. Every function stored here is a v2purity
+	// root:
+	//
+	//gc:pure
 	Decide func(v txView) txStep
 	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
 	call   func(ctx context.Context, c txCaps, in any) (any, error)
-	defs   []any // the kind's own Probe and Call, which the effect lint covers
+	// callKind is the Call's kind (called), when it has one.
+	callKind callKind
+	defs     []any // the kind's own Probe and Call, which the effect lint covers
 }
 
 // probed is a section whose Probe, a bounded read under both locks after the
 // transaction's own reads (it sees the expected row), hands Decide its typed
-// result. A probe past fenceProbeTimeout answers errProbeExpired.
+// result. A probe past fenceProbeTimeout answers errProbeExpired. Every decide
+// passed here is a v2purity root, as a section's Decide is:
+//
+//gc:pure-param decide
 func probed[P any](probe func(context.Context, effectReads, txView) (P, error), decide func(txView, P, error) txStep) section {
 	return section{
 		probe: func(ctx context.Context, r effectReads, v txView) (any, error) { return probe(ctx, r, v) },
@@ -270,11 +290,26 @@ func probed[P any](probe func(context.Context, effectReads, txView) (P, error), 
 	}
 }
 
+// callKind is what a section's Call does to the runtime, which decides the
+// premise of the sections after it.
+type callKind uint8
+
+const (
+	// callStart starts a runtime: the sections after it compare the
+	// registry's FactsAfterStart facts, since the started runtime writes the
+	// keys that exception drops.
+	callStart callKind = iota + 1
+	// callStop stops one: the full premise holds after it, a start's
+	// before it included.
+	callStop
+)
+
 // called is sec with a provider Call after it, run under the name lock with
 // the mutation lock released, and only like a write (the context, then the
 // latch). It takes the step's Pass, typed In, and hands the next section's
 // Decide its result (callResult[Out]).
-func called[In, Out any](sec section, call func(context.Context, txCaps, In) (Out, error)) section {
+func called[In, Out any](kind callKind, sec section, call func(context.Context, txCaps, In) (Out, error)) section {
+	sec.callKind = kind
 	sec.call = func(ctx context.Context, c txCaps, in any) (any, error) {
 		typed, _ := in.(In)
 		return call(ctx, c, typed)
@@ -313,6 +348,8 @@ type txView struct {
 // action, "" passes (attachLeg, boundedPending); Work is L5, read live.
 type txFence struct {
 	Attach, Pending string
+	AttachEscalate  bool      // L3 escalates (C8.5, on a terminal-no-report leaf)
+	Read            fenceLegs // the legs read: one not read holds (fenceDestructive)
 	Work            *txWork
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
 }
@@ -406,34 +443,71 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
-	if n := t.needs; n.NameLock || n.Runtime || n.Legs != 0 || n.Idle || slices.ContainsFunc(spec.sections, func(s section) bool { return s.call != nil }) {
-		name, unlock, ok := lockRuntimeName(p.World, row.Info)
-		switch {
-		case !ok && name == "":
-			return refused(causeRouteUnknown)
-		case !ok:
-			return refused(causeNameBusy)
+	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	t.needs.Lease = t.needs.Lease || spec.needs.Lease // a per-intent needsFor cannot drop the record
+	if t.needs.locksName(spec) {
+		var front *session.Store
+		if t.needs.Lease {
+			if ctx.Err() != nil { // past its deadline: write no record
+				return ended(ctx)
+			}
+			var err error
+			if front, err = writer.leaseFront(); err != nil {
+				return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}
+			}
 		}
-		defer unlock()
-		t.name = name
+		name, lease, cause, err := lockRuntimeName(p.World, row.Info, front, session.RuntimeLeaseTTL(effectBudget(ctx)))
+		if cause != "" {
+			return settlement{Outcome: settledRefused, Cause: cause, Err: err}
+		}
+		defer lease.Release()
+		t.name, t.lease = name, lease
+		if lease.Epoch() > 0 {
+			// One epoch per effect: it ends by the lease's SafeUntil, compared
+			// as remaining durations, never wall clock to wall clock.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeoutCause(ctx, time.Until(lease.SafeUntil()), session.ErrRuntimeLeaseExpired)
+			defer cancel()
+		}
 	}
 	return t.run(ctx, spec.sections)
 }
 
+// locksName reports an effect that holds its row's runtime name: one that
+// takes the lease record, needs the name, the runtime, a fence leg or
+// idleness, or has a Call.
+func (n needs) locksName(spec effectSpec) bool {
+	return n.Lease || n.NameLock || n.Runtime || n.Legs != 0 || n.Idle || slices.ContainsFunc(spec.sections, func(s section) bool { return s.call != nil })
+}
+
+// leaseWatchEvery is how often a Call's lease watch reads the row.
+var leaseWatchEvery = 5 * time.Second
+
+// effectBudget is what remains of ctx's deadline: the effect's own TTL. An
+// effect with no deadline budgets nothing, and its lease lasts the margin.
+func effectBudget(ctx context.Context) time.Duration {
+	if dl, ok := ctx.Deadline(); ok {
+		return time.Until(dl)
+	}
+	return 0
+}
+
 // tx is one transaction across its sections.
 type tx struct {
-	c      txCaps
-	p      *effectPass
-	needs  needs
-	writer fencedWriter
-	name   string       // the runtime name, when the name lock is held
-	expect session.Info // the row the premise expects
-	basis  rowBasis     // its incarnation and token
-	landed bool         // a section's write landed
-	facts  effectFacts
-	pass   any // the concluded step's Pass, to its section's Call
-	view   txView
+	c       txCaps
+	p       *effectPass
+	needs   needs
+	writer  fencedWriter
+	name    string                // the runtime name, when the name lock is held
+	lease   *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
+	expect  session.Info          // the row the premise expects
+	facts0  session.Facts         // its premise facts
+	basis   rowBasis              // its incarnation and token
+	started bool                  // a callStart ran, and no callStop since
+	landed  bool                  // a section's write landed
+	facts   effectFacts
+	pass    any // the concluded step's Pass, to its section's Call
+	view    txView
 }
 
 // run runs the sections, each under the row's mutation lock.
@@ -462,7 +536,13 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			s = ended(ctx)
 			break
 		}
-		t.view.prev, t.view.prevErr = sec.call(ctx, t.c, t.pass)
+		t.view.prev, t.view.prevErr = t.callWatched(ctx, sec)
+		switch sec.callKind {
+		case callStart:
+			t.started = true
+		case callStop:
+			t.started = false // a stopped runtime writes nothing more
+		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
 			break
@@ -487,10 +567,12 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		}
 		var step txStep
 		var ended *settlement
+		var wroteFacts session.Facts
 		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
 			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil {
 				return nil
 			}
+			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
 			return step.Write
 		})
 		switch {
@@ -503,7 +585,7 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		case err != nil:
 			return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, true
 		case wrote:
-			t.landed, t.expect = true, wroteRow(t.view.Row, step.Write)
+			t.landed, t.expect, t.facts0 = true, wroteRow(t.view.Row, step.Write), wroteFacts
 			t.basis = rowBasisOf(t.view.It.Key, t.expect)
 			if err := t.c.at(ctx, seamAfterWrite); err != nil {
 				t.facts.merge(step.Facts)
@@ -633,8 +715,9 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s := injected(err)
 		return txStep{}, &s
 	}
-	if !t.premise(sec.Premise, row) {
+	if moved := t.premise(sec.Premise, row, meta); len(moved) > 0 {
 		s := refused(causePremise)
+		s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
 		return txStep{}, &s
 	}
 	step := sec.Decide(v)
@@ -647,6 +730,8 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}
 	case sec.Premise == premiseClose && session.IsKillPendingInfo(row, t.view.Now):
+		// Not subsumed by the facts: a row the pass already read under an
+		// honored kill fence has equal facts, and the fence still refuses.
 		s = refused(causePremise)
 	case len(step.Write) == 0 && len(step.Terminal) == 0:
 		return step, nil
@@ -666,43 +751,75 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	return step, &s
 }
 
-// premise reports whether row is still the expected row (the pass's, then
-// the last landed write's) under rule.
-func (t *tx) premise(rule premiseRule, row session.Info) bool {
-	if row.Closed || t.name != "" && strings.TrimSpace(row.SessionName) != t.name {
-		return false
+// premise reports what keeps row, persisted as meta, from being the
+// expected row (the pass's, then the last landed write's) under rule: none
+// when it is; otherwise the moved premise keys by name, "closed",
+// "session_name", or the basis, so a refusal tells a conflict from a key
+// that moves too often to belong in the premise.
+func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string) (moved []string) {
+	switch {
+	case row.Closed:
+		return []string{"closed"}
+	case t.name != "" && strings.TrimSpace(row.SessionName) != t.name:
+		return []string{"session_name"}
 	}
+	if t.lease != nil && !t.lease.HoldsMeta(meta) {
+		return []string{"runtime lease"}
+	}
+	fresh := session.FactsOf(meta)
 	switch rule {
 	case premiseOwnToken:
-		// After the effect's own write: holding its token, and creating,
-		// active or awake, so a kill fence (asleep, same token) refuses.
-		switch session.State(strings.TrimSpace(row.MetadataState)) {
-		case session.StateCreating, session.StateActive, session.StateAwake:
-			return t.landed && row.InstanceToken == t.expect.InstanceToken
+		if !t.landed {
+			return []string{"no own write"}
 		}
-		return false
+		return session.FactsCommit.Moved(fresh, t.facts0)
 	case premiseDefault, premiseClose:
-		return rowBasisOf(t.view.It.Key, row) == t.basis &&
-			reflect.DeepEqual(session.LifecycleInputFromInfo(row), session.LifecycleInputFromInfo(t.expect)) &&
-			(t.needs.Legs&legWork == 0 || t.sameAssignees(row))
+		site := session.FactsDefault
+		if t.started {
+			site = session.FactsAfterStart
+		}
+		moved = site.Moved(t.compared(fresh), t.compared(t.facts0))
+		if len(moved) == 0 && rowBasisOf(t.view.It.Key, row) != t.basis {
+			moved = []string{"basis"}
+		}
+		return moved
 	}
-	return false
+	return []string{"rule"}
 }
 
-// sameAssignees reports that row is assigned work under the identifiers the
-// L5 read used (the expected row's), its alias among them.
-func (t *tx) sameAssignees(row session.Info) bool {
-	var cfg *config.City
-	if t.p.World.Env != nil {
-		cfg = t.p.World.Env.Cfg
+// compared is the part of f the premise compares: the assignment identity
+// keys only for an effect that reads the row's work (L5).
+func (t *tx) compared(f session.Facts) session.Facts {
+	if t.needs.Legs&legWork == 0 {
+		f = f.Premise()
 	}
-	return slices.Equal(sessionAssignmentIdentifiersForConfigInfo(row, cfg), sessionAssignmentIdentifiersForConfigInfo(t.expect, cfg))
+	return f
 }
 
 // rowBasisOf is row's incarnation and token, as the census reads them.
 func rowBasisOf(k rowKey, row session.Info) rowBasis {
 	r := newCensusRow(k, row)
 	return rowBasis{Incarnation: r.Incarnation, InstanceToken: r.InstanceToken}
+}
+
+// errPremiseMoved is a premise refusal's error, naming what moved.
+var errPremiseMoved = errors.New("the row moved since the pass")
+
+// callWatched runs sec's Call on the lease's watch, so a Call whose lease
+// is lost, released or past SafeUntil sees its context end, and carries the
+// lease on its context.
+func (t *tx) callWatched(ctx context.Context, sec section) (any, error) {
+	if t.lease == nil {
+		return sec.call(ctx, t.c, t.pass)
+	}
+	watched, cancel, err := t.lease.Watch(ctx, leaseWatchEvery)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	// A Call through a leasing helper (a Manager start or stop) runs under
+	// this lease instead of finding its own flock busy.
+	return sec.call(session.ContextWithRuntimeLease(watched, t.lease), t.c, t.pass)
 }
 
 // ended is the failure of an effect that may not write: its context ended
@@ -712,10 +829,20 @@ func ended(ctx context.Context) settlement {
 	switch cause := context.Cause(ctx); {
 	case cause == nil:
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: errAbandoned}
+	case errors.Is(cause, session.ErrRuntimeLeaseExpired):
+		return settlement{Outcome: settledFailed, Cause: causeLeaseExpired, Err: cause}
+	case errors.Is(cause, session.ErrRuntimeLeaseLost):
+		return settlement{Outcome: settledFailed, Cause: causeLeaseLost, Err: cause}
 	case !errors.Is(cause, context.DeadlineExceeded):
 		return settlement{Outcome: settledFailed, Cause: canceledCause(ctx), Err: cause}
 	}
 	return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: context.DeadlineExceeded}
 }
+
+// The lease's own ends: past its SafeUntil, or taken over.
+const (
+	causeLeaseExpired = "lease-expired"
+	causeLeaseLost    = "lease-lost"
+)
 
 func refused(cause string) settlement { return settlement{Outcome: settledRefused, Cause: cause} }

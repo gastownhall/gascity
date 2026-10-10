@@ -614,7 +614,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		// The write lands right after the reopen's live re-read of the row,
 		// the read its fence is taken on.
 		store := &interleavedStore{Store: mem, id: closed.ID, between: func() {
-			if err := mem.SetMetadata(closed.ID, "note", "cli touched"); err != nil {
+			if err := mem.SetMetadata(closed.ID, "test_note", "cli touched"); err != nil {
 				t.Error(err)
 			}
 		}}
@@ -627,7 +627,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if after.Status != "closed" || after.Metadata["state"] != "asleep" || after.Metadata["note"] != "cli touched" {
+		if after.Status != "closed" || after.Metadata["state"] != "asleep" || after.Metadata["test_note"] != "cli touched" {
 			t.Fatalf("row = %s %v, want the concurrent write kept and no reopen", after.Status, after.Metadata)
 		}
 		assertFailedNoWrite(t, h)

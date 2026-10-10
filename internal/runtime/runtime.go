@@ -548,11 +548,14 @@ type DialogProvider interface {
 // presence in the roster as "running" therefore reports crashed agents as
 // idle.
 type SessionRosterProvider interface {
-	// SessionRoster returns attributes for every session currently known
-	// to the runtime, keyed by session name. A name absent from the
-	// result is not running, but the converse does not hold: a name
-	// present in the result is not necessarily running. See the
-	// interface doc.
+	// SessionRoster returns attributes for sessions known to the runtime,
+	// keyed by session name. A leaf runtime (tmux) reports every session it
+	// knows, so a name absent from its result is not running there; a
+	// composite merges only the backends that report a roster
+	// ([MergeSessionRosters]), so a name absent from its result proves
+	// nothing. In neither case is a name present in the result necessarily
+	// running. Callers must fall back to per-session reads for an absent
+	// name. See the interface doc.
 	SessionRoster() (map[string]SessionRosterEntry, error)
 }
 

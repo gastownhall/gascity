@@ -225,9 +225,11 @@ WRAPPED = [
     "//tools/nogo/analyzers/gocritic",
     "//tools/nogo/analyzers/misspell",
     "//tools/nogo/analyzers/revive",
+    "//tools/nogo/analyzers/runtimelease",
     "//tools/nogo/analyzers/unconvert",
     "//tools/nogo/analyzers/unparam",
     "//tools/nogo/analyzers/unused",
+    "//tools/nogo/analyzers/v2purity",
 ]
 
 NOGO_ANALYZERS = (

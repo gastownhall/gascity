@@ -156,6 +156,7 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Mail config durations.
 	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
+	check("[mail]", "unread_retention_ttl", cfg.Mail.UnreadRetentionTTL)
 
 	// Events config durations.
 	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)

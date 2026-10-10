@@ -134,18 +134,32 @@ func cmdRuntimeHeartbeat(duration time.Duration, jsonOutput bool, stdout, stderr
 // doRuntimeHeartbeat sets held_until on the session bead to suppress
 // idle-timeout and max-session-age timers for the specified duration.
 // Extracted for testability.
-func doRuntimeHeartbeat(store beads.Store, duration time.Duration, display, sessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
-	sessionID, err := session.ResolveSessionID(store, sessionName)
+func doRuntimeHeartbeat(sessStore beads.Store, duration time.Duration, display, sessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
+	sessionID, err := session.ResolveSessionID(sessStore, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime heartbeat: resolving session %q: %v\n", display, err) //nolint:errcheck
 		return 1
 	}
 
+	// An operator's suspend owns held_until: the heartbeat never shortens or
+	// replaces it. Decided from a fresh read and fenced.
 	heldUntil := time.Now().Add(duration).UTC().Format(time.RFC3339)
-	if err := store.SetMetadataBatch(sessionID, map[string]string{
-		"held_until": heldUntil,
-	}); err != nil {
+	operatorHeld := false
+	ok, err := sessionFrontDoor(sessStore).UpdateMetadataFenced(sessionID, 3, func(info session.Info, _ session.PersistedResponse) session.MetadataPatch {
+		if operatorHeld = session.HoldsInfo(info, time.Now()).In&session.HoldUser != 0; operatorHeld {
+			return nil
+		}
+		return session.MetadataPatch{"held_until": heldUntil}
+	})
+	switch {
+	case err != nil:
 		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: %v\n", err) //nolint:errcheck
+		return 1
+	case operatorHeld:
+		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is suspended by an operator; its hold is left as it is\n", display) //nolint:errcheck
+		return 1
+	case !ok:
+		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: lost to concurrent writes; retry\n") //nolint:errcheck
 		return 1
 	}
 

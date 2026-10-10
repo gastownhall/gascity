@@ -57,6 +57,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if logicalID == "" {
 		return ControlResult{}, fmt.Errorf("%s: could not resolve logical bead ID", bead.ID)
 	}
+	// The terminal branches below settle the logical bead before closing this
+	// check, so an open check over a closed logical bead is a settle that was
+	// interrupted between those two writes. Finish it without re-running the
+	// gate: the verdict is already durable on the logical bead, and a second
+	// run could disagree with it.
+	logical, err := store.Get(logicalID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
+	}
+	if logical.Status == "closed" {
+		if err := setOutcomeAndClose(store, bead.ID, logical.Metadata[beadmeta.OutcomeMetadataKey]); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing check of settled logical bead %s: %w", bead.ID, logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "logical-settled"}, nil
+	}
 
 	subjectID, err := resolveBlockingSubjectID(store, bead.ID)
 	if err != nil {
@@ -114,17 +129,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			bead.ID, result.Outcome, infraRetries, attempt)
 	}
 
+	// Every terminal branch below settles the logical bead first and closes
+	// the check last. The open check is what re-drives this function, so a
+	// crash before its close is finished by the next serve cycle (see the
+	// settled-logical guard above); a check closed first would strand the
+	// logical bead open with nothing left to close it.
 	if result.Outcome == convergence.GatePass {
+		settled := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+			settled[beadmeta.OutputJSONMetadataKey] = outputJSON
+		}
+		if err := settleLogicalBead(store, logicalID, settled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: settling passed logical bead: %w", logicalID, err)
+		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed check: %w", bead.ID, err)
-		}
-		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
-			if err := store.SetMetadata(logicalID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
-			}
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
@@ -139,36 +158,30 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	// to gc.max_attempts below. Only an explicit "hard" class terminates here.
 	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
 		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:    retryFailureReason(subject),
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
+			return ControlResult{}, fmt.Errorf("%s: settling hard-failed logical bead: %w", logicalID, err)
 		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed check: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 	}
 
 	if attempt >= maxAttempts {
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey: strconv.Itoa(attempt),
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical failure: %w", logicalID, err)
+			return ControlResult{}, fmt.Errorf("%s: settling failed logical bead: %w", logicalID, err)
 		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed check: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "fail"}, nil
 	}
@@ -220,6 +233,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 	opts.tracef("ralph retry-finalize-done bead=%s next=%d", bead.ID, nextAttempt)
 	return ControlResult{Processed: true, Action: "retry"}, nil
+}
+
+// settleLogicalBead records a control's terminal verdict on its logical bead
+// and closes it. The close is a forced Close, not a status update: the control
+// being processed (a check or retry-eval) still blocks the logical bead (it
+// must stay open until the logical bead is durable), and bd refuses an
+// unforced close of a blocked bead.
+func settleLogicalBead(store beads.Store, logicalID string, metadata map[string]string) error {
+	if err := store.SetMetadataBatch(logicalID, metadata); err != nil {
+		return fmt.Errorf("recording verdict: %w", err)
+	}
+	if err := store.Close(logicalID); err != nil {
+		return fmt.Errorf("closing: %w", err)
+	}
+	return nil
 }
 
 func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opts ProcessOptions) (convergence.GateResult, error) {

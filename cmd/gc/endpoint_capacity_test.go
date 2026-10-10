@@ -1206,7 +1206,7 @@ func TestReapStaleSessionBeads_KeepsRefusedHeldPendingCreate(t *testing.T) {
 	e.start(context.Background(), e.refreshed(a))
 	e.clk.Advance(2 * time.Second)
 
-	reapStaleSessionBeads(e.store, e.sp, e.dt, nil, e.clk, &e.log)
+	reapStaleSessionBeads("", e.store, e.sp, e.dt, nil, e.clk, &e.log)
 
 	requireHeldPendingCreate(t, e.bead(t, a.info.ID))
 }
@@ -1324,7 +1324,7 @@ func (p *midStartWriter) Start(ctx context.Context, name string, cfg runtime.Con
 // suspendPatch is what `gc session suspend` writes on a managed city.
 func suspendPatch(now time.Time) map[string]string {
 	return map[string]string{
-		"held_until":   now.Add(indefiniteHoldDuration).UTC().Format(time.RFC3339),
+		"held_until":   now.Add(sessionpkg.IndefiniteHoldDuration).UTC().Format(time.RFC3339),
 		"sleep_intent": "user-hold",
 		"state":        "suspended",
 	}
@@ -1559,13 +1559,13 @@ func TestReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 				t.Fatalf("premise: state=%q last_woke_at=%q, want a never-started creating row", got.Metadata["state"], got.Metadata["last_woke_at"])
 			}
 
-			if n := reapStaleSessionBeads(e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 0 {
+			if n := reapStaleSessionBeads("", e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 0 {
 				t.Fatalf("reaped %d rows, want the held row kept while its endpoint refuses", n)
 			}
 			if got := e.bead(t, a.info.ID); got.Status != "open" {
 				t.Fatalf("row status = %q, want open", got.Status)
 			}
-			if n := reapStaleSessionBeads(e.store, e.sp, e.dt, nil, e.clk, &e.log); n != 1 {
+			if n := reapStaleSessionBeads("", e.store, e.sp, e.dt, nil, e.clk, &e.log); n != 1 {
 				t.Fatalf("premise: reaped %d rows without the hold, want the row reapable", n)
 			}
 		})
@@ -1581,7 +1581,7 @@ func TestReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 		e.clk.Advance(11 * time.Minute)
 		e.reopen(t)
 
-		if n := reapStaleSessionBeads(e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 1 {
+		if n := reapStaleSessionBeads("", e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 1 {
 			t.Fatalf("reaped %d rows, want the started stale row reaped regardless of the hold", n)
 		}
 		if got := e.bead(t, a.info.ID); got.Status != "closed" {

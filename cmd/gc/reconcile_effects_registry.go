@@ -77,21 +77,25 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	return p
 }
 
+// effectSpecs is the kind table. Its functions are effects, run by the
+// executor, never by the decide that reads the table for a kind's class
+// (v2purity reaches a function stored in a field only through a read of
+// that field):
 var effectSpecs = map[string]effectSpec{
-	intentStart:           {class: capStarts, tokens: 1},
-	intentAdopt:           {class: capProbing},
-	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                    // C1, C2
-	intentRekey:           {class: capProbing, needs: needs{Runtime: true}, sections: rekeySections}, // A3
-	intentZombie:          {class: capProbing, bootGated: true},
+	intentStart:           {class: capStarts, tokens: 1, needs: needs{Lease: true}},
+	intentAdopt:           {class: capProbing, needs: needs{Lease: true}},
+	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                 // C1, C2
+	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections}, // A3: writes the incarnation under the row's lease record
+	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentDrainBegin:      {class: capRowWrites, bootGated: true},
 	intentDrainBeginFresh: {class: capProbing, bootGated: true},
 	intentSignal:          {class: capRowWrites, bootGated: true},
 	intentSignalFresh:     {class: capProbing, bootGated: true},
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
-	intentStop:            {class: capProbing, bootGated: true},
-	intentClose:           {class: capProbing, bootGated: true},
-	intentRollback:        {class: capProbing, bootGated: true},
+	intentStop:            {class: capProbing, bootGated: true, needs: needs{Lease: true}},
+	intentClose:           {class: capProbing, bootGated: true, needs: needs{Lease: true}},
+	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentRowMetadata:     {class: capRowWrites},
 	intentBaseline:        {class: capRowWrites},
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                        // A6

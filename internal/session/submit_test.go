@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
@@ -268,6 +269,64 @@ func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T)
 	}
 	if got := updated.Metadata[startupDialogVerifiedKey]; got != "true" {
 		t.Fatalf("%s = %q, want true", startupDialogVerifiedKey, got)
+	}
+}
+
+// TestSubmitDefaultCodexDismissesDialogsThroughAutoProvider covers a city
+// whose provider is auto-wrapped: the deferred dismissal must reach the tmux
+// leg hosting the session (mc-zndi7.92).
+func TestSubmitDefaultCodexDismissesDialogsThroughAutoProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	tmuxLeg := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sessionauto.New(tmuxLeg, runtime.NewFake()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	dismissals := 0
+	for _, call := range tmuxLeg.Calls {
+		if call.Method == "DismissKnownDialogs" && call.Name == info.SessionName {
+			dismissals++
+		}
+	}
+	if dismissals != 2 {
+		t.Fatalf("tmux leg DismissKnownDialogs calls = %d, want 2; calls = %#v", dismissals, tmuxLeg.Calls)
+	}
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata[startupDialogVerifiedKey]; got != "true" {
+		t.Fatalf("%s = %q, want true", startupDialogVerifiedKey, got)
+	}
+}
+
+// TestSubmitDefaultCodexLeavesDialogsUnverifiedWhenUnsupported: a composite
+// whose backend for the session cannot dismiss dialogs answers
+// ErrInteractionUnsupported, and the session must not be marked verified.
+func TestSubmitDefaultCodexLeavesDialogsUnverifiedWhenUnsupported(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.DialogErrors[info.SessionName] = runtime.ErrInteractionUnsupported
+	if _, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator); err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	updated, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata[startupDialogVerifiedKey]; got != "" {
+		t.Fatalf("%s = %q, want unset", startupDialogVerifiedKey, got)
 	}
 }
 
