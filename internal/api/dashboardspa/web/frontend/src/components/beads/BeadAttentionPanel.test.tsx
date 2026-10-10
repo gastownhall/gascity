@@ -49,10 +49,10 @@ describe('BeadAttentionPanel (gascity-dashboard-2j8e.3)', () => {
       <BeadAttentionPanel
         items={[
           attentionItem({
-            id: 'beads:B-ready:ready-unclaimed',
+            id: 'beads:B-human:human-assigned',
             severity: 'watch',
-            title: 'B-ready unclaimed',
-            href: '/beads?bead=B-ready',
+            title: 'B-human assigned to human',
+            href: '/beads?bead=B-human',
           }),
           attentionItem({
             id: 'beads:B-esc:escalated',
@@ -68,9 +68,9 @@ describe('BeadAttentionPanel (gascity-dashboard-2j8e.3)', () => {
     // The operator cannot be a bead assignee, so no row offers Claim — only Open.
     expect(screen.queryByRole('button', { name: 'Claim' })).toBeNull();
 
-    const readyRow = screen.getByText('B-ready unclaimed').closest('li') as HTMLElement;
+    const readyRow = screen.getByText('B-human assigned to human').closest('li') as HTMLElement;
     within(readyRow).getByRole('button', { name: 'Open' }).click();
-    expect(onOpen).toHaveBeenCalledWith('B-ready');
+    expect(onOpen).toHaveBeenCalledWith('B-human');
 
     const escRow = screen.getByText('B-esc escalated').closest('li') as HTMLElement;
     within(escRow).getByRole('button', { name: 'Open' }).click();
@@ -91,8 +91,8 @@ describe('BeadAttentionPanel (gascity-dashboard-2j8e.3)', () => {
           decisionLabel: 'needs/stephanie',
           nowMs: Date.parse('2026-06-07T12:00:00.000Z'),
           items: [
-            bead({ id: 'B-ready', status: 'open', created_at: '2026-06-04T11:00:00.000Z' }),
-            // plain dependency-blocked — excluded from both badge and page.
+            bead({ id: 'B-human', status: 'open', assignee: 'human' }),
+            // Plain dependency-blocked work remains machine-operable and is excluded.
             bead({ id: 'B-dep', status: 'blocked' }),
           ],
           escalations: [bead({ id: 'B-esc', status: 'blocked', labels: ['gc:escalation'] })],

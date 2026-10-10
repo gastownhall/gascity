@@ -6,10 +6,9 @@ import { StatusBadge } from '../StatusBadge';
 // counterpart of the Beads nav badge. It renders the badge-counting attention
 // items (attention + watch tiers, the same `summary.attention + summary.watch`
 // the nav indicator shows), so the page count and the nav badge cannot
-// disagree, and gives each item a path to act: Open the escalation / decision /
-// ready-unclaimed bead to act on it. The operator does not claim beads — a bead
-// assignee must be a concrete session, never the human operator
-// (gascity-dashboard-2j8e.8) — so there is no inline Claim affordance.
+// disagree. Each item links to the human-assigned, escalated, waiting, or
+// decision bead that needs action. The panel has no inline assignment control;
+// operators open the bead to act on it.
 
 interface BeadAttentionPanelProps {
   /** The beads-domain attention items from the composed model (any severity). */
