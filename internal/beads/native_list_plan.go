@@ -1,30 +1,42 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync/atomic"
 
+	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // NativeListPlan returns the reader-role requests NativeDoltStore.List issues
-// for query, in the order it issues them. The store unions their rows by id and
-// ApplyListQuery then applies the whole query exactly, so a plan only decides
-// how many rows cross from the backend, never which rows the caller receives:
-// every predicate it pushes is exact or a superset of the query's.
+// for query, in the order it issues them, on a scope whose infra-type setting
+// is unset. The store unions their rows by id and ApplyListQuery then applies
+// the whole query exactly, so a plan only decides how many rows cross from the
+// backend, never which rows the caller receives: every predicate it pushes is
+// exact or a superset of the query's.
 //
 // A plural Assignees set fans out into one request per distinct assignee, each
 // with that assignee pushed, up to nativeListAssigneeFanOutMax. The status and
 // type pushdowns are nativeListRequestFromListQuery's.
 //
+// A FANNED-OUT PLAN IS SEVERAL SNAPSHOTS. The reader role publishes no read
+// transaction, so each request reads the ledger as of its own arrival: a bead
+// whose assignee moves between two of the requests can be seen by both (the
+// union keeps it once) or by neither. The answer is then one the ledger never
+// held at a single instant, but every row in it was true when it was read, and
+// the next hook's listing reads the moved row where it now lives. Hooks
+// tolerate that by design — they are re-run on every turn and converge — and a
+// caller that needs one instant's answer passes a singular Assignee.
+//
 // It is a pure function of the query so a test can price a recorded List
 // without a server: each request costs one backend listing, and a request that
 // NativeListRequestKeyed reports as unkeyed reads the whole ledger.
 func NativeListPlan(query ListQuery) []issueops.ListRequest {
-	return nativeListPlan(query, true)
+	return nativeListPlan(query, nativeListDefaultPushableTypes)
 }
 
 // nativeListAssigneeFanOutMax bounds the plural-assignee fan-out. No hook asks
@@ -32,10 +44,10 @@ func NativeListPlan(query ListQuery) []issueops.ListRequest {
 // history); a larger set stays one request with the assignees applied Go-side.
 const nativeListAssigneeFanOutMax = 8
 
-// nativeListPlan is NativeListPlan with the type pushdown switchable, for a
-// store whose backend refused a pushed type.
-func nativeListPlan(query ListQuery, pushType bool) []issueops.ListRequest {
-	base := nativeListRequestFromListQuery(query, pushType)
+// nativeListPlan is NativeListPlan over a store's own pushable type set. A nil
+// set pushes no type at all.
+func nativeListPlan(query ListQuery, pushableTypes map[string]bool) []issueops.ListRequest {
+	base := nativeListRequestFromListQuery(query, pushableTypes)
 	assignees := nativeListFanOutAssignees(query)
 	if len(assignees) == 0 {
 		return []issueops.ListRequest{base}
@@ -80,29 +92,80 @@ func nativeListPushableStatus(status string) bool {
 	return status == "in_progress" || status == "closed"
 }
 
-// nativeListInfraTypes are bd's default infra types. Naming one on a listing
-// routes it to the ephemeral plane alone (workapi.BuildListFilter), which
-// would drop durable rows of that type, so they are never pushed.
-var nativeListInfraTypes = map[string]bool{"agent": true, "role": true, "message": true}
+// nativeTypesInfraConfigKey is the workspace setting naming the types bd treats
+// as infrastructure.
+const nativeTypesInfraConfigKey = "types.infra"
 
-// nativeListPushableTypes is the type vocabulary a listing may push: the types
-// gc registers in every scope it provisions (RequiredCustomTypes), less bd's
-// infra types. A server that validates types knows every one of them; a scope
-// provisioned without them refuses the request, and NativeDoltStore.List
-// retries it without the type.
-var nativeListPushableTypes = func() map[string]bool {
+// nativeListHistoricalInfraTypes are every type a bd release has treated as
+// infra by default: agent, role and message today, and rig until bd commit
+// 4d3a552424 (Jun 22 2026). Naming an infra type on a listing routes it to the
+// ephemeral plane alone (workapi.BuildListFilter), and the library reads the
+// durable rows only when no wisp matches, so pushing one would intermittently
+// drop durable rows of that type — a loss the Go-side re-filter cannot undo.
+// None of them is ever pushed, whatever the server's own setting says, because
+// a server may run a release whose built-in default still carries one.
+var nativeListHistoricalInfraTypes = map[string]bool{"agent": true, "rig": true, "role": true, "message": true}
+
+// nativeListDefaultPushableTypes is the type vocabulary a listing may push on a
+// scope whose types.infra setting is unset: the types gc registers in every
+// scope it provisions (RequiredCustomTypes), less the historical infra types.
+// A server that validates types knows every one of them; a scope provisioned
+// without them refuses the request, and NativeDoltStore.List retries it
+// without the type.
+var nativeListDefaultPushableTypes = nativeListPushableTypesFor("")
+
+// nativeListPushableTypesFor is nativeListDefaultPushableTypes less every type
+// a types.infra setting value names. The value is bd's comma-separated list.
+//
+// THE ONE RESIDUE is a server whose setting is unset and whose config.yaml
+// carries its own types.infra (bd's second fallback). The workspace-config
+// role publishes only stored settings, so that list is invisible here; gc
+// never writes it, and a type an operator adds there must also be added to the
+// stored setting for the pushdown to honor it.
+func nativeListPushableTypesFor(infraSetting string) map[string]bool {
+	infra := make(map[string]bool)
+	for _, t := range strings.Split(infraSetting, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			infra[t] = true
+		}
+	}
 	out := make(map[string]bool, len(RequiredCustomTypes))
 	for _, t := range RequiredCustomTypes {
-		if !nativeListInfraTypes[t] {
+		if !nativeListHistoricalInfraTypes[t] && !infra[t] {
 			out[t] = true
 		}
 	}
 	return out
-}()
+}
 
-// nativeListPushableType reports whether a gc type may be pushed to the role.
-func nativeListPushableType(issueType string) bool {
-	return nativeListPushableTypes[issueType]
+// nativeReadListPushableTypes reads the scope's types.infra setting through the
+// workspace-config role, as nativeReadIssuePrefix reads the prefix, and returns
+// the types a listing of this scope may push.
+func nativeReadListPushableTypes(ctx context.Context, storage beadslib.Storage) (map[string]bool, error) {
+	settings, err := storage.WorkspaceConfig()
+	if err != nil {
+		return nil, err
+	}
+	result, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: nativeTypesInfraConfigKey})
+	if err != nil {
+		return nil, err
+	}
+	return nativeListPushableTypesFor(result.Value), nil
+}
+
+// loadListPushableTypes sets the store's pushable type set from its scope's
+// types.infra setting. It runs once, at open. A setting that cannot be read
+// leaves the set nil, and the store then pushes no type at all: a type the
+// server classifies as infra would lose durable rows, and only the server's
+// own setting says which types those are.
+func (s *NativeDoltStore) loadListPushableTypes(ctx context.Context) {
+	pushable, err := nativeReadListPushableTypes(ctx, s.storage)
+	if err != nil {
+		s.listLogger().Warn("native bead store: cannot read the scope's types.infra setting; listing without type pushdown for this store",
+			"prefix", s.idPrefix, "err", err)
+		return
+	}
+	s.listPushableTypes = pushable
 }
 
 // nativeListTypeRefused reports whether err is the role refusing a pushed
@@ -158,12 +221,28 @@ type nativeListCounters struct {
 
 func (c *nativeListCounters) noteList() { c.lists.Add(1) }
 
-func (c *nativeListCounters) noteRequest(req issueops.ListRequest, rows int) {
-	c.requests.Add(1)
+// nativeListTally is what one attempt of a List sent: every backend listing
+// request, a refused one included, and the rows the answered ones returned. A
+// List commits only its last attempt's tally, so a withReadRetry retry does not
+// count the abandoned attempt's requests twice.
+type nativeListTally struct {
+	requests int64
+	unkeyed  int64
+	rows     int64
+}
+
+func (t *nativeListTally) noteRequest(req issueops.ListRequest, rows int) {
+	t.requests++
 	if !NativeListRequestKeyed(req) {
-		c.unkeyed.Add(1)
+		t.unkeyed++
 	}
-	c.rows.Add(int64(rows))
+	t.rows += int64(rows)
+}
+
+func (c *nativeListCounters) commit(t nativeListTally) {
+	c.requests.Add(t.requests)
+	c.unkeyed.Add(t.unkeyed)
+	c.rows.Add(t.rows)
 }
 
 func (c *nativeListCounters) snapshot() ListRequestStats {
@@ -244,9 +323,9 @@ func (s *NativeDoltStore) listLogger() *slog.Logger {
 }
 
 // disableTypePushdown latches type pushdown off for this store after the
-// backend refused issueType, and warns once: the answers stay exact, but the
-// scope is missing gc's type vocabulary and every typed listing now reads
-// more rows than it needs.
+// backend refused issueType and answered the same request without it, and
+// warns once: the answers stay exact, but the scope is missing gc's type
+// vocabulary and every typed listing now reads more rows than it needs.
 func (s *NativeDoltStore) disableTypePushdown(issueType string, err error) {
 	if !s.typePushdownOff.CompareAndSwap(false, true) {
 		return
@@ -257,13 +336,18 @@ func (s *NativeDoltStore) disableTypePushdown(issueType string, err error) {
 
 // noteUnkeyedPlan is the whole-ledger tripwire: a plan request that carries no
 // narrowing predicate pages through every row, and is logged at debug with
-// the query that asked for it. ListRequestStats counts it.
+// the query that asked for it. ListRequestStats counts it. The query is
+// rendered only when debug logging is on.
 func (s *NativeDoltStore) noteUnkeyedPlan(query ListQuery, plan []issueops.ListRequest) {
 	for _, req := range plan {
 		if NativeListRequestKeyed(req) {
 			continue
 		}
-		s.listLogger().Debug("native bead store: list walks the whole ledger",
+		logger := s.listLogger()
+		if !logger.Enabled(context.Background(), slog.LevelDebug) {
+			return
+		}
+		logger.Debug("native bead store: list walks the whole ledger",
 			"prefix", s.idPrefix, "query", fmt.Sprintf("%+v", query))
 		return
 	}

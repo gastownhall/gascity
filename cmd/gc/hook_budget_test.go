@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,10 +18,14 @@ import (
 
 // The hook request budget (engdocs/design/worker-hook-request-budget.md).
 //
-// Every session-side hook command runs here in process against a file-backed
+// Every session-side hook command runs here in process against a FILE-BACKED
 // city, with observeOpenedStore wrapping each store it opens in a recorder.
-// The recorded operations are priced by beadstest.WireModel: what the same
-// command would cost against a remote ledger of hookBudgetLedgerRows rows,
+// The file store is only the fixture: it answers the operations so the command
+// takes its real path, and nothing about its own cost is measured. The
+// recorded operations are priced by beadstest.WireModel AS THE NATIVE STORE
+// WOULD SEND THEM — its open handshake, its two-request Get, and
+// beads.NativeListPlan for every listing — that is, what the same command
+// would cost against a remote ledger of hookBudgetLedgerRows rows,
 // where a listing whose plan carries no narrowing predicate pages through the
 // whole ledger. Each scenario asserts that no listing walks the whole ledger,
 // so its cost does not grow with the ledger, and a ceiling on that total and
@@ -34,12 +40,13 @@ import (
 // walks at: the size fitted to the field measurement.
 const hookBudgetLedgerRows = 4000
 
-// hookBudgetHandshake is the requests one store open costs: the handshake
-// plus the issue-prefix read.
-const hookBudgetHandshake = 2
+// hookBudgetHandshake is the requests one native store open costs: the
+// handshake, the issue-prefix read and the types.infra read the list pushdown
+// takes its pushable types from.
+const hookBudgetHandshake = 3
 
 // hookBudgetIdentity is the configured named session every scenario runs as.
-const hookBudgetIdentity = "mayor"
+const hookBudgetIdentity = "probe-a"
 
 type hookBudgetFixture struct {
 	cityDir   string
@@ -58,7 +65,7 @@ func newHookBudgetFixture(t *testing.T) hookBudgetFixture {
 	t.Setenv("GC_INJECT_CONTEXT", "")
 
 	cityDir := t.TempDir()
-	writeNamedSessionCityTOML(t, cityDir)
+	writeHookBudgetCityTOML(t, cityDir)
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
@@ -83,6 +90,28 @@ func newHookBudgetFixture(t *testing.T) hookBudgetFixture {
 	t.Cleanup(func() { startNudgePoller = prevPoller })
 
 	return hookBudgetFixture{cityDir: cityDir, sessionID: sessionBead.ID}
+}
+
+// writeHookBudgetCityTOML writes a file-backed city whose one named session is
+// hookBudgetIdentity.
+func writeHookBudgetCityTOML(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	pack := fmt.Sprintf("[pack]\nname = \"test-city\"\nschema = 2\n\n[[named_session]]\ntemplate = %q\n", hookBudgetIdentity)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(pack), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	writeBuiltinImportsFixture(t, dir, "core")
+	siteTOML := fmt.Sprintf("workspace_name = %q\n", namedSessionTestWorkspace)
+	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(siteTOML), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gc/site.toml): %v", err)
+	}
+	writeCatalogFile(t, dir, "agents/"+hookBudgetIdentity+"/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\n")
 }
 
 // resetHookBudgetProcessState drops the process-lifetime store memos, so each
@@ -233,19 +262,19 @@ func hookBudgetScenarios() []hookBudgetScenario {
 	oneMail := func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "human", hookBudgetIdentity, "status please") }
 	handoff := func(t *testing.T, f hookBudgetFixture) { f.autoHandoff(t) }
 	return []hookBudgetScenario{
-		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 16, Opens: 2}},
-		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2}, wantStdout: "status please"},
-		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 21, Opens: 2}, wantStdout: "context cycle"},
-		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 12, Opens: 1}},
-		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2}},
-		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 10, Opens: 2}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 5}, wantStdout: "review queued work"},
-		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 39, Opens: 3}},
-		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 44, Opens: 3}, wantStdout: "context cycle"},
-		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 21, Opens: 2}},
+		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 23, Opens: 2}, wantStdout: "status please"},
+		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 2}, wantStdout: "context cycle"},
+		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1}},
+		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 20, Opens: 2}},
+		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 2}, wantStdout: "inspect"},
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 33, Opens: 5}, wantStdout: "review queued work"},
+		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 47, Opens: 3}},
+		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 53, Opens: 3}, wantStdout: "context cycle"},
+		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, stdout, stderr)
 		}},
-		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 12, Opens: 2}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdMailSend([]string{"human"}, false, false, "", "", "done", "work finished", stdout, stderr)
 		}},
 	}
