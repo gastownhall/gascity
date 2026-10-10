@@ -34,8 +34,12 @@ func fastIdlePoll(t *testing.T) {
 
 // idlePack is an exec pack script whose `exec` op logs each capture-pane
 // command and answers the nth capture with panes[n-1] (the last pane once
-// the list is exhausted). Other ops log their name to opsLog.
+// the list is exhausted). It keeps the in-box tmux GC_READY_PROMPT_PREFIX in
+// a file (set/unset by set-environment, read by show-environment, removed by
+// stop); show-environment fails while the env.fail file exists. Other ops log
+// their name to opsLog.
 type idlePack struct {
+	dir        string
 	script     string
 	captureLog string
 	opsLog     string
@@ -45,6 +49,7 @@ func newIdlePack(t *testing.T, handshake string, panes ...string) idlePack {
 	t.Helper()
 	dir := t.TempDir()
 	pk := idlePack{
+		dir:        dir,
 		captureLog: filepath.Join(dir, "captures.log"),
 		opsLog:     filepath.Join(dir, "ops.log"),
 	}
@@ -70,6 +75,20 @@ case "$op" in
     cmd=$(cat)
     echo exec >> %[2]q
     case "$cmd" in
+      *set-environment*-u*)
+        echo set-env-unset >> %[2]q
+        rm -f %[4]q/env ;;
+      *set-environment*)
+        echo set-env >> %[2]q
+        eval "set -- $cmd"
+        printf '%%s' "$6" > %[4]q/env ;;
+      *show-environment*)
+        echo show-env >> %[2]q
+        [ -f %[4]q/env.fail ] && exit 1
+        echo "HOME=/root"
+        echo "-TERM"
+        [ -f %[4]q/env ] && printf 'GC_READY_PROMPT_PREFIX=%%s\n' "$(cat %[4]q/env)"
+        exit 0 ;;
       *capture-pane*)
         printf '%%s\n' "$cmd" >> %[3]q
         n=$(wc -l < %[3]q | tr -d ' ')
@@ -79,7 +98,7 @@ case "$op" in
         ;;
     esac ;;
   start) cat > /dev/null; echo start >> %[2]q ;;
-  stop) echo stop >> %[2]q ;;
+  stop) echo stop >> %[2]q; rm -f %[4]q/env ;;
   is-attached) echo is-attached >> %[2]q; echo false ;;
   *) exit 2 ;;
 esac
@@ -180,8 +199,8 @@ func TestWaitForIdleIdlePaneReturnsNil(t *testing.T) {
 	}
 }
 
-// Kills: a scan that ignores the busy footer, and a timeout that is not a
-// context.DeadlineExceeded (callers classify on it).
+// Kills: a timeout that is not a context.DeadlineExceeded (callers classify
+// on it).
 func TestWaitForIdleBusyPaneTimesOut(t *testing.T) {
 	fastIdlePoll(t)
 	pk := newIdlePack(t, idleHandshake, busyClaudePane)
@@ -189,8 +208,18 @@ func TestWaitForIdleBusyPaneTimesOut(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("WaitForIdle on a busy pane = %v, want DeadlineExceeded", err)
 	}
-	if len(pk.captures(t)) == 0 {
-		t.Fatal("no capture ran before the timeout")
+}
+
+// Kills: a scan that ignores the busy footer (the two busy panes would count
+// as idle and the wait would end after two captures).
+func TestWaitForIdleBusyPaneIsNotIdle(t *testing.T) {
+	fastIdlePoll(t)
+	pk := newIdlePack(t, idleHandshake, busyClaudePane, busyClaudePane, idleClaudePane, idleClaudePane)
+	if err := NewProvider(pk.script).WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+	if got := len(pk.captures(t)); got != 4 {
+		t.Fatalf("captures = %d, want exactly 4 (busy, busy, idle, idle)", got)
 	}
 }
 
@@ -207,39 +236,139 @@ func TestWaitForIdleNeedsTwoConsecutiveIdleObservations(t *testing.T) {
 }
 
 // The session's own ready prompt is scanned for while this provider knows
-// it, and the default comes back after Stop.
+// it, and the default comes back after Stop. Each phase is told apart by how
+// many captures the wait needs, not by a timeout, so no assertion races a
+// subprocess against a short deadline.
 // Kills: ignoring Config.ReadyPromptPrefix (codex-style agents never read
-// idle), and a cache that outlives the session.
+// idle), and a cache or published prompt that outlives the session.
 func TestWaitForIdleUsesSessionReadyPrompt(t *testing.T) {
 	fastIdlePoll(t)
-	codex := newIdlePack(t, idleHandshake, idleCodexPane)
-	p := NewProvider(codex.script)
+
+	// Codex prompt: idle after two captures. After Stop the default prompt
+	// is back, so the two further codex panes do not count and the wait
+	// ends on the two claude panes after them.
+	pk := newIdlePack(t, idleHandshake, idleCodexPane, idleCodexPane, idleCodexPane, idleCodexPane, idleClaudePane, idleClaudePane)
+	p := NewProvider(pk.script)
 	if err := p.Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
 		t.Fatalf("WaitForIdle with the session's prompt on screen: %v", err)
 	}
-	if err := p.Stop("s"); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	if err := p.WaitForIdle(context.Background(), "s", 200*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("WaitForIdle after Stop on a codex pane = %v, want DeadlineExceeded (default prompt again)", err)
-	}
-
-	claude := newIdlePack(t, idleHandshake, idleClaudePane)
-	p = NewProvider(claude.script)
-	if err := p.Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := p.WaitForIdle(context.Background(), "s", 200*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("WaitForIdle for a codex session on a claude-only pane = %v, want DeadlineExceeded", err)
+	if got := len(pk.captures(t)); got != 2 {
+		t.Fatalf("captures with the codex prompt = %d, want 2", got)
 	}
 	if err := p.Stop("s"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
-		t.Fatalf("WaitForIdle after Stop on a claude pane: %v", err)
+		t.Fatalf("WaitForIdle after Stop: %v", err)
+	}
+	if got := len(pk.captures(t)); got != 6 {
+		t.Fatalf("captures after Stop = %d, want 6 (codex panes no longer idle)", got)
+	}
+
+	// A codex session does not read idle on claude panes.
+	pk = newIdlePack(t, idleHandshake, idleClaudePane, idleClaudePane, idleCodexPane, idleCodexPane)
+	p = NewProvider(pk.script)
+	if err := p.Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+	if got := len(pk.captures(t)); got != 4 {
+		t.Fatalf("captures for a codex session = %d, want 4 (claude panes not idle)", got)
+	}
+}
+
+// A provider instance that did not start the session (a restarted
+// orchestrator, a CLI process) recovers the session's ready prompt from the
+// in-box tmux environment that Start published, and remembers it.
+// Kills: a prefix kept only in the starting instance's memory (the other
+// instance would scan for the default prompt and never read a codex session
+// idle, which turns interrupt_now into a hard restart), a Start that does not
+// publish, and a read on every wait.
+func TestWaitForIdleSecondInstanceRecoversReadyPrompt(t *testing.T) {
+	fastIdlePoll(t)
+	pk := newIdlePack(t, idleHandshake, idleCodexPane)
+	if err := NewProvider(pk.script).Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !strings.Contains(pk.ops(t), "set-env\n") {
+		t.Fatalf("Start did not publish the ready prompt; ops = %q", pk.ops(t))
+	}
+	other := NewProvider(pk.script)
+	for i := range 2 {
+		if err := other.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+			t.Fatalf("second instance WaitForIdle #%d on a codex pane: %v", i+1, err)
+		}
+	}
+	if got := strings.Count(pk.ops(t), "show-env\n"); got != 1 {
+		t.Fatalf("show-environment reads = %d, want 1 (remembered after the first)", got)
+	}
+}
+
+// An unset variable means the default prompt and is remembered; a failed read
+// falls back to the default without remembering, so the next wait retries.
+// Kills: a failed read cached forever, and an unset variable treated as a
+// failure on every wait.
+func TestWaitForIdleReadyPromptReadFallback(t *testing.T) {
+	fastIdlePoll(t)
+
+	unset := newIdlePack(t, idleHandshake, idleClaudePane)
+	p := NewProvider(unset.script)
+	for i := range 2 {
+		if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+			t.Fatalf("WaitForIdle #%d with no published prompt on a claude pane: %v", i+1, err)
+		}
+	}
+	if got := strings.Count(unset.ops(t), "show-env\n"); got != 1 {
+		t.Fatalf("show-environment reads with the variable unset = %d, want 1", got)
+	}
+
+	failing := newIdlePack(t, idleHandshake, idleClaudePane)
+	if err := os.WriteFile(filepath.Join(failing.dir, "env.fail"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p = NewProvider(failing.script)
+	for i := range 2 {
+		if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+			t.Fatalf("WaitForIdle #%d with a failing read on a claude pane: %v", i+1, err)
+		}
+	}
+	if got := strings.Count(failing.ops(t), "show-env\n"); got != 2 {
+		t.Fatalf("show-environment reads with a failing read = %d, want 2 (not remembered)", got)
+	}
+}
+
+// A blank prefix unsets the published variable, so a relaunch with the
+// default prompt does not leave a stale one behind; a pack without an idle
+// boundary gets no extra exec op at Start.
+func TestStartPublishesReadyPromptOnlyWithIdleBoundary(t *testing.T) {
+	pk := newIdlePack(t, idleHandshake, idleClaudePane)
+	if err := NewProvider(pk.script).Start(context.Background(), "s", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !strings.Contains(pk.ops(t), "set-env-unset\n") {
+		t.Fatalf("Start with a blank prompt did not unset it; ops = %q", pk.ops(t))
+	}
+
+	// The separable launch publishes once the agent's tmux session exists.
+	pk = newIdlePack(t, `{"version":0,"capabilities":["proc.exec","proc.provision","report-activity","report-attachment"]}`, idleClaudePane)
+	if err := NewProvider(pk.script).launchAgent(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
+		t.Fatalf("launchAgent: %v", err)
+	}
+	if !strings.Contains(pk.ops(t), "set-env\n") {
+		t.Fatalf("launchAgent did not publish the ready prompt; ops = %q", pk.ops(t))
+	}
+
+	pk = newIdlePack(t, `{"version":0,"capabilities":["proc.exec","report-activity"]}`, idleClaudePane)
+	if err := NewProvider(pk.script).Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if strings.Contains(pk.ops(t), "set-env") {
+		t.Fatalf("Start published without an idle boundary; ops = %q", pk.ops(t))
 	}
 }
 
@@ -270,6 +399,8 @@ func TestIsAttachedWithError(t *testing.T) {
 		wantOp       bool
 	}{
 		{"undeclared", `{"version":0,"capabilities":["report-activity"]}`, `echo true`, false, nil, false},
+		{"attachment only", `{"version":0,"capabilities":["report-attachment"]}`, `echo true`, true, nil, true},
+		{"attachment only op error", `{"version":0,"capabilities":["report-attachment"]}`, `exit 1`, false, runtime.ErrRuntimeUnavailable, true},
 		{"attached", idleHandshake, `echo true`, true, nil, true},
 		{"attached with whitespace", idleHandshake, `printf ' true \n'`, true, nil, true},
 		{"not attached", idleHandshake, `echo false`, false, nil, true},

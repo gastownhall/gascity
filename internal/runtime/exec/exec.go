@@ -228,6 +228,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
+	p.publishReadyPrompt(ctx, name, cfg)
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
 		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err), foreignBox)
@@ -329,6 +330,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
 	}
+	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }
 

@@ -224,10 +224,23 @@ pause between them fit in 5 s when each capture finishes in under about
 2.4 s. A slower check fails closed: the session stays awake, and the check
 runs again on the next orchestrator tick.
 
-The orchestrator remembers a non-default `ready_prompt_prefix` only for
-sessions it started itself. After an orchestrator restart it looks for the
-default prompt, so a session with another prompt stays awake until it is next
-restarted.
+Once the agent's tmux session exists, the orchestrator stores the session's
+`ready_prompt_prefix` in that session's environment as
+`GC_READY_PROMPT_PREFIX` (`tmux set-environment -t main`, unset for the
+default prompt), as local tmux sessions do. A process that did not start the
+session, such as a restarted orchestrator or a `gc` command that cannot reach
+the API, reads it back once with `tmux show-environment -t main` and then
+remembers it. Do not clear the `main` session's environment. If the read
+fails, that process looks for the default prompt until a later read succeeds.
+A session whose agent shows another prompt then never reads as idle. It stays
+awake, and every wait for its idle boundary runs to its timeout: interrupting
+it (`interrupt_now`) can restart the session, and stopping a turn reports an
+error.
+
+The `is-attached` rule above applies to every runtime that declares
+`report-attachment`, even without the other two capabilities. gc runs the op
+directly and treats a non-zero exit as "attached": the session stays awake and
+destructive actions on it are held.
 
 ```toml
 [session_sleep]

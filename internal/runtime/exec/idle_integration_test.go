@@ -91,7 +91,8 @@ func writeAgent(t *testing.T, root, name, body string) {
 
 // Over a real tmux server per box, a pack declaring the idle boundary gets
 // full idle sleep: WaitForIdle proves an idle prompt, times out on a busy
-// pane, honors a custom ready prompt, and the activity and attachment ops
+// pane, honors a custom ready prompt (also from a provider instance that did
+// not start the box), and the activity and attachment ops
 // answer from the box's tmux.
 func TestTmuxBoxPackIdleBoundary(t *testing.T) {
 	script, root := newTmuxBoxPack(t)
@@ -121,6 +122,11 @@ func TestTmuxBoxPackIdleBoundary(t *testing.T) {
 	}
 	if err := p.WaitForIdle(ctx, "custom", 10*time.Second); err != nil {
 		t.Fatalf("WaitForIdle on a box showing its custom prompt: %v", err)
+	}
+	// A provider instance that did not start the box (a restarted
+	// orchestrator) reads the custom prompt back from the box's tmux.
+	if err := NewProvider(script).WaitForIdle(ctx, "custom", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle from another provider instance on a box showing its custom prompt: %v", err)
 	}
 	began := time.Now()
 	if err := p.WaitForIdle(ctx, "busy", time.Second); !errors.Is(err, context.DeadlineExceeded) {
