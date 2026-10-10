@@ -383,6 +383,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			// The bead.closed being applied is already on the bus.
 			closeAnnounced: true,
 		})
+		c.noteCloseAnnouncedLocked(b.ID)
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {

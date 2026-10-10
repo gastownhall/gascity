@@ -649,6 +649,9 @@ func (c *CachingStore) mergeSnapshotLocked(
 		}
 		res.removes++
 		if d.notification == "bead.closed" {
+			// A closing write in flight for this row must not announce
+			// the close again once it finds the row evicted.
+			c.noteCloseAnnouncedLocked(id)
 			closed := cloneBead(cached)
 			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {

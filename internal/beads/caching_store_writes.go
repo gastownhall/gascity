@@ -81,7 +81,13 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		return nil
 	}
 	startSeq := c.currentMutationSeq()
+	if updateCloses(opts) {
+		c.beginCloseIntent(id)
+	}
 	if err := c.backing.Update(id, opts); err != nil {
+		if updateCloses(opts) {
+			c.endCloseIntent(id)
+		}
 		return err
 	}
 	c.absorbUpdate(id, opts, startSeq)
@@ -100,7 +106,13 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 		return false, ErrConditionalWriteUnsupported
 	}
 	startSeq := c.currentMutationSeq()
+	if updateCloses(opts) {
+		c.beginCloseIntent(id)
+	}
 	updated, err := updater.UpdateIfAssignment(id, expectedStatus, expectedAssignee, opts)
+	if (err != nil || !updated) && updateCloses(opts) {
+		c.endCloseIntent(id)
+	}
 	switch {
 	case err != nil:
 		return false, err
@@ -117,13 +129,17 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64) {
 	fresh, err := c.backing.Get(id)
 	c.mu.Lock()
+	// Every branch below claims (or declines) the close under this lock, so
+	// the intent can end here; a close announced elsewhere meanwhile is not
+	// claimed (claimCloseIntentLocked).
+	announcedElsewhere := updateCloses(opts) && c.endCloseIntentLocked(id)
 	raced := c.racedWriteLocked(id, startSeq)
 	if errors.Is(err, ErrNotFound) {
 		closed, notifyClosed := c.patchedCachedRowLocked(id, func(b *Bead) { setBeadStatus(b, "closed") })
 		// Only a held row's close is announced, once: a held row already
 		// closed was announced by whoever installed it, unless a read queued
 		// that close and has not drained it yet.
-		notifyClosed = notifyClosed && c.claimCloseLocked(id, false, raced)
+		notifyClosed = notifyClosed && !announcedElsewhere && c.claimCloseLocked(id, false, raced)
 		if !raced {
 			seq := c.noteLocalMutationLocked(id)
 			c.tombstoneLocked(id, seq)
@@ -144,7 +160,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		patched, found := c.patchedCachedRowLocked(id, func(b *Bead) { *b = applyUpdateOptsToBead(*b, opts) })
 		eventType := "bead.updated"
 		if found {
-			eventType = c.updateEventTypeLocked(id, patched, opts, raced)
+			eventType = c.updateEventTypeLocked(id, patched, opts, announcedElsewhere, raced)
 		}
 		if !raced {
 			c.noteLocalMutationLocked(id)
@@ -171,14 +187,14 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 	}
 	if raced {
 		// Notify with the backing's row, not the write laid over it.
-		eventType := c.updateEventTypeLocked(id, fresh, opts, true)
+		eventType := c.updateEventTypeLocked(id, fresh, opts, announcedElsewhere, true)
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		c.notifyChange(ChangeLocal, eventType, fresh)
 		return
 	}
 	fresh = applyUpdateOptsToBead(fresh, opts)
-	eventType := c.updateEventTypeLocked(id, fresh, opts, false)
+	eventType := c.updateEventTypeLocked(id, fresh, opts, announcedElsewhere, false)
 	c.noteLocalMutationLocked(id)
 	c.absorbFreshLocked(id, fresh, c.clockNow(), absorbOpts{
 		depsMode:       depsFromFieldsIfCarried,
@@ -395,7 +411,9 @@ func (c *CachingStore) Close(id string) error {
 		return nil
 	}
 	startSeq := c.currentMutationSeq()
+	c.beginCloseIntent(id)
 	if err := c.backing.Close(id); err != nil {
+		c.endCloseIntent(id)
 		return err
 	}
 
@@ -416,6 +434,9 @@ func (c *CachingStore) Close(id string) error {
 	}
 
 	c.mu.Lock()
+	// The claim below runs under this same lock; a close announced elsewhere
+	// while this one was in flight is not claimed (claimCloseIntentLocked).
+	announcedElsewhere := c.endCloseIntentLocked(id)
 	// A fenced close installs nothing but still notifies the closed row, as
 	// an unfenced one does: the close committed either way.
 	raced := c.racedWriteLocked(id, startSeq)
@@ -426,7 +447,10 @@ func (c *CachingStore) Close(id string) error {
 	setBeadStatus(&closed, "closed")
 	// A concurrent read that installed and announced this close first owns
 	// the announcement; announcing again here would duplicate it.
-	announce := found && c.claimCloseLocked(id, true, raced)
+	announce := found && !announcedElsewhere && c.claimCloseLocked(id, true, raced)
+	if announce {
+		c.noteCloseAnnouncedLocked(id)
+	}
 	if !raced {
 		c.noteLocalMutationLocked(id)
 		if found {
@@ -487,7 +511,9 @@ func (c *CachingStore) Reopen(id string) error {
 	raced := c.racedWriteLocked(id, startSeq)
 	found := refreshed
 	if !refreshed {
-		reopened, found = c.patchedCachedRowLocked(id, func(*Bead) {})
+		// The backing's reopen dropped metadata.close_reason; the patch
+		// mirrors it.
+		reopened, found = c.patchedCachedRowLocked(id, dropCloseReasonMetadata)
 	}
 	setBeadStatus(&reopened, "open")
 	if !raced {

@@ -4767,6 +4767,37 @@ export type SlingBatchSummary = {
     total: number;
 };
 
+export type SlingChildOutcome = {
+    /**
+     * Child bead ID.
+     */
+    bead_id: string;
+    /**
+     * Formula attached to the child, when one was.
+     */
+    formula?: string;
+    /**
+     * Root of the formula wisp attached to the child, when a non-graph formula was attached.
+     */
+    molecule_id?: string;
+    /**
+     * routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+     */
+    outcome: 'routed' | 'failed' | 'skipped';
+    /**
+     * Why routing the child failed. Present only for outcome failed.
+     */
+    reason?: string;
+    /**
+     * The child's bead status when it was skipped because it was not open.
+     */
+    status?: string;
+    /**
+     * Graph workflow launched for the child, when one was.
+     */
+    workflow_id?: string;
+};
+
 export type SlingInputBody = {
     /**
      * Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -4840,6 +4871,10 @@ export type SlingResponse = {
     batch?: SlingBatchSummary;
     bead?: string;
     /**
+     * One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+     */
+    children?: Array<SlingChildOutcome> | null;
+    /**
      * Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
      */
     convoy_id?: string;
@@ -4858,7 +4893,10 @@ export type SlingResponse = {
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
      */
     run?: RunRef;
-    status: string;
+    /**
+     * slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+     */
+    status: 'slung' | 'partial';
     target: string;
     warnings?: Array<string> | null;
     workflow_id?: string;

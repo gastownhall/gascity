@@ -65,8 +65,8 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	// Publish the session.pending_cleared now rather than on the next tick.
-	s.pokePendingMonitor()
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	resp := map[string]string{"status": "accepted", "id": id}
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)

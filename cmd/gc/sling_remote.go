@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // cmdSlingRemote routes a sling mutation to a REMOTE city over the control
@@ -101,7 +102,7 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 			return fail("attached_to_container", msg)
 		}
 	}
-	return renderRemoteSlingResult(res, jsonOutput, stdout, stderr)
+	return renderRemoteSlingResult(res, onFormula != "", jsonOutput, stdout, stderr)
 }
 
 // checkRemoteOnAttach catches a remote server older than this client
@@ -154,8 +155,15 @@ func parseSlingVars(vars []string) (map[string]string, error) {
 
 // renderRemoteSlingResult prints a remote sling outcome. Warnings go to stderr;
 // the result goes to stdout (a compact JSON object with --json, otherwise a
-// one-line summary).
-func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stderr io.Writer) int {
+// one-line summary, or for a convoy the same per-child lines the local path
+// prints). A convoy that routed some children and failed others (status
+// partial) exits 1, as the local path does. onFormula says the sling attached
+// an explicit --on formula, which only labels attached wisps.
+func renderRemoteSlingResult(res api.SlingResult, onFormula, jsonOutput bool, stdout, stderr io.Writer) int {
+	exit := 0
+	if res.Partial() {
+		exit = 1
+	}
 	for _, w := range res.Warnings {
 		fmt.Fprintln(stderr, "warning:", w) //nolint:errcheck // best-effort stderr
 	}
@@ -168,7 +176,7 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 		// mode) is added.
 		payload := map[string]any{
 			"schema_version": "1",
-			"success":        true,
+			"success":        !res.Partial(),
 			"status":         res.Status,
 			"target":         res.Target,
 		}
@@ -191,6 +199,19 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 			putIfSet(batch, "container_type", b.ContainerType)
 			payload["batch"] = batch
 		}
+		if len(res.Children) > 0 {
+			children := make([]map[string]any, 0, len(res.Children))
+			for _, c := range res.Children {
+				child := map[string]any{"bead_id": c.BeadID, "outcome": c.Outcome}
+				putIfSet(child, "status", c.Status)
+				putIfSet(child, "reason", c.Reason)
+				putIfSet(child, "formula", c.Formula)
+				putIfSet(child, "workflow_id", c.WorkflowID)
+				putIfSet(child, "molecule_id", c.MoleculeID)
+				children = append(children, child)
+			}
+			payload["children"] = children
+		}
 		if len(res.Warnings) > 0 {
 			payload["warnings"] = res.Warnings
 		}
@@ -200,7 +221,15 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 			return 1
 		}
 		fmt.Fprintln(stdout, string(enc)) //nolint:errcheck // best-effort stdout
-		return 0
+		return exit
+	}
+	if res.Batch != nil && len(res.Children) > 0 {
+		printBatchSlingResult(remoteBatchSlingResult(res, onFormula), stdout, stderr)
+		if res.Partial() {
+			b := res.Batch
+			fmt.Fprintf(stderr, "%d/%d children failed\n", b.Failed, b.Failed+b.Routed+b.Idempotent) //nolint:errcheck
+		}
+		return exit
 	}
 	line := res.Status + " → " + res.Target
 	switch {
@@ -211,6 +240,41 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 	}
 	fmt.Fprintln(stdout, line) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// remoteBatchSlingResult rebuilds the domain batch result from a remote convoy
+// sling's wire result, so the remote path renders it with the local path's
+// printBatchSlingResult.
+func remoteBatchSlingResult(res api.SlingResult, onFormula bool) sling.SlingResult {
+	b := res.Batch
+	out := sling.SlingResult{
+		BeadID:        res.Bead,
+		Target:        res.Target,
+		Method:        "batch-default-on",
+		ContainerType: b.ContainerType,
+		Total:         b.Total,
+		Routed:        b.Routed,
+		Failed:        b.Failed,
+		Skipped:       b.Skipped,
+		IdempotentCt:  b.Idempotent,
+	}
+	if onFormula {
+		out.Method = "batch-on"
+	}
+	for _, c := range res.Children {
+		out.Children = append(out.Children, sling.SlingChildResult{
+			BeadID:      c.BeadID,
+			Status:      c.Status,
+			Routed:      c.Outcome == sling.ChildOutcomeRouted,
+			Skipped:     c.Outcome == sling.ChildOutcomeSkipped,
+			Failed:      c.Outcome == sling.ChildOutcomeFailed,
+			FailReason:  c.Reason,
+			WorkflowID:  c.WorkflowID,
+			WispRootID:  c.MoleculeID,
+			FormulaName: c.Formula,
+		})
+	}
+	return out
 }
 
 func putIfSet(m map[string]any, key, val string) {

@@ -189,8 +189,8 @@ type sseStream struct {
 
 // openSSEStream serves GET path on h in-process and returns once the handler
 // has committed a 200 response. stop cancels the request and returns only after
-// the handler has returned, so everything the handler defers (watcher closes,
-// pending-monitor leases) has run by then. It is also registered as cleanup.
+// the handler has returned, so everything the handler defers (watcher closes)
+// has run by then. It is also registered as cleanup.
 func openSSEStream(t *testing.T, h http.Handler, path, lastEventID string) *sseStream {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -398,7 +398,8 @@ func TestSupervisorGlobalEventStreamDetachesCityStoppedMidStream(t *testing.T) {
 
 	alpha.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "alpha-1"})
 	frame, data := stream.nextTaggedEvent(t)
-	assertTaggedEvent(t, frame, data, "alpha", "alpha-1", "alpha:1,beta:0")
+	// The departed city is pruned from the composite id.
+	assertTaggedEvent(t, frame, data, "alpha", "alpha-1", "alpha:1")
 }
 
 // A resolver without a change notifier still has new cities picked up by the
