@@ -1568,7 +1568,6 @@ go_test(
         "runtime_lease_controller_test.go",
         "runtime_lease_crossproc_test.go",
         "runtime_lease_kill_test.go",
-        "runtime_lease_lint_test.go",
         "runtime_lease_optout_test.go",
         "runtime_lease_reopen_test.go",
         "runtime_observation_cache_test.go",
