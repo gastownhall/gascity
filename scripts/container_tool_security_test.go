@@ -159,6 +159,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pillow>=12.3.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
+		"litellm>=1.89.7",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -167,7 +168,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
 	for _, want := range []string{
 		"cryptography>=50.0.0",
-		"pyjwt>=2.14.0",
+		"pyjwt>=2.15.0",
 	} {
 		if !strings.Contains(overrides, want) {
 			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
@@ -181,7 +182,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
-		"pyjwt==2.14.0 \\",
+		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
 	} {
