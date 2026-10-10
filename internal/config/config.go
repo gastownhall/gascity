@@ -2718,8 +2718,9 @@ type DaemonConfig struct {
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
-	// path waits on the originally requested port when bind fails with
-	// "address already in use" before falling back to a higher port. The
+	// path waits on the originally requested port when dolt reports it in
+	// use ("address already in use", or "Port N already in use." from dolt
+	// 2.3.3) before falling back to a higher port. The
 	// common cause is a TIME_WAIT socket left by an abrupt stop of a sibling
 	// dolt subprocess (external SIGTERM, supervisor restart, OOM kill); on
 	// Linux the listening-socket slot typically frees within ~30s. Falling
@@ -3066,7 +3067,8 @@ func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
-// when dolt's bind fails with "address already in use" before the start path
+// when dolt reports its port in use ("address already in use", or "Port N
+// already in use." from dolt 2.3.3) before the start path
 // falls back to the next available port. 30s is roughly half Linux's default
 // TCP TIME_WAIT — the listening-socket slot typically frees well before the
 // full TIME_WAIT elapses because there are no active half-open connections
