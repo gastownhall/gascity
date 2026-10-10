@@ -41,15 +41,16 @@ func (p *Provider) idleBoundaryDeclared() bool {
 		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
 }
 
+// readyPromptEnvKey is the in-box tmux session environment variable that
+// carries the session's ready-prompt prefix, the same key the tmux provider
+// publishes, so any provider instance can recover the prefix from the box.
+const readyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
+
 // rememberReadyPrompt records the session's configured ready-prompt prefix so
 // WaitForIdle scans for the agent's own prompt rather than the default one. A
-// blank prefix forgets any earlier value.
+// blank prefix records the default.
 func (p *Provider) rememberReadyPrompt(name string, cfg runtime.Config) {
-	if strings.TrimSpace(cfg.ReadyPromptPrefix) == "" {
-		p.readyPrompts.Delete(name)
-		return
-	}
-	p.readyPrompts.Store(name, cfg.ReadyPromptPrefix)
+	p.readyPrompts.Store(name, idlePromptPrefix(cfg.ReadyPromptPrefix))
 }
 
 // forgetReadyPrompt drops the remembered ready-prompt prefix for name.
@@ -57,16 +58,79 @@ func (p *Provider) forgetReadyPrompt(name string) {
 	p.readyPrompts.Delete(name)
 }
 
-// readyPromptPrefix returns the ready-prompt prefix remembered for name, or
-// tmux.DefaultReadyPromptPrefix when this provider instance did not start the
-// session (for example after an orchestrator restart).
-func (p *Provider) readyPromptPrefix(name string) string {
+// idlePromptPrefix returns configured, or tmux.DefaultReadyPromptPrefix when
+// it is blank.
+func idlePromptPrefix(configured string) string {
+	if strings.TrimSpace(configured) == "" {
+		return tmux.DefaultReadyPromptPrefix
+	}
+	return configured
+}
+
+// publishReadyPrompt writes the session's ready-prompt prefix into the in-box
+// tmux session environment (readyPromptEnvKey), or unsets it for a blank
+// prefix, once the in-box session exists. The in-memory cache only covers the
+// provider instance that started the session; this copy lets any other
+// instance (a restarted orchestrator, a rebuilt provider, a CLI process)
+// recover it in readyPromptPrefix. Only a pack with an idle boundary has the
+// in-box tmux session and the exec connection this needs. Best effort: on
+// failure other instances fall back to the default prompt.
+func (p *Provider) publishReadyPrompt(ctx context.Context, name string, cfg runtime.Config) {
+	if !p.idleBoundaryDeclared() {
+		return
+	}
+	argv := []string{"tmux", "set-environment", "-t", execTmuxSession, readyPromptEnvKey, cfg.ReadyPromptPrefix}
+	if strings.TrimSpace(cfg.ReadyPromptPrefix) == "" {
+		argv = []string{"tmux", "set-environment", "-t", execTmuxSession, "-u", readyPromptEnvKey}
+	}
+	_, _, _ = p.Exec(ctx, name, argv)
+}
+
+// readyPromptPrefix returns the ready-prompt prefix for name, reading it within
+// limit. A prefix this instance remembered from Start is returned without a
+// round trip. Otherwise (this instance did not start the session, for example
+// after an orchestrator restart) it is read from the in-box tmux session
+// environment that publishReadyPrompt wrote and remembered; an unset variable
+// means the default prompt and is remembered too. A failed read returns
+// tmux.DefaultReadyPromptPrefix without remembering it, so the next call
+// retries.
+func (p *Provider) readyPromptPrefix(ctx context.Context, name string, limit time.Duration) string {
 	if v, ok := p.readyPrompts.Load(name); ok {
 		if prefix, ok := v.(string); ok {
 			return prefix
 		}
 	}
-	return tmux.DefaultReadyPromptPrefix
+	prefix, expired, err := bounded(ctx, limit, func(ctx context.Context) (string, error) {
+		return p.readPublishedReadyPrompt(ctx, name)
+	})
+	if expired || err != nil {
+		return tmux.DefaultReadyPromptPrefix
+	}
+	p.readyPrompts.LoadOrStore(name, prefix)
+	return prefix
+}
+
+// readPublishedReadyPrompt reads readyPromptEnvKey from the in-box tmux
+// session over the exec connection. It lists the whole session environment
+// rather than asking for the one key, because tmux exits 1 both for an unset
+// key and for a missing session, and the exec op does not carry the stderr
+// that tells them apart: a "KEY=value" line is the prefix, a "-KEY" line or
+// no line means unset (the default prompt), and a non-zero exit is an error.
+func (p *Provider) readPublishedReadyPrompt(ctx context.Context, name string) (string, error) {
+	out, code, err := p.Exec(ctx, name, []string{"tmux", "show-environment", "-t", execTmuxSession})
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		return "", fmt.Errorf("exec provider: reading the tmux environment in %q: tmux exited %d", name, code)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if value, ok := strings.CutPrefix(line, readyPromptEnvKey+"="); ok {
+			return idlePromptPrefix(value), nil
+		}
+	}
+	return tmux.DefaultReadyPromptPrefix, nil
 }
 
 // WaitForIdle waits until the in-box tmux pane shows the session's ready prompt
@@ -86,7 +150,16 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	if !p.idleBoundaryDeclared() {
 		return runtime.ErrInteractionUnsupported
 	}
-	return waitForPaneIdle(ctx, p.carrier(), time.Now, name, p.readyPromptPrefix(name), timeout)
+	deadline := time.Now().Add(timeout)
+	prefix := p.readyPromptPrefix(ctx, name, timeout)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("exec provider: %q not idle within %s: %w (reading the ready prompt used the whole timeout)", name, timeout, context.DeadlineExceeded)
+	}
+	return waitForPaneIdle(ctx, p.carrier(), time.Now, name, prefix, remaining)
 }
 
 // waitForPaneIdle is WaitForIdle's poll loop over carrier c, reading time from
@@ -146,28 +219,41 @@ func waitForPaneIdle(ctx context.Context, c runtime.Carrier, now func() time.Tim
 }
 
 // boundedPeek captures the pane under a context that expires after limit and
-// returns no later than that, even if the carrier does not return promptly
-// on cancellation (the exec op can outlive its context while a child of the
-// pack script still holds its output open). An abandoned capture finishes in
-// the background and its result is dropped. expired reports that the limit
-// was reached before the capture produced a usable result.
+// returns no later than that (see bounded).
 func boundedPeek(ctx context.Context, c runtime.Carrier, name string, limit time.Duration) (out string, expired bool, err error) {
-	captureCtx, cancel := context.WithTimeout(ctx, limit)
+	out, expired, err = bounded(ctx, limit, func(ctx context.Context) (string, error) {
+		return c.Peek(ctx, name, tmux.PromptObservationLines)
+	})
+	if err != nil && expired {
+		err = fmt.Errorf("exec provider: capturing %q: %w", name, err)
+	}
+	return out, expired, err
+}
+
+// bounded runs f under a context derived from ctx that expires after limit,
+// and returns no later than that, even if f does not return promptly on
+// cancellation (an exec op can outlive its context while a child of the pack
+// script still holds its output open). An abandoned call finishes in the
+// background and its result is dropped. expired reports that the limit was
+// reached before f produced a usable result.
+func bounded[T any](ctx context.Context, limit time.Duration, f func(context.Context) (T, error)) (val T, expired bool, err error) {
+	callCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	type result struct {
-		out string
+		val T
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
-		out, err := c.Peek(captureCtx, name, tmux.PromptObservationLines)
-		done <- result{out, err}
+		v, err := f(callCtx)
+		done <- result{v, err}
 	}()
 	select {
 	case r := <-done:
-		return r.out, errors.Is(captureCtx.Err(), context.DeadlineExceeded), r.err
-	case <-captureCtx.Done():
-		return "", errors.Is(captureCtx.Err(), context.DeadlineExceeded), fmt.Errorf("exec provider: capturing %q: %w", name, captureCtx.Err())
+		return r.val, errors.Is(callCtx.Err(), context.DeadlineExceeded), r.err
+	case <-callCtx.Done():
+		var zero T
+		return zero, errors.Is(callCtx.Err(), context.DeadlineExceeded), callCtx.Err()
 	}
 }
 
