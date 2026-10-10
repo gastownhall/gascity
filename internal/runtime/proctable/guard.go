@@ -34,7 +34,7 @@ func liveScanGuard() error {
 // SetScanRootForTesting overrides the procfs root used by ScanBySessionID and
 // IsScanRoot for t, and restores it when t ends. It exists only so tests can
 // drive the scanner against a controlled, fake procfs tree instead of the
-// host's; it is the only test write of scanRoot (the testrelax analyzer).
+// host's; it is the only write of scanRoot (the testrelax analyzer).
 func SetScanRootForTesting(t testing.TB, root string) {
 	t.Helper()
 	prev := scanRoot

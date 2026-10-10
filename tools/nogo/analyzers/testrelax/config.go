@@ -3,7 +3,7 @@ package testrelax
 const gascity = "github.com/gastownhall/gascity/"
 
 // Analyzer is the lint as nogo runs it over the repository.
-var Analyzer = New(Config{Guards: guards, Vars: vars, Env: env, Allowed: allowed})
+var Analyzer = New(Config{Guards: guards, Vars: vars, Writers: writers, Env: env, Allowed: allowed})
 
 // The reviewed guards. A production guard is anything that refuses or delays
 // a destructive act or a takeover, or that keeps a process off a resource it
@@ -21,12 +21,18 @@ var guards = map[string]string{
 	gascity + "cmd/gc.setSessionCircuitBreakerForTest":           "replaces the session circuit breaker, which stops restarting a crash-looping session",
 }
 
-// vars are the variables that hold a guard. A test writes one only through
-// its setter.
+// vars are the variables that hold a guard. Only its setter, or a writer
+// below, writes one.
 var vars = map[string]string{
 	gascity + "internal/runtime/proctable.scanRoot":            "holds the procfs root liveScanGuard refuses to scan live under go test (#2839)",
 	gascity + "cmd/gc.sessionCircuitBreakerSingleton":          "holds the session circuit breaker, which stops restarting a crash-looping session",
 	gascity + "internal/workspacesvc.proxyProcessReadyTimeout": "holds the readiness bound after which a spawned service helper is killed as hung",
+}
+
+// writers are the production functions that write a guarded variable, each
+// with why the write relaxes nothing.
+var writers = map[string]string{
+	gascity + "cmd/gc.defaultSessionCircuitBreaker": "lazily builds the production breaker, with its defaults, when nothing has set one",
 }
 
 // env are the break-glass environment variables: each lets a process past a
@@ -37,9 +43,12 @@ var env = map[string]string{
 	"GC_BD_ALLOW_RELOCATED_CLASS_READ":     "lets `gc bd` read a bead class from the store it was relocated away from",
 	"GC_BD_ALLOW_UNREAD_STORE_READ":        "lets `gc bd` read a store gc no longer reads (the unread-store guard)",
 	"GC_ALLOW_PROD_DOLT_PORT_IN_TESTS":     "lets a test client reach the production Dolt port (ga-4c2ss6)",
+	"GC_BEADS_CONDITIONAL_WRITES":          "turns the beads compare-and-swap write fence (beads.conditional_writes) off, so a lost race clobbers a peer's write",
+	"GC_BEADS_GUARDED_RELEASE":             "turns the guarded release fence (beads.guarded_release) off, so a stale owner's release unclaims a re-claimed bead",
 }
 
-// allowed are the package-global relaxations kept, each with its reason.
-var allowed = map[string]string{
-	gascity + "internal/workspacesvc:" + gascity + "internal/workspacesvc.proxyProcessReadyTimeout": "ga-bhct0w: a starved test host can take longer than the production bound to start a healthy helper. Reload and Tick return only once the helper answers, so the tests need a bound only a hung helper outlives; the helper processes the test binary re-executes itself as share it, which a per-test write cannot reach",
+// allowed are the package-global relaxations kept, each at its one site with
+// its reason.
+var allowed = map[Allowance]string{
+	{Pkg: gascity + "internal/workspacesvc", Site: "proxy_process_ready_test.go:init", Guard: gascity + "internal/workspacesvc.proxyProcessReadyTimeout"}: "ga-bhct0w: a starved test host can take longer than the production bound to start a healthy helper. Reload and Tick return only once the helper answers, so the tests need a bound only a hung helper outlives; the helper processes the test binary re-executes itself as share it, which a per-test write cannot reach",
 }

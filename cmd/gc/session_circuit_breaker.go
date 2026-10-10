@@ -866,8 +866,8 @@ func defaultSessionCircuitBreaker() *sessionCircuitBreaker {
 
 // setSessionCircuitBreakerForTest swaps the singleton for t, and restores the
 // previous one when t ends. Tests call this to inject a fake-clocked breaker
-// without touching production wiring; it is the only test write of the
-// singleton (the testrelax analyzer).
+// without touching production wiring. It and defaultSessionCircuitBreaker's
+// lazy build are the only writes of the singleton (the testrelax analyzer).
 func setSessionCircuitBreakerForTest(t testing.TB, b *sessionCircuitBreaker) {
 	t.Helper()
 	sessionCircuitBreakerMu.Lock()
