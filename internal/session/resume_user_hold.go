@@ -7,36 +7,21 @@ import (
 )
 
 // This file is the interim consume of an operator's user hold by an
-// operator's own resume (ResumeOperator: Attach, and Start, Submit or Send
-// carrying it): a strict subset of CONTRACT v5.9 D8 rules 2-5. The runtime
+// operator's own resume (ActorOperator: Attach, and Start, Submit or Send
+// by an operator): a strict subset of CONTRACT v5.9 D8 rules 2-5. The runtime
 // lease (L1b) fences it against the controller's kills; D8 B replaces it with
 // the lease-fenced consume.
-
-// resumeReplacing is the policy an interrupt's restart runs under for a
-// caller that is not an operator's resume: the hold was decided before the
-// interrupt's stop, so it starts without re-reading it (as ResumeOperator
-// does), but it never consumes one.
-const resumeReplacing ResumePolicy = -1
-
-// restartPolicy is the policy an interrupt's restart runs under for a caller
-// that submitted under policy.
-func restartPolicy(policy ResumePolicy) ResumePolicy {
-	if policy == ResumeOperator {
-		return ResumeOperator
-	}
-	return resumeReplacing
-}
 
 // liveUserHoldPremise is userHoldPremise for a running row: only an operator's
 // resume of an active or awake row consumes it, never a draining or
 // stop-pending one, whose stop is already the controller's.
-func liveUserHoldPremise(meta map[string]string, policy ResumePolicy, now time.Time) map[string]string {
+func liveUserHoldPremise(meta map[string]string, by Actor, now time.Time) map[string]string {
 	switch State(strings.TrimSpace(meta["state"])) {
 	case StateActive, StateAwake:
 	default:
 		return nil
 	}
-	if policy != ResumeOperator {
+	if !by.consumesHold() {
 		return nil
 	}
 	return userHoldPremise(meta, now)

@@ -982,7 +982,7 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 	if err != nil {
 		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperator, info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

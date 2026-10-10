@@ -30,7 +30,7 @@ func TestSessionHandleStartRecordsWorkerOperationEvent(t *testing.T) {
 		Provider: "claude",
 	}, recorder)
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -74,12 +74,12 @@ func TestSessionHandleMessageRecordsQueuedState(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	}, recorder)
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	recorder.events = nil
 
-	result, err := handle.Message(context.Background(), MessageRequest{Text: "hello"})
+	result, err := handle.Message(context.Background(), testAgent, MessageRequest{Text: "hello"})
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestSessionHandleNudgeRecordsDeliveredFalse(t *testing.T) {
 	}
 	recorder.events = nil
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "queued reminder",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -208,7 +208,7 @@ func TestSessionHandleCloseKeepsRuntimeSessionNameInWorkerOperationEvent(t *test
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	}, recorder)
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -217,7 +217,7 @@ func TestSessionHandleCloseKeepsRuntimeSessionNameInWorkerOperationEvent(t *test
 	}
 	recorder.events = nil
 
-	if err := handle.Close(context.Background()); err != nil {
+	if err := handle.Close(context.Background(), testOperator); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

@@ -359,8 +359,8 @@ func TestTxCloseAndCommitHoldTheLease(t *testing.T) {
 func TestTxCallCarriesTheLease(t *testing.T) {
 	k := newTxKit(t)
 	var helperErr error
-	call := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(ctx context.Context, _ txCaps, _ any) (any, error) {
-		release, err := session.LeaseRuntimeName(session.WithoutLeaseWait(ctx), k.p.World.CityPath, "s-gc-1")
+	call := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(ctx context.Context, c txCaps, _ any) (any, error) {
+		release, err := session.LeaseRuntimeName(ctx, c.by, "s-gc-1")
 		if err == nil {
 			release()
 		}

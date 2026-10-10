@@ -123,14 +123,14 @@ func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *tes
 	}
 	seedDrainAckStopPending(t, m, id)
 
-	if err := m.SuspendForShutdown(id); err != nil {
-		t.Fatalf("SuspendForShutdown(draining) = %v, want nil (must not block gc stop and leave a live pane holding a pool name)", err)
+	if err := m.Suspend(context.Background(), testActor(m, ActorSweep), id, false); err != nil {
+		t.Fatalf("sweep Suspend(draining) = %v, want nil (must not block gc stop and leave a live pane holding a pool name)", err)
 	}
 	if sp.CountCalls("Stop", sessName) == 0 {
-		t.Errorf("SuspendForShutdown(draining) did not tear down the runtime session %q", sessName)
+		t.Errorf("sweep Suspend(draining) did not tear down the runtime session %q", sessName)
 	}
 	if sp.IsRunning(sessName) {
-		t.Errorf("runtime session %q still running after SuspendForShutdown(draining)", sessName)
+		t.Errorf("runtime session %q still running after sweep Suspend(draining)", sessName)
 	}
 	if got := getState(t, m, id); got != StateDraining {
 		t.Errorf("state = %q, want %q — the early return must not rewrite state and lose the drain", got, StateDraining)
@@ -168,7 +168,7 @@ func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
 	}
 	seedDrainAckStopPending(t, m, id)
 
-	err = m.Suspend(id)
+	err = m.Suspend(context.Background(), testActor(m, ActorOperator), id, false)
 	if !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("Suspend(draining) = %v, want ErrIllegalTransition — an operator suspend must not become an ungated mid-drain kill", err)
 	}
@@ -201,9 +201,9 @@ func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *test
 	sp.StopErrors = map[string]error{sessName: errors.New("provider refused the stop")}
 	seedDrainAckStopPending(t, m, id)
 
-	err = m.SuspendForShutdown(id)
+	err = m.Suspend(context.Background(), testActor(m, ActorSweep), id, false)
 	if err == nil {
-		t.Fatal("SuspendForShutdown(draining) = nil despite a failed teardown; gc stop would report a live pane as stopped")
+		t.Fatal("sweep Suspend(draining) = nil despite a failed teardown; gc stop would report a live pane as stopped")
 	}
 	if !strings.Contains(err.Error(), "stopping runtime session") {
 		t.Errorf("err = %v, want it to name the runtime teardown failure", err)
@@ -225,7 +225,7 @@ func TestConformance_SuspendStillRejectsOtherIllegalStates(t *testing.T) {
 				t.Fatalf("set state %q: %v", from, err)
 			}
 
-			err := m.Suspend(id)
+			err := m.Suspend(context.Background(), testActor(m, ActorOperator), id, false)
 			if err == nil {
 				t.Fatalf("Suspend from %q should return ErrIllegalTransition", from)
 			}
@@ -263,7 +263,7 @@ func TestConformance_SuspendActiveSessionUnchanged(t *testing.T) {
 		t.Fatalf("seeding runtime: %v", err)
 	}
 
-	if err := m.Suspend(id); err != nil {
+	if err := m.Suspend(context.Background(), testActor(m, ActorOperator), id, false); err != nil {
 		t.Fatalf("Suspend(active) = %v, want nil", err)
 	}
 	if got := getState(t, m, id); got != StateSuspended {
@@ -323,7 +323,7 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	// city-wide. The pre-fix regression returned a wrapped ErrIllegalTransition;
 	// either symptom (any non-nil) trips this assertion and pinpoints the
 	// regression by quoting the returned error.
-	if err := m.Suspend(id); err != nil {
+	if err := m.Suspend(context.Background(), testActor(m, ActorOperator), id, false); err != nil {
 		t.Fatalf("Suspend(failed-create) = %v, want nil (must not block gc stop)", err)
 	}
 	if sp.CountCalls("Stop", sessName) == 0 {

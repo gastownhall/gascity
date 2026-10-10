@@ -40,10 +40,10 @@ func TestRuntimeHandleExcludedFromInvocationTelemetry(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if _, err := handle.Message(ctx, MessageRequest{Text: "summarize the worker contract"}); err != nil {
+	if _, err := handle.Message(ctx, testAgent, MessageRequest{Text: "summarize the worker contract"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	if _, err := handle.Nudge(ctx, NudgeRequest{Text: "still there?"}); err != nil {
+	if _, err := handle.Nudge(ctx, testAgent, NudgeRequest{Text: "still there?"}); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 

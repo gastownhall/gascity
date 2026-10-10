@@ -34,7 +34,7 @@ type Config struct {
 	RuntimePkg  string               // declares the verbs' interfaces (verbs) and StopForCleanup
 	SkipFiles   []string             // file-name prefixes another lint covers
 	CityHelpers map[string]int       // a function handed a city path, by its argument index
-	SweepCtx    string               // the ctx constructor that marks a stop sweep
+	Sweep       string               // the stop sweep's actor kind constant, "importpath.Name"
 	Allowed     map[string]Allowance // by function: "Name" or "Recv.Name", per package path prefix "pkg:"
 }
 
@@ -92,7 +92,7 @@ func run(pass *analysis.Pass, cfg Config) error {
 				if a, listed := allowed(callee); listed && len(a.Callers) > 0 && !slices.Contains(a.Callers, fn) {
 					pass.Reportf(call.Pos(), "runtime lease: %s runs under its caller's lease (%s), and %s is not one of its callers %v", callee, a.Reason, fn, a.Callers)
 				}
-				if i, helper := cfg.CityHelpers[callee]; helper && i < len(call.Args) && emptyString(pass, fd, call.Args[i]) && !sweep(call, cfg.SweepCtx) {
+				if i, helper := cfg.CityHelpers[callee]; helper && i < len(call.Args) && emptyString(pass, fd, call.Args[i]) && !sweep(pass, call, cfg.Sweep) {
 					pass.Reportf(call.Args[i].Pos(), "runtime lease: %s is handed no city path, so its Manager cannot take the runtime lease", callee)
 				}
 				return true
@@ -276,23 +276,19 @@ func emptyString(pass *analysis.Pass, fd *ast.FuncDecl, e ast.Expr) bool {
 	return empty
 }
 
-// sweep reports whether one of call's arguments is a stop sweep's ctx.
-func sweep(call *ast.CallExpr, ctor string) bool {
+// sweep reports whether one of call's arguments names the stop sweep's actor
+// kind, the constant kind ("importpath.Name").
+func sweep(pass *analysis.Pass, call *ast.CallExpr, kind string) bool {
+	found := false
 	for _, a := range call.Args {
-		c, ok := a.(*ast.CallExpr)
-		if !ok {
-			continue
-		}
-		switch f := c.Fun.(type) {
-		case *ast.SelectorExpr:
-			if f.Sel.Name == ctor {
-				return true
+		ast.Inspect(a, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				if c, ok := pass.TypesInfo.Uses[id].(*types.Const); ok && c.Pkg() != nil && c.Pkg().Path()+"."+c.Name() == kind {
+					found = true
+				}
 			}
-		case *ast.Ident:
-			if f.Name == ctor {
-				return true
-			}
-		}
+			return !found
+		})
 	}
-	return false
+	return found
 }

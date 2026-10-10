@@ -83,7 +83,7 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperator, info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -406,7 +406,7 @@ func TestDeferralFor(t *testing.T) {
 }
 
 // TestBackgroundMessageNeverStartsInProcess is review finding C-4: extmsg's
-// background send routes like ResumeViaController. A message to an asleep
+// background send routes as ActorBackground. A message to an asleep
 // session is queued, the wake recorded and the session handed to the
 // controller; nothing starts in the controller's process. Kills a background
 // send that starts the runtime itself.

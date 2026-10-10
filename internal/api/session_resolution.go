@@ -160,7 +160,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 		}
 		if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
 			if handle, err := s.workerHandleForSession(store, info.ID); err == nil {
-				_ = handle.Kill(context.Background())
+				_ = handle.Kill(context.Background(), s.actor(session.ActorOperator))
 			}
 		}
 		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
@@ -668,14 +668,13 @@ func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, 
 	if err != nil {
 		return messageOutcome{}, err
 	}
-	policy := session.ResumeViaController
+	by := s.actor(session.ActorBackground)
 	if resume {
-		policy = session.ResumeOperator
+		by = s.actor(session.ActorOperator)
 	}
-	result, err := handle.Message(ctx, worker.MessageRequest{
+	result, err := handle.Message(ctx, by, worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntent(intent),
-		Resume:   policy,
 	})
 	if err != nil {
 		return messageOutcome{}, err
@@ -762,7 +761,7 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 	if err != nil {
 		return err
 	}
-	result, err := handle.Nudge(ctx, worker.NudgeRequest{Text: message, Resume: session.ResumeViaController})
+	result, err := handle.Nudge(ctx, s.actor(session.ActorBackground), worker.NudgeRequest{Text: message})
 	if err == nil && result.Undelivered == worker.NudgeQueuedHeld {
 		s.deferToController(store, id)
 	}
