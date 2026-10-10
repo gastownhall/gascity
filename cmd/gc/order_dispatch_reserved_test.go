@@ -143,7 +143,9 @@ func TestOrderDispatchReservedOrdersPreserveOpenWorkPolicy(t *testing.T) {
 			order := reservedExecOrder(t, orderName, tt.noWorkGate)
 			m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
 
-			m.dispatch(context.Background(), t.TempDir(), openWork.CreatedAt.Add(2*time.Hour))
+			// Past the 1h cooldown, so the order is due, but inside the 2h
+			// in-flight bound of an unclaimed root-only wisp, so the gate holds.
+			m.dispatch(context.Background(), t.TempDir(), openWork.CreatedAt.Add(90*time.Minute))
 			drainOrderDispatch(t, m)
 
 			if got := recorder.counts()[orderName]; got != tt.wantCalls {
