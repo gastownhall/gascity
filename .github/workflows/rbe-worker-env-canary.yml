@@ -8,7 +8,8 @@
 # does (the pinned rbe-worker's blacksmith-worker.sh, WORKER_MODE=measure).
 # Drift fails this run and opens or updates the pin's drift issue, with the
 # manifest and pin to commit, before CI runs into it. A match closes the drift
-# issues of superseded pins.
+# issues of superseded pins. Each measurement also leaves the host's fingerprint
+# (host-fingerprint artifact) for bazel-nightly.yml's fresh-on-drift decision.
 name: rbe-worker-env-canary
 
 on:
@@ -49,11 +50,33 @@ jobs:
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
       - name: Provision and measure this host as a pool worker does
+        id: measure
         env:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+      # Fresh-on-drift (rbe-reexecution-design.md S3c): what the pool's host is,
+      # finer than worker-env, which keys some tools at major version only: every
+      # package version as installed (the raw listing), the kernel, and the
+      # rbe-worker revision. bazel-nightly.yml re-executes every test only when this
+      # moves, and at least once an ISO week.
+      - name: Record the host fingerprint
+        if: always() && steps.measure.outcome != 'skipped'
+        env:
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+        run: |
+          { cat "$RUNNER_TEMP/worker-env.raw.txt"; uname -r; echo "rbe-worker $RBE_WORKER_REVISION"; } |
+            sha256sum | cut -c1-64 >"$RUNNER_TEMP/host-fingerprint.txt"
+          echo "host fingerprint: $(cat "$RUNNER_TEMP/host-fingerprint.txt")"
+      - name: Upload the host fingerprint
+        if: always() && steps.measure.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: host-fingerprint
+          path: ${{ runner.temp }}/host-fingerprint.txt
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload the worker-env drift
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

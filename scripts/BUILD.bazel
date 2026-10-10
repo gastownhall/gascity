@@ -90,6 +90,7 @@ go_test(
         "bazel_integration_suite_test.go",
         "bazel_key_parity_test.go",
         "bazel_multilane_test.go",
+        "bazel_nightly_fresh_test.go",
         "bazel_no_flaky_retries_test.go",
         "bazel_output_cache_test.go",
         "bazel_repo_tree_test.go",
