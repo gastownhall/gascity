@@ -136,6 +136,17 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	if items := derefSlice(mustJSON(t, "list agent patches", alist.JSON200, alist).Items); len(items) != 1 || items[0].Name != contractAgent {
 		t.Fatalf("agent patches = %s, want the %s patch", contractBody(alist), contractAgent)
 	}
+	// The config summary and explain count the declared patch as well.
+	counted, err := c.GetV0CityByCityNameConfigWithResponse(ctx, city)
+	expectStatus(t, "config with agent patch", counted, err, http.StatusOK)
+	if p := mustJSON(t, "config with agent patch", counted.JSON200, counted).Patches; p == nil || p.AgentCount != 1 {
+		t.Fatalf("config patch counts = %+v, want 1 agent patch: %s", p, contractBody(counted))
+	}
+	explained, err := c.GetV0CityByCityNameConfigExplainWithResponse(ctx, city)
+	expectStatus(t, "explain with agent patch", explained, err, http.StatusOK)
+	if got := mustJSON(t, "explain with agent patch", explained.JSON200, explained).Patches.Agents; got != 1 {
+		t.Fatalf("explain agent patch count = %d, want 1: %s", got, contractBody(explained))
+	}
 	aget, err := c.GetV0CityByCityNamePatchesAgentByBaseWithResponse(ctx, city, contractAgent)
 	expectStatus(t, "get agent patch", aget, err, http.StatusOK)
 	if env := mustJSON(t, "get agent patch", aget.JSON200, aget).Env; env == nil || (*env)["CONTRACT"] != "1" {

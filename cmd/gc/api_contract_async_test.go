@@ -81,7 +81,7 @@ var contractAsyncCases = []contractAsyncCase{
 	},
 	{
 		operationID: "trigger-maintenance-dolt-gc",
-		terminal:    "explicit refusal: a file-backed city has no Dolt store, so the trigger answers the documented 503 (no 202, no orphaned run)",
+		terminal:    "explicit refusal: a file-backed city has no Dolt store, so the trigger answers the documented 503 (no 202, no orphaned run; the Dolt-backed 202 run body is owned by internal/api TestHumaHandleMaintenanceTriggerDoltGC_WaitSuccess)",
 		run: func(t *testing.T, h *contractHarness) {
 			resp, err := h.client.TriggerMaintenanceDoltGcWithResponse(h.ctx, contractCityName,
 				&genclient.TriggerMaintenanceDoltGcParams{XGCRequest: contractCSRF})
@@ -112,8 +112,8 @@ var contractAsyncCases = []contractAsyncCase{
 	},
 }
 
-// contractAsyncFamily runs every row and checks the table covers exactly the
-// spec's 202 operations.
+// contractAsyncFamily checks the table covers exactly the spec's 202
+// operations, then runs every row.
 func contractAsyncFamily(t *testing.T, h *contractHarness) {
 	want := map[string]bool{}
 	for _, op := range h.spec.Operations() {
@@ -126,15 +126,6 @@ func contractAsyncFamily(t *testing.T, h *contractHarness) {
 	have := map[string]bool{}
 	for _, tc := range contractAsyncCases {
 		have[tc.operationID] = true
-		t.Run(tc.operationID, func(t *testing.T) {
-			if tc.terminal == "" {
-				t.Fatal("async case must document its terminal outcome")
-			}
-			tc.run(t, h)
-			if h.transport.Exercised()[tc.operationID] == 0 {
-				t.Fatalf("case never called %s", tc.operationID)
-			}
-		})
 	}
 	var missing, extra []string
 	for id := range want {
@@ -154,6 +145,18 @@ func contractAsyncFamily(t *testing.T, h *contractHarness) {
 	}
 	if len(extra) > 0 {
 		t.Errorf("contractAsyncCases rows for operations the spec no longer declares 202: %v", extra)
+	}
+
+	for _, tc := range contractAsyncCases {
+		t.Run(tc.operationID, func(t *testing.T) {
+			if tc.terminal == "" {
+				t.Fatal("async case must document its terminal outcome")
+			}
+			tc.run(t, h)
+			if h.transport.Exercised()[tc.operationID] == 0 {
+				t.Fatalf("case never called %s", tc.operationID)
+			}
+		})
 	}
 }
 

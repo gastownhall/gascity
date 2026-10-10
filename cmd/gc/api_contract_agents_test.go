@@ -67,7 +67,7 @@ func contractAgentsFamily(t *testing.T, h *contractHarness) {
 
 	// Rig-qualified routes. Schema-2 cities declare rig-scoped agents in pack
 	// config, so the API refuses to create one (documented 400); the
-	// qualified reads and edits act on the declared alpha/rigbot.
+	// qualified reads act on the declared alpha/rigbot.
 	rigCreated, err := c.CreateAgentWithResponse(ctx, city, &genclient.CreateAgentParams{XGCRequest: contractCSRF},
 		genclient.CreateAgentJSONRequestBody{Name: "rigtwo", Provider: "claude", Dir: ptr(contractRig)})
 	expectStatus(t, "create rig agent", rigCreated, err, http.StatusBadRequest)
@@ -78,37 +78,54 @@ func contractAgentsFamily(t *testing.T, h *contractHarness) {
 	h.openStreamOrStatus(t, "rig agent output stream", func(ctx context.Context) (*http.Response, error) {
 		return c.StreamAgentOutputQualified(ctx, city, contractRig, contractRigAgent)
 	}, http.StatusNotFound)
-	// alpha/rigbot is the alpha instance of the generic scope="rig" template
-	// rigbot: it has no config of its own, so the qualified edits address the
-	// template (as the CLI does) and the read reflects them.
+	// alpha/rigbot is alpha's instance of the generic scope="rig" template
+	// rigbot, which serves omega too. The instance has no config of its own,
+	// so an edit addressed to it would change every rig: the qualified edits
+	// refuse it (documented 409) and neither rig's instance changes.
 	rigSuspended, err := c.PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx, city, contractRig, contractRigAgent,
 		genclient.PostV0CityByCityNameAgentByDirByBaseByActionParamsActionSuspend,
 		&genclient.PostV0CityByCityNameAgentByDirByBaseByActionParams{XGCRequest: contractCSRF})
-	expectStatus(t, "suspend rig agent", rigSuspended, err, http.StatusOK)
-	h.expectQualifiedAgentSuspended(t, true)
-	// PATCH reaches the template too, and answers what PATCH on the template
-	// answers: the editor refuses field edits of a rig-scoped convention
-	// agent (documented 400), leaving it suspended.
+	expectStatus(t, "suspend rig agent", rigSuspended, err, http.StatusConflict)
 	rigPatched, err := c.PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent,
 		&genclient.PatchV0CityByCityNameAgentByDirByBaseParams{XGCRequest: contractCSRF},
-		genclient.PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody{Suspended: ptr(false)})
-	expectStatus(t, "patch rig agent", rigPatched, err, http.StatusBadRequest)
+		genclient.PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody{Suspended: ptr(true)})
+	expectStatus(t, "patch rig agent", rigPatched, err, http.StatusConflict)
+	rigRescoped, err := c.PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent,
+		&genclient.PatchV0CityByCityNameAgentByDirByBaseParams{XGCRequest: contractCSRF},
+		genclient.PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody{Scope: ptr("city")})
+	expectStatus(t, "rescope rig agent", rigRescoped, err, http.StatusConflict)
+	rigDeleted, err := c.DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent,
+		&genclient.DeleteV0CityByCityNameAgentByDirByBaseParams{XGCRequest: contractCSRF})
+	expectStatus(t, "delete rig agent", rigDeleted, err, http.StatusConflict)
+	h.expectRigAgentSuspended(t, contractRig, false)
+	h.expectRigAgentSuspended(t, contractOtherRig, false)
+	// An every-rig edit addresses the template itself, and it reaches both
+	// rigs' instances: the reach the refusals above keep a one-rig request
+	// from having. The qualified resume is refused the same way.
+	templateSuspended, err := c.PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx, city, contractRigAgent,
+		genclient.PostV0CityByCityNameAgentByBaseByActionParamsActionSuspend,
+		&genclient.PostV0CityByCityNameAgentByBaseByActionParams{XGCRequest: contractCSRF})
+	expectStatus(t, "suspend rig template", templateSuspended, err, http.StatusOK)
+	h.expectRigAgentSuspended(t, contractRig, true)
+	h.expectRigAgentSuspended(t, contractOtherRig, true)
+	rigResumed, err := c.PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx, city, contractRig, contractRigAgent,
+		genclient.PostV0CityByCityNameAgentByDirByBaseByActionParamsActionResume,
+		&genclient.PostV0CityByCityNameAgentByDirByBaseByActionParams{XGCRequest: contractCSRF})
+	expectStatus(t, "resume rig agent", rigResumed, err, http.StatusConflict)
+	// The template's own PATCH answers the editor's refusal of field edits
+	// on a rig-scoped convention agent (documented 400).
 	templatePatched, err := c.PatchV0CityByCityNameAgentByBaseWithResponse(ctx, city, contractRigAgent,
 		&genclient.PatchV0CityByCityNameAgentByBaseParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameAgentByBaseJSONRequestBody{Suspended: ptr(false)})
 	expectStatus(t, "patch rig template", templatePatched, err, http.StatusBadRequest)
-	h.expectQualifiedAgentSuspended(t, true)
-	rigResumed, err := c.PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx, city, contractRig, contractRigAgent,
-		genclient.PostV0CityByCityNameAgentByDirByBaseByActionParamsActionResume,
-		&genclient.PostV0CityByCityNameAgentByDirByBaseByActionParams{XGCRequest: contractCSRF})
-	expectStatus(t, "resume rig agent", rigResumed, err, http.StatusOK)
-	h.expectQualifiedAgentSuspended(t, false)
-	// Deleting the shared template through one rig's instance is refused.
-	rigDeleted, err := c.DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent,
-		&genclient.DeleteV0CityByCityNameAgentByDirByBaseParams{XGCRequest: contractCSRF})
-	expectStatus(t, "delete rig agent", rigDeleted, err, http.StatusConflict)
-	stillThere, err := c.GetV0CityByCityNameAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent)
-	expectStatus(t, "get rig agent after refused delete", stillThere, err, http.StatusOK)
+	h.expectRigAgentSuspended(t, contractRig, true)
+	h.expectRigAgentSuspended(t, contractOtherRig, true)
+	templateResumed, err := c.PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx, city, contractRigAgent,
+		genclient.PostV0CityByCityNameAgentByBaseByActionParamsActionResume,
+		&genclient.PostV0CityByCityNameAgentByBaseByActionParams{XGCRequest: contractCSRF})
+	expectStatus(t, "resume rig template", templateResumed, err, http.StatusOK)
+	h.expectRigAgentSuspended(t, contractRig, false)
+	h.expectRigAgentSuspended(t, contractOtherRig, false)
 
 	missing, err := c.GetV0CityByCityNameAgentByBaseWithResponse(ctx, city, "no-such-agent")
 	expectStatus(t, "get missing agent", missing, err, http.StatusNotFound)
@@ -126,10 +143,10 @@ func contractAgentListed(t *testing.T, h *contractHarness, name string) bool {
 	return false
 }
 
-func (h *contractHarness) expectQualifiedAgentSuspended(t *testing.T, want bool) {
+func (h *contractHarness) expectRigAgentSuspended(t *testing.T, rig string, want bool) {
 	t.Helper()
-	h.expectAgentSuspendedAt(t, contractRig+"/"+contractRigAgent, want, func() (contractResponse, *genclient.AgentResponse, error) {
-		r, err := h.client.GetV0CityByCityNameAgentByDirByBaseWithResponse(h.ctx, contractCityName, contractRig, contractRigAgent)
+	h.expectAgentSuspendedAt(t, rig+"/"+contractRigAgent, want, func() (contractResponse, *genclient.AgentResponse, error) {
+		r, err := h.client.GetV0CityByCityNameAgentByDirByBaseWithResponse(h.ctx, contractCityName, rig, contractRigAgent)
 		if err != nil {
 			return nil, nil, err
 		}

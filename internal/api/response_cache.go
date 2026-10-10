@@ -145,8 +145,10 @@ func collectCacheKeyParts(v reflect.Value, parts *[]string) {
 // configGeneration returns a counter that advances whenever the state serves a
 // different config snapshot than the previous call saw. A config swap (an API
 // config mutation, or a reload) does not advance the event index, so caches of
-// config-derived projections must key on this as well as the index. Holding
-// the last snapshot keeps its address from being reused by a later one.
+// config-derived projections must key on this as well as the index. Snapshots
+// are told apart by pointer, which relies on State.Config serving a changed
+// config as a new snapshot. Holding the last snapshot keeps its address from
+// being reused by a later one.
 func (s *Server) configGeneration(cfg *config.City) uint64 {
 	s.responseCacheMu.Lock()
 	defer s.responseCacheMu.Unlock()

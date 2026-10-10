@@ -10799,6 +10799,10 @@ export type PostV0CityByCityNameAgentByBaseByActionErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -11183,6 +11187,10 @@ export type PostV0CityByCityNameAgentByDirByBaseByActionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

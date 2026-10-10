@@ -7,15 +7,22 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// rawConfig returns the state's raw (pre-composition) config, or nil when the
+// state does not provide one (see RawConfigProvider).
+func (s *Server) rawConfig() *config.City {
+	if rcp, ok := s.state.(RawConfigProvider); ok {
+		return rcp.RawConfig()
+	}
+	return nil
+}
+
 // patchConfig returns the config the patch read paths serve. Patches are
 // declared in city.toml and composition clears them from the composed config
 // once applied, so reads use the raw (pre-composition) config when the state
 // provides one — the same document the patch write paths edit.
 func (s *Server) patchConfig() *config.City {
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		if raw := rcp.RawConfig(); raw != nil {
-			return raw
-		}
+	if raw := s.rawConfig(); raw != nil {
+		return raw
 	}
 	return s.state.Config()
 }

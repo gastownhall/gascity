@@ -334,27 +334,27 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
-// agentConfigIdentity maps an agent identity the read paths accept to the
-// identity its durable config lives under. A rig-qualified identity that only
-// resolves through a generic scope="rig" template ("myrig/rigbot" served by
-// template "rigbot", see agentutil.ResolveQualifiedRigScopedTemplate) has no
-// config of its own, so edits address the template, as the CLI does; instance
-// reports that the identity was such a per-rig instance.
-func agentConfigIdentity(cfg *config.City, name string) (identity string, instance bool) {
+// rigTemplateInstance reports whether name is a rig-qualified identity that
+// only resolves through a generic scope="rig" template ("myrig/rigbot" served
+// by template "rigbot", see agentutil.ResolveQualifiedRigScopedTemplate). Such
+// an instance has no config of its own: the template it reads through serves
+// every rig. It returns the template's identity and the instance's rig.
+func rigTemplateInstance(cfg *config.City, name string) (template, rig string, ok bool) {
 	if cfg == nil {
-		return name, false
+		return "", "", false
 	}
 	for i := range cfg.Agents {
 		if config.AgentMatchesIdentity(&cfg.Agents[i], name) {
-			return name, false
+			return "", "", false
 		}
 	}
-	template, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name)
+	instance, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name)
 	if !ok {
-		return name, false
+		return "", "", false
 	}
-	template.Dir = ""
-	return template.QualifiedName(), true
+	rig = instance.Dir
+	instance.Dir = ""
+	return instance.QualifiedName(), rig, true
 }
 
 // findActiveBeadForAssignees returns the ID of the first in_progress bead

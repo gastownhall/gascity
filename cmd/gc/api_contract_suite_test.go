@@ -49,9 +49,14 @@ func TestAPIContractSuite(t *testing.T) {
 		}
 	}
 
-	if ran != len(contractFamilies) || failed > 0 {
-		t.Logf("operationId coverage guard skipped: %d/%d families ran, %d failed", ran, len(contractFamilies), failed)
+	if ran != len(contractFamilies) {
+		t.Logf("operationId coverage guard skipped: %d/%d families ran", ran, len(contractFamilies))
 		return
+	}
+	// A failed family still gets the guard, so a coverage gap is reported
+	// alongside the failure rather than hidden until the family is fixed.
+	if failed > 0 {
+		t.Logf("%d of %d families failed; operations after a failure point report as unexercised below", failed, len(contractFamilies))
 	}
 	cov := apicontract.CheckCoverage(h.spec.Operations(), h.transport.ExercisedIDs(), contractWaivers)
 	t.Logf("API contract coverage: %d/%d operations exercised (%.1f%%), %d waived",

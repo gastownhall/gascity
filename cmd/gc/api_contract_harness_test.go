@@ -47,10 +47,14 @@ const (
 	// hardcoded roles: the suite only needs *a* configured template.
 	contractAgent = "worker"
 	// contractRigAgent is a rig-scoped template; it expands to
-	// contractRig/contractRigAgent.
+	// <rig>/contractRigAgent in every declared rig.
 	contractRigAgent = "rigbot"
 	// contractRig is a rig declared in city.toml at startup.
 	contractRig = "alpha"
+	// contractOtherRig is a second declared rig. The rig-scoped template
+	// serves it too, so the suite can see whether an edit addressed to one
+	// rig reaches another.
+	contractOtherRig = "omega"
 	// contractCSRF is the anti-CSRF header value every mutation sends.
 	contractCSRF = "api-contract"
 	// contractWait bounds every event-driven wait. It is a safety deadline,
@@ -87,16 +91,22 @@ func newContractHarness(t *testing.T) *contractHarness {
 
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(t.TempDir(), contractRig)
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
+	otherRigPath := filepath.Join(t.TempDir(), contractOtherRig)
+	for _, dir := range []string{rigPath, otherRigPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := bootstrapScopedFileProviderCityFS(fsys.OSFS{}, cityPath); err != nil {
 		t.Fatal(err)
 	}
-	// The rig is provisioned the way `gc rig add` leaves a file-provider rig:
+	// Each rig is provisioned the way `gc rig add` leaves a file-provider rig:
 	// its own empty scoped store, bound to the city through .gc/site.toml.
-	writeContractFile(t, filepath.Join(rigPath, ".gc", "beads.json"), "{\"seq\":0,\"beads\":[]}\n")
-	siteToml := fmt.Sprintf("workspace_name = %q\nworkspace_prefix = \"hq\"\n\n[[rig]]\nname = %q\npath = %q\n", contractCityName, contractRig, rigPath)
+	for _, dir := range []string{rigPath, otherRigPath} {
+		writeContractFile(t, filepath.Join(dir, ".gc", "beads.json"), "{\"seq\":0,\"beads\":[]}\n")
+	}
+	siteToml := fmt.Sprintf("workspace_name = %q\nworkspace_prefix = \"hq\"\n\n[[rig]]\nname = %q\npath = %q\n\n[[rig]]\nname = %q\npath = %q\n",
+		contractCityName, contractRig, rigPath, contractOtherRig, otherRigPath)
 	writeSchema2RigCity(t, cityPath, contractCityName, contractCityToml(), siteToml)
 	writeContractFile(t, filepath.Join(cityPath, "agents", contractAgent, "agent.toml"), "scope = \"city\"\nstart_command = \"true\"\n")
 	writeContractFile(t, filepath.Join(cityPath, "agents", contractAgent, "prompt.md"), "contract worker\n")
@@ -224,7 +234,7 @@ func newContractHarness(t *testing.T) *contractHarness {
 }
 
 // contractCityToml is the harness city: file beads, the fake session
-// provider, one rig, and the built-in maintenance orders that shell out
+// provider, two rigs, and the built-in maintenance orders that shell out
 // skipped (they are not part of the HTTP contract).
 func contractCityToml() string {
 	skipped := []string{
@@ -253,7 +263,11 @@ base = "builtin:claude"
 [[rigs]]
 name = %q
 prefix = "al"
-`, strings.Join(quoted, ", "), contractRig)
+
+[[rigs]]
+name = %q
+prefix = "om"
+`, strings.Join(quoted, ", "), contractRig, contractOtherRig)
 }
 
 func writeContractFile(t *testing.T, path, content string) {

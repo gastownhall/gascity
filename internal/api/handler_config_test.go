@@ -664,3 +664,44 @@ func TestHandleConfigDefaults_OverriddenCitySurfacesDrift(t *testing.T) {
 		t.Error("expected defaults baseline to include builtin 'claude'")
 	}
 }
+
+func TestConfigPatchCountsServeRawConfigPatchesClearedByComposition(t *testing.T) {
+	fs := newFakeState(t)
+	suspended := true
+	branch := "trunk"
+	raw := *fs.cfg
+	raw.Patches = config.Patches{
+		Agents: []config.AgentPatch{
+			{Dir: "rig1", Name: "worker", Suspended: &suspended},
+			{Name: "mayor", Suspended: &suspended},
+		},
+		Rigs: []config.RigPatch{{Name: "myrig", DefaultBranch: &branch}},
+	}
+	fs.rawCfg = &raw
+	fs.cfg.Patches = config.Patches{} // composition cleared them after applying
+	h := newTestCityHandler(t, fs)
+
+	get := func(path string, into any) {
+		t.Helper()
+		req := httptest.NewRequest("GET", cityURL(fs, path), nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200; body = %s", path, w.Code, w.Body.String())
+		}
+		if err := json.NewDecoder(w.Body).Decode(into); err != nil {
+			t.Fatalf("GET %s: decoding body: %v", path, err)
+		}
+	}
+
+	var summary configResponse
+	get("/config", &summary)
+	if want := (configPatchesResponse{AgentCount: 2, RigCount: 1}); summary.Patches == nil || *summary.Patches != want {
+		t.Errorf("GET /config patches = %+v, want %+v", summary.Patches, want)
+	}
+	var explain configExplainResponse
+	get("/config/explain", &explain)
+	if want := (configExplainPatches{Agents: 2, Rigs: 1}); explain.Patches != want {
+		t.Errorf("GET /config/explain patches = %+v, want %+v", explain.Patches, want)
+	}
+}
