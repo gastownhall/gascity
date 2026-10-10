@@ -53,6 +53,13 @@ var Default = Config{
 		"github.com/gastownhall/gascity/cmd/gc.resolveConfiguredWorkDirPath":                    {Class: "dead", Bead: "mc-zndi7.91", Via: []string{"github.com/gastownhall/gascity/cmd/gc.poolTriggerWorkDir"}, Reason: "dead: the validating wrapper, the only one that names workdir.ValidateAncestorWorktreesNotStale (os.Lstat); poolTriggerWorkDir names it but runs resolveConfiguredWorkDirPathUnvalidated under the decide's planOnly params (cmd/gc/build_desired_state.go:4333)"},
 	},
 	Cutover: "v2EffectsReal",
+	Sealed: map[string]string{
+		"txRuntime":      "reconcile_effect_runtime.go",
+		"txFence":        "reconcile_effect_fence.go",
+		"txWork":         "reconcile_effect_fence.go",
+		"fenceVerdict":   "reconcile_session_fence.go",
+		"completeCensus": "allocator_census.go",
+	},
 }
 
 // Analyzer runs the rules with Default.
