@@ -1758,6 +1758,7 @@ go_test(
         "sling_source_workflow_binding_test.go",
         "soft_reload_test.go",
         "sole_class_binding_test.go",
+        "split_store_cascade_test.go",
         "split_store_work_legs_test.go",
         "split_topology_conformance_test.go",
         "split_topology_env_test.go",
