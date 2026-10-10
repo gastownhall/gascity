@@ -35,6 +35,12 @@ jobs:
     permissions:
       contents: read
       actions: write
+      # bazel.yml's repo contents cache seed job requests id-token: write.
+      # GitHub validates a called workflow's permissions at startup even for
+      # jobs that skip, so the caller must grant it (startup_failure
+      # otherwise). The seed only runs on main pushes and the mint refuses
+      # any token that is not a main-push bazel.yml run.
+      id-token: write
       issues: write
     uses: ./.github/workflows/bazel.yml
     with:
