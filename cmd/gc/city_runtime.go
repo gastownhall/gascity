@@ -262,6 +262,15 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
+	// usageUnsettledOpen is the set of open session ids whose current awake
+	// interval was not yet accounted on the previous usage pass. An id that
+	// leaves the open snapshot was closed (by any close arm), so the next pass
+	// settles it from the closed bead. Touched only by emitDueComputeFacts.
+	usageUnsettledOpen map[string]struct{}
+	// closedUsageScanAt is when the periodic closed-session usage backstop scan
+	// last ran (zero = never; it runs on the first steady-state pass).
+	closedUsageScanAt time.Time
+
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
 	// is permitted for this supervisor lifetime; a restart deliberately rebuilds
