@@ -18,33 +18,58 @@ import (
 
 // Arm A6's heals and markers (CONTRACT v5 §4 A6; C5d).
 
-// freshObserver is a provider whose fresh read answers l and err, after
-// calling read when set, and whose identity env is env.
+// freshObserver scripts a backend's reads: its fresh read answers l and
+// err, after calling read when set, and its identity env is env. tmux and
+// acp are it as that backend.
 type freshObserver struct {
-	*runtime.Fake
+	Fake *runtime.Fake
 	l    runtime.Liveness
 	err  error
 	read func()
 	env  map[string]string
 }
 
-func (f *freshObserver) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
-	if f.read != nil {
-		f.read()
+func (f *freshObserver) tmux() runtime.Provider {
+	return runtime.NewFakeProfile(runtime.ProfileTmux, observerReads{runtime.FullFake{Fake: f.Fake}, f})
+}
+
+func (f *freshObserver) acp() runtime.Provider {
+	return runtime.NewFakeProfile(runtime.ProfileACP, observerReads{runtime.FullFake{Fake: f.Fake}, f})
+}
+
+// observerReads is a freshObserver's backend: its reads scripted, the rest
+// the fake's.
+type observerReads struct {
+	runtime.FullFake
+	o *freshObserver
+}
+
+func (r observerReads) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	if r.o.read != nil {
+		r.o.read()
 	}
-	return f.l, f.err
+	return r.o.l, r.o.err
 }
 
 // ObserveLivenessSince is its error-bearing read, fresh for any since.
-func (f *freshObserver) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
-	return f.ObserveLivenessWithError(name, pn)
+func (r observerReads) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
+	return r.ObserveLivenessWithError(name, pn)
 }
 
-func (f *freshObserver) GetAllEnvironment(name string) (map[string]string, error) {
-	if f.env == nil {
+// GetAllEnvironment is tmux's identity read.
+func (r observerReads) GetAllEnvironment(name string) (map[string]string, error) {
+	if r.o.env == nil {
 		return nil, fmt.Errorf("no environment for %q", name)
 	}
-	return f.env, nil
+	return r.o.env, nil
+}
+
+// GetMeta is acp's: its sidecar holds the env.
+func (r observerReads) GetMeta(name, key string) (string, error) {
+	if r.o.env == nil {
+		return "", fmt.Errorf("no sidecar for %q", name)
+	}
+	return r.o.env[key], nil
 }
 
 // healCase is one row on a fenced MemStore, its entry reading liveness and
@@ -132,7 +157,7 @@ func legacyHeal(info session.Info) session.MetadataPatch {
 // legacy's patch, by the fresh heal; the same row holding a claim is not.
 func TestCreatingRowWithoutClaimHealedToAsleep(t *testing.T) {
 	c := newHealCase(t, livenessGone, desireNone, "state", "creating", "session_key", "k-1")
-	it, s := c.run(t, gone(), nil)
+	it, s := c.run(t, gone().tmux(), nil)
 	if it.Kind != intentRowHealFresh || it.Reason != decideCreatingHeal {
 		t.Fatalf("decideRow = (%q, %q), want the creating heal", it.Kind, it.Reason)
 	}
@@ -181,7 +206,7 @@ func TestCreatingHealFencedOnToken(t *testing.T) {
 			} else {
 				c.before = write
 			}
-			_, s := c.run(t, gone(), writer)
+			_, s := c.run(t, gone().tmux(), writer)
 			if s.Outcome != settledRefused || s.Cause != tc.cause {
 				t.Fatalf("settlement %+v, want refused with cause %q", s, tc.cause)
 			}
@@ -273,7 +298,7 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 			if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentRowHealFresh || !maps.Equal(it.Patch, want) {
 				t.Fatalf("intent (%q, %v), want a fresh heal of legacy's %v", it.Kind, it.Patch, want)
 			}
-			_, s := c.run(t, gone(), nil)
+			_, s := c.run(t, gone().tmux(), nil)
 			m := c.meta(t)
 			if s.Outcome != settledLanded || m["state"] != "asleep" {
 				t.Fatalf("settlement %+v, row %v, want the row healed asleep", s, m)
@@ -465,7 +490,7 @@ func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
 				Fake: runtime.NewFake(), l: runtime.Liveness{Running: tc.alive, Alive: tc.alive},
 				env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": tc.read},
 			}
-			_, s := c.run(t, sp, nil)
+			_, s := c.run(t, sp.tmux(), nil)
 			if tc.cause != "" {
 				if s.Outcome != settledRefused || s.Cause != tc.cause || c.meta(t)["state"] != "asleep" {
 					t.Fatalf("settlement %+v, state %q, want refused %q and the row asleep", s, c.meta(t)["state"], tc.cause)
@@ -527,7 +552,7 @@ func TestAwakeHealNeverRevivesAnOperatorDormantRow(t *testing.T) {
 		Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
 		env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
 	}
-	if _, s := c.run(t, sp, nil); s.Outcome != settledRefused || c.meta(t)["state"] != "asleep" {
+	if _, s := c.run(t, sp.tmux(), nil); s.Outcome != settledRefused || c.meta(t)["state"] != "asleep" {
 		t.Fatalf("settlement %+v, state %q, want a kill after the pass to refuse the heal", s, c.meta(t)["state"])
 	}
 }
@@ -684,7 +709,7 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 	tracked := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
 	alive := func(c *healCase) runtime.Provider {
-		return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"}}
+		return (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"}}).tmux()
 	}
 	for _, tc := range []struct {
 		name string
@@ -745,10 +770,10 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 				t.Fatalf("census-only: decideRow = (%q, %q, %v), want None(census-only)", got.Kind, got.Reason, got.Patch)
 			}
 			before := maps.Clone(c.meta(t))
-			var sp runtime.Provider = gone()
+			sp := gone().tmux()
 			switch {
 			case it.Kind == intentRekey:
-				sp = &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": "tok-old"}}
+				sp = (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": "tok-old"}}).tmux()
 			case c.a.Snapshot.Entries[c.k].Liveness == livenessAlive:
 				sp = alive(c)
 			}

@@ -91,6 +91,7 @@ go_test(
         "proctable_tracking_test.go",
         "runtime_inventory_test.go",
         "seam_conformance_test.go",
+        "seam_surface_test.go",
         "server_probe_test.go",
         "session_env_file_integration_test.go",
         "session_env_file_test.go",
