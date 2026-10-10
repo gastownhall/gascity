@@ -781,6 +781,7 @@ func TestHandoffNotInSessionContext(t *testing.T) {
 }
 
 func TestHandoffRemoteRunning(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	rec := events.NewFake()
 	sp := runtime.NewFake()
@@ -789,8 +790,8 @@ func TestHandoffRemoteRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "mayor",
-		[]string{"Context refresh", "Check beads for current state"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(city, store, store, rec, sp, "deacon", "deacon", "mayor",
+		[]string{"Context refresh", "Check beads for current state"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

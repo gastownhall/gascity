@@ -1001,6 +1001,7 @@ type sessionChaosHarness struct {
 func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	t.Helper()
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	template := "chaos-worker"
 	env.cfg = &config.City{
 		Agents: []config.Agent{{
@@ -1011,7 +1012,7 @@ func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	return &sessionChaosHarness{
 		t:        t,
 		env:      env,
-		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk)),
+		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city)),
 		rng:      rand.New(rand.NewSource(seed)), //nolint:gosec // deterministic test chaos, not security-sensitive.
 		seed:     seed,
 		template: template,
@@ -1099,9 +1100,9 @@ func (h *sessionChaosHarness) reconcileTickWithoutPostInvariants(storeQueryParti
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, storeQueryPartial, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, nil, h.env.dt, poolDesired, storeQueryPartial, nil, "",
 		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
 	)
 	h.record("reconcile open=%d woken=%d", len(sessions), woken)
@@ -1118,9 +1119,9 @@ func (h *sessionChaosHarness) reconcileTickWithIdle(it idleTracker) {
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, h.env.dt, poolDesired, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, nil, h.env.dt, poolDesired, false, nil, "",
 		it, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
 	)
 	h.record("reconcile-with-idle open=%d woken=%d", len(sessions), woken)
@@ -1138,9 +1139,9 @@ func (h *sessionChaosHarness) reconcileTickWithDrainOps() {
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, newDrainOps(h.env.sp), nil, nil, h.env.dt, poolDesired, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, newDrainOps(h.env.sp), nil, nil, nil, h.env.dt, poolDesired, false, nil, "",
 		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
 	)
 	h.record("reconcile-with-drain-ops open=%d woken=%d", len(sessions), woken)
@@ -1158,9 +1159,9 @@ func (h *sessionChaosHarness) reconcileTickWithReadyWait(readyWaitSet map[string
 			poolDesired[tp.TemplateName]++
 		}
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
-		h.env.cfg, h.env.sp, h.env.store, nil, nil, readyWaitSet, h.env.dt, poolDesired, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), h.env.city, sessions, h.env.desiredState, configuredSessionNames(h.env.cfg, "", h.env.store),
+		h.env.cfg, h.env.sp, h.env.store, nil, nil, nil, readyWaitSet, h.env.dt, poolDesired, false, nil, "",
 		nil, h.env.clk, h.env.rec, 0, 0, &h.env.stdout, &h.env.stderr,
 	)
 	h.record("reconcile-with-ready-wait open=%d woken=%d", len(sessions), woken)

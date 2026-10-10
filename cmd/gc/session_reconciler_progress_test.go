@@ -44,6 +44,7 @@ func newProgressStallTestEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, 
 	t.Helper()
 
 	env := newRestartRequestTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{

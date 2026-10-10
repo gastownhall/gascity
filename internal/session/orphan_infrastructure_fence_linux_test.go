@@ -75,7 +75,8 @@ func writeFakeProcess(t *testing.T, root string, pid, ppid int, argv, env []stri
 func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp)
+	city := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -86,7 +87,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	sp.terminated = nil
 	sp.started = nil
 
-	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper"}
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper", "GC_CITY_PATH=" + city}
 	root := t.TempDir()
 	const (
 		watchdogPID = 4100

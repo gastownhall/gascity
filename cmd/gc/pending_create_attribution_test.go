@@ -304,12 +304,13 @@ func TestCommitAsyncStart_UnknownAttributionKeepsRateLimitAndCapacityArms(t *tes
 // synchronous twin: runPreparedStartCandidate defers instead of handing the
 // failure to the rollback.
 func TestExecutePreparedStartWave_StartErrorWithUnknownAttributionDefers(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	sp.StartErrors["worker"] = errors.New("launcher exited")
 	failIdentityReads(sp, "worker", "GC_SESSION_ID", "GC_INSTANCE_TOKEN")
 	item := unattributedWorkerStart()
 
-	results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))
 	}
@@ -324,7 +325,7 @@ func TestExecutePreparedStartWave_StartErrorWithUnknownAttributionDefers(t *test
 	}
 
 	delete(sp.GetMetaErrors, "worker")
-	results = executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+	results = executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
 	if r := results[0]; r.err == nil || !r.rollbackPending {
 		t.Fatalf("readable, unattributed runtime: err=%v rollbackPending=%v, want the rollback", r.err, r.rollbackPending)
 	}
@@ -363,6 +364,7 @@ func TestExecutePreparedStartWave_TimedOutStartWithUnknownAttributionDefers(t *t
 // defaultMaxWakeAttempts, and the deferral logs the start error with the failed
 // identity reads.
 func TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -377,7 +379,7 @@ func TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth(t *testi
 	var stderr strings.Builder
 
 	for i := 0; i < defaultMaxWakeAttempts; i++ {
-		result := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)[0]
+		result := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)[0]
 		if result.outcome != TraceOutcomeDeferred {
 			t.Fatalf("attempt %d: outcome = %q, want deferred", i+1, result.outcome)
 		}
@@ -401,7 +403,7 @@ func TestCommitStartResult_UnattributedStartFailureAccruesStartupHealth(t *testi
 	collided.candidate.tp.SessionName = "other"
 	sp.StartErrors["other"] = fmt.Errorf("%w: session %q", runtime.ErrSessionExists, "other")
 	failIdentityReads(sp, "other", "GC_SESSION_ID", "GC_INSTANCE_TOKEN")
-	result := executePreparedStartWave(context.Background(), []preparedStart{collided}, sp, nil, 10*time.Second)[0]
+	result := executePreparedStartWaveForCity(context.Background(), []preparedStart{collided}, city, sp, nil, nil, 10*time.Second, 1)[0]
 	if result.outcome != TraceOutcomeDeferred {
 		t.Fatalf("collision outcome = %q, want deferred", result.outcome)
 	}

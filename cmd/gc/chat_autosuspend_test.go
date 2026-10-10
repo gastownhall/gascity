@@ -15,6 +15,7 @@ import (
 )
 
 func TestAutoSuspendChatSessions(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := session.NewManagerWithOptions(store, sp)
@@ -40,7 +41,7 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	sp.SetAttached(s2.SessionName, false)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions("", nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(city, nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	// s1 should be suspended (idle 2h > 30m timeout).
 	got1, err := mgr.Get(s1.ID)
@@ -82,6 +83,7 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 // the union's type leg and correctly suspended. This is the intended fix, not a
 // regression: the previously-stranded session gets reaped.
 func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := session.NewManagerWithOptions(store, sp)
@@ -102,7 +104,7 @@ func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
 	sp.SetAttached(s1.SessionName, false)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions("", nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(city, nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {

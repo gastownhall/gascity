@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // sequencedRuntimeObservationProvider makes a secondary observation fail while
@@ -351,6 +352,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckRuntimeUnavailablePreservesDra
 }
 
 func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompletion(t *testing.T) {
+	city := t.TempDir()
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	sp := &sequencedRuntimeObservationProvider{Fake: runtime.NewFake(), livenessUnavailableAt: map[int]bool{2: true}}
@@ -384,7 +386,7 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 		t.Fatalf("Get before drain advance: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced(city, dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
@@ -396,6 +398,12 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 	if err != nil {
 		t.Fatalf("Get after drain advance: %v", err)
 	}
+	// The verified stop's runtime lease leaves its record's epoch and, once
+	// released, its cleared keys (SESSION-RUNTIME-012); a held record would
+	// still differ, which is a leaked lease.
+	maps.DeleteFunc(after.Metadata, func(k, v string) bool {
+		return strings.HasPrefix(k, "runtime_lease_") && (k == sessionpkg.RuntimeLeaseEpochKey || v == "")
+	})
 	if !maps.Equal(after.Metadata, before.Metadata) {
 		t.Fatalf("metadata mutated after unavailable post-stop probe: before=%#v after=%#v", before.Metadata, after.Metadata)
 	}

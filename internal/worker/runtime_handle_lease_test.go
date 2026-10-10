@@ -9,10 +9,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// This package's tests predate the runtime lease and run session Managers
-// without a city path.
-func init() { session.AllowManagersWithoutCityForTest() }
-
 // TestRuntimeHandleStopsUnderTheNamesFlock: a runtime-only handle stops only
 // under the name's flock, never waiting under the controller's mode.
 func TestRuntimeHandleStopsUnderTheNamesFlock(t *testing.T) {

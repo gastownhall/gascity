@@ -71,6 +71,11 @@ type ownershipFixture struct {
 func newOwnershipFixture(t *testing.T) *ownershipFixture {
 	t.Helper()
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
+	// An async drain-ack stop finishes before the city is removed.
+	stops := &asyncStartTracker{}
+	env.startOptions = append(env.startOptions, withAsyncDrainAckStopTracker(stops))
+	t.Cleanup(func() { stops.wait(5 * time.Second) })
 	env.cfg = &config.City{Agents: []config.Agent{{Name: ownershipPoolTemplate, MaxActiveSessions: intPtr(4)}}}
 	backing := beads.NewMemStore()
 	env.store = backing

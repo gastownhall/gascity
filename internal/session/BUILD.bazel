@@ -149,7 +149,6 @@ go_test(
         "resume_test.go",
         "resume_user_hold_test.go",
         "runtime_lease_crossproc_test.go",
-        "runtime_lease_optout_test.go",
         "runtime_lease_test.go",
         "sleep_reason_test.go",
         "startup_health_test.go",

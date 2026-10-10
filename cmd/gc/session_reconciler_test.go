@@ -291,6 +291,7 @@ type reconcilerTestEnv struct {
 	cfg          *config.City
 	desiredState map[string]TemplateParams
 	startOptions []startExecutionOption
+	city         string // the reconcile helpers' city path: a test that starts or stops a runtime sets t.TempDir()
 }
 
 func newReconcilerTestEnv() *reconcilerTestEnv {
@@ -455,9 +456,9 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesired(sessions []beads.Bead, pool
 
 func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) int {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
-	return reconcileSessionBeads(
-		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
-		e.store, dops, nil, nil, e.dt, poolDesired, false, nil, "",
+	return reconcileSessionBeadsAtPath(
+		context.Background(), e.city, sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		e.store, dops, nil, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 		e.startOptions...,
 	)
@@ -733,9 +734,9 @@ func (e *reconcilerTestEnv) reconcileStopPendingToTerminal(t *testing.T, sp runt
 	if err != nil {
 		t.Fatalf("Get(%s) before stop-pending finalize: %v", session.ID, err)
 	}
-	woken := reconcileSessionBeads(
-		context.Background(), []beads.Bead{got}, e.desiredState, cfgNames, e.cfg, sp,
-		e.store, dops, nil, nil, e.dt, nil, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), e.city, []beads.Bead{got}, e.desiredState, cfgNames, e.cfg, sp,
+		e.store, dops, nil, nil, nil, e.dt, nil, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 	)
 	if woken != 0 {
@@ -750,6 +751,7 @@ func (e *reconcilerTestEnv) reconcileStopPendingToTerminal(t *testing.T, sp runt
 
 func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
 	}
@@ -768,8 +770,9 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -777,6 +780,7 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -816,6 +820,7 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 // rotates session_key and destroys resume continuity.
 func TestReconcileSessionBeads_DrainAckConsumesRestartRequested(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
 	}
@@ -835,8 +840,9 @@ func TestReconcileSessionBeads_DrainAckConsumesRestartRequested(t *testing.T) {
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -844,6 +850,7 @@ func TestReconcileSessionBeads_DrainAckConsumesRestartRequested(t *testing.T) {
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -913,6 +920,7 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 
 func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -946,8 +954,9 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 
 	done := make(chan int, 1)
 	go func() {
-		done <- reconcileSessionBeads(
+		done <- reconcileSessionBeadsAtPath(
 			context.Background(),
+			env.city,
 			[]beads.Bead{session},
 			env.desiredState,
 			map[string]bool{"worker": true},
@@ -955,6 +964,7 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 			sp,
 			env.store,
 			dops,
+			nil,
 			nil,
 			nil,
 			env.dt,
@@ -1207,6 +1217,7 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 }
 
 func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := newBlockingStopProvider()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -1214,7 +1225,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1255,16 +1266,17 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	// Two trackers are two cities' controllers: their runtime names are
-	// locked per city.
-	queueDrainAckAsyncStop("city-a", store, first, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, firstTracker, nil, &stderr)
+	// Two trackers are two cities' controllers, each with its own store:
+	// their runtime names are locked per city.
+	cityA, cityB, storeB := t.TempDir(), t.TempDir(), beads.NewMemStore()
+	queueDrainAckAsyncStop(cityA, store, first, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, firstTracker, nil, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("city-b", store, second, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, secondTracker, nil, &stderr)
+	queueDrainAckAsyncStop(cityB, storeB, second, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, storeB, "gc-worker", "worker", ""), nil, secondTracker, nil, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1315,6 +1327,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 // next event tick instead of waiting for the patrol interval (ga-ryhnhd).
 // Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
 func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
+	city := t.TempDir()
 	var pokeCalls int
 	var pokeKey reconcilekey.Key
 	var pokeMu sync.Mutex
@@ -1335,7 +1348,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1441,6 +1454,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 // TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession verifies the fence
 // lets the kill proceed when the live token matches the queued token.
 func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -1452,7 +1466,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "live-token"), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "live-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "live-token"), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1473,6 +1487,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 // slot it occupies never frees and the reassigned next step stays
 // runtime-missing forever (root cause under investigation in this change).
 func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
+	city := t.TempDir()
 	oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	drainAckStopConfirmDeadTimeout = 300 * time.Millisecond
 	drainAckStopConfirmDeadPoll = 20 * time.Millisecond
@@ -1493,7 +1508,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), []string{"claude"}, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), []string{"claude"}, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1510,6 +1525,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 }
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := newShutdownWaitStopProvider()
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -1524,7 +1540,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, &cr.asyncStops, nil, &synchronizedBuffer{})
+	queueDrainAckAsyncStop(city, store, sp, cr.cfg, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, &cr.asyncStops, nil, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -1634,6 +1650,7 @@ func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testi
 	})
 
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", ProcessNames: []string{"claude"}}},
 	}
@@ -1654,7 +1671,8 @@ func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testi
 
 	tracker := &asyncStartTracker{}
 	finalized := finalizeDrainAckStopPendingSessions(
-		"", env.cfg, sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		env.city,
+		env.cfg, sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, tracker, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 0 {
@@ -1903,6 +1921,7 @@ func TestReconcileSessionBeads_ZombieDrainAckPendingUnknownFinalizes(t *testing.
 
 func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraining(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -1923,8 +1942,9 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -1932,6 +1952,7 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -1975,6 +1996,7 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 // it does not commit, push, or clear assignee.
 func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	fake := events.NewFake()
@@ -1998,8 +2020,9 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -2007,6 +2030,7 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -2077,6 +2101,7 @@ func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing
 func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, store beads.Store, sessionID string)) int {
 	t.Helper()
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	fake := events.NewFake()
@@ -2090,8 +2115,9 @@ func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, st
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -2099,6 +2125,7 @@ func drainAckAssignedWorkEventCount(t *testing.T, seedWork func(t *testing.T, st
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -2142,6 +2169,7 @@ func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) in
 	t.Helper()
 	const poolAlias = "gc__worker-pool"
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	fake := events.NewFake()
@@ -2175,9 +2203,9 @@ func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) in
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
-	reconcileSessionBeads(
-		context.Background(), inventory, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, inventory, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, nil, env.dt, nil, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -2193,9 +2221,9 @@ func drainAckPoolAliasInProgressEventCount(t *testing.T, addLiveSibling bool) in
 		}
 		reloaded = append(reloaded, got)
 	}
-	reconcileSessionBeads(
-		context.Background(), reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, nil, env.dt, nil, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -2617,6 +2645,7 @@ func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDra
 	t.Helper()
 	const poolAlias = "gc__worker-pool"
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	fake := events.NewFake()
 	env.rec = fake
@@ -2651,9 +2680,9 @@ func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDra
 	}
 
 	inventory := []beads.Bead{draining, sibling}
-	reconcileSessionBeads(
-		context.Background(), inventory, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, inventory, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, nil, env.dt, nil, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -2672,9 +2701,9 @@ func drainAckAliasSiblingEventCount(t *testing.T, siblingName string, siblingDra
 		}
 		reloaded = append(reloaded, got)
 	}
-	reconcileSessionBeads(
-		context.Background(), reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, dops, nil, nil, env.dt, nil, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, reloaded, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, nil, nil, nil, env.dt, nil, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -2737,6 +2766,7 @@ func TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent(t *testing.T)
 // onto the same still-open step every ~20s.
 func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	fake := events.NewFake()
 	env.rec = fake
 
@@ -2778,8 +2808,9 @@ func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		nil,
@@ -2787,6 +2818,7 @@ func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -2842,6 +2874,7 @@ func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing
 // step named "drain".
 func TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksClose(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	fake := events.NewFake()
@@ -2879,8 +2912,9 @@ func TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksCl
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -2888,6 +2922,7 @@ func TestReconcileSessionBeads_DrainAckStepNamedDrainInOtherFormulaStillBlocksCl
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -3083,6 +3118,7 @@ func TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent(t
 
 func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -3094,8 +3130,9 @@ func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		nil,
@@ -3103,6 +3140,7 @@ func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -3135,6 +3173,7 @@ func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 
 func TestReconcileSessionBeads_UndesiredDrainAckWithAssignedOpenWorkSleepsInsteadOfClosing(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -3154,8 +3193,9 @@ func TestReconcileSessionBeads_UndesiredDrainAckWithAssignedOpenWorkSleepsInstea
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		nil,
@@ -3163,6 +3203,7 @@ func TestReconcileSessionBeads_UndesiredDrainAckWithAssignedOpenWorkSleepsInstea
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -3277,6 +3318,7 @@ func TestReconcileSessionBeads_DrainAckPreservesConfiguredNamedSession(t *testin
 // lands the session in `drained` (the correct terminal for recycling).
 func TestReconcileSessionBeads_DrainAckUsesLiveStoreQuery(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -3291,7 +3333,7 @@ func TestReconcileSessionBeads_DrainAckUsesLiveStoreQuery(t *testing.T) {
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),
-		"",
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -4585,6 +4627,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 // from silently closing a session whose assignment status we cannot verify.
 func TestReconcileSessionBeads_DrainAckLiveStoreErrorFailsClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -4602,7 +4645,7 @@ func TestReconcileSessionBeads_DrainAckLiveStoreErrorFailsClosed(t *testing.T) {
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),
-		"",
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -4634,7 +4677,7 @@ func TestReconcileSessionBeads_DrainAckLiveStoreErrorFailsClosed(t *testing.T) {
 	}
 	reconcileSessionBeadsAtPath(
 		context.Background(),
-		"",
+		env.city,
 		[]beads.Bead{stopPending},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -4989,6 +5032,7 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 
 func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -5006,8 +5050,9 @@ func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *tes
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -5015,6 +5060,7 @@ func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *tes
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -5051,6 +5097,7 @@ func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *tes
 
 func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -5068,8 +5115,9 @@ func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -5077,6 +5125,7 @@ func TestReconcileSessionBeads_DrainAckFreshModeClearsSessionIdentity(t *testing
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -5190,6 +5239,7 @@ func (p *stopFailProvider) Stop(_ string) error {
 
 func TestReconcileSessionBeads_DrainAckStopFailurePreservesMetadata(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -5213,8 +5263,9 @@ func TestReconcileSessionBeads_DrainAckStopFailurePreservesMetadata(t *testing.T
 	failSp := &stopFailProvider{Fake: env.sp, stopCalled: stopCalled}
 	var stderr synchronizedBuffer
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -5222,6 +5273,7 @@ func TestReconcileSessionBeads_DrainAckStopFailurePreservesMetadata(t *testing.T
 		failSp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -5337,6 +5389,7 @@ func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(
 
 func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
 	}
@@ -5354,8 +5407,9 @@ func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t 
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -5363,6 +5417,7 @@ func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t 
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -5387,8 +5442,9 @@ func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t 
 		t.Fatalf("last_woke_at = %q, want cleared after drain-ack", got.Metadata["last_woke_at"])
 	}
 
-	woken = reconcileSessionBeads(
+	woken = reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{got},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -5396,6 +5452,7 @@ func TestReconcileSessionBeads_DrainAckResumeModeNotClassifiedAsCrashNextTick(t 
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -8158,6 +8215,7 @@ func TestFreshRestartSessionKey(t *testing.T) {
 
 func TestReconcileSessionBeads_PreservedRunningNamedSessionHonorsRestartRequest(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
@@ -8253,6 +8311,7 @@ func TestReconcileSessionBeads_HealsRunningPendingCreateToActive(t *testing.T) {
 // the full restart-requested → wake handoff.
 func TestReconcileAndWake_RestartRequestBumpsContinuationEpoch(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
@@ -10916,6 +10975,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckUsesRecentAttachedDeferralForP
 
 func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
@@ -10933,9 +10993,9 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	it.idle["worker"] = true
 
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -11040,6 +11100,7 @@ func TestReconcileSessionBeads_IdleTimeoutKeepsMinFloorWarm(t *testing.T) {
 // floor exemption is bounded to minSess and does not leak the pool warm.
 func TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
 	env.addDesired("w1", "worker", true)
 	env.addDesired("w2", "worker", true)
@@ -11064,9 +11125,9 @@ func TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic(t *testing.T
 	it.idle["w1"] = true
 	it.idle["w2"] = true
 
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{s1, s2}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{s1, s2}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -11091,6 +11152,7 @@ func TestReconcileSessionBeads_IdleTimeoutReclaimsAboveFloorElastic(t *testing.T
 // sc-5mtyhy.
 func TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1)}}}
 	env.addDesired("named", "worker", true)
 	env.addDesired("w1", "worker", true)
@@ -11120,9 +11182,9 @@ func TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession(t *testi
 	it.idle["named"] = true
 	it.idle["w1"] = true
 
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{named, pool}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{named, pool}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -11142,6 +11204,7 @@ func TestReconcileSessionBeads_IdleTimeoutMinFloorIgnoresNonPoolSession(t *testi
 
 func TestReconcileSessionBeads_IdleTimeoutUsesTemplateFallbackForPoolSession(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{
 			Name: "builder",
@@ -11175,9 +11238,9 @@ func TestReconcileSessionBeads_IdleTimeoutUsesTemplateFallbackForPoolSession(t *
 	it.setTimeoutForTemplate(template, time.Hour)
 	exemptAlwaysNamedTemplateFallbacks(env.cfg, "", template, it.exemptTemplateFallbackForSession)
 
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{poolSession, namedSession}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
-		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{template: 2}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{poolSession, namedSession}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{template: 2}, false, nil, "",
 		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 	)
 
@@ -11555,7 +11618,7 @@ func (e *reconcilerTestEnv) maxAgeReconcile(sessions []beads.Bead, tr maxSession
 	}
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	reconcileSessionBeadsTraced(
-		context.Background(), "", sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		context.Background(), e.city, sessions, e.desiredState, cfgNames, e.cfg, e.sp,
 		e.store, nil, nil, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
 		withMaxSessionAgeTracker(tr),
@@ -11593,6 +11656,7 @@ func TestMaxAgeGatherPendingUnknownDefers(t *testing.T) {
 
 func TestReconcileSessionBeads_MaxSessionAgeKillsAgedSession(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
 	env.addDesired("witness", "witness", true)
 	session := env.createSessionBead("witness", "witness")
@@ -11985,6 +12049,7 @@ func idleTimeoutBackstopKilled(rec *events.Fake) bool {
 // DecideAssignedWorkExhausted's forced stop.
 func TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
 	env.addDesired("witness", "witness", true)
 	session := env.createSessionBead("witness", "witness")
@@ -12021,7 +12086,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit(t *
 		rec := events.NewFake()
 		trace := idleTimeoutBackstopTrace("witness")
 		reconcileSessionBeadsTraced(
-			context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
 			withAssignedWorkDeferTracker(tr),
@@ -12066,6 +12131,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit(t *
 // anchor change at tick 2 must reset that streak so tick 2 still defers.
 func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnAnchorChange(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
 	env.addDesired("witness", "witness", true)
 	session := env.createSessionBead("witness", "witness")
@@ -12102,7 +12168,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnAnchorChange(t *
 		rec := events.NewFake()
 		trace := idleTimeoutBackstopTrace("witness")
 		reconcileSessionBeadsTraced(
-			context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
 			withAssignedWorkDeferTracker(tr),
@@ -12133,6 +12199,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnAnchorChange(t *
 // repeating anchor A with no intervening reset, which must exceed the limit.
 func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnOtherOutcome(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
 	env.addDesired("witness", "witness", true)
 	session := env.createSessionBead("witness", "witness")
@@ -12168,7 +12235,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnOtherOutcome(t *
 		rec := events.NewFake()
 		trace := idleTimeoutBackstopTrace("witness")
 		reconcileSessionBeadsTraced(
-			context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
 			withAssignedWorkDeferTracker(tr),
@@ -12690,6 +12757,7 @@ func TestReconcileSessionBeads_ResetStallEvictsStaleRuntime(t *testing.T) {
 // the fix for the rest of the episode.
 func TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	rec := events.NewFake()
 	env.rec = rec
 	env.cfg = &config.City{
@@ -12728,9 +12796,9 @@ func TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure(t *test
 	tick := func() {
 		// Each tick reads the row afresh, as the controller does.
 		session = mustGetBead(t, env.store, session.ID)
-		reconcileSessionBeads(
-			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
-			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
+		reconcileSessionBeadsAtPath(
+			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames,
+			env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
 			nil, env.clk, rec, env.cfg.Session.StartupTimeoutDuration(), 0, &env.stdout, &env.stderr,
 		)
 	}

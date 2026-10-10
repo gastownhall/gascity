@@ -172,7 +172,7 @@ func TestInterruptStrategyUsesPiProviderFamilyAlias(t *testing.T) {
 func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -207,7 +207,7 @@ func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testi
 func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -361,7 +361,7 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1158,7 +1158,7 @@ func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "gemini", WorkDir: t.TempDir(), Provider: "gemini", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1227,7 +1227,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1288,7 +1288,7 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1340,7 +1340,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.WaitForIdleErrors = map[string]error{}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1376,7 +1376,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1425,7 +1425,7 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1466,7 +1466,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1503,7 +1503,7 @@ func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
 func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1527,7 +1527,7 @@ func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
 func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1643,7 +1643,7 @@ func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy,
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1722,7 +1722,7 @@ func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy,
 func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter), WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1793,7 +1793,7 @@ func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session target", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1840,7 +1840,7 @@ func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1897,7 +1897,7 @@ func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session missing", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -1938,7 +1938,7 @@ func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)

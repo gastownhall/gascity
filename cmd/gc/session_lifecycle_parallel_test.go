@@ -6318,15 +6318,19 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
-	results := executePreparedStartWave(
+	city := t.TempDir()
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{info: sessionpkg.Info{SessionName: "worker", SessionNameMetadata: "worker"}},
 			cfg:       runtime.Config{Command: "panic-provider"},
 		}},
+		city,
 		&panicStartProvider{Fake: runtime.NewFake()},
 		nil,
+		nil,
 		time.Second,
+		1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -6732,6 +6736,7 @@ func immediateSessionStaleKeyDetectionWaiter(context.Context, string) error {
 }
 
 func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	newItem := func(id, name string) preparedStart {
 		return preparedStart{
@@ -6761,7 +6766,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 				newItem("gc-first", "first-agent"),
 				newItem("gc-second", "second-agent"),
 			},
-			"",
+			city,
 			sp,
 			nil,
 			nil,
@@ -6878,6 +6883,7 @@ func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBounda
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
+	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6897,12 +6903,15 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		cfg: runtime.Config{Command: "claude --resume stale-key-abc"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6919,6 +6928,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6941,12 +6951,15 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6963,6 +6976,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 }
 
 func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
+	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6981,12 +6995,15 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7047,6 +7064,7 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 }
 
 func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -7072,12 +7090,15 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -7105,6 +7126,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 }
 
 func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -7132,12 +7154,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7159,6 +7184,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMismatch(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -7194,12 +7220,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMisma
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7267,6 +7296,7 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 }
 
 func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallback(t *testing.T) {
+	city := t.TempDir()
 	sp := &existingProcessAliveSequenceProvider{
 		Fake: runtime.NewFake(),
 		alive: map[string][]bool{
@@ -7296,12 +7326,15 @@ func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallba
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7422,6 +7455,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 }
 
 func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t *testing.T) {
+	city := t.TempDir()
 	sp := &falseNegativeAfterStartProvider{
 		Fake:            runtime.NewFake(),
 		falseAfterStart: make(map[string]bool),
@@ -7447,12 +7481,15 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -7466,6 +7503,7 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 }
 
 func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFailure(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
@@ -7507,7 +7545,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
-		"",
+		city,
 		sp,
 		nil,
 		&config.City{},
@@ -7560,6 +7598,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 }
 
 func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 30, 0, 0, time.UTC)}
@@ -7600,7 +7639,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
-		"",
+		city,
 		sp,
 		nil,
 		&config.City{},

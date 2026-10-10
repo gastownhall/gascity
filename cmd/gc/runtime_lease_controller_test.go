@@ -454,11 +454,9 @@ func TestDrainAckEscalationRechecksBeforeItsProcessKill(t *testing.T) {
 }
 
 // TestControllerStopsWorkWithoutTheTestOptOut drives the controller's stop
-// paths with this package's opt-out off (session.RefuseManagersWithoutCityForTest),
-// as production runs them: a path that lost its city path would fail with
-// ErrRuntimeLeaseNoCity and leave its runtime running.
+// paths as production runs them: a path that lost its city path would fail
+// with ErrRuntimeLeaseNoCity and leave its runtime running.
 func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
-	defer sessionpkg.RefuseManagersWithoutCityForTest()()
 	active := func(t *testing.T, env *reconcilerTestEnv, cfg *config.City) beads.Bead {
 		t.Helper()
 		env.cfg = cfg

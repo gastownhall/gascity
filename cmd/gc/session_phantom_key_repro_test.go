@@ -33,6 +33,7 @@ import (
 // discard the minted key must now be a genuine no-op.
 func TestPhantomReplacementSessionKeyRepro(t *testing.T) {
 	env := newRestartRequestTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},

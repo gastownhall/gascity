@@ -262,7 +262,7 @@ func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
 				t.Run(fmt.Sprintf("%d/%s/%s", policy, provider, until), func(t *testing.T) {
 					store := beads.NewMemStore()
 					sp := runtime.NewFake()
-					mgr := NewManagerWithOptions(store, sp)
+					mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 					info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider + " --session k", WorkDir: t.TempDir(), Provider: provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 					if err != nil {
 						t.Fatal(err)

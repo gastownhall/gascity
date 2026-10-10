@@ -443,8 +443,6 @@ func TestInterruptRefusesAStopPendingRow(t *testing.T) {
 // TestLeaselessManagerFailsAtUse: a Manager with no city path refuses to
 // start or stop a runtime, except in a stop sweep.
 func TestLeaselessManagerFailsAtUse(t *testing.T) {
-	leaselessManagersAllowed.Store(false)
-	defer leaselessManagersAllowed.Store(true)
 	m := newManagerLeaseFixture(t)
 	mgr := NewManagerWithOptions(m.f.store, m.sp)
 	if err := mgr.Start(context.Background(), m.info.ID, BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, ResumeOperator); !errors.Is(err, ErrRuntimeLeaseNoCity) {

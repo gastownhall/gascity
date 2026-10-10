@@ -670,6 +670,7 @@ func writeTestFile(path string) error {
 }
 
 func TestVerifiedStop_MatchingToken(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
@@ -682,7 +683,7 @@ func TestVerifiedStop_MatchingToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop(city, sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with matching token: %v", err)
 	}
@@ -720,6 +721,7 @@ func TestVerifiedStop_MismatchedToken(t *testing.T) {
 }
 
 func TestVerifiedStop_NoToken(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
@@ -735,7 +737,7 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 		t.Fatalf("store.Get: %v", err)
 	}
 
-	err = verifiedStop("", sessiontest.SeedBead(t, session), store, sp, nil)
+	err = verifiedStop(city, sessiontest.SeedBead(t, session), store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with no token: %v", err)
 	}
@@ -781,9 +783,10 @@ func TestVerifiedStopDefersOnUnverifiableToken(t *testing.T) {
 // A runtime with no metadata store has no token by construction: the kill
 // proceeds, or exec kills would become impossible.
 func TestVerifiedStopProceedsOnMetaUnsupported(t *testing.T) {
+	city := t.TempDir()
 	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("exec get-meta: %w", runtime.ErrMetaUnsupported))
 
-	if err := verifiedStop("", info, store, sp, nil); err != nil {
+	if err := verifiedStop(city, info, store, sp, nil); err != nil {
 		t.Fatalf("verifiedStop error = %v, want nil on ErrMetaUnsupported", err)
 	}
 	if sp.IsRunning(info.SessionNameMetadata) {
@@ -1001,6 +1004,7 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 }
 
 func TestAdvanceSessionDrains_Timeout(t *testing.T) {
+	city := t.TempDir()
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	sp := runtime.NewFake()
@@ -1034,7 +1038,7 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 
 	cfg := &config.City{}
 
-	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced(city, dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, cfg, clk, nil)

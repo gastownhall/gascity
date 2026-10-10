@@ -408,7 +408,6 @@ go_test(
         "rigidem_test.go",
         "run_detail_retired_sessions_test.go",
         "run_steps_order_test.go",
-        "runtime_lease_optout_test.go",
         "scope_root_test.go",
         "server_rollout_test.go",
         "server_test.go",

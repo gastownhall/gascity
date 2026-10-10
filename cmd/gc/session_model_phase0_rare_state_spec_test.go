@@ -103,6 +103,7 @@ func TestPhase0ConfigDrift_IdleNamedSessionRestartsInPlaceWithoutCapVacancy(t *t
 	// When a named session is idle (detached, no recent activity),
 	// config-drift should proceed with restart-in-place.
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -173,6 +174,7 @@ func TestPhase0ConfigDrift_NamedSessionBoundsRecentActivityDeferral(t *testing.T
 	// Recent activity is a headless-use signal, but it must not let a live
 	// process loop hide one fixed config-drift episode forever.
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -249,6 +251,7 @@ func TestPhase0ConfigDrift_NamedSessionDrainsWhenStaleActivity(t *testing.T) {
 	// When a named session has stale activity (beyond threshold) and
 	// is not attached, config-drift should proceed.
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -792,6 +795,7 @@ func TestConfigDrift_DetachAllowsDriftToResume(t *testing.T) {
 	// After an attached session detaches, config-drift should proceed
 	// with restart-in-place for named sessions.
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{

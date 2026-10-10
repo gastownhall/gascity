@@ -902,6 +902,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 
 func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{
 			Name:           "worker",
@@ -924,14 +925,16 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 	it := newFakeIdleTracker()
 	it.idle["worker"] = true
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	got := reconcileSessionBeads(
+	got := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		cfgNames,
 		env.cfg,
 		env.sp,
 		env.store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -966,14 +969,16 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 	}
 
 	delete(env.sp.StartErrors, "worker")
-	got = reconcileSessionBeads(
+	got = reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{failed},
 		env.desiredState,
 		cfgNames,
 		env.cfg,
 		env.sp,
 		env.store,
+		nil,
 		nil,
 		nil,
 		nil,

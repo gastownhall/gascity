@@ -118,6 +118,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 
 func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Providers: map[string]config.ProviderSpec{

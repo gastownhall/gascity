@@ -107,6 +107,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 }
 
 func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 
 	usedWorker, err := startPreparedStartCandidate(
@@ -121,7 +122,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 				WorkDir: t.TempDir(),
 			},
 		},
-		"",
+		city,
 		nil,
 		sp,
 		nil,
@@ -249,6 +250,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 }
 
 func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) {
+	city := t.TempDir()
 	sp := &startConfirmedAbsentProvider{Fake: runtime.NewFake()}
 	started, err := startPreparedStartCandidate(
 		context.Background(),
@@ -259,7 +261,8 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"", nil, sp, nil, nil, nil, nil,
+		city,
+		nil, sp, nil, nil, nil, nil,
 	)
 	if err != nil || !started {
 		t.Fatalf("startPreparedStartCandidate = (%v, %v), want started without error", started, err)

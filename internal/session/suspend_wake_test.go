@@ -44,7 +44,7 @@ func TestOperatorSuspendClearsPendingWake(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
-			mgr := NewManagerWithOptions(store, sp)
+			mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 			b := wakeRow(t, store)
 			if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 				t.Fatal(err)

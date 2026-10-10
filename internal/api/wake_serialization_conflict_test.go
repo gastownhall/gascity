@@ -40,7 +40,7 @@ func (s *wakeBatchConflictStore) SetMetadataBatch(id string, kvs map[string]stri
 func TestHandleSessionWake_SerializationConflictIsDeclaredRetryable503(t *testing.T) {
 	fs := newSessionFakeState(t)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Conflicted")
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp).Suspend(info.ID); err != nil {
+	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(info.ID); err != nil {
 		t.Fatalf("suspend session: %v", err)
 	}
 	conflicts := &wakeBatchConflictStore{Store: fs.cityBeadStore, sessionID: info.ID}

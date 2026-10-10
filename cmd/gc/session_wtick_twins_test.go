@@ -189,6 +189,7 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 // bead metadata + work assignee across the two stores. It fails loudly if the row
 // form skips the runtime stop, the front-door retire, or the work reassignment.
 func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
+	city := t.TempDir()
 	cfg := &config.City{
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor"}},
@@ -279,7 +280,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 				indexBySessionName[sn] = i
 			}
 		}
-		retireDuplicateConfiguredNamedSessionBeads("", store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
+		retireDuplicateConfiguredNamedSessionBeads(city, store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
 	}
 	runRows := func(store beads.Store, sp *runtime.Fake) {
 		rowBeads := loadOpen(t, store)
@@ -287,7 +288,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		for i, b := range rowBeads {
 			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
-		retireDuplicateConfiguredNamedSessionRows("", store, nil, sp, cfg, cityName, rows, now, nil)
+		retireDuplicateConfiguredNamedSessionRows(city, store, nil, sp, cfg, cityName, rows, now, nil)
 	}
 
 	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {

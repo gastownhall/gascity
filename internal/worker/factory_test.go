@@ -71,6 +71,7 @@ func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
 	sp := runtime.NewFake()
 	waited := make(chan string, 1)
 	factory, err := NewFactory(FactoryConfig{
+		CityPath: t.TempDir(),
 		Store:    store,
 		Provider: sp,
 		StaleKeyDetectionWaiter: func(_ context.Context, name string) error {
@@ -242,7 +243,7 @@ func TestFactoryTailMetaForProviderUsesCodexSchema(t *testing.T) {
 func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "legacy-provider", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
@@ -258,6 +259,7 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	var gotSessionKind string
 	var gotProfile Profile
 	factory, err := NewFactory(FactoryConfig{
+		CityPath: t.TempDir(),
 		Store:    store,
 		Provider: sp,
 		ResolveSessionRuntime: func(_ sessionpkg.Info, sessionKind string, _ map[string]string) (*ResolvedRuntime, error) {
@@ -397,7 +399,7 @@ func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	recorder := events.NewFake()
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Transport: "", Resume: sessionpkg.ProviderResume{SessionIDFlag: "--session-id"}})
@@ -406,6 +408,7 @@ func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T
 	}
 
 	factory, err := NewFactory(FactoryConfig{
+		CityPath: t.TempDir(),
 		Store:    store,
 		Provider: sp,
 		Recorder: recorder,
@@ -438,7 +441,7 @@ func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T
 func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(
 		context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Probe", Command: "", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -450,6 +453,7 @@ func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
 	}
 
 	factory, err := NewFactory(FactoryConfig{
+		CityPath: t.TempDir(),
 		Store:    store,
 		Provider: sp,
 	})
