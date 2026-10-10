@@ -131,12 +131,7 @@ func (f *ownershipFixture) assertCacheStale(t *testing.T) {
 // drain ack (the state the next tick would stop the worker from).
 func (f *ownershipFixture) beginInFlightOrphanedDrain(t *testing.T, reason string, acked bool) {
 	t.Helper()
-	ds := &drainState{
-		startedAt:  f.env.clk.Now(),
-		deadline:   f.env.clk.Now().Add(time.Hour),
-		reason:     reason,
-		generation: 1,
-	}
+	ds := beginDrainForTest(t, f.env.store, f.env.dt, f.session.ID, reason, f.env.clk.Now(), f.env.clk.Now().Add(time.Hour))
 	if acked {
 		if err := setReconcilerDrainAckMetadata(f.env.sp, ownershipWorkerName, ds); err != nil {
 			t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
@@ -146,7 +141,6 @@ func (f *ownershipFixture) beginInFlightOrphanedDrain(t *testing.T, reason strin
 		}
 		ds.ackSet = true
 	}
-	f.env.dt.set(f.session.ID, ds)
 }
 
 // ageBeyondWakeGrace backdates the tick's snapshot of the worker's last wake past

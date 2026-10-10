@@ -190,62 +190,6 @@ func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait ti
 	return l, l.Release, err
 }
 
-type killPremiseCtxKey struct{}
-
-// ErrKillPremiseMoved refuses a kill whose row, read fresh under the runtime
-// lease, no longer carries the facts the kill was decided on.
-var ErrKillPremiseMoved = errors.New("runtime lease: the row moved since the kill was decided")
-
-// WithKillPremise makes a Manager kill under ctx decide again under the
-// runtime lease: it reads the row fresh once it holds the lease, and stops
-// only when premise holds for that read (an open row). A controller kill
-// decided on a tick's snapshot passes one, so it spares a row an operator
-// moved in between under the lease: a resume that consumed a hold or woke a
-// dormant row, or a new incarnation. It cannot see a move that writes
-// nothing the premise reads: a live runtime restarted in place at the same
-// generation and token is told apart only by the kill's exact-object fence.
-func WithKillPremise(ctx context.Context, premise func(fresh Info) bool) context.Context {
-	return context.WithValue(ctx, killPremiseCtxKey{}, premise)
-}
-
-// SameKillFacts reports whether fresh still carries the facts a kill decided
-// on expected rests on that an operator moves under the lease: the
-// incarnation (generation, instance token), the operator's intent (the hold
-// an attach consumes or a suspend sets), and dormancy (a row decided dormant
-// that an attach woke is live now). Other state the controller's own tick
-// heals is not compared.
-func SameKillFacts(expected, fresh Info) bool {
-	return !fresh.Closed && fresh.Generation == expected.Generation && fresh.InstanceToken == expected.InstanceToken &&
-		fresh.SleepIntent == expected.SleepIntent && fresh.HeldUntil == expected.HeldUntil &&
-		(liveMetadataState(expected.MetadataState) || !liveMetadataState(fresh.MetadataState))
-}
-
-// liveMetadataState reports whether a row's raw state claims a live or
-// starting runtime.
-func liveMetadataState(state string) bool {
-	switch State(strings.TrimSpace(state)) {
-	case StateActive, StateAwake, StateCreating, StateStartPending:
-		return true
-	}
-	return false
-}
-
-// killPremiseHolds checks ctx's kill premise, if any, on a fresh read of id.
-func (m *Manager) killPremiseHolds(ctx context.Context, id string) error {
-	premise, ok := ctx.Value(killPremiseCtxKey{}).(func(Info) bool)
-	if !ok {
-		return nil
-	}
-	b, err := NewStore(beads.SessionStore{Store: m.store}).freshBead(id)
-	if err != nil {
-		return err
-	}
-	if fresh := infoFromPersistedBead(b); b.Status == "closed" || !premise(fresh) {
-		return fmt.Errorf("%w: session %q", ErrKillPremiseMoved, id)
-	}
-	return nil
-}
-
 // LeaseRuntimeName takes the runtime name's flock alone, for a starter or
 // stopper with no session row (a runtime-only worker handle), under ctx's
 // lease mode: a lease ctx carries or a stop sweep takes none; the controller

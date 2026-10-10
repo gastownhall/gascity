@@ -187,39 +187,52 @@ func (s *Store) ApplyPatchIfLifecycleUnchangedUnder(expected Info, patch Metadat
 }
 
 func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch, lease *RuntimeLease, attempts int) (bool, error) {
+	res, err := s.commitIf(expected.ID, patch, lease, attempts, s.validatedBead, func(b beads.Bead) bool {
+		return sameLifecycleFacts(expected, infoFromPersistedBead(b))
+	})
+	return res == CommitLanded, err
+}
+
+// commitIf writes patch to row id while holds accepts read's read of it
+// (and, with lease, the read still records the lease), fenced at that read's
+// revision; a fence lost to another writer re-reads, up to attempts times.
+// Without conditional writes the write is unfenced: its window runs from the
+// read to the write, plus the cache's lag when read goes through the cache
+// (ApplyPatchIfLifecycleUnchanged; Commit reads live).
+func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
-		return false, nil
+		return 0, nil // nothing to write
 	}
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
-		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+		return 0, fmt.Errorf("updating session %q: %w", id, err)
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		bead, err := s.validatedBead(expected.ID)
+		bead, err := read(id)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 		if bead.Status == "closed" {
-			return false, nil
+			return CommitClosed, nil
 		}
-		if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) || (lease != nil && !lease.HoldsMeta(bead.Metadata)) {
-			return false, nil
+		if !holds(bead) || (lease != nil && !lease.HoldsMeta(bead.Metadata)) {
+			return CommitMoved, nil
 		}
 		if writer == nil {
-			if err := s.ApplyPatch(expected.ID, patch); err != nil {
-				return false, err
+			if err := s.ApplyPatch(id, patch); err != nil {
+				return 0, err
 			}
-			return true, nil
+			return CommitLanded, nil
 		}
-		err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
 		switch {
 		case err == nil:
-			return true, nil
+			return CommitLanded, nil
 		case !beads.IsPreconditionFailed(err):
-			return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+			return 0, fmt.Errorf("updating session %q: %w", id, err)
 		}
 	}
-	return false, nil
+	return CommitContended, nil
 }
 
 // UpdateMetadataFenced writes a patch decided from a fresh read of the row. It

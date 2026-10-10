@@ -407,7 +407,12 @@ func newLegacyWorld(f parityFixture, cityPath string, rows []beads.Bead) *legacy
 	}
 	w.dops = newDrainOps(w.sp)
 	for id, reason := range f.Drains {
-		w.dt.set(id, &drainState{startedAt: parityDrainAt, reason: reason, generation: 1})
+		// The drain's basis is the seeded row, as beginSessionDrainInfo records it.
+		var basis session.Decided
+		if i := slices.IndexFunc(rows, func(b beads.Bead) bool { return b.ID == id }); i >= 0 {
+			basis = session.Decide(sessionInfoFromBead(rows[i]), session.FactsLegacyStopPending)
+		}
+		w.dt.set(id, &drainState{startedAt: parityDrainAt, reason: reason, generation: 1, basis: basis})
 	}
 	return w
 }

@@ -3692,6 +3692,13 @@ func cleanDeadRuntimeCorpse(store beads.Store, legs workLegs, info session.Info,
 	if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
 		return false
 	}
+	// The cleanup is decided on info, the tick's row: under the name's flock
+	// it stops only while the row still carries the kill's facts, so a row
+	// decided dormant that a start has since woken keeps its runtime.
+	if holds, err := sessionFrontDoor(store).Holds(session.Decide(info, session.FactsLegacyKill)); !holds {
+		fmt.Fprintf(stderr, "session reconciler: dead runtime session %s skipped: session bead %s moved since the cleanup was decided (%v)\n", name, info.ID, err) //nolint:errcheck
+		return false
+	}
 	if err := sp.Stop(name); err != nil {
 		if runtime.IsSessionGone(err) {
 			return false
@@ -3713,9 +3720,7 @@ func cleanDeadRuntimeCorpse(store beads.Store, legs workLegs, info session.Info,
 	// runtime has been confirmed dead and stopped cannot be resumed,
 	// so releasing its work is the correct action.
 	//
-	// The outer `if store != nil` guard tolerates a nil store so the
-	// runtime-Stop side effect still runs in test contexts that do not
-	// wire a real store; closeBead is idempotent on already-closed beads.
+	// closeBead is idempotent on already-closed beads.
 	//
 	// Only a row that claims the runtime it just lost is closed. A dormant
 	// row (asleep, drained, suspended, quarantined, archived) records no
@@ -3724,7 +3729,7 @@ func cleanDeadRuntimeCorpse(store beads.Store, legs workLegs, info session.Info,
 	// the dead pane is that sleep's leftover. Closing it would make the
 	// session impossible to wake. Reaping the pane above is still right: it
 	// frees the name for that wake.
-	if store != nil && claimsLive {
+	if claimsLive {
 		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 		closeBead(store, legs, info, "dead-runtime", clk.Now().UTC(), stderr)
 	}
