@@ -1428,3 +1428,80 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		}
 	})
 }
+
+func TestCodexTailActivityUsesExplicitTurnEvents(t *testing.T) {
+	start := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}`
+	done := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`
+	answer := `{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Ready"}]}}`
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"started", []string{start}, "in-turn"},
+		{"assistant is not completion", []string{start, answer}, "in-turn"},
+		{"completed", []string{start, answer, done}, "idle"},
+		{"completion alone in tail window", []string{done}, "idle"},
+		{"new turn", []string{done, start}, "in-turn"},
+		{"stale completion", []string{start, `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"older"}}`}, "in-turn"},
+		{"aborted", []string{start, `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1"}}`}, "idle"},
+		{"no terminal event", []string{answer}, ""},
+		{"rate limit update after completion", []string{done, `{"type":"event_msg","payload":{"type":"token_count","info":null}}`}, "idle"},
+		{"malformed trailing event", []string{done, `{"type":"event_msg"`}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+			meta, err := ExtractCodexTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if meta != nil {
+				got = meta.Activity
+			}
+			if got != tc.want {
+				t.Fatalf("activity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexTailActivitySurvivesLargeToolOutput(t *testing.T) {
+	start := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}`
+	done := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"current"}}`
+	stale := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"older"}}`
+	large := fmt.Sprintf(`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"tool","output":%q}}`, strings.Repeat("guide output ", tailChunkSize/3))
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"active after one large result", []string{start, large}, "in-turn"},
+		{"active across many small results", append([]string{start}, codexFillerLines(t, 3*tailChunkSize)...), "in-turn"},
+		{"delayed old completion outside start window", []string{start, large, stale}, "in-turn"},
+		{"idle after large result", []string{start, large, done}, "idle"},
+		{"idle marker beyond tail", []string{start, done, large}, "idle"},
+		{"aborted beyond tail", []string{start, `{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"current"}}`, large}, "idle"},
+		{"new active turn beyond tail", []string{start, done, start, large}, "in-turn"},
+		{"no lifecycle is unknown", []string{large}, ""},
+		{"torn final record stays unknown", []string{start, large, `{"type":"event_msg"`}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			writeCodexUsageLines(t, path, tc.lines)
+			meta, err := ExtractCodexTailMeta(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if meta != nil {
+				got = meta.Activity
+			}
+			if got != tc.want {
+				t.Fatalf("activity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
