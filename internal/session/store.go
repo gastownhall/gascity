@@ -410,25 +410,6 @@ func (s *Store) Sleep(id, reason string, now time.Time) error {
 	return s.ApplyPatch(id, SleepPatch(now, reason))
 }
 
-// BeginDrainAckStopPending moves a drain-acked session into durable
-// stop-pending state via DrainAckStopPendingPatch. Replaces markDrainAckStopPending.
-func (s *Store) BeginDrainAckStopPending(id string, now time.Time) error {
-	return s.ApplyPatch(id, DrainAckStopPendingPatch(now))
-}
-
-// RequestRestart records a controller handoff to a fresh provider conversation
-// via RestartRequestPatch. Replaces the restart-request write in session_reconciler.go.
-func (s *Store) RequestRestart(id, sessionKey string, now time.Time) error {
-	return s.ApplyPatch(id, RestartRequestPatch(sessionKey, now))
-}
-
-// ResetConfigDrift records an in-place named-session repair after core config
-// drift via ConfigDriftResetPatch. Replaces the config-drift reset writes in
-// session_reconciler.go and soft_reload.go.
-func (s *Store) ResetConfigDrift(id string, next State, sessionKey string, now time.Time) error {
-	return s.ApplyPatch(id, ConfigDriftResetPatch(next, sessionKey, now))
-}
-
 // SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
 // SetMetadataBatch(sessionID, {wait_hold, sleep_intent}) writes in cmd_wait.go.
 // When on is false both keys are cleared (empty-string write).
