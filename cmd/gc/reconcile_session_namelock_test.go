@@ -10,21 +10,22 @@ import (
 // a name an effect holds stops no reap in its city and only there, and a
 // name the reaper holds refuses the effect.
 func TestLockRuntimeNameKeysAsTheReaper(t *testing.T) {
-	w := &World{CityPath: "city-a"}
+	cityA, cityB := t.TempDir(), t.TempDir()
+	w := &World{CityPath: cityA}
 	name, unlock, ok := lockRuntimeName(w, session.Info{SessionName: " named-1 "})
 	if !ok || unlock == nil || name != "named-1" {
 		t.Fatalf("lockRuntimeName = %q, %v, %v; want named-1 locked", name, unlock != nil, ok)
 	}
 	sp := boundFake(t, "old")
-	if stopped, _ := stopStillBoundClosedRuntime("city-a", "named-1", "old", sp, false); stopped || sp.CountCalls("Stop", "named-1") != 0 {
+	if stopped, _ := stopStillBoundClosedRuntime(cityA, "named-1", "old", sp, false); stopped || sp.CountCalls("Stop", "named-1") != 0 {
 		t.Fatal("the reaper stopped a name an effect holds")
 	}
-	if stopped, _ := stopStillBoundClosedRuntime("city-b", "named-1", "old", sp, false); !stopped {
+	if stopped, _ := stopStillBoundClosedRuntime(cityB, "named-1", "old", sp, false); !stopped {
 		t.Fatal("an effect's lock in one city blocked another city's reap of the same name")
 	}
 	unlock()
 
-	held := runtimeNames.tryLock("city-a", "named-1") // the reaper's own call
+	held := runtimeNames.tryLock(cityA, "named-1") // the reaper's own call
 	if held == nil {
 		t.Fatal("the effect's unlock left the name held")
 	}
@@ -37,13 +38,13 @@ func TestLockRuntimeNameKeysAsTheReaper(t *testing.T) {
 // Kills a lock helper that locks the empty name (every nameless row would
 // share one lock) or hands out a busy name.
 func TestLockRuntimeNameRefusesEmptyOrBusy(t *testing.T) {
-	w := &World{CityPath: t.Name()}
+	w := &World{CityPath: t.TempDir()}
 	for _, empty := range []string{"", "  "} {
 		if name, unlock, ok := lockRuntimeName(w, session.Info{SessionName: empty}); ok || unlock != nil || name != "" {
 			t.Errorf("SessionName %q: lockRuntimeName = %q, %v, %v; want refused", empty, name, unlock != nil, ok)
 		}
 	}
-	if free := runtimeNames.tryLock(t.Name(), ""); free == nil {
+	if free := runtimeNames.tryLock(w.CityPath, ""); free == nil {
 		t.Error("a refused empty name took the empty name's lock")
 	} else {
 		free()

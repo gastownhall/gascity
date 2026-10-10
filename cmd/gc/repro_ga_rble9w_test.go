@@ -13,7 +13,7 @@ import (
 )
 
 func TestRepro_ga_rble9w_PinnedMayorHandoffNeverCyclesAndFalselyReportsSuccess(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "mayor", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},

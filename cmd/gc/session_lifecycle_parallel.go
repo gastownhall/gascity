@@ -1667,17 +1667,6 @@ func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
 	}
 }
 
-func executePreparedStartWave(
-	ctx context.Context,
-	prepared []preparedStart,
-	sp runtime.Provider,
-	store beads.Store,
-	startupTimeout time.Duration,
-	options ...startExecutionOption,
-) []startResult {
-	return executePreparedStartWaveForCity(ctx, prepared, "", sp, store, nil, startupTimeout, 1, options...)
-}
-
 func executePreparedStartWaveForCity(
 	ctx context.Context,
 	prepared []preparedStart,
@@ -3212,7 +3201,7 @@ func recoverRunningPendingCreate(
 		return false, nil
 	}
 	var lease *sessionpkg.RuntimeLease
-	if name := strings.TrimSpace(info.SessionName); name != "" && filepath.IsAbs(cityPath) {
+	if name := strings.TrimSpace(info.SessionName); name != "" {
 		held, release, err := tryRuntimeLease(store, cityPath, name, info.ID, sessionpkg.RuntimeLeaseTTLFor(cfg))
 		if err != nil {
 			if trace != nil {
@@ -3840,23 +3829,6 @@ func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *session
 	return batch
 }
 
-func executePlannedStarts(
-	ctx context.Context,
-	candidates []startCandidate,
-	cfg *config.City,
-	desiredState map[string]TemplateParams,
-	sp runtime.Provider,
-	store beads.Store,
-	cityName string,
-	clk clock.Clock,
-	rec events.Recorder,
-	startupTimeout time.Duration,
-	stdout, stderr io.Writer,
-	options ...startExecutionOption,
-) int {
-	return executePlannedStartsTraced(ctx, candidates, cfg, desiredState, sp, store, cityName, "", clk, rec, startupTimeout, stdout, stderr, nil, options...)
-}
-
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -4036,10 +4008,10 @@ func executePlannedStartsTraced(
 				// commit (I-LEASE), and takes the row's record just before PreWake,
 				// after capacity admission and the circuit's open check. A name
 				// another holder has (an operator's attach or kill, another host)
-				// defers, writing nothing; the next pass reconsiders it. A city
-				// path that is not absolute (tests) has no runtime dir to lease in.
+				// defers, writing nothing; the next pass reconsiders it, as does a
+				// city path that is not absolute (ErrRuntimeLeaseNoCity).
 				leased := false
-				if name := strings.TrimSpace(candidate.info.SessionName); name != "" && filepath.IsAbs(cityPath) {
+				if name := strings.TrimSpace(candidate.info.SessionName); name != "" {
 					lease, dropLease, err := tryRuntimeLease(store, cityPath, name, "", 0)
 					if err != nil {
 						if release != nil {

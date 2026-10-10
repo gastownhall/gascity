@@ -443,14 +443,6 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 	return errors.Join(errs...)
 }
 
-// doHandoffRemote sends handoff mail to a remote session and kills its runtime.
-// Non-blocking: returns immediately after killing the session.
-func doHandoffRemote(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
-	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
-) int {
-	return doHandoffRemoteWithForce("", msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
-}
-
 func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {

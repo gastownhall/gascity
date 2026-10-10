@@ -579,6 +579,7 @@ func TestObserveSessionBoundedLimitsOutstandingObservationsPerCity(t *testing.T)
 // The async start goroutine holds its asyncStartLimiter slot until the commit
 // finishes, so a start that waits forever on a provider call holds it forever.
 func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t *testing.T) {
+	testCity := t.TempDir()
 	workDir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
@@ -609,7 +610,7 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 					close(finishedC)
 				},
 			}},
-			"", sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
+			testCity, sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
 			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
 		)
 		select {

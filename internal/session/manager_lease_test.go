@@ -55,7 +55,7 @@ func newManagerLeaseFixture(t *testing.T) managerLeaseFixture {
 	t.Helper()
 	store := openLeaseStore(t, t.TempDir())
 	sp := &leaseWatchProvider{Fake: runtime.NewFake(), store: store}
-	info, err := NewManagerWithOptions(store, sp.Fake).CreateSession(context.Background(), CreateOptions{
+	info, err := newTestManager(t, store, sp.Fake).CreateSession(context.Background(), CreateOptions{
 		Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude",
 		ExtraMeta: map[string]string{"session_origin": "manual"},
 	})
@@ -71,7 +71,7 @@ func newManagerLeaseFixture(t *testing.T) managerLeaseFixture {
 	operatorLeaseWait = 600 * time.Millisecond
 	t.Cleanup(func() { operatorLeaseWait = prev })
 	return managerLeaseFixture{
-		mgr:  NewManagerWithOptions(store, sp, WithCityPath(city)),
+		mgr:  newTestManager(t, store, sp, WithCityPath(city)),
 		sp:   sp,
 		info: info,
 		city: city,
@@ -443,6 +443,7 @@ func TestInterruptRefusesAStopPendingRow(t *testing.T) {
 // TestLeaselessManagerFailsAtUse: a Manager with no city path refuses to
 // start or stop a runtime, except in a stop sweep.
 func TestLeaselessManagerFailsAtUse(t *testing.T) {
+	ExpectNoCityRefusalsForTest(t)
 	m := newManagerLeaseFixture(t)
 	mgr := NewManagerWithOptions(m.f.store, m.sp)
 	if err := mgr.Start(context.Background(), m.info.ID, BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, ResumeOperator); !errors.Is(err, ErrRuntimeLeaseNoCity) {

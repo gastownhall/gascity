@@ -157,6 +157,7 @@ func TestTopoOrderRowsMatchesTopoOrder(t *testing.T) {
 // reads session_name off Info.SessionNameMetadata. The full kill path is
 // exercised end-to-end by TestRetireDuplicateRowsMatchesBeads.
 func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
+	testCity := t.TempDir()
 	sp := runtime.NewFake()
 	cases := []struct {
 		name string
@@ -171,8 +172,8 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := wtickSessionBead("s-stop", tc.meta)
 			var rawErr, infoErr bytes.Buffer
-			raw := stopRuntimeBeforeSessionBeadMutation("", nil, tc.sp, nil, b, "duplicate", &rawErr)
-			info := stopRuntimeBeforeSessionBeadMutationInfo("", nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
+			raw := stopRuntimeBeforeSessionBeadMutation(testCity, nil, tc.sp, nil, b, "duplicate", &rawErr)
+			info := stopRuntimeBeforeSessionBeadMutationInfo(testCity, nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
 			if raw != info {
 				t.Fatalf("stop-runtime diverged: raw=%v info=%v", raw, info)
 			}

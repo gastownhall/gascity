@@ -44,7 +44,7 @@ func TestOperatorSuspendClearsPendingWake(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
-			mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+			mgr := newTestManager(t, store, sp)
 			b := wakeRow(t, store)
 			if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 				t.Fatal(err)
@@ -87,7 +87,7 @@ func TestOperatorSuspendHoldsTheRow(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(t.TempDir()), WithClock(&clock.Fake{Time: now}))
+			mgr := newTestManager(t, store, runtime.NewFake(), WithClock(&clock.Fake{Time: now}))
 			b := wakeRow(t, store)
 			if err := store.SetMetadata(b.ID, "state", string(tc.state)); err != nil {
 				t.Fatal(err)
@@ -133,7 +133,7 @@ func idleSuspend(m *Manager, id string) error { return m.SuspendIdle(context.Bac
 // wake reason; it keeps the operator's transition rules.
 func TestChatIdleSuspendHoldsNothing(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(t.TempDir()))
+	mgr := newTestManager(t, store, runtime.NewFake())
 	b := wakeRow(t, store)
 	if err := mgr.SuspendIdle(context.Background(), b.ID); err != nil {
 		t.Fatalf("SuspendIdle: %v", err)
@@ -190,7 +190,7 @@ func TestOperatorSuspendHoldsBeforeTheStop(t *testing.T) {
 		if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
-		err := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir())).Suspend(b.ID)
+		err := newTestManager(t, store, sp).Suspend(b.ID)
 		if sp.seen["sleep_intent"] != string(SleepReasonUserHold) || sp.seen["held_until"] == "" {
 			t.Fatalf("fail=%v: the stop found sleep_intent=%q held_until=%q, want the hold already written", fail, sp.seen["sleep_intent"], sp.seen["held_until"])
 		}
@@ -217,7 +217,7 @@ func TestFailedStopRollbackLeavesANewerWriteAlone(t *testing.T) {
 	if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir())).Suspend(b.ID); err == nil {
+	if err := newTestManager(t, store, sp).Suspend(b.ID); err == nil {
 		t.Fatal("Suspend with a failing stop succeeded")
 	}
 	if got, _ := store.Get(b.ID); got.Metadata["state"] != string(StateAsleep) || got.Metadata["wake_request"] != "" {

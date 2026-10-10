@@ -76,7 +76,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
 	city := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

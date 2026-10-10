@@ -244,6 +244,7 @@ func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
 }
 
 func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
+	testCity := t.TempDir()
 	cityDir := t.TempDir()
 	writeCityTOML(t, cityDir, "trace-town", "mayor")
 
@@ -349,7 +350,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		sp,
 		store,
 		"trace-town",
-		"",
+		testCity,
 		clock.Real{},
 		events.NewFake(),
 		5*time.Second,
@@ -383,7 +384,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	wakeEvals := map[string]wakeEvaluation{
 		drainBead.ID: {Reasons: nil},
 	}
-	advanceSessionDrainsWithSessionsTraced("",
+	advanceSessionDrainsWithSessionsTraced(testCity,
 		drainTracker,
 		sp,
 		store,

@@ -57,7 +57,7 @@ func newPolicyEnv(t *testing.T, meta map[string]string, live bool) *policyEnv {
 		}
 	}
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithClock(&clock.Fake{Time: resumeNow}), WithCityPath(cityPath))
+	mgr := newTestManager(t, store, sp, WithClock(&clock.Fake{Time: resumeNow}), WithCityPath(cityPath))
 	return &policyEnv{store: store, sp: sp, mgr: mgr, id: b.ID, cityPath: cityPath}
 }
 
@@ -262,7 +262,7 @@ func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
 				t.Run(fmt.Sprintf("%d/%s/%s", policy, provider, until), func(t *testing.T) {
 					store := beads.NewMemStore()
 					sp := runtime.NewFake()
-					mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+					mgr := newTestManager(t, store, sp)
 					info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider + " --session k", WorkDir: t.TempDir(), Provider: provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 					if err != nil {
 						t.Fatal(err)

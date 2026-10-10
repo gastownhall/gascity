@@ -14,7 +14,7 @@ import (
 func reproSession(t *testing.T) (*Manager, beads.Store, string) {
 	t.Helper()
 	store := beads.NewMemStore()
-	mgr := NewManagerWithOptions(store, runtime.NewFake(), WithCityPath(t.TempDir()))
+	mgr := newTestManager(t, store, runtime.NewFake())
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "polecat", Title: "repro", Command: "claude",
 		WorkDir: "/tmp", Provider: "claude",

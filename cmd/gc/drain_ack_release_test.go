@@ -351,6 +351,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 // different verb that deliberately KEEPS its claims for the successor session.
 // Only drain-ack means "I hold nothing."
 func TestRequestRestartReleasesNothing(t *testing.T) {
+	testCity := t.TempDir()
 	originalRelease := drainAckReleaseHeldClaims
 	t.Cleanup(func() { drainAckReleaseHeldClaims = originalRelease })
 	released := false
@@ -358,7 +359,7 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,
-		events.Discard, "worker-1", "worker-1", "", &stdout, &stderr)
+		events.Discard, "worker-1", "worker-1", testCity, &stdout, &stderr)
 
 	if released {
 		t.Fatal("gc runtime request-restart released the session's claims; only drain-ack may")

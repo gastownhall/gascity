@@ -36,8 +36,7 @@ type stalledConvergenceHarness struct {
 
 func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 	t.Helper()
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	template := "worker"
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -50,7 +49,7 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 		}},
 	}
 
-	manager := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk))
+	manager := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city))
 	info, err := manager.CreateSession(t.Context(), sessionpkg.CreateOptions{
 		BeadOnly: true, Template: template, Title: "pool worker", Command: "true", Provider: "fake",
 	})

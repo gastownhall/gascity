@@ -838,7 +838,7 @@ func createCircuitTestNamedSessionWithIdentity(
 }
 
 func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	configureAlwaysNamedSessionWithoutCircuit(env)
 	env.addDesired("session-a", "template-a", false)
 
@@ -862,7 +862,7 @@ func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testin
 }
 
 func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
 			SessionCircuitBreaker:            true,
@@ -907,7 +907,7 @@ func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
 }
 
 func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
 
@@ -954,7 +954,7 @@ func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T
 // TestReconciler_CircuitOpenBlocksSpawn verifies that a named session with
 // an OPEN breaker is NOT added to startCandidates and is NOT spawned.
 func TestReconciler_CircuitOpenBlocksSpawn(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	configureAlwaysNamedSession(env)
 
 	// Inject a breaker with aggressive thresholds and pre-trip it.
@@ -993,7 +993,7 @@ func TestReconciler_CircuitOpenBlocksSpawn(t *testing.T) {
 // prior restart history the breaker is CLOSED and the reconciler spawns the
 // named session normally.
 func TestReconciler_CircuitClosedAllowsSpawn(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	configureAlwaysNamedSession(env)
 
 	cb := breakerAt(30*time.Minute, 5)
@@ -1026,7 +1026,7 @@ func TestReconciler_CircuitClosedAllowsSpawn(t *testing.T) {
 }
 
 func TestReconciler_CircuitDoesNotRecordRestartForDependencyBlockedNamedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
 			SessionCircuitBreaker:            true,
@@ -1063,7 +1063,7 @@ func TestReconciler_CircuitDoesNotRecordRestartForDependencyBlockedNamedSession(
 }
 
 func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	maxWakes := 1
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
@@ -1111,7 +1111,7 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 }
 
 func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
 
@@ -1159,7 +1159,7 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 }
 
 func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
 
@@ -1177,13 +1177,15 @@ func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testin
 			t.Fatalf("get bead attempt %d: %v", i+1, err)
 		}
 		poolDesired := map[string]int{"template-a": 1}
-		woken := reconcileSessionBeads(
-			context.Background(), []beads.Bead{current}, env.desiredState,
+		woken := reconcileSessionBeadsAtPath(
+			context.Background(), env.city, []beads.Bead{current}, env.desiredState,
 			configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp,
 			env.store, nil,
 			[]beads.Bead{{ID: "work-1", Assignee: identity, Status: status}},
+			nil,
 			nil, env.dt, poolDesired, false, nil, "", nil, env.clk, env.rec,
 			0, 0, &env.stdout, &env.stderr,
+			withAsyncDrainAckStopTracker(env.stops),
 		)
 		if woken != 1 {
 			t.Fatalf("attempt %d (%s): woken = %d, want 1; stderr=%s", i+1, status, woken, env.stderr.String())

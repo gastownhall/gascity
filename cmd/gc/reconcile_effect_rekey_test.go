@@ -23,6 +23,7 @@ type rekeyFixture struct {
 	leaf  *fenceLeaf
 	id    string
 	name  string
+	city  string
 }
 
 func newRekeyFixture(t *testing.T, rowMeta ...string) *rekeyFixture {
@@ -33,7 +34,7 @@ func newRekeyFixture(t *testing.T, rowMeta ...string) *rekeyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &rekeyFixture{t: t, store: store, leaf: newFenceLeaf(runtime.ProfileTmux), id: b.ID, name: "s-rekey"}
+	return &rekeyFixture{t: t, store: store, leaf: newFenceLeaf(runtime.ProfileTmux), id: b.ID, name: "s-rekey", city: t.TempDir()}
 }
 
 // residue starts the row's runtime as a warm-reuse residue: the row's own
@@ -55,7 +56,7 @@ func (f *rekeyFixture) pass(rt runtimeIdentity) (*effectPass, intent) {
 	c := readCensus(f.t, gatherNow, censusLegs(rowLeg, f.store))
 	k := rowKey{Leg: rowLeg, ID: f.id}
 	w := &World{
-		Now: gatherNow, Census: c, Mislabelled: map[rowKey]bool{}, CityPath: f.t.Name(),
+		Now: gatherNow, Census: c, Mislabelled: map[rowKey]bool{}, CityPath: f.city,
 		Observed:  map[rowKey]rowObservation{k: {Identity: rt}},
 		Env:       &reconcileEnv{SP: f.leaf.P},
 		LegStores: map[string]beads.Store{rowLeg: f.store},
@@ -176,7 +177,7 @@ func TestRekeyRefusesOnTokenChange(t *testing.T) {
 		{"token changed", func(f *rekeyFixture) { _ = f.leaf.SetMeta(f.name, "GC_INSTANCE_TOKEN", "tok-other") }, causeIdentityChanged},
 		{"runtime gone", func(f *rekeyFixture) { _ = f.leaf.Stop(f.name) }, causeNotPresent},
 		{"presence unreadable", func(f *rekeyFixture) { f.leaf.LivenessErrors[f.name] = errors.New("tmux: server busy") }, causeLivenessUnknown},
-		{"name busy", func(f *rekeyFixture) { f.t.Cleanup(runtimeNames.tryLock(f.t.Name(), f.name)) }, causeNameBusy},
+		{"name busy", func(f *rekeyFixture) { f.t.Cleanup(runtimeNames.tryLock(f.city, f.name)) }, causeNameBusy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRekeyFixture(t)

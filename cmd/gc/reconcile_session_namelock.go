@@ -55,24 +55,24 @@ func (l *runtimeNameLocks) tryLock(city, name string) (unlock func()) {
 // runtime lease, which is the name's flock and, when id is set, the record on
 // that open row. It never waits: a busy name is session.ErrRuntimeLeaseBusy,
 // and the caller defers. A city path that is not absolute has no runtime dir
-// to lock in (tests), so it takes the in-process lock alone and lease is nil.
-// release is idempotent.
+// to lock in: ErrRuntimeLeaseNoCity. release is idempotent.
 func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Duration) (lease *session.RuntimeLease, release func(), err error) {
+	if !filepath.IsAbs(cityPath) {
+		return nil, nil, session.RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
+	}
 	unlock := runtimeNames.tryLock(cityPath, name)
 	if unlock == nil {
 		return nil, nil, &session.RuntimeLeaseBusyError{Name: name, Holder: "this process", Local: true}
 	}
-	if filepath.IsAbs(cityPath) {
-		var front *session.Store
-		if store != nil && id != "" {
-			front = sessionFrontDoor(store)
-		} else {
-			id = ""
-		}
-		if lease, err = session.TryRuntimeLease(front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}); err != nil {
-			unlock()
-			return nil, nil, err
-		}
+	var front *session.Store
+	if store != nil && id != "" {
+		front = sessionFrontDoor(store)
+	} else {
+		id = ""
+	}
+	if lease, err = session.TryRuntimeLease(front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}); err != nil {
+		unlock()
+		return nil, nil, err
 	}
 	var once sync.Once
 	return lease, func() { once.Do(func() { lease.Release(); unlock() }) }, nil
@@ -89,7 +89,7 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 // and kills nothing.
 func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (context.Context, func(), error) {
 	if !filepath.IsAbs(cityPath) {
-		return nil, func() {}, fmt.Errorf("%w (%q): runtime %q", session.ErrRuntimeLeaseNoCity, cityPath, name)
+		return nil, func() {}, session.RefuseWithoutCity(cityPath, fmt.Sprintf("the controller's stop of runtime %q", name))
 	}
 	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
 	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {

@@ -868,8 +868,8 @@ func TestHandoffRemoteNamedOnDemandSkipsKill(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "mayor", "mayor", "deacon",
-		[]string{"Context refresh", "Please pick this up manually"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(t.TempDir(), store, store, rec, sp, "mayor", "mayor", "deacon",
+		[]string{"Context refresh", "Please pick this up manually"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -908,8 +908,8 @@ func TestHandoffRemoteNotRunning(t *testing.T) {
 	rec := events.NewFake()
 	sp := runtime.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, "deacon", "deacon", "human",
-		[]string{"Please check on PR #42"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(t.TempDir(), store, store, rec, sp, "deacon", "deacon", "human",
+		[]string{"Please check on PR #42"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1183,7 +1183,7 @@ func handoffMailIDFromOutput(t *testing.T, out, marker string) string {
 var handoffMessagingForbidden = []string{
 	"doHandoffAuto(store,",
 	"doHandoffWithOutcome(store,",
-	"doHandoffRemote(store,",
+	"doHandoffRemoteWithForce(cityPath, store,",
 	"beadmail.NewWithStores(store,",
 }
 
@@ -1240,6 +1240,9 @@ func TestHandoffMessagingScanDetectsTheDefectItGuards(t *testing.T) {
 		// in the store argument. Otherwise it guards a spelling nothing would ever
 		// produce.
 		routed := strings.Replace(needle, "(store,", "(msgStore,", 1)
+		if routed == needle {
+			routed = strings.Replace(needle, ", store,", ", msgStore,", 1) // a store after the city path
+		}
 		if routed == needle {
 			t.Errorf("forbidden needle %q does not name a store argument, so it cannot be the unrouted spelling of anything", needle)
 			continue

@@ -191,6 +191,7 @@ func TestBeforeProviderSwapWaitsInFlightStartsBounded(t *testing.T) {
 // row's runtime name (P4 F14): it must skip a name whose lock a start holds,
 // and re-read GC_SESSION_ID under the lock before its Stop.
 func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
+	cityA, cityB := t.TempDir(), t.TempDir()
 	closed := routerSessionBead("old", map[string]string{"session_name": "named-1"})
 	closed.Status = "closed"
 	fresh := routerSessionBead("new", map[string]string{"session_name": "named-1"})
@@ -211,11 +212,11 @@ func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
 	open := newSessionBeadSnapshotFromInfos([]session.Info{freshInfo})
 
 	sp, store := setup(t)
-	unlock := runtimeNames.tryLock("city-a", "named-1") // a start is mid provider Start
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-a", io.Discard); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
+	unlock := runtimeNames.tryLock(cityA, "named-1") // a start is mid provider Start
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityA, io.Discard); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
 		t.Fatal("the reaper stopped a name a start holds")
 	}
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-b", io.Discard); n != 1 {
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityB, io.Discard); n != 1 {
 		t.Fatal("another city's start on the same runtime name blocked the reap")
 	}
 	unlock()
@@ -225,12 +226,12 @@ func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
 		_ = sp.SetMeta("named-1", "GC_SESSION_ID", "new") //nolint:errcheck // fake
 	}
 	var stderr bytes.Buffer
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-a", &stderr); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityA, &stderr); n != 0 || sp.CountCalls("Stop", "named-1") != 0 {
 		t.Fatalf("the reaper stopped the fresh runtime: %s", stderr.String())
 	}
 
 	sp, store = setup(t)
-	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, "city-a", io.Discard); n != 1 {
+	if n := reapRuntimesBoundToClosedBeads(store, open, nil, sp, nil, cityA, io.Discard); n != 1 {
 		t.Fatal("the reaper must still reap a runtime bound to a closed bead")
 	}
 }
@@ -239,6 +240,7 @@ func TestRuntimeNameLockSerializesReaperAndStart(t *testing.T) {
 // lane-gone path's unlock, MAINT-032), so every later start and reap of the
 // name is skipped forever, and a provider panic that leaks it.
 func TestReaperFreesRuntimeNameLockOnEveryPath(t *testing.T) {
+	cityA := t.TempDir()
 	for _, c := range []struct {
 		name    string
 		sp      func() runtime.Provider
@@ -251,11 +253,11 @@ func TestReaperFreesRuntimeNameLockOnEveryPath(t *testing.T) {
 	} {
 		func() {
 			defer func() { _ = recover() }()
-			if stopped, _ := stopStillBoundClosedRuntime("city-a", "named-1", "old", c.sp(), true); stopped != c.stopped {
+			if stopped, _ := stopStillBoundClosedRuntime(cityA, "named-1", "old", c.sp(), true); stopped != c.stopped {
 				t.Errorf("%s: stopped=%v, want %v", c.name, stopped, c.stopped)
 			}
 		}()
-		unlock := runtimeNames.tryLock("city-a", "named-1")
+		unlock := runtimeNames.tryLock(cityA, "named-1")
 		if unlock == nil {
 			t.Fatalf("%s: the name lock is still held", c.name)
 		}

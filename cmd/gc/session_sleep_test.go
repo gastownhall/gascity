@@ -229,7 +229,7 @@ func TestReconcileDetachedAtUsesRoutedSleepCapability(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -251,10 +251,11 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 
 	poolDesired := map[string]int{"worker": 1}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 	close(idleGate)
 	waitForIdleProbeReady(t, env.dt, session.ID)
@@ -262,10 +263,11 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(session): %v", err)
 	}
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{fresh}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{fresh}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 
 	ds := env.dt.get(session.ID)
@@ -295,7 +297,7 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteractiveSleepPolicy(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			NonInteractive: "60s",
@@ -339,8 +341,9 @@ func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteracti
 	}
 	cfgNames := configuredSessionNames(env.cfg, env.cfg.EffectiveCityName(), env.store)
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		cfgNames,
@@ -349,6 +352,7 @@ func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteracti
 		env.store,
 		nil,
 		[]beads.Bead{work},
+		nil,
 		nil,
 		env.dt,
 		map[string]int{},
@@ -363,6 +367,7 @@ func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteracti
 		&env.stdout,
 		&env.stderr,
 		withReadyAssignedFlags([]bool{true}),
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 
 	if woken != 0 {
@@ -438,7 +443,7 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForRoutedDemand(t *testing
 }
 
 func TestReconcileSessionBeads_MinActiveCityStopWakeBypassesInteractiveSleepSuppression(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -476,7 +481,7 @@ func TestReconcileSessionBeads_MinActiveCityStopWakeBypassesInteractiveSleepSupp
 }
 
 func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveSleepPolicy(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			NonInteractive: "60s",
@@ -520,8 +525,9 @@ func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveS
 	}
 	cfgNames := configuredSessionNames(env.cfg, env.cfg.EffectiveCityName(), env.store)
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		cfgNames,
@@ -530,6 +536,7 @@ func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveS
 		env.store,
 		nil,
 		[]beads.Bead{work},
+		nil,
 		map[string]bool{session.ID: true},
 		env.dt,
 		map[string]int{},
@@ -544,6 +551,7 @@ func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveS
 		&env.stdout,
 		&env.stderr,
 		withReadyAssignedFlags([]bool{true}),
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 
 	if woken != 0 {
@@ -565,7 +573,7 @@ func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveS
 }
 
 func TestReconcileSessionBeads_WaitHoldBypassesIdleProbe(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -602,7 +610,7 @@ func TestReconcileSessionBeads_WaitHoldBypassesIdleProbe(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_IdleLatchedSessionDoesNotWake(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -637,7 +645,7 @@ func TestReconcileSessionBeads_IdleLatchedSessionDoesNotWake(t *testing.T) {
 // the awake set without overriding the idle latch (explicitWakePendingInfo):
 // only the pending probe could lift the suppression.
 func TestReconcileSessionBeads_PendingUnknownDoesNotWakeIdleLatchedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -665,7 +673,7 @@ func TestReconcileSessionBeads_PendingUnknownDoesNotWakeIdleLatchedSession(t *te
 }
 
 func TestReconcileSessionBeads_AssignedWorkWakesIdleLatchedInteractiveSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -692,11 +700,12 @@ func TestReconcileSessionBeads_AssignedWorkWakesIdleLatchedInteractiveSession(t 
 	}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 
-	woken := reconcileSessionBeads(
-		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, []beads.Bead{work}, nil, env.dt, map[string]int{}, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, []beads.Bead{work}, nil, nil, env.dt, map[string]int{}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 		withReadyAssignedFlags([]bool{true}),
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 
 	if woken != 1 {
@@ -715,7 +724,7 @@ func TestReconcileSessionBeads_AssignedWorkWakesIdleLatchedInteractiveSession(t 
 }
 
 func TestReconcileSessionBeads_ConfigChangeDoesNotWakeIdleLatchedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	oldCfg := &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -747,7 +756,7 @@ func TestReconcileSessionBeads_ConfigChangeDoesNotWakeIdleLatchedSession(t *test
 }
 
 func TestReconcileSessionBeads_ConfigChangeDoesNotRetryIdleLatchedSingletonWake(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.sp = runtime.NewFailFake()
 	oldCfg := &config.City{
 		SessionSleep: config.SessionSleepConfig{
@@ -788,7 +797,7 @@ func TestReconcileSessionBeads_ConfigChangeDoesNotRetryIdleLatchedSingletonWake(
 }
 
 func TestReconcileSessionBeads_ConfigChangeCancelsPendingIdleDrain(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	oldCfg := &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -840,7 +849,7 @@ func TestReconcileSessionBeads_ConfigChangeCancelsPendingIdleDrain(t *testing.T)
 }
 
 func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{{
 			Name:           "worker",
@@ -862,14 +871,16 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 	it := newFakeIdleTracker()
 	it.idle["worker"] = true
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	got := reconcileSessionBeads(
+	got := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		cfgNames,
 		env.cfg,
 		env.sp,
 		env.store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -885,6 +896,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 	if got != 0 {
 		t.Fatalf("planned wakes = %d, want 0", got)
@@ -901,8 +913,7 @@ func TestReconcileSessionBeads_IdleTimeoutLeavesImmediateSleepPolicyAsleep(t *te
 }
 
 func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{{
 			Name:           "worker",
@@ -950,6 +961,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 	if got != 0 {
 		t.Fatalf("planned wakes after failed restart = %d, want 0", got)
@@ -994,6 +1006,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 	if got != 0 {
 		t.Fatalf("planned wakes after retry = %d, want 0", got)
@@ -1011,7 +1024,7 @@ func TestReconcileSessionBeads_IdleTimeoutDoesNotRetryWithoutExplicitWakeReason(
 }
 
 func TestReconcileSessionBeads_RecoversPendingIdleSleep(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
@@ -1087,7 +1100,7 @@ func TestRecoverPendingIdleSleep_PreservesPreDrainFingerprint(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_DoesNotRecoverPendingIdleSleepWhileZombieStillRunning(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			NonInteractive: "0s",
@@ -1130,7 +1143,7 @@ func TestReconcileSessionBeads_DoesNotRecoverPendingIdleSleepWhileZombieStillRun
 }
 
 func TestReconcileSessionBeads_IdleStopPendingRestartsDrainAsIdle(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			NonInteractive: "0s",
@@ -1165,7 +1178,7 @@ func TestReconcileSessionBeads_IdleStopPendingRestartsDrainAsIdle(t *testing.T) 
 }
 
 func TestReconcileSessionBeads_ClearsIdleProbeForMissingSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.dt.startIdleProbe("missing")
 	if _, ok := env.dt.idleProbe("missing"); !ok {
 		t.Fatal("expected probe state for missing session before reconcile")
@@ -1183,7 +1196,7 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 	// Asleep sessions are never restarted by scaleCheck/poolDesired alone.
 	// They wake only via direct assignment to their alias. The reconciler
 	// creates fresh sessions to fill demand instead of reusing asleep ones.
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			NonInteractive: "0s",
@@ -1199,14 +1212,16 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 	apiSession := env.createSessionBead("api", "api")
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 
-	got := reconcileSessionBeads(
+	got := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{dbSession, apiSession},
 		env.desiredState,
 		cfgNames,
 		env.cfg,
 		env.sp,
 		env.store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1222,6 +1237,7 @@ func TestReconcileSessionBeads_AsleepSingletonsDoNotWakeViaScaleCheck(t *testing
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 	if got != 0 {
 		t.Fatalf("planned wakes = %d, want 0 (asleep sessions stay asleep)", got)
@@ -1313,6 +1329,7 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 }
 
 func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing.T) {
+	testCity := t.TempDir()
 	now := time.Now().UTC()
 	dt := newDrainTracker()
 	bead := beads.Bead{
@@ -1335,7 +1352,7 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 		t.Fatalf("Start: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced("",
+	advanceSessionDrainsWithSessionsTraced(testCity,
 		dt,
 		sp,
 		nil,

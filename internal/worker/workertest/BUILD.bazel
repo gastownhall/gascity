@@ -31,6 +31,7 @@ go_test(
     srcs = [
         "catalog_phase2_data_test.go",
         "hangbudget_test.go",
+        "nocity_guard_test.go",
         "phase1_conformance_test.go",
         "phase2_conformance_test.go",
         "phase2_fake_worker_test.go",

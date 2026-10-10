@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -60,7 +61,7 @@ type capacityEnv struct {
 
 func newCapacityEnv(t *testing.T, guarded bool, templates ...string) *capacityEnv {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	rec := events.NewFake()
 	env.rec = rec
 	agents := make([]config.Agent, 0, len(templates))
@@ -135,7 +136,7 @@ func (e *capacityEnv) bead(t *testing.T, id string) beads.Bead {
 }
 
 func (e *capacityEnv) start(ctx context.Context, candidates ...startCandidate) int {
-	return executePlannedStartsTraced(ctx, candidates, e.cfg, e.desiredState, e.sp, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+	return executePlannedStartsTraced(ctx, candidates, e.cfg, e.desiredState, e.sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 }
 
 func (e *capacityEnv) breakerStatus(k endpointKey) resilience.Status {
@@ -538,7 +539,7 @@ func (e *capacityEnv) startAsync(t *testing.T, candidates ...startCandidate) {
 	t.Helper()
 	var tracker asyncStartTracker
 	opts := append(append([]startExecutionOption(nil), e.startOptions...), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
-	executePlannedStartsTraced(context.Background(), candidates, e.cfg, e.desiredState, e.sp, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+	executePlannedStartsTraced(context.Background(), candidates, e.cfg, e.desiredState, e.sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
 	if !tracker.wait(hangBudget) {
 		t.Fatalf("async starts did not finish within the hang budget (%s)", hangBudget)
 	}
@@ -560,6 +561,7 @@ func (p *supersedingStartProvider) Start(ctx context.Context, name string, cfg r
 }
 
 func TestAsyncStart_ProbeResolvedBeforeCommitEvenWhenStale(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "s")
 	c := e.pendingCreate(t, "s", "e", nil)
 	fake := e.sp
@@ -569,7 +571,7 @@ func TestAsyncStart_ProbeResolvedBeforeCommitEvenWhenStale(t *testing.T) {
 
 	var tracker asyncStartTracker
 	opts := append(append([]startExecutionOption(nil), e.startOptions...), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
-	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
 	if !tracker.wait(hangBudget) {
 		t.Fatalf("async start did not finish within the hang budget (%s)", hangBudget)
 	}
@@ -590,6 +592,7 @@ func (p *panickingStartProvider) Start(context.Context, string, runtime.Config) 
 }
 
 func TestAsyncStart_PanickingStartResolvesProbeInconclusive(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "s")
 	c := e.pendingCreate(t, "s", "e", nil)
 	e.openEndpoint(t)
@@ -597,7 +600,7 @@ func TestAsyncStart_PanickingStartResolvesProbeInconclusive(t *testing.T) {
 
 	var tracker asyncStartTracker
 	opts := append(append([]startExecutionOption(nil), e.startOptions...), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
-	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, &panickingStartProvider{Fake: e.sp}, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, &panickingStartProvider{Fake: e.sp}, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
 	if !tracker.wait(hangBudget) {
 		t.Fatalf("async start did not finish within the hang budget (%s)", hangBudget)
 	}
@@ -961,7 +964,7 @@ func (e *capacityEnv) reconcileTraced(sessions ...beads.Bead) int {
 	}
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeadsTraced(
-		context.Background(), "", sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		context.Background(), e.city, sessions, e.desiredState, cfgNames, e.cfg, e.sp,
 		e.store, nil, nil, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.log, &e.log, e.trace,
 		e.startOptions...,
@@ -1194,6 +1197,7 @@ func TestReconcileSessionBeads_CapacityRefusalKeepsConversationPastStaleCreating
 }
 
 func TestReapStaleSessionBeads_KeepsRefusedHeldPendingCreate(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "a")
 	a := e.pendingCreate(t, "a", "e", map[string]string{
 		"state":                     "start-pending",
@@ -1206,7 +1210,7 @@ func TestReapStaleSessionBeads_KeepsRefusedHeldPendingCreate(t *testing.T) {
 	e.start(context.Background(), e.refreshed(a))
 	e.clk.Advance(2 * time.Second)
 
-	reapStaleSessionBeads("", e.store, e.sp, e.dt, nil, e.clk, &e.log)
+	reapStaleSessionBeads(testCity, e.store, e.sp, e.dt, nil, e.clk, &e.log)
 
 	requireHeldPendingCreate(t, e.bead(t, a.info.ID))
 }
@@ -1356,12 +1360,13 @@ func requireSuspendKept(t *testing.T, got beads.Bead) {
 }
 
 func TestCommitStartResult_CapacityRestoreKeepsSuspendDuringStart(t *testing.T) {
+	testCity := t.TempDir()
 	t.Run("sync", func(t *testing.T) {
 		e := newCapacityEnv(t, true, "s")
 		c := asleepSession(t, e, nil)
 		provider := &midStartWriter{Fake: e.sp, store: e.store, id: c.info.ID, patch: suspendPatch(e.clk.Now())}
 
-		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 		got := e.bead(t, c.info.ID)
 		requireSuspendKept(t, got)
@@ -1401,10 +1406,11 @@ func TestCommitStartResult_CapacityRestoreKeepsSuspendDuringStart(t *testing.T) 
 	})
 }
 
-// writeAfterNextGetStore applies patch just after the first read of the row
-// that follows arm, so that read sees the row as it was and every later read
-// sees the write: a command landing between the async commit's refresh and
-// the restore's own re-read.
+// writeAfterNextGetStore applies patch just after the async commit's first
+// read of the row that follows arm, so that read sees the row as it was and
+// every later read sees the write: a command landing between the async
+// commit's refresh and the restore's own re-read. Reads the start makes
+// itself after the provider call (its operation event's) do not fire it.
 type writeAfterNextGetStore struct {
 	beads.Store
 	id    string
@@ -1422,7 +1428,7 @@ func (s *writeAfterNextGetStore) arm() {
 func (s *writeAfterNextGetStore) Get(id string) (beads.Bead, error) {
 	b, err := s.Store.Get(id)
 	s.mu.Lock()
-	fire := s.armed && id == s.id
+	fire := s.armed && id == s.id && calledFrom("commitAsyncStartResultWithContext")
 	if fire {
 		s.armed = false
 	}
@@ -1433,6 +1439,22 @@ func (s *writeAfterNextGetStore) Get(id string) (beads.Bead, error) {
 		}
 	}
 	return b, err
+}
+
+// calledFrom reports whether a cmd/gc function named fn is on the caller's
+// stack.
+func calledFrom(fn string) bool {
+	pcs := make([]uintptr, 64)
+	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, "/cmd/gc."+fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
 }
 
 // armingRefuser refuses every start and arms its hook just before returning.
@@ -1453,18 +1475,19 @@ func (e *capacityEnv) startAsyncWith(t *testing.T, sp runtime.Provider, candidat
 	t.Helper()
 	var tracker asyncStartTracker
 	opts := append(append([]startExecutionOption(nil), e.startOptions...), withAsyncStartExecution(), withAsyncStartTracker(&tracker))
-	executePlannedStartsTraced(context.Background(), candidates, e.cfg, e.desiredState, sp, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
+	executePlannedStartsTraced(context.Background(), candidates, e.cfg, e.desiredState, sp, e.store, "", e.city, e.clk, e.rec, 0, &e.log, &e.log, nil, opts...)
 	if !tracker.wait(hangBudget) {
 		t.Fatalf("async starts did not finish within the hang budget (%s)", hangBudget)
 	}
 }
 
 func TestCommitStartResult_CapacityRestoreKeepsWaitHoldDuringStart(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "s")
 	c := asleepSession(t, e, nil)
 	provider := &midStartWriter{Fake: e.sp, store: e.store, id: c.info.ID, patch: map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold"}}
 
-	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 	got := e.bead(t, c.info.ID)
 	if got.Metadata["sleep_intent"] != "wait-hold" || got.Metadata["wait_hold"] != "true" {
@@ -1476,11 +1499,12 @@ func TestCommitStartResult_CapacityRestoreKeepsWaitHoldDuringStart(t *testing.T)
 }
 
 func TestCommitStartResult_CapacityRestoreKeepsWakeRequestedDuringStart(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "s")
 	c := asleepSession(t, e, map[string]string{"wake_request": "manual", "wake_requested_at": "2026-03-08T11:00:00Z"})
 	provider := &midStartWriter{Fake: e.sp, store: e.store, id: c.info.ID, patch: map[string]string{"wake_request": "api", "wake_requested_at": "2026-03-08T12:00:01Z"}}
 
-	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 	got := e.bead(t, c.info.ID)
 	if got.Metadata["wake_request"] != "api" || got.Metadata["wake_requested_at"] != "2026-03-08T12:00:01Z" {
@@ -1489,13 +1513,14 @@ func TestCommitStartResult_CapacityRestoreKeepsWakeRequestedDuringStart(t *testi
 }
 
 func TestCommitStartResult_CapacityRestoreSkipsNewerIncarnation(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "s")
 	c := asleepSession(t, e, nil)
 	// A newer incarnation took the row mid-start: new token and its own
 	// lease, with the same "creating" state PreWake wrote.
 	provider := &midStartWriter{Fake: e.sp, store: e.store, id: c.info.ID, patch: map[string]string{"instance_token": "tok-newer"}}
 
-	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 	got := e.bead(t, c.info.ID)
 	if got.Metadata["state"] != "creating" || got.Metadata["last_woke_at"] == "" {
@@ -1536,6 +1561,7 @@ func TestEndpointCapacityGuard_StragglerSuccessWhileOpenKeepsOpen(t *testing.T) 
 }
 
 func TestReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
+	testCity := t.TempDir()
 	for _, tc := range []struct {
 		name  string
 		extra map[string]string
@@ -1559,13 +1585,13 @@ func TestReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 				t.Fatalf("premise: state=%q last_woke_at=%q, want a never-started creating row", got.Metadata["state"], got.Metadata["last_woke_at"])
 			}
 
-			if n := reapStaleSessionBeads("", e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 0 {
+			if n := reapStaleSessionBeads(testCity, e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 0 {
 				t.Fatalf("reaped %d rows, want the held row kept while its endpoint refuses", n)
 			}
 			if got := e.bead(t, a.info.ID); got.Status != "open" {
 				t.Fatalf("row status = %q, want open", got.Status)
 			}
-			if n := reapStaleSessionBeads("", e.store, e.sp, e.dt, nil, e.clk, &e.log); n != 1 {
+			if n := reapStaleSessionBeads(testCity, e.store, e.sp, e.dt, nil, e.clk, &e.log); n != 1 {
 				t.Fatalf("premise: reaped %d rows without the hold, want the row reapable", n)
 			}
 		})
@@ -1581,7 +1607,7 @@ func TestReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 		e.clk.Advance(11 * time.Minute)
 		e.reopen(t)
 
-		if n := reapStaleSessionBeads("", e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 1 {
+		if n := reapStaleSessionBeads(testCity, e.store, e.sp, e.dt, endpointHoldForRows(e.cfg, e.guard), e.clk, &e.log); n != 1 {
 			t.Fatalf("reaped %d rows, want the started stale row reaped regardless of the hold", n)
 		}
 		if got := e.bead(t, a.info.ID); got.Status != "closed" {
@@ -1607,11 +1633,12 @@ func (p *closingRefuser) Start(ctx context.Context, name string, cfg runtime.Con
 }
 
 func TestCommitStartResult_CapacityRestoreSkipsClosedRow(t *testing.T) {
+	testCity := t.TempDir()
 	e := newCapacityEnv(t, true, "s")
 	c := asleepSession(t, e, nil)
 	provider := &closingRefuser{Fake: e.sp, store: e.store, id: c.info.ID}
 
-	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+	executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 	got := e.bead(t, c.info.ID)
 	if got.Status != "closed" || got.Metadata["state"] != "creating" || got.Metadata["last_woke_at"] == "" {
@@ -1725,8 +1752,12 @@ func (s *raceStore) arm() {
 	s.armed, s.counting = true, true
 }
 
-func (s *raceStore) Get(id string) (beads.Bead, error) {
-	b, err := s.MemStore.Get(id)
+// fire lands the armed patch on id once: just before the first conditional
+// write after arming, which is the restore's, so it falls between the
+// restore's read and its write. (The runtime lease's own reads come between
+// the start and the restore, so the first read after arming is not the
+// restore's.)
+func (s *raceStore) fire(id string) {
 	s.mu.Lock()
 	fire := s.armed && id == s.id && s.patch != nil
 	if fire {
@@ -1734,11 +1765,8 @@ func (s *raceStore) Get(id string) (beads.Bead, error) {
 	}
 	s.mu.Unlock()
 	if fire {
-		if werr := s.MemStore.SetMetadataBatch(s.id, s.patch); werr != nil {
-			return b, werr
-		}
+		_ = s.MemStore.SetMetadataBatch(s.id, s.patch)
 	}
-	return b, err
 }
 
 func (s *raceStore) countWrite(err error) error {
@@ -1759,7 +1787,22 @@ func (s *raceStore) Update(id string, opts beads.UpdateOpts) error {
 }
 
 func (s *raceStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
-	return s.countWrite(s.MemStore.UpdateIfMatch(id, rev, opts))
+	s.fire(id)
+	err := s.MemStore.UpdateIfMatch(id, rev, opts)
+	if leaseRecordOnly(opts.Metadata) {
+		return err // the runtime lease's own record, not a restore
+	}
+	return s.countWrite(err)
+}
+
+// leaseRecordOnly reports whether kvs writes only the runtime lease record.
+func leaseRecordOnly(kvs map[string]string) bool {
+	for k := range kvs {
+		if !strings.HasPrefix(k, "runtime_lease_") {
+			return false
+		}
+	}
+	return len(kvs) > 0
 }
 
 func (s *raceStore) SetMetadata(id, key, value string) error {
@@ -1767,7 +1810,11 @@ func (s *raceStore) SetMetadata(id, key, value string) error {
 }
 
 func (s *raceStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	return s.countWrite(s.MemStore.SetMetadataBatch(id, kvs))
+	err := s.MemStore.SetMetadataBatch(id, kvs)
+	if leaseRecordOnly(kvs) {
+		return err // the runtime lease's own record, not a restore
+	}
+	return s.countWrite(err)
 }
 
 // openRaceStore stamps a raceStore with conditional writes on, as the store
@@ -1794,6 +1841,7 @@ func openRaceStore(t *testing.T) *raceStore {
 }
 
 func TestCommitStartResult_CapacityRestoreIsOneFencedWrite(t *testing.T) {
+	testCity := t.TempDir()
 	t.Run("suspend between the restore's read and write is kept", func(t *testing.T) {
 		e := newCapacityEnv(t, true, "s")
 		store := openRaceStore(t)
@@ -1802,7 +1850,7 @@ func TestCommitStartResult_CapacityRestoreIsOneFencedWrite(t *testing.T) {
 		store.id, store.patch = c.info.ID, suspendPatch(e.clk.Now())
 		provider := &armingRefuser{Fake: e.sp, arm: store.arm}
 
-		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 		if store.conflict == 0 {
 			t.Fatal("the suspend did not land between the restore's read and write; the race was not exercised")
@@ -1824,7 +1872,7 @@ func TestCommitStartResult_CapacityRestoreIsOneFencedWrite(t *testing.T) {
 		store.id = c.info.ID
 		provider := &armingRefuser{Fake: e.sp, arm: store.arm}
 
-		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", "", e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
+		executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, provider, e.store, "", testCity, e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...)
 
 		if store.writes != 1 {
 			t.Fatalf("writes after the refusal = %d, want the restore as exactly one write", store.writes)

@@ -92,7 +92,7 @@ func newHealCase(t *testing.T, liveness rowLiveness, desired desire, meta ...str
 		t.Fatal(err)
 	}
 	c := &healCase{store: store, k: rowKeyOf(b.ID)}
-	c.w = &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.Name()}
+	c.w = &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.TempDir()}
 	c.w.LegStores = map[string]beads.Store{rowLeg: store}
 	c.a = &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{
 		c.k: {Key: c.k, Liveness: liveness, Desired: desired},

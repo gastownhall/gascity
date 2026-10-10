@@ -134,6 +134,7 @@ func TestControllerStopSequencesDeferOnABusyLease(t *testing.T) {
 // lease and kills nothing, the escalation's process-table kill included: it
 // defers with ErrRuntimeLeaseNoCity.
 func TestControllerStopSequencesRefuseWithoutACity(t *testing.T) {
+	sessionpkg.ExpectNoCityRefusalsForTest(t)
 	for _, city := range []string{"", "relative/city"} {
 		if _, _, err := controllerStopLease(beads.NewMemStore(), city, "worker", "sess-1", io.Discard); !errors.Is(err, sessionpkg.ErrRuntimeLeaseNoCity) {
 			t.Fatalf("controllerStopLease(%q) = %v, want ErrRuntimeLeaseNoCity", city, err)
@@ -174,7 +175,7 @@ func TestControllerStopSequencesRefuseWithoutACity(t *testing.T) {
 // refused by another holder's lease decides nothing this tick: no patch, the
 // runtime and the row as they were.
 func TestConfigDriftResetDefersOnABusyLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	if err := env.sp.Start(context.Background(), "mayor", runtime.Config{Command: "x"}); err != nil {
 		t.Fatal(err)
@@ -227,7 +228,7 @@ func TestChatAutoSuspendNeverWaits(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
-	info, err := sessionpkg.NewManagerWithOptions(store, sp).CreateSession(context.Background(), sessionpkg.CreateOptions{
+	info, err := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir())).CreateSession(context.Background(), sessionpkg.CreateOptions{
 		Template: "default", Title: "S1", Command: "echo s1", WorkDir: t.TempDir(), Provider: "test",
 		ExtraMeta: map[string]string{"session_origin": "manual"},
 	})
@@ -522,7 +523,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 	}
 
 	t.Run("idle", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		env.setSessionMetadata(&b, map[string]string{"sleep_intent": "idle-stop-pending"})
 		it := newFakeIdleTracker()
@@ -531,7 +532,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		stopped(t, env)
 	})
 	t.Run("max-age", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker", MaxSessionAge: "5h"}}})
 		env.setSessionMetadata(&b, map[string]string{"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339)})
 		tr := newMaxSessionAgeTracker()
@@ -540,7 +541,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		stopped(t, env)
 	})
 	t.Run("restart-requested", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		env.setSessionMetadata(&b, map[string]string{"restart_requested": "true"})
 		reconcileAt(env, t.TempDir(), b, nil)
@@ -549,7 +550,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		}
 	})
 	t.Run("verifiedStop", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		if err := verifiedStop(t.TempDir(), sessionInfoFromBead(mustGetBead(t, env.store, b.ID)), env.store, env.sp, env.cfg); err != nil {
 			t.Fatalf("verifiedStop: %v", err)
@@ -557,7 +558,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		stopped(t, env)
 	})
 	t.Run("retire", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		if !stopRuntimeBeforeSessionBeadMutation(t.TempDir(), env.store, env.sp, env.cfg, mustGetBead(t, env.store, b.ID), "retired", &env.stderr) {
 			t.Fatalf("retire stop refused; stderr %q", env.stderr.String())
@@ -569,7 +570,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 // TestVerifiedStopDecidesAgainUnderTheLease: the drain's timeout kill spares
 // a row whose hold moved since the tick read it.
 func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	b := env.createSessionBead("worker", "worker")

@@ -72,10 +72,10 @@ func reconcileWithSequencedRuntimeObservation(
 	sp runtime.Provider,
 	poolDesired map[string]int,
 ) int {
-	return reconcileSessionBeads(
-		context.Background(), sessions, env.desiredState,
+	return reconcileSessionBeadsAtPath(
+		context.Background(), env.city, sessions, env.desiredState,
 		configuredSessionNames(env.cfg, "", env.store), env.cfg, sp,
-		env.store, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+		env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 		env.startOptions...,
 	)
@@ -99,7 +99,7 @@ func assertObservationDeferralPreservedSession(t *testing.T, env *reconcilerTest
 }
 
 func TestNamedSessionActiveUseReasonInfoKeepsNonSentinelActivityErrorsBestEffort(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start(worker): %v", err)
 	}
@@ -118,7 +118,7 @@ func TestNamedSessionActiveUseReasonInfoKeepsNonSentinelActivityErrorsBestEffort
 }
 
 func TestReconcileSessionBeads_AttachmentUnavailableDoesNotRecordDetachedAt(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
 		Agents:       []config.Agent{{Name: "worker"}},
@@ -151,7 +151,7 @@ func TestReconcileSessionBeads_AttachmentUnavailableDoesNotRecordDetachedAt(t *t
 }
 
 func TestReconcileSessionBeads_AwakeAttachmentUnavailableDoesNotStartNoWakeDrain(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
@@ -186,7 +186,7 @@ func TestReconcileSessionBeads_AwakeAttachmentUnavailableDoesNotStartNoWakeDrain
 }
 
 func TestReconcileSessionBeads_ActivityUnavailableDoesNotStartIdleDrain(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
 		Agents:       []config.Agent{{Name: "worker"}},
@@ -226,7 +226,7 @@ func TestReconcileSessionBeads_ActivityUnavailableDoesNotStartIdleDrain(t *testi
 }
 
 func TestReconcileSessionBeads_ConfigDriftActivityUnavailableDoesNotRestartNamedSession(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "new-cmd"}},
@@ -286,7 +286,7 @@ func TestReconcileSessionBeads_ConfigDriftActivityUnavailableDoesNotRestartNamed
 }
 
 func TestReconcileSessionBeads_ConfigDriftDrainAckRuntimeUnavailablePreservesDrainState(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addRunningWorkerDesiredWithNewConfig()
 	session := env.createSessionBead("worker", "worker")
@@ -314,10 +314,10 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckRuntimeUnavailablePreservesDra
 	stopsBefore := env.sp.CountCalls("Stop", "worker")
 	sp := &sequencedRuntimeObservationProvider{Fake: env.sp, activityUnavailableAt: map[int]bool{3: true}}
 
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{beadBefore}, env.desiredState,
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{beadBefore}, env.desiredState,
 		configuredSessionNames(env.cfg, "", env.store), env.cfg, sp,
-		env.store, newDrainOps(sp), nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		env.store, newDrainOps(sp), nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 		env.startOptions...,
 	)
@@ -421,7 +421,7 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 // Idle sleep: an attachment probe that cannot tell must not start the detached
 // clock that later authorizes the idle drain.
 func TestReconcileSessionBeads_AttachProbeErrorDoesNotRecordDetachedAt(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
 		Agents:       []config.Agent{{Name: "worker"}},
@@ -463,7 +463,7 @@ func TestConfigDriftAttachFallbackTreatsProbeErrorAsAttached(t *testing.T) {
 // Named-session config drift is an immediate kill; an attachment probe that
 // cannot tell must defer it like a real attach.
 func TestNamedActiveUseDefersOnAttachProbeError(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start(worker): %v", err)
 	}

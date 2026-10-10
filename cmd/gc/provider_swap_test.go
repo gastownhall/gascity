@@ -701,7 +701,7 @@ func TestReloadStandaloneSwapReopensStoreBeforeTheSwap(t *testing.T) {
 // Kills: a swap that leaves the row in a shape legacy cannot free or restart,
 // and an unpinned change to that consequence.
 func TestLegacyPassAfterProviderSwapStopReadsRuntimeDeath(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
@@ -813,6 +813,7 @@ func TestStopProviderSwapRuntimesStopsEachLeg(t *testing.T) {
 // until it returns, so a provider swap waits for it.
 // Kills: async starts launched outside the tracker's count.
 func TestEnqueuedAsyncStartIsCountedUntilItReturns(t *testing.T) {
+	testCity := t.TempDir()
 	workDir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
@@ -822,7 +823,7 @@ func TestEnqueuedAsyncStartIsCountedUntilItReturns(t *testing.T) {
 		enqueuePreparedStartWaveForCity(
 			context.Background(),
 			[]asyncPreparedStart{{item: item, release: func() { <-gate }, tracker: &tracker}},
-			"", runtime.NewFake(), store, nil, clk, events.NewFake(), postStartTimeout, 1, io.Discard, io.Discard, nil, nil,
+			testCity, runtime.NewFake(), store, nil, clk, events.NewFake(), postStartTimeout, 1, io.Discard, io.Discard, nil, nil,
 			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
 		)
 		synctest.Wait()

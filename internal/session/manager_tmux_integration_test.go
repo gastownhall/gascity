@@ -64,7 +64,7 @@ func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.C
 	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), cfg.SocketName)
 	tm := tmux.NewTmuxWithConfig(cfg)
 
-	mgr := NewManagerWithOptions(beads.NewMemStore(), newProvider(cfg), WithCityPath(t.TempDir()))
+	mgr := newTestManager(t, beads.NewMemStore(), newProvider(cfg))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "sleep 600", WorkDir: t.TempDir(), Provider: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

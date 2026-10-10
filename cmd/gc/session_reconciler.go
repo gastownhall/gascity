@@ -1667,10 +1667,11 @@ func wakeDemandOverridesSleepSuppression(
 	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
 }
 
-// reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
-// semantics. For each session bead, it determines if the session should be
-// awake (has a matching entry in the desired state) and manages lifecycle
-// transitions using the Phase 2 building blocks.
+// reconcileSessionBeadsAtPath performs bead-driven reconciliation using
+// wake/sleep semantics for the city at cityPath. For each session bead, it
+// determines if the session should be awake (has a matching entry in the
+// desired state) and manages lifecycle transitions using the Phase 2 building
+// blocks.
 //
 // The function assumes session beads are already synced (syncSessionBeads
 // called before this function). When the bead reconciler is active,
@@ -1687,40 +1688,7 @@ func wakeDemandOverridesSleepSuppression(
 //
 // Returns the number of start attempts issued or enqueued this tick.
 //
-//nolint:unparam // compatibility wrapper retains the full production signature.
-func reconcileSessionBeads(
-	ctx context.Context,
-	sessions []beads.Bead,
-	desiredState map[string]TemplateParams,
-	configuredNames map[string]bool,
-	cfg *config.City,
-	sp runtime.Provider,
-	store beads.Store,
-	dops drainOps,
-	assignedWorkBeads []beads.Bead,
-	readyWaitSet map[string]bool,
-	dt *drainTracker,
-	poolDesired map[string]int,
-	storeQueryPartial bool,
-	workSet map[string]bool,
-	cityName string,
-	it idleTracker,
-	clk clock.Clock,
-	rec events.Recorder,
-	startupTimeout time.Duration,
-	driftDrainTimeout time.Duration,
-	stdout, stderr io.Writer,
-	startOptions ...startExecutionOption,
-) int {
-	return reconcileSessionBeadsAtPath(
-		ctx, "", sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, nil, readyWaitSet, dt,
-		poolDesired, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
-		startOptions...,
-	)
-}
-
-// reconcileSessionBeadsAtPath runs the reconciler for a specific city
-// path. rigStores supplies the attached rig bead stores so live
+// rigStores supplies the attached rig bead stores so live
 // cross-store ownership checks (sessionHasOpenAssignedWork) can see
 // work that lives outside the primary store. Pass nil when no rig
 // stores are attached; the reconciler will fall back to primary-store-
@@ -7648,7 +7616,7 @@ func relaunchAgentForLaunchDrift(
 	// has defers it, writing nothing and skipping the full restart too: the
 	// next tick decides again. Any other lease failure falls back to the full
 	// restart (whose stop takes the lease itself), so drift is never stuck.
-	if leaseName := strings.TrimSpace(name); leaseName != "" && filepath.IsAbs(cityPath) {
+	if leaseName := strings.TrimSpace(name); leaseName != "" {
 		lease, release, err := tryRuntimeLease(store, cityPath, leaseName, info.ID, sessionpkg.RuntimeLeaseTTLFor(cfg))
 		if err != nil {
 			if errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) {

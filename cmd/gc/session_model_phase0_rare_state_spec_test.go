@@ -38,7 +38,7 @@ func (p capabilityOverrideProvider) SleepCapability(string) runtime.SessionSleep
 func TestPhase0ConfigDrift_ActiveNamedSessionDefersWhenAttached(t *testing.T) {
 	// When a named session is attached (actively in use), config-drift
 	// should be deferred -- not immediately restarted. See #119.
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -102,8 +102,7 @@ func TestPhase0ConfigDrift_ActiveNamedSessionDefersWhenAttached(t *testing.T) {
 func TestPhase0ConfigDrift_IdleNamedSessionRestartsInPlaceWithoutCapVacancy(t *testing.T) {
 	// When a named session is idle (detached, no recent activity),
 	// config-drift should proceed with restart-in-place.
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -173,8 +172,7 @@ func TestPhase0ConfigDrift_IdleNamedSessionRestartsInPlaceWithoutCapVacancy(t *t
 func TestPhase0ConfigDrift_NamedSessionBoundsRecentActivityDeferral(t *testing.T) {
 	// Recent activity is a headless-use signal, but it must not let a live
 	// process loop hide one fixed config-drift episode forever.
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -250,8 +248,7 @@ func TestPhase0ConfigDrift_NamedSessionBoundsRecentActivityDeferral(t *testing.T
 func TestPhase0ConfigDrift_NamedSessionDrainsWhenStaleActivity(t *testing.T) {
 	// When a named session has stale activity (beyond threshold) and
 	// is not attached, config-drift should proceed.
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -491,7 +488,7 @@ func TestShouldDeferNamedSessionConfigDriftDoesNotDeferWhenMarkerWriteFails(t *t
 func TestPoolSessionConfigDriftNotAffectedByActiveGuard(t *testing.T) {
 	// Pool (non-named) sessions should still defer on config-drift
 	// via existing guards -- the new guard only applies to named sessions.
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", StartCommand: "new-cmd"}},
 	}
@@ -521,7 +518,7 @@ func TestPoolSessionConfigDriftNotAffectedByActiveGuard(t *testing.T) {
 }
 
 func TestPhase0ConfigDrift_AsleepNamedSessionRepairsInPlaceWithoutWaking(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -581,7 +578,7 @@ func TestPhase0ConfigDrift_AsleepNamedSessionRepairsInPlaceWithoutWaking(t *test
 }
 
 func TestPhase0ConfigDrift_AsleepNamedSessionAppliesTemplateOverrides(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -646,7 +643,7 @@ func TestPhase0ConfigDrift_AsleepNamedSessionAppliesTemplateOverrides(t *testing
 func TestConfigDrift_AttachedSessionPersistsAcrossCycles(t *testing.T) {
 	// Config-drift deferral for attached sessions must persist across
 	// reconciler cycles — the session must never be killed while attached.
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -713,7 +710,7 @@ func TestConfigDrift_AttachedSessionPersistsAcrossCycles(t *testing.T) {
 }
 
 func TestConfigDrift_AttachedSessionSurvivesTransientFalseNegative(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -794,8 +791,7 @@ func TestConfigDrift_AttachedSessionSurvivesTransientFalseNegative(t *testing.T)
 func TestConfigDrift_DetachAllowsDriftToResume(t *testing.T) {
 	// After an attached session detaches, config-drift should proceed
 	// with restart-in-place for named sessions.
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -872,7 +868,7 @@ func TestConfigDrift_DetachAllowsDriftToResume(t *testing.T) {
 func TestConfigDrift_AttachedPoolSessionDefersAcrossCycles(t *testing.T) {
 	// Non-named (pool) sessions that are attached should also defer
 	// config-drift across multiple reconciler cycles.
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", StartCommand: "new-cmd"}},
 	}
@@ -902,7 +898,7 @@ func TestConfigDrift_AttachedPoolSessionDefersAcrossCycles(t *testing.T) {
 }
 
 func TestConfigDrift_AttachedPoolSessionSurvivesTransientFalseNegative(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker", StartCommand: "new-cmd"}},
 	}
@@ -950,7 +946,7 @@ func TestConfigDrift_AttachedPoolSessionSurvivesTransientFalseNegative(t *testin
 }
 
 func TestPhase0CanonicalRepair_DuplicateOpenNamedBeadsRetiresLosersNonTerminally(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{

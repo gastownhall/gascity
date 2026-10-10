@@ -121,8 +121,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 	}
 	steps := []step{
 		{"legacy tick: start and wake", "awake_started_at continuation_epoch continuation_reset_pending core_hash_breakdown creation_complete_at detached_at effective_sleep_after_idle generation instance_token last_woke_at live_hash pending_create_started_at requested_sleep_after_idle reset_committed_at runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_capability sleep_intent sleep_policy_fingerprint sleep_policy_source sleep_reason started_config_hash started_launch_hash started_live_hash started_provision_hash state state_reason wake_request wake_requested_at", []string{"internal/session/lifecycle_transition.go:PreWakePatch", "internal/session/lifecycle_transition.go:CommitStartedPatch", "cmd/gc/session_sleep.go:persistSleepPolicyMetadataInfo", "cmd/gc/session_sleep.go:reconcileDetachedAtInfo", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			env := newReconcilerTestEnv()
-			env.city = t.TempDir()
+			env := newReconcilerTestEnv(t)
 			env.store = rec
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			env.addDesired("worker", "worker", false)
@@ -135,8 +134,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 		}},
 		{"legacy drain-ack finalize", "last_woke_at pending_create_claim pending_create_started_at slept_at state state_reason", []string{"cmd/gc/session_reconciler.go:finalizeDrainAckStoppedSession"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			env := newReconcilerTestEnv()
-			env.city = t.TempDir()
+			env := newReconcilerTestEnv(t)
 			env.store = rec
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			b := env.createSessionBead("worker", "worker")
@@ -304,8 +302,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		run  func(*testing.T, []string) map[string]string
 	}{
 		"cmd/gc/session_reconciler.go:finalizeDrainAckStoppedSession": {[]string{"restart_requested", "true"}, func(t *testing.T, meta []string) map[string]string {
-			env := newReconcilerTestEnv()
-			env.city = t.TempDir()
+			env := newReconcilerTestEnv(t)
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			b := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&b, pairs(meta))

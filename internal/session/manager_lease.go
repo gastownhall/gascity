@@ -78,7 +78,8 @@ func ContextWithRuntimeLease(ctx context.Context, l *RuntimeLease) context.Conte
 
 // CitySweepContext marks ctx as a stop-every-session sweep (`gc stop`, a rig
 // restart): its stops take no runtime lease, by design. It is the only way a
-// Manager stop goes without one besides a city path that is not absolute.
+// Manager stop goes without one: without it, a city path that is not absolute
+// refuses (ErrRuntimeLeaseNoCity).
 func CitySweepContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, citySweepCtxKey{}, true)
 }
@@ -126,9 +127,9 @@ func operatorRuntimeLease(l *RuntimeLease, err error) (*RuntimeLease, error) {
 	return l, err
 }
 
-// ErrRuntimeLeaseNoCity refuses a start or stop by a Manager whose city path
-// is not absolute: it has no runtime dir to take the lease in.
-var ErrRuntimeLeaseNoCity = errors.New("runtime lease: the session manager has no city path")
+// ErrRuntimeLeaseNoCity refuses a start or stop whose city path is not
+// absolute: there is no runtime dir to take the lease in (RefuseWithoutCity).
+var ErrRuntimeLeaseNoCity = errors.New("runtime lease: no absolute city path to take the lease in")
 
 // leaseRuntime takes the lease on session id's runtime sessName, waiting up
 // to wait (zero: not at all, for a caller under the session mutation lock).
@@ -147,7 +148,7 @@ func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait ti
 		return nil, func() {}, nil
 	}
 	if !filepath.IsAbs(m.cityPath) {
-		return nil, func() {}, fmt.Errorf("%w (%q): session %q", ErrRuntimeLeaseNoCity, m.cityPath, id)
+		return nil, func() {}, RefuseWithoutCity(m.cityPath, fmt.Sprintf("session %q", id))
 	}
 	ttl := m.leaseTTL
 	if ttl <= 0 {
@@ -238,7 +239,7 @@ func LeaseRuntimeName(ctx context.Context, cityPath, name string) (release func(
 	case borrowed || sweep:
 		return func() {}, nil
 	case !filepath.IsAbs(cityPath):
-		return func() {}, fmt.Errorf("%w (%q): runtime %q", ErrRuntimeLeaseNoCity, cityPath, name)
+		return func() {}, RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
 	}
 	req := RuntimeLeaseRequest{City: cityPath, Name: name}
 	var l *RuntimeLease

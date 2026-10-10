@@ -43,8 +43,7 @@ func (s *sessionObservationGetErrorStore) Get(id string) (beads.Bead, error) {
 func newProgressStallTestEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
 
-	env := newRestartRequestTestEnv()
-	env.city = t.TempDir()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{
@@ -430,7 +429,7 @@ func TestReconcileSessionBeads_ClaimHolderStallDoesNotRestartIntoRedProvider(t *
 }
 
 func TestReconcileSessionBeads_ClaimHolderStallKeepsPoolClaimForFreshWorker(t *testing.T) {
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{

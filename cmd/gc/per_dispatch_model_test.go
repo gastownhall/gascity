@@ -676,7 +676,7 @@ func TestExecutePlannedStartsAppliesRigResidentTriggerOptionsViaResolver(t *test
 				options = append(options, withTriggerBeadResolver(rigStore.Get))
 			}
 
-			woken := executePlannedStarts(
+			woken := executePlannedStartsTraced(
 				context.Background(),
 				[]startCandidate{candidate},
 				cfg,
@@ -684,11 +684,13 @@ func TestExecutePlannedStartsAppliesRigResidentTriggerOptionsViaResolver(t *test
 				sp,
 				sessionStore,
 				"",
+				t.TempDir(),
 				clk,
 				events.Discard,
 				5*time.Second,
 				io.Discard,
 				io.Discard,
+				nil,
 				options...,
 			)
 			if woken != 1 {

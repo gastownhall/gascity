@@ -84,7 +84,7 @@ func createStartRecoveryFixture(t *testing.T, store beads.Store, clk clock.Clock
 
 func executeStartRecovery(t *testing.T, store beads.Store, sp runtime.Provider, bead beads.Bead, workDir string) startResult {
 	t.Helper()
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{
@@ -97,9 +97,11 @@ func executeStartRecovery(t *testing.T, store beads.Store, sp runtime.Provider, 
 			},
 			cfg: runtime.Config{Command: "claude --resume resume-key", WorkDir: workDir},
 		}},
+		t.TempDir(),
 		sp,
 		store,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))

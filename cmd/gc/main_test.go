@@ -197,6 +197,14 @@ type cleanupTestingM struct {
 	paths []string
 }
 
+// noCityGuardTestingM fails the run on a start or stop refused for want of a
+// city that no test expected (session.FailOnNoCityRefusals).
+type noCityGuardTestingM struct{ m testscript.TestingM }
+
+func (m noCityGuardTestingM) Run() int {
+	return sessionpkg.FailOnNoCityRefusals(m.m.Run(), os.Stderr)
+}
+
 func (m cleanupTestingM) Run() int {
 	code := sessionpkg.FailOnKeyViolations(m.m.Run(), os.Stderr) // a guard panic a recover() swallowed still fails
 	for _, path := range m.paths {
@@ -322,6 +330,7 @@ func TestMain(m *testing.M) {
 	// per-run socket root still exists (dip-73cr05 — city-name sockets like
 	// -L test-city have exit-empty off and outlive their sessions forever).
 	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
+	testRunner = noCityGuardTestingM{m: testRunner}
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}

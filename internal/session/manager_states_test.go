@@ -56,7 +56,7 @@ func getState(t *testing.T, m *Manager, id string) State {
 func TestConformance_CreatingState(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
+	m := newTestManager(t, store, sp)
 
 	// Create a bead in creating state.
 	b, err := store.Create(beads.Bead{
@@ -110,7 +110,7 @@ func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *tes
 	// to reap.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
+	m := newTestManager(t, store, sp)
 
 	id := createTestSession(t, m, "worker")
 	b, err := store.Get(id)
@@ -155,7 +155,7 @@ func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *tes
 func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+	m := newTestManager(t, store, sp)
 
 	id := createTestSession(t, m, "worker")
 	b, err := store.Get(id)
@@ -187,7 +187,7 @@ func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
 func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
+	m := newTestManager(t, store, sp)
 
 	id := createTestSession(t, m, "worker")
 	b, err := store.Get(id)
@@ -218,7 +218,7 @@ func TestConformance_SuspendStillRejectsOtherIllegalStates(t *testing.T) {
 		t.Run(string(from), func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
-			m := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+			m := newTestManager(t, store, sp)
 
 			id := createTestSession(t, m, "worker")
 			if err := store.SetMetadata(id, "state", string(from)); err != nil {
@@ -251,7 +251,7 @@ func TestConformance_SuspendStillRejectsOtherIllegalStates(t *testing.T) {
 func TestConformance_SuspendActiveSessionUnchanged(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+	m := newTestManager(t, store, sp)
 
 	id := createTestSession(t, m, "worker")
 	b, err := store.Get(id)
@@ -302,7 +302,7 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	// with an illegal-transition error that blocks `gc stop` city-wide.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+	m := newTestManager(t, store, sp)
 
 	id := createTestSession(t, m, "dog")
 	b, err := store.Get(id)

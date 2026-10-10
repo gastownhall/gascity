@@ -40,7 +40,7 @@ func newSuspendedResumableSession(t *testing.T) (*Manager, *recordingStartupDeat
 	store := beads.NewMemStore()
 	base := runtime.NewFake()
 	sp := &recordingStartupDeathProvider{Fake: base}
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter), WithCityPath(t.TempDir()))
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template: "worker",

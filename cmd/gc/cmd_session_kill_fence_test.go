@@ -163,10 +163,10 @@ func TestCmdSessionKill_ReconcileBetweenIntentAndTeardownLeavesKilledRowAlone(t 
 					return
 				}
 				stateBefore := current.Metadata["state"]
-				reconcileSessionBeads(
-					context.Background(), []beads.Bead{current}, desiredState,
+				reconcileSessionBeadsAtPath(
+					context.Background(), t.TempDir(), []beads.Bead{current}, desiredState,
 					configuredSessionNames(cfg, "", store), cfg, inner, store,
-					nil, nil, nil, newDrainTracker(), map[string]int{identity: 1}, false, nil, "",
+					nil, nil, nil, nil, newDrainTracker(), map[string]int{identity: 1}, false, nil, "",
 					nil, clock.Real{}, events.Discard, 0, 0, &tickLog, &tickLog,
 					withStartStabilityWaiter(immediateStartStabilityWaiter),
 					withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),

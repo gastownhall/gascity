@@ -1000,8 +1000,7 @@ type sessionChaosHarness struct {
 
 func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	t.Helper()
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	template := "chaos-worker"
 	env.cfg = &config.City{
 		Agents: []config.Agent{{

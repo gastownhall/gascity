@@ -22,8 +22,7 @@ import (
 // drain the agent acked and whose runtime is gone: the row J27 A attaches to.
 func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps) {
 	t.Helper()
-	env := newReconcilerTestEnv()
-	env.city = t.TempDir()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	b := env.createSessionBead("worker", "worker")
@@ -102,6 +101,7 @@ func TestAttachAfterManagedSuspendStaysUp(t *testing.T) {
 // written over the resumed row. A drain whose row still holds the intent
 // runs as before.
 func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
+	testCity := t.TempDir()
 	for intent, wantStop := range map[string]bool{"": false, "user-hold": true} {
 		now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 		sp := runtime.NewFake()
@@ -117,7 +117,7 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 		}
 		dt := newDrainTracker()
 		dt.set(b.ID, &drainState{startedAt: now.Add(-time.Hour), deadline: now.Add(-time.Minute), reason: "user-hold", generation: 1, ackSet: true})
-		advanceSessionDrainsWithSessionsTraced(t.TempDir(), dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		advanceSessionDrainsWithSessionsTraced(testCity, dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got
 		}), map[string]wakeEvaluation{}, &config.City{}, &clock.Fake{Time: now}, nil)
