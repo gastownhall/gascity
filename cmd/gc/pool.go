@@ -389,6 +389,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	}
 	dst.MinActiveSessions = src.MinActiveSessions
 	dst.ScaleCheck = src.ScaleCheck
+	if src.ColdWake != nil {
+		v := *src.ColdWake
+		dst.ColdWake = &v
+	}
 	if len(src.NamepoolNames) > 0 {
 		dst.NamepoolNames = make([]string, len(src.NamepoolNames))
 		copy(dst.NamepoolNames, src.NamepoolNames)

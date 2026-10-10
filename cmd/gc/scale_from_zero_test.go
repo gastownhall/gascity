@@ -96,7 +96,13 @@ func TestBuildDesiredState_ScaleFromZero_CrossRig(t *testing.T) {
 // TestBuildDesiredState_ScaleFromZero_ClampsWakeDemandToOne proves the cold-pool
 // wake probe only wakes the pool from zero (contributes at most 1) and never
 // scales to the full routed-bead count. With the clamp removed, the cross-store
-// probe would report demand 3 (one per routed bead) instead of 1.
+// probe would report demand 3 (one per routed bead) instead of 1. This is the
+// default (cold_wake unset) behavior: the wake probe may still override a
+// successful custom check's 0, because the check can be blind to demand it
+// never queries for (see TestBuildDesiredState_ScaleFromZero_CrossRig above).
+// The opt-out case, where a successful 0 is authoritative, is covered by
+// TestBuildDesiredState_ScaleFromZero_ColdWakeDoesNotOverrideAuthoritativeZero
+// (#6351).
 func TestBuildDesiredState_ScaleFromZero_ClampsWakeDemandToOne(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigPath := tmpDir + "/rigs/rig-A"
@@ -164,6 +170,84 @@ func TestBuildDesiredState_ScaleFromZero_ClampsWakeDemandToOne(t *testing.T) {
 	}
 	if len(result.State) != 1 {
 		t.Errorf("expected 1 desired session, got %d", len(result.State))
+	}
+}
+
+// TestBuildDesiredState_ScaleFromZero_ColdWakeDoesNotOverrideAuthoritativeZero
+// pins #6351: with cold_wake explicitly disabled, a cold pool's own
+// successful custom scale_check returning 0 -- an explicit "no session right
+// now" -- must not be overridden by the cold-wake probe's clamped 1. Before
+// the fix there was no way to say this at all: the merge always compared the
+// two by maximum (1 > 0), so a custom check that correctly said "none
+// needed" was always beaten by the wake probe the instant the pool had any
+// routed demand, which is exactly the case a cross-rig capacity budget needs
+// to arbitrate.
+func TestBuildDesiredState_ScaleFromZero_ColdWakeDoesNotOverrideAuthoritativeZero(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigPath := tmpDir + "/rigs/rig-A"
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	maxSess := 5
+	minSess := 0
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "planner",
+				MaxActiveSessions: &maxSess,
+				MinActiveSessions: &minSess,
+				ScaleCheck:        "printf 0", // custom check succeeds, authoritative 0
+				ColdWake:          boolPtr(false),
+				Dir:               "rig-A",
+				Provider:          "mock",
+			},
+		},
+		Rigs: []config.Rig{
+			{Name: "rig-A", Path: rigPath},
+		},
+		Providers: map[string]config.ProviderSpec{
+			"mock": {
+				Command: "true",
+			},
+		},
+	}
+
+	cityStore := beads.NewMemStore()
+	rigAStore := beads.NewMemStore()
+	rigStores := map[string]beads.Store{
+		"rig-A": rigAStore,
+	}
+
+	qualifiedName := "rig-A/planner"
+
+	// Route work so the cold-wake probe sees real demand and would (pre-fix)
+	// wake the pool anyway, overriding the custom check's authoritative 0.
+	for _, id := range []string{"bead-0", "bead-1", "bead-2"} {
+		if _, err := cityStore.Create(beads.Bead{
+			ID:     id,
+			Status: "open",
+			Type:   "task",
+			Metadata: map[string]string{
+				"gc.routed_to": qualifiedName,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sessionBeads := &sessionBeadSnapshot{} // Empty city store snapshot
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", tmpDir, time.Now(), cfg, &localMockProvider{},
+		cityStore, rigStores, sessionBeads, nil, os.Stderr,
+	)
+
+	if demand := result.ScaleCheckCounts[qualifiedName]; demand != 0 {
+		t.Errorf("expected the custom check's authoritative 0 to hold, got demand %d", demand)
+	}
+	if len(result.State) != 0 {
+		t.Errorf("expected 0 desired sessions (pool held at zero), got %d", len(result.State))
 	}
 }
 

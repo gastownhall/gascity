@@ -2421,6 +2421,30 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 	poolScaleCheckPartialTemplates := maps.Clone(in.CustomPartials)
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
 	if in.DefaultProbed {
+		// customScaleCheckSucceeded snapshots which templates the custom
+		// scale_check just answered for successfully, before
+		// poolScaleCheckPartialTemplates is merged below with the separate
+		// default/cold-wake probe's own partial set -- the cold-wake clamp
+		// further down needs to know whether THIS custom check succeeded,
+		// not whether the cold-wake probe itself did.
+		customScaleCheckSucceeded := make(map[string]bool, len(in.CustomCounts))
+		for template := range in.CustomCounts {
+			if !in.CustomPartials[template] {
+				customScaleCheckSucceeded[template] = true
+			}
+		}
+		// coldWakeDisabledTemplates marks templates whose agent set
+		// cold_wake=false: the wake probe must defer to a successful custom
+		// scale_check's count, including an authoritative 0, rather than merge
+		// by maximum (#6351). Unset (the default) keeps today's behavior, where
+		// the wake probe may override a 0 it cannot tell apart from a check that
+		// is simply blind to demand from another store.
+		coldWakeDisabledTemplates := map[string]bool{}
+		for i := range cfg.Agents {
+			if !cfg.Agents[i].EffectiveColdWake() {
+				coldWakeDisabledTemplates[cfg.Agents[i].QualifiedName()] = true
+			}
+		}
 		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, in.DefaultPartials)
 		if scaleCheckCounts == nil {
 			scaleCheckCounts = make(map[string]int)
@@ -2438,6 +2462,21 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 			// 1 so N unassigned gc.routed_to beads do not spawn {name}-N phantoms.
 			if in.NamedOnDemandTemplates[template] && count > 1 {
 				count = 1
+			}
+			// A successful custom scale_check's count is authoritative on a
+			// cold_wake=false template, including an explicit 0 -- the one
+			// value that means "no session right now" and the one value
+			// merge-by-maximum could not otherwise preserve, since 1 > 0.
+			// Gated on the opt-out (not the default): the wake probe
+			// otherwise exists precisely because a check can be blind to
+			// demand from a store it never queries, and treating every
+			// successful 0 as authoritative would silently stop those pools
+			// from ever waking. A check that errored is never authoritative
+			// here either way -- it goes PARTIAL rather than reading as zero
+			// demand, which other logic relies on.
+			if in.ColdWakeTemplates[template] && customScaleCheckSucceeded[template] && coldWakeDisabledTemplates[template] {
+				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], in.DefaultDemand[template], count)
+				continue
 			}
 			if count > scaleCheckCounts[template] {
 				scaleCheckCounts[template] = count
