@@ -1,5 +1,7 @@
 package beads
 
+import "time"
+
 // NewNativeDoltStoreForConformance returns a NativeDoltStore backed by the
 // in-memory native storage fixture for the external conformance suite.
 func NewNativeDoltStoreForConformance() Store {
@@ -33,4 +35,18 @@ func NewNativeDoltStoreForPinnedIDFenceConformance(mintPrefix string, namespaces
 // site (cmd/gc/api_state.go) wraps into an events.Event.
 func (c *CachingStore) NotifyChangeForTest(eventType string, b Bead) {
 	c.notifyChange(eventType, b)
+}
+
+// ReconcileForTest runs one reconcile pass synchronously as the background
+// loop runs it on its cadence, for beadstest.RunReadyParityConformance. The
+// loop's shortest cadence is far longer than the recency window that protects
+// an in-flight local write (recentLocalMutation), so this ages every local
+// write stamp past that window first instead of waiting it out.
+func (c *CachingStore) ReconcileForTest() {
+	c.mu.Lock()
+	for id, at := range c.localBeadAt {
+		c.localBeadAt[id] = at.Add(-time.Minute)
+	}
+	c.mu.Unlock()
+	c.runReconciliation()
 }

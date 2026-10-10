@@ -24,8 +24,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retries it on the next start. If you upgrade bd while the supervisor is
   running, the repair waits for the next `gc start`.
 
+### Changed
+
+- **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
+  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
+  returned rows oldest-first (`created_at, id`). It now returns the canonical
+  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
+  reads already use, and applies `Limit` after sorting. When several ready
+  beads in the ledger route to one pool template, the bead a new session takes
+  its trigger, worktree and pack from is now the highest-priority one, oldest
+  first within a priority; the order in which sessions claim work does not
+  change. `GET /v0/beads/ready` also returns the relocated graph leg's rows in
+  this order (#6863).
+
 ### Fixed
 
+- **Fenced writes to relocated classes honor `[beads] conditional_writes` on
+  split cities.** On a city that relocates sessions, graph, messaging, orders
+  or nudges to a storage binding, nothing stamped the conditional-writes mode
+  onto the binding engine, and the one-shot CLI's emitting wrapper hid the
+  stamp again. Under `auto` and `require` every fenced write to a relocated
+  class (session wake/kill fences, pending-create rollback, molecule attach,
+  control epoch, drain reservations) silently took the unconditional legacy
+  path. The binding engine is now stamped, the SQLite engine reports whether it
+  can fence, the `require` boot preflight probes the binding once per engine,
+  and `gc status` reports the binding engine's mode (#6917, #7194).
+- **A control row only wakes the control dispatcher of its own root scope on a
+  split city.** The default `scale_check` probe re-read the durable route of a
+  control bead whose route repair had been suppressed or deferred, and on a
+  class-binding city every dispatcher reads the binding, so the dispatcher the
+  stale route named was demand-spawned for a row it must not serve (#7206).
+- **Large graph cooks in a SQLite infra ledger keep `BEGIN IMMEDIATE`.** The
+  write connection's DSN builder no longer drops `_txlock=immediate` when the
+  store path does not parse as a URL, and MemStore's pinned-id sequence lift
+  uses the same strict suffix parse as SQLite so an overflowed pinned id cannot
+  wrap the sequence (#6833, follow-up to #6827).
 - **Work hidden by beads migration 0059 is dispatched again.** On the first
   start under a new bd version, `gc start` (and the supervisor, and
   `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each

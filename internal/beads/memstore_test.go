@@ -31,6 +31,16 @@ func TestMemStoreCreateUsesSerializableTimestamp(t *testing.T) {
 	}
 }
 
+// TestMemStoreReadyParityConformance runs the cache ready-parity suite under
+// its ledgered waiver (ga-gmf8r): MemStore has no ready projection and no
+// canonical ready order yet.
+func TestMemStoreReadyParityConformance(t *testing.T) {
+	beadstest.RunReadyParityConformanceWithOptions(t, "MemStore", beadstest.ReadyParityHarness{
+		Open:   func(*testing.T) beads.Store { return beads.NewMemStore() },
+		Rescan: (*beads.CachingStore).ReconcileForTest,
+	}, beadstest.ReadyParityOptions{SkipCachedReadyParity: true})
+}
+
 func TestMemStoreConditionalWriterConformance(t *testing.T) {
 	beadstest.RunConditionalWriterConformanceWithOptions(t, "MemStore",
 		func(_ *testing.T) beads.Store { return beads.NewMemStore() },

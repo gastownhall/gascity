@@ -201,6 +201,7 @@ func sqliteBusyBackoff(attempt int) time.Duration {
 // Concurrency model: a single write connection serializes mutations; a pool
 // of 8 read connections allows concurrent reads in WAL mode.
 type SQLiteStore struct {
+	condWritesStamp
 	db                         *sql.DB // write connection (MaxOpenConns=1)
 	readDB                     *sql.DB // read pool (MaxOpenConns=8)
 	path                       string
@@ -400,15 +401,7 @@ func sqliteStoreDSN(path string, readOnly bool) string {
 // It is a begin mode, not a pragma, so it does not ride the per-connection
 // pragma budget, and it is deliberately off the read pool and read-only DSN.
 func sqliteStoreWriterDSN(path string) string {
-	dsn := sqliteStoreDSNWithMode(path, "")
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	query := parsed.Query()
-	query.Set("_txlock", "immediate")
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return sqliteStoreDSNWithOptions(path, "", "immediate")
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
@@ -416,6 +409,12 @@ func sqliteStorePrivateRecoveryDSN(path string) string {
 }
 
 func sqliteStoreDSNWithMode(path, mode string) string {
+	return sqliteStoreDSNWithOptions(path, mode, "")
+}
+
+// sqliteStoreDSNWithOptions is the one DSN builder. txlock, when set, is the
+// modernc _txlock begin mode ("immediate" for the write connection only).
+func sqliteStoreDSNWithOptions(path, mode, txlock string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
@@ -470,6 +469,9 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 
 	if mode != "" {
 		query.Set("mode", mode)
+	}
+	if txlock != "" {
+		query.Set("_txlock", txlock)
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
@@ -1485,7 +1487,8 @@ func (s *SQLiteStore) ListOpen(status ...string) ([]Bead, error) {
 	return s.List(query)
 }
 
-// Ready returns open, unblocked actionable beads from the requested tier.
+// Ready returns open, unblocked actionable beads from the requested tier in
+// the canonical (priority, created_at, id) ready order.
 func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
@@ -1553,9 +1556,6 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 			continue
 		}
 		result = append(result, b)
-		if q.Limit > 0 && len(result) >= q.Limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		if ctxErr := contextErr(); ctxErr != nil {
@@ -1566,32 +1566,27 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if err := contextErr(); err != nil {
 		return nil, err
 	}
+	// Cut the Limit prefix only after the canonical sort, so a bounded read
+	// takes the same rows a cache-served read over this store takes (#3208).
+	if err := sortBeadsReadyOrderContext(ctx, result); err != nil {
+		return nil, err
+	}
+	if q.Limit > 0 && len(result) > q.Limit {
+		result = result[:q.Limit]
+	}
 	return result, nil
 }
 
-// sqliteReadySQL builds the ready projection query for q. Tier and limit
-// filtering is partly residual: wisp-tier reads decide tier membership after
-// decode, so the source-side LIMIT is only safe for the other tier modes.
+// sqliteReadySQL builds the ready projection query for q. It carries no ORDER
+// BY or LIMIT: readyRows filters after decode (wisp-tier membership, deferral,
+// excluded labels) and then sorts into the canonical ready order, so a
+// source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		fmt.Sprintf(`NOT EXISTS (
-			SELECT 1 FROM deps d
-			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
-			WHERE d.issue_id=b.id
-			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
-			  AND (
-			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
-			       )
-			  )
-		  )`, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked),
+		"NOT " + sqliteReadyBlockerExists("b.id"),
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1606,11 +1601,31 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 		sqlText += " AND b.assignee=?"
 		args = append(args, q.Assignee)
 	}
-	sqlText += " ORDER BY b.created_at ASC, b.id ASC"
-	if q.Limit > 0 && q.TierMode != TierWisps {
-		sqlText += fmt.Sprintf(" LIMIT %d", q.Limit)
-	}
 	return sqlText, args
+}
+
+// sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
+// over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
+// closed, or closed with gc.work_outcome=blocked. A target missing from this
+// store (deleted, or another store's id) has no status and so blocks. Ready
+// negates it and enrichReadyProjectionForCache selects it, so the store and a
+// cache over it cannot disagree about which rows are blocked.
+func sqliteReadyBlockerExists(issueCol string) string {
+	return fmt.Sprintf(`EXISTS (
+			SELECT 1 FROM deps d
+			LEFT JOIN beads blocker ON blocker.id=d.depends_on_id
+			WHERE d.issue_id=%s
+			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
+			  AND (
+			    COALESCE(blocker.status, '') <> 'closed'
+			    OR EXISTS (
+			         SELECT 1 FROM metadata m
+			         WHERE m.bead_id = blocker.id
+			           AND m.meta_key = '%s'
+			           AND m.meta_value = '%s'
+			       )
+			  )
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.
@@ -2060,23 +2075,4 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 
 func ptrTo(v string) *string {
 	return &v
-}
-
-// numericIDSuffix parses the trailing numeric portion of a bead ID like
-// "gc-42" and returns 42. Returns 0 if the ID has no numeric suffix or the
-// suffix does not fit in an int. It is a loose parser for MemStore's pinned-id
-// bookkeeping; the SQLite allocator uses the strict parseSQLiteAutoIDSuffix.
-func numericIDSuffix(id string) int {
-	i := len(id)
-	for i > 0 && id[i-1] >= '0' && id[i-1] <= '9' {
-		i--
-	}
-	if i == len(id) {
-		return 0
-	}
-	n, err := strconv.Atoi(id[i:])
-	if err != nil {
-		return 0
-	}
-	return n
 }

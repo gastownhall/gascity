@@ -17,8 +17,8 @@ import (
 // cached view of it. fenced reports whether the store resolves a conditional
 // writer, so the patch is revision-fenced rather than re-read-checked only.
 // staleCache marks a cached front door whose re-read cannot see a write to the
-// backing. (SQLiteStore carries no conditional-writes stamp, so it resolves as
-// unfenced under every mode and appears only in the off rows.)
+// backing. The SQLiteStore rows are a split city's relocated session binding,
+// stamped the way storage boot stamps the engine it opens.
 type patchFenceBackend struct {
 	name       string
 	fenced     bool
@@ -49,6 +49,14 @@ func patchFenceBackends() []patchFenceBackend {
 		store := opened.(*beads.SQLiteStore)
 		t.Cleanup(func() { _ = store.CloseStore() })
 		return store
+	}
+	stampSQLite := func(t *testing.T, mode gate.Mode) beads.Store {
+		t.Helper()
+		s := openSQLite(t)
+		if err := beads.StampOpenedStore(s, "SQLiteStore", mode, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		return s
 	}
 	openFile := func(t *testing.T) beads.Store {
 		t.Helper()
@@ -85,10 +93,18 @@ func patchFenceBackends() []patchFenceBackend {
 			s := stamp(t, gate.Auto, openFile(t))
 			return s, s
 		}},
+		{name: "SQLiteStore/auto", fenced: true, open: func(t *testing.T) (beads.Store, beads.Store) {
+			s := stampSQLite(t, gate.Auto)
+			return s, s
+		}},
 		// The concurrent write hits the backing, so the cache serves the
 		// pre-write row to the re-read. Only the revision fence can see it.
 		{name: "CachingStore/FileStore/auto", fenced: true, staleCache: true, open: func(t *testing.T) (beads.Store, beads.Store) {
 			backing := stamp(t, gate.Auto, openFile(t))
+			return cached(t, backing), backing
+		}},
+		{name: "CachingStore/SQLiteStore/require", fenced: true, staleCache: true, open: func(t *testing.T) (beads.Store, beads.Store) {
+			backing := stampSQLite(t, gate.Require)
 			return cached(t, backing), backing
 		}},
 	}

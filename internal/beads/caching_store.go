@@ -928,12 +928,6 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -942,6 +936,12 @@ func (c *CachingStore) PrimeActive() error {
 	if depErr != nil {
 		partialErr = errors.Join(partialErr, depErr)
 		c.recordProblem("prime active dep cache", depErr)
+	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
+	all = enriched
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
 	}
 
 	c.mu.Lock()
@@ -1044,15 +1044,6 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-	if err := c.cacheContextErr(ctx); err != nil {
-		return err
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -1061,6 +1052,17 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	depMap, depsComplete, depErr := c.fetchDepsForBeads(beadMap)
 	if depErr != nil {
 		c.recordProblem("prime dep cache", depErr)
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
+	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
+	}
+	for _, b := range enriched {
+		beadMap[b.ID] = cloneBead(b)
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -1459,6 +1461,13 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 // applyReadyProjection enriches items with the backing store's ready projection
 // and returns the failure that leaves the snapshot INCOMPLETE, having already
 // recorded every failure on the problem log.
+//
+// Callers run it AFTER reading the deps they install beside the rows. A cached
+// verdict is trusted over the cached edges, so the verdict must be at least as
+// fresh as they are: an edge added between an earlier projection and the deps
+// read would sit, open, next to IsBlocked=false, and the cache would offer work
+// the store holds back. Projected last, a racing edge can only leave a verdict
+// stricter than the edges, which the next re-scan corrects.
 //
 // A projection the backing store cannot serve AT ALL costs the snapshot one
 // column, not rows: the cache latches readyProjectionDegraded, its readiness

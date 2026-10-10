@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -16,10 +17,11 @@ import (
 	"time"
 )
 
-// seedSQLiteGraphIDs writes one minimal bead per id in a single transaction on
-// the store's write handle. It bypasses Create on purpose: the point is to
-// reproduce an on-disk id population (including ids another process minted),
-// not to exercise the allocator while seeding it.
+// seedSQLiteGraphIDs writes one minimal bead row per id in a single
+// transaction on the store's write handle. It bypasses Create on purpose: the
+// point is to reproduce an on-disk id population (including ids another
+// process minted), not to exercise the allocator while seeding it. One
+// prepared insert per row keeps a large seed cheap under -race.
 func seedSQLiteGraphIDs(t *testing.T, s *SQLiteStore, ids []string) {
 	t.Helper()
 	ctx := context.Background()
@@ -28,14 +30,41 @@ func seedSQLiteGraphIDs(t *testing.T, s *SQLiteStore, ids []string) {
 		t.Fatalf("seed begin: %v", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO beads(id,tier,title,status,issue_type,created_at,updated_at,bead_json)
+		VALUES(?,'main','seed','open','task',?,?,?)`)
+	if err != nil {
+		t.Fatalf("seed prepare: %v", err)
+	}
+	defer stmt.Close() //nolint:errcheck
 	now := time.Now()
 	for _, id := range ids {
-		if err := s.upsertBeadTx(ctx, tx, Bead{ID: id, Title: "seed", Status: "open", Type: "task", CreatedAt: now, UpdatedAt: now}); err != nil {
+		payload, err := json.Marshal(Bead{ID: id, Title: "seed", Status: "open", Type: "task", CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("seed marshal %s: %v", id, err)
+		}
+		if _, err := stmt.ExecContext(ctx, id, now.UnixNano(), now.UnixNano(), string(payload)); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("seed commit: %v", err)
+	}
+}
+
+// seedSQLiteGraphIDRange inserts gcg-<first> .. gcg-<first+count-1> in one
+// statement. A recursive CTE keeps the row loop inside SQLite, so a large seed
+// stays cheap under -race, where per-row driver round trips dominate.
+func seedSQLiteGraphIDRange(t *testing.T, s *SQLiteStore, first int64, count int) {
+	t.Helper()
+	now := time.Now().UnixNano()
+	if _, err := s.db.ExecContext(context.Background(), `
+		WITH RECURSIVE n(i, k) AS (SELECT ?, 1 UNION ALL SELECT i+1, k+1 FROM n WHERE k < ?)
+		INSERT INTO beads(id,tier,title,status,issue_type,created_at,updated_at,bead_json)
+		SELECT 'gcg-'||i, 'main', 'seed', 'open', 'task', ?, ?,
+			json_object('id', 'gcg-'||i, 'title', 'seed', 'status', 'open', 'issue_type', 'task')
+		FROM n`, first, count, now, now); err != nil {
+		t.Fatalf("seed range gcg-%d x%d: %v", first, count, err)
 	}
 }
 
@@ -251,7 +280,7 @@ func TestSQLiteStoreWriteTxTakesWriteLockAtBegin(t *testing.T) {
 }
 
 // TestSQLiteStoreGraphCookUnderConcurrentWriter reproduces the maintainer-city
-// cook failure end to end: a large graph store holding an id at
+// cook failure end to end: a graph store holding an id at
 // math.MaxInt64-1 and a block of ids from the overflowed old allocator,
 // a fresh CLI process cooking a multi-node workflow, and a controller
 // committing continuously. Before the fix the cook reseeded next to
@@ -271,15 +300,11 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 
 	dir := t.TempDir()
 	controller := newSQLiteGraphApplyStore(t, dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix))
-	ids := make([]string, 0, 25000)
-	for i := 1; i <= 20000; i++ {
-		ids = append(ids, "gcg-"+strconv.Itoa(i))
-	}
-	ids = append(ids, nearMaxGraphIDs()...)
-	wrapped := wrappedGraphIDs(2000)
-	ids = append(ids, wrapped...)
-	seedSQLiteGraphIDs(t, controller, ids)
-	floor := int64(math.MinInt64) + int64(len(wrapped)) - 1
+	const wrappedCount = 2000
+	seedSQLiteGraphIDRange(t, controller, 1, 5000)
+	seedSQLiteGraphIDRange(t, controller, math.MinInt64, wrappedCount)
+	seedSQLiteGraphIDs(t, controller, nearMaxGraphIDs())
+	floor := int64(math.MinInt64) + wrappedCount - 1
 	if _, err := RaiseSQLiteSequenceFloor(dir, sqliteGraphPrefix, floor); err != nil {
 		t.Fatalf("RaiseSQLiteSequenceFloor: %v", err)
 	}
@@ -442,5 +467,65 @@ func TestSQLiteStoreWriterDSNBeginsImmediate(t *testing.T) {
 		if got := parsed.Query().Get("_txlock"); got != "" {
 			t.Fatalf("shared/read DSN %s carries _txlock=%s; the read pool must stay deferred", dsn, got)
 		}
+	}
+}
+
+// TestMemStorePinnedIDSequenceMatchesSQLite: MemStore stands in for a class
+// database, so a pinned overflowed id must not drag its sequence to
+// math.MaxInt64 (and the next mint into negative ids) either: as in
+// SQLiteStore.normalizeCreate, only a positive "<prefix>-<n>" consumes a value.
+// The same pins run through a real SQLiteStore, and MemStore must mint the id
+// it mints, so the parity is pinned against the store it names rather than a
+// hard-coded answer.
+func TestMemStorePinnedIDSequenceMatchesSQLite(t *testing.T) {
+	pins := append(wrappedGraphIDs(3), sqliteGraphPrefix+"-41")
+	mintedAfterPins := func(store Store) (string, error) {
+		for _, id := range pins {
+			if _, err := store.Create(Bead{ID: id, Title: "pinned"}); err != nil {
+				return "", fmt.Errorf("create pinned %s: %w", id, err)
+			}
+		}
+		minted, err := store.Create(Bead{Title: "minted"})
+		if err != nil {
+			return "", fmt.Errorf("create minted: %w", err)
+		}
+		return minted.ID, nil
+	}
+
+	want, err := mintedAfterPins(newSQLiteGraphApplyStore(t, t.TempDir(), WithSQLiteStoreIDPrefix(sqliteGraphPrefix)))
+	if err != nil {
+		t.Fatalf("SQLiteStore: %v", err)
+	}
+	m := NewMemStore()
+	m.IDPrefix = sqliteGraphPrefix
+	m.HonorExplicitIDs = true
+	got, err := mintedAfterPins(m)
+	if err != nil {
+		t.Fatalf("MemStore: %v", err)
+	}
+	if got != want {
+		t.Fatalf("after pinning %v, MemStore minted %q but SQLiteStore minted %q", pins, got, want)
+	}
+}
+
+// TestMemStorePinnedIDPastMaxIntLeavesSequence: MemStore's sequence is an int,
+// so a pinned suffix past math.MaxInt is skipped rather than narrowed (no mint
+// can reach it, while int(n) would wrap the sequence negative). The suffix
+// only parses where int is 32-bit, so GOARCH=386 exercises the narrowing; on a
+// 64-bit int it overflows int64 and is never parsed.
+func TestMemStorePinnedIDPastMaxIntLeavesSequence(t *testing.T) {
+	m := NewMemStore()
+	m.IDPrefix = sqliteGraphPrefix
+	m.HonorExplicitIDs = true
+	pinned := fmt.Sprintf("%s-%d", sqliteGraphPrefix, uint64(math.MaxInt)+1)
+	if _, err := m.Create(Bead{ID: pinned, Title: "pinned"}); err != nil {
+		t.Fatalf("Create pinned %s: %v", pinned, err)
+	}
+	minted, err := m.Create(Bead{Title: "minted"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if want := sqliteGraphPrefix + "-1"; minted.ID != want {
+		t.Fatalf("MemStore minted %q after pinning %s, want %s", minted.ID, pinned, want)
 	}
 }
