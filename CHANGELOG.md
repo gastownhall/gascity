@@ -188,6 +188,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The controller no longer wakes an on-demand named session for a
+  deferred molecule or wisp root it cannot claim.** An assigned, open,
+  ephemeral/no-history/workflow molecule root counts as ready wake demand
+  (`appendOpenAssignedMoleculeWorkUnique`) so an on-demand session gets
+  woken for its actual next turn — but the check never looked at
+  `defer_until` or an indefinite defer, even though the hook
+  (`isFutureDeferredHookCandidate`) already refuses the same row while it
+  is deferred. The session woke, found nothing claimable, and drained;
+  the next pass counted the same root again. Deferring a molecule or wisp
+  root now actually pauses the session it would otherwise wake, the same
+  way deferring a plain task already does.
+
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**
   `gc-beads-bd init` now stamps bd's version witness on a store that already

@@ -925,6 +925,7 @@ go_test(
         "beads_scope_suspension_test.go",
         "beads_shared_server_test.go",
         "build_desired_state_blocked_demand_test.go",
+        "build_desired_state_deferred_molecule_test.go",
         "build_desired_state_ga80pen8_test.go",
         "build_desired_state_ga_uvwxp8_test.go",
         "build_desired_state_legacy_bound_recovery_test.go",

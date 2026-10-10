@@ -3209,8 +3209,16 @@ func appendAssignedUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[
 // beads contribute to readyIDs (their assigned turn is genuinely actionable),
 // unlike the open-routed orphan-release pass.
 func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	now := time.Now()
 	for _, b := range beadList {
 		if !isOpenAssignedMoleculeWork(b) {
+			continue
+		}
+		// A root hidden by a deferral (future defer_until, or an indefinite
+		// defer) is not an actionable turn: the hook refuses it
+		// (isFutureDeferredHookCandidate), so counting it here as ready
+		// wake demand wakes the session for work it cannot claim (#7080).
+		if beads.IsDeferred(b, now) {
 			continue
 		}
 		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
