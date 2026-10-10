@@ -6109,6 +6109,127 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectIgnoresEmptyRejectionReason pins that a key left set to
+// the empty string is not a rejection. jq reads "" as not null, so a cleared
+// rejection_reason written as "" used to count on every sweep and raised a
+// storm alert for a bead nothing had reset.
+func TestSpawnStormDetectIgnoresEmptyRejectionReason(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-empty","status":"open","metadata":{"rejection_reason":"","recovered":""}},{"id":"ga-rejected","status":"open","metadata":{"rejection_reason":"tests red"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if _, ok := counts["ga-empty"]; ok {
+		t.Fatalf("ledger counted ga-empty, whose rejection_reason and recovered are empty strings\nledger: %s", ledgerData)
+	}
+	if got := counts["ga-rejected"]; got != 1 {
+		t.Fatalf("ledger count for ga-rejected = %d, want 1\nledger: %s", got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "SPAWN_STORM: bead ga-empty") {
+		t.Fatalf("alerted on ga-empty, whose rejection_reason is empty\ngc log:\n%s", gcData)
+	}
+}
+
+// TestSpawnStormDetectListsOnlyUnassignedBeads pins the list filter. bd treats
+// --assignee="" as no filter, so the sweep must ask with --no-assignee; an
+// assigned bead carrying a rejection_reason is being worked, not reset to pool.
+// The stub behaves like bd: it drops assigned rows only for --no-assignee.
+func TestSpawnStormDetectListsOnlyUnassignedBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    case " $* " in
+      *" --no-assignee "*)
+        printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}}]\n'
+        ;;
+      *)
+        printf '[{"id":"ga-pool","status":"open","metadata":{"recovered":"true"}},{"id":"ga-held","status":"open","assignee":"worker-1","metadata":{"rejection_reason":"tests red"}}]\n'
+        ;;
+    esac
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Some bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	if _, ok := counts["ga-held"]; ok {
+		t.Fatalf("ledger counted ga-held, which is assigned; the list must filter with --no-assignee\nledger: %s", ledgerData)
+	}
+	if got := counts["ga-pool"]; got != 1 {
+		t.Fatalf("ledger count for ga-pool = %d, want 1\nledger: %s", got, ledgerData)
+	}
+}
+
 func runScript(t *testing.T, script string, env map[string]string) {
 	t.Helper()
 	out, err := runScriptResult(t, script, env)
