@@ -226,16 +226,20 @@ runs again on the next orchestrator tick.
 
 Once the agent's tmux session exists, the orchestrator stores the session's
 `ready_prompt_prefix` in that session's environment as
-`GC_READY_PROMPT_PREFIX` (`tmux set-environment -t main`, unset for the
-default prompt), as local tmux sessions do. A process that did not start the
-session, such as a restarted orchestrator or a `gc` command that cannot reach
-the API, reads it back once with `tmux show-environment -t main` and then
-remembers it. Do not clear the `main` session's environment. If the read
-fails, that process looks for the default prompt until a later read succeeds.
-A session whose agent shows another prompt then never reads as idle. It stays
-awake, and every wait for its idle boundary runs to its timeout: interrupting
-it (`interrupt_now`) can restart the session, and stopping a turn reports an
-error.
+`GC_READY_PROMPT_PREFIX` (`tmux -u set-environment -t main`; a blank prefix
+stores the default prompt, `❯ `), as local tmux sessions do. A process that
+did not start the session, such as a restarted orchestrator or a `gc` command
+that cannot reach the API, reads it back with `tmux -u show-environment -t
+main` and then remembers it. Like local tmux, gc passes `-u` to these
+commands, so the prompt survives an exec environment without a UTF-8 locale.
+Do not clear the `main` session's environment. While the read fails or the
+variable is absent, that process looks for the default prompt and reads again
+on its next wait. The variable is absent when storing it failed (gc does not
+retry; the next start stores it again) and for a session started by an older
+gc. A session whose agent shows another prompt then never reads as idle. It
+stays awake, and every wait for its idle boundary runs to its timeout:
+interrupting it (`interrupt_now`) can restart the session, and stopping a turn
+reports an error.
 
 The `is-attached` rule above applies to every runtime that declares
 `report-attachment`, even without the other two capabilities. gc runs the op

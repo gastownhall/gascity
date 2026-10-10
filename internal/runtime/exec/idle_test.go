@@ -35,14 +35,15 @@ func fastIdlePoll(t *testing.T) {
 // idlePack is an exec pack script whose `exec` op logs each capture-pane
 // command and answers the nth capture with panes[n-1] (the last pane once
 // the list is exhausted). It keeps the in-box tmux GC_READY_PROMPT_PREFIX in
-// a file (set/unset by set-environment, read by show-environment, removed by
-// stop); show-environment fails while the env.fail file exists. Other ops log
-// their name to opsLog.
+// a file (set by set-environment, read by show-environment, removed by stop);
+// show-environment fails while the env.fail file exists. Every in-box tmux
+// command is logged to tmuxLog. Other ops log their name to opsLog.
 type idlePack struct {
 	dir        string
 	script     string
 	captureLog string
 	opsLog     string
+	tmuxLog    string
 }
 
 func newIdlePack(t *testing.T, handshake string, panes ...string) idlePack {
@@ -52,6 +53,7 @@ func newIdlePack(t *testing.T, handshake string, panes ...string) idlePack {
 		dir:        dir,
 		captureLog: filepath.Join(dir, "captures.log"),
 		opsLog:     filepath.Join(dir, "ops.log"),
+		tmuxLog:    filepath.Join(dir, "tmux.log"),
 	}
 	for i, pane := range panes {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("pane.%d", i+1)), []byte(pane), 0o644); err != nil {
@@ -74,14 +76,13 @@ case "$op" in
   exec)
     cmd=$(cat)
     echo exec >> %[2]q
+    printf '%%s\n' "$cmd" >> %[4]q/tmux.log
     case "$cmd" in
-      *set-environment*-u*)
-        echo set-env-unset >> %[2]q
-        rm -f %[4]q/env ;;
       *set-environment*)
         echo set-env >> %[2]q
         eval "set -- $cmd"
-        printf '%%s' "$6" > %[4]q/env ;;
+        for v; do :; done
+        printf '%%s' "$v" > %[4]q/env ;;
       *show-environment*)
         echo show-env >> %[2]q
         [ -f %[4]q/env.fail ] && exit 1
@@ -116,6 +117,32 @@ func (pk idlePack) captures(t *testing.T) []string {
 		t.Fatal(err)
 	}
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// env returns the published GC_READY_PROMPT_PREFIX, and whether it is set.
+func (pk idlePack) env(t *testing.T) (string, bool) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(pk.dir, "env"))
+	if os.IsNotExist(err) {
+		return "", false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data), true
+}
+
+// tmuxCommands returns every in-box tmux command line the exec op ran.
+func (pk idlePack) tmuxCommands(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(pk.tmuxLog)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func (pk idlePack) ops(t *testing.T) string {
@@ -309,22 +336,30 @@ func TestWaitForIdleSecondInstanceRecoversReadyPrompt(t *testing.T) {
 	}
 }
 
-// An unset variable means the default prompt and is remembered; a failed read
-// falls back to the default without remembering, so the next wait retries.
-// Kills: a failed read cached forever, and an unset variable treated as a
-// failure on every wait.
+// An absent variable (never published: a failed publish at Start, or a
+// session started before publishing existed) and a failed read both fall back
+// to the default prompt without remembering it, so the next wait reads again
+// and picks up a prefix published later.
+// Kills: an absent variable remembered as the default forever (a codex
+// session whose publish failed would never read idle in this instance), and a
+// failed read cached forever.
 func TestWaitForIdleReadyPromptReadFallback(t *testing.T) {
 	fastIdlePoll(t)
 
-	unset := newIdlePack(t, idleHandshake, idleClaudePane)
-	p := NewProvider(unset.script)
-	for i := range 2 {
-		if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
-			t.Fatalf("WaitForIdle #%d with no published prompt on a claude pane: %v", i+1, err)
-		}
+	absent := newIdlePack(t, idleHandshake, idleClaudePane, idleClaudePane, idleCodexPane)
+	p := NewProvider(absent.script)
+	if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle with no published prompt on a claude pane: %v", err)
 	}
-	if got := strings.Count(unset.ops(t), "show-env\n"); got != 1 {
-		t.Fatalf("show-environment reads with the variable unset = %d, want 1", got)
+	// The prefix is published after the first wait; the next wait reads it.
+	if err := os.WriteFile(filepath.Join(absent.dir, "env"), []byte("› "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle after the prompt was published, on a codex pane: %v", err)
+	}
+	if got := strings.Count(absent.ops(t), "show-env\n"); got != 2 {
+		t.Fatalf("show-environment reads with the variable absent at first = %d, want 2 (absent not remembered)", got)
 	}
 
 	failing := newIdlePack(t, idleHandshake, idleClaudePane)
@@ -342,16 +377,45 @@ func TestWaitForIdleReadyPromptReadFallback(t *testing.T) {
 	}
 }
 
-// A blank prefix unsets the published variable, so a relaunch with the
-// default prompt does not leave a stale one behind; a pack without an idle
-// boundary gets no extra exec op at Start.
+// Both in-box tmux environment commands pass -u, as local tmux does on every
+// command: without a UTF-8 locale in the exec environment (an image that sets
+// no LANG) tmux prints the non-ASCII prompts of every builtin agent ("❯ ",
+// "› ", "→ ") as "_ ". The integration test proves the behavior against a real
+// tmux; this pins the argv.
+// Kills: a read or publish without -u.
+func TestReadyPromptTmuxCommandsForceUTF8(t *testing.T) {
+	fastIdlePoll(t)
+	pk := newIdlePack(t, idleHandshake, idleCodexPane)
+	if err := NewProvider(pk.script).Start(context.Background(), "s", runtime.Config{ReadyPromptPrefix: "› "}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := NewProvider(pk.script).WaitForIdle(context.Background(), "s", 10*time.Second); err != nil {
+		t.Fatalf("WaitForIdle: %v", err)
+	}
+	cmds := pk.tmuxCommands(t)
+	for _, want := range []string{"'tmux' '-u' 'set-environment' ", "'tmux' '-u' 'show-environment' "} {
+		if !strings.Contains(cmds, want) {
+			t.Fatalf("in-box tmux commands lack %q:\n%s", want, cmds)
+		}
+	}
+}
+
+// A blank prefix publishes the default prompt explicitly (so a relaunch with
+// the default prompt overwrites a stale one, and an absent variable always
+// means "never published"); a pack without an idle boundary gets no extra exec
+// op at Start.
+// Kills: a blank prefix that unsets the variable (indistinguishable from a
+// failed publish).
 func TestStartPublishesReadyPromptOnlyWithIdleBoundary(t *testing.T) {
 	pk := newIdlePack(t, idleHandshake, idleClaudePane)
+	if err := os.WriteFile(filepath.Join(pk.dir, "env"), []byte("› "), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := NewProvider(pk.script).Start(context.Background(), "s", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if !strings.Contains(pk.ops(t), "set-env-unset\n") {
-		t.Fatalf("Start with a blank prompt did not unset it; ops = %q", pk.ops(t))
+	if got, ok := pk.env(t); !ok || got != "❯ " {
+		t.Fatalf("published prompt after Start with a blank prefix = (%q, %v), want (\"❯ \", true)", got, ok)
 	}
 
 	// The separable launch publishes once the agent's tmux session exists.

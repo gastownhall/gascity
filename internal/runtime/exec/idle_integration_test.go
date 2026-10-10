@@ -20,6 +20,11 @@ import (
 // "main". The exec op runs the command with a tmux shim on PATH that targets
 // the box's server, so the orchestrator's in-box tmux commands reach it. The
 // agent a box runs is the file <root>/<name>.agent.
+//
+// The exec op runs the way a command exec'd into an image that sets no LANG
+// does: no UTF-8 locale and no $TMUX, and the shim adds no -u. tmux then
+// treats the client as non-UTF-8 unless the command itself passes -u, as gc
+// must.
 const tmuxBoxPack = `
 op="$1"
 name="$2"
@@ -34,7 +39,7 @@ case "$op" in
   start)
     cat > /dev/null
     mkdir -p "$box/bin"
-    printf '#!/bin/sh\nexport LC_ALL=C.UTF-8\nexec %%s -u -S %%s "$@"\n' "$real_tmux" "$sock" > "$box/bin/tmux"
+    printf '#!/bin/sh\nexec %%s -S %%s "$@"\n' "$real_tmux" "$sock" > "$box/bin/tmux"
     chmod +x "$box/bin/tmux"
     bt new-session -d -s main -x 120 -y 40 "sh $root/$name.agent" ;;
   stop) bt kill-server 2>/dev/null; rm -rf "$box"; exit 0 ;;
@@ -52,7 +57,7 @@ case "$op" in
   exec)
     cmd=$(cat)
     [ -d "$box/bin" ] || { echo "no box $name" >&2; exit 1; }
-    PATH="$box/bin:$PATH" sh -c "$cmd" ;;
+    env -u LANG -u LC_ALL -u LC_CTYPE -u LC_MESSAGES -u TMUX PATH="$box/bin:$PATH" sh -c "$cmd" ;;
   *) exit 2 ;;
 esac
 `
@@ -92,8 +97,8 @@ func writeAgent(t *testing.T, root, name, body string) {
 // Over a real tmux server per box, a pack declaring the idle boundary gets
 // full idle sleep: WaitForIdle proves an idle prompt, times out on a busy
 // pane, honors a custom ready prompt (also from a provider instance that did
-// not start the box), and the activity and attachment ops
-// answer from the box's tmux.
+// not start the box, with no UTF-8 locale in the exec environment), and the
+// activity and attachment ops answer from the box's tmux.
 func TestTmuxBoxPackIdleBoundary(t *testing.T) {
 	script, root := newTmuxBoxPack(t)
 	p := NewProvider(script)
@@ -108,10 +113,13 @@ func TestTmuxBoxPackIdleBoundary(t *testing.T) {
 
 	writeAgent(t, root, "idle", "printf 'work done\\n\\n❯ \\n'\nexec sleep 3600\n")
 	writeAgent(t, root, "busy", "printf '❯ \\n· Working… (12s · ↓ 1.2k tokens)\\n'\nexec sleep 3600\n")
-	writeAgent(t, root, "custom", "printf '> \\n'\nexec sleep 3600\n")
+	writeAgent(t, root, "custom", "printf '› \\n'\nexec sleep 3600\n")
+	writeAgent(t, root, "claude", "printf 'work done\\n\\n❯ \\n'\nexec sleep 3600\n")
 	start("idle", runtime.Config{})
 	start("busy", runtime.Config{})
-	start("custom", runtime.Config{ReadyPromptPrefix: "> "})
+	start("custom", runtime.Config{ReadyPromptPrefix: "› "})
+	// The builtin Claude profile sets its prompt explicitly.
+	start("claude", runtime.Config{ReadyPromptPrefix: "❯ "})
 
 	if got := p.SleepCapability("idle"); got != runtime.SessionSleepCapabilityFull {
 		t.Fatalf("SleepCapability = %q, want full", got)
@@ -124,9 +132,14 @@ func TestTmuxBoxPackIdleBoundary(t *testing.T) {
 		t.Fatalf("WaitForIdle on a box showing its custom prompt: %v", err)
 	}
 	// A provider instance that did not start the box (a restarted
-	// orchestrator) reads the custom prompt back from the box's tmux.
-	if err := NewProvider(script).WaitForIdle(ctx, "custom", 10*time.Second); err != nil {
-		t.Fatalf("WaitForIdle from another provider instance on a box showing its custom prompt: %v", err)
+	// orchestrator) reads the prompt back from the box's tmux, non-ASCII
+	// bytes intact although the exec environment has no UTF-8 locale.
+	for _, name := range []string{"custom", "claude", "idle"} {
+		other := NewProvider(script)
+		if err := other.WaitForIdle(ctx, name, 10*time.Second); err != nil {
+			got, _ := other.readyPrompts.Load(name)
+			t.Fatalf("WaitForIdle from another provider instance on box %s: %v (read prompt %q)", name, err, got)
+		}
 	}
 	began := time.Now()
 	if err := p.WaitForIdle(ctx, "busy", time.Second); !errors.Is(err, context.DeadlineExceeded) {
