@@ -12,11 +12,19 @@ import (
 // Dockerfile FROM instruction (flags such as --platform are skipped).
 var fromLineRe = regexp.MustCompile(`(?i)^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?`)
 
-// TestContribDockerfileBaseImagesArePinnedByDigest guards Scorecard's
-// Pinned-Dependencies check (alert 418): every registry base image in a
-// contrib Dockerfile is pinned by digest. A FROM naming an earlier build
-// stage or a build-arg (${BASE}, a locally built image) is not a registry
-// pull and is exempt.
+// TestContribDockerfileBaseImagesArePinnedByDigest keeps the alert 418 fix
+// and the other contrib base-image digests in place: every FROM in a
+// contrib file whose name starts with "Dockerfile" must contain "@sha256:".
+// A FROM naming an earlier build stage is exempt, and so is any image that
+// starts with "$", such as ${BASE}; the ARG default is not resolved, so a
+// build-arg that defaults to a registry image also passes unpinned.
+//
+// The test pins the current sites; it does not reimplement Scorecard's
+// Pinned-Dependencies rule, so passing it does not rule out a new alert.
+// Scorecard resolves ARG defaults (it flags the two k8s build-arg images
+// exempted here, alerts 27 and 63), checks files whose name contains
+// "dockerfile" in any case, accepts only a full 64-hex or ${ARG} digest,
+// and exempts FROM scratch, which this test rejects.
 func TestContribDockerfileBaseImagesArePinnedByDigest(t *testing.T) {
 	root := repoRoot(t)
 	var dockerfiles []string
@@ -58,11 +66,19 @@ func TestContribDockerfileBaseImagesArePinnedByDigest(t *testing.T) {
 	}
 }
 
-// TestContribNPMProjectInstallsUseLockfile guards Scorecard's
-// Pinned-Dependencies check (alerts 420, 184, 181): a contrib project that
-// commits a package-lock.json installs with `npm ci`, which installs exactly
-// the locked, integrity-checked tree, never `npm install`, which may
-// re-resolve it.
+// TestContribNPMProjectInstallsUseLockfile keeps the npm ci fixes for
+// alerts 420, 184 and 181 in place. For each listed file it requires the
+// project's package-lock.json to exist, the text "npm ci " to appear in the
+// file, and no line other than a #-comment line to contain `npm install`
+// unless the same line contains `npm install -g ` (a global tool install).
+// `npm ci` installs exactly the locked, integrity-checked tree; `npm
+// install` may re-resolve it.
+//
+// The file list is fixed and the match is textual, so the test pins these
+// three sites rather than enforcing Scorecard's Pinned-Dependencies rule
+// across contrib. It does not check a new install site or an `npm i`
+// spelling, and Scorecard flags the global install this test exempts
+// (alert 419).
 func TestContribNPMProjectInstallsUseLockfile(t *testing.T) {
 	root := repoRoot(t)
 	for _, tc := range []struct {
