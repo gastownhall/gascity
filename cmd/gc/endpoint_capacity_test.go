@@ -303,7 +303,7 @@ func TestExecutePlannedStarts_OpenEndpointDefersWithoutWritesOrBudget(t *testing
 	e.cfg.Daemon.SessionCircuitBreakerMaxRestarts = intPtrCircuit(5)
 	e.cfg.Daemon.SessionCircuitBreakerWindow = "30m"
 	cb := breakerAt(30*time.Minute, 5)
-	defer setSessionCircuitBreakerForTest(cb)()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	named := createCircuitTestNamedSessionWithIdentity(t, e.reconcilerTestEnv, "session-a", "template-a", "rig-a/session-a", "asleep")
 	a := startCandidate{info: e.sessionInfo(named.ID), tp: TemplateParams{Command: "test-cmd", SessionName: "session-a", TemplateName: "template-a", Upstream: "e"}}
@@ -524,7 +524,7 @@ func (e *capacityEnv) namedIdentityBreaker(t *testing.T) *sessionCircuitBreaker 
 	e.cfg.Daemon.SessionCircuitBreakerMaxRestarts = intPtrCircuit(1)
 	e.cfg.Daemon.SessionCircuitBreakerWindow = "30m"
 	cb := breakerAt(30*time.Minute, 1)
-	t.Cleanup(setSessionCircuitBreakerForTest(cb))
+	setSessionCircuitBreakerForTest(t, cb)
 	return cb
 }
 

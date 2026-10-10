@@ -305,9 +305,7 @@ func waitAsyncStopsForTest(t *testing.T, stops *asyncStartTracker) {
 }
 
 func newReconcilerTestEnv(t testing.TB) *reconcilerTestEnv {
-	sessionCircuitBreakerMu.Lock()
-	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
-	sessionCircuitBreakerMu.Unlock()
+	setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
 	env := &reconcilerTestEnv{
 		store:        beads.NewMemStore(),
 		sp:           runtime.NewFake(),

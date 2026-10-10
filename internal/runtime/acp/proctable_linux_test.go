@@ -61,8 +61,7 @@ func snapshotProcRoot(t *testing.T, pids ...int) string {
 // duration of fn.
 func scanSnapshot(t *testing.T, fn func(), pids ...int) {
 	t.Helper()
-	restore := proctable.SetScanRootForTesting(snapshotProcRoot(t, pids...))
-	defer restore()
+	proctable.SetScanRootForTesting(t, snapshotProcRoot(t, pids...))
 	fn()
 }
 
@@ -461,9 +460,8 @@ func TestFindRuntimesBySessionIDTracksOwnedHandshakeBeforeSocketBind(t *testing.
 	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(agentPID), "environ"), []byte(environ), 0o644); err != nil {
 		t.Fatalf("write environ: %v", err)
 	}
-	restore := proctable.SetScanRootForTesting(root)
+	proctable.SetScanRootForTesting(t, root)
 	found := findOnly(t, p, sessionID)
-	restore()
 
 	if len(found) != 1 || !found[0].IsTracked || found[0].ProviderName != name {
 		t.Fatalf("found = %+v, want the handshaking agent tracked as %q", found, name)
