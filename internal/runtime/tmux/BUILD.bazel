@@ -120,8 +120,8 @@ go_test(
     ),
     embed = [":tmux"],
     # ~590 tests, ~90 s on one worker in the integration build
-    # (//test:integration_packages); 3 shards keep each under 40 s.
-    shard_count = 3,
+    # (//test:integration_packages); 6 shards keep each under 20 s.
+    shard_count = 6,
     deps = [
         "//internal/bazeltest",
         "//internal/citylayout",
