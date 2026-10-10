@@ -70,6 +70,11 @@ py_test(
         ".github/workflows/scripts/runner_policy.py",
         ".github/workflows/scripts/test_runner_policy.py",
     ],
+    data = [
+        ".bazelrc",
+        "//internal/gchome:BUILD.bazel",
+        "//internal/productmetrics:BUILD.bazel",
+    ],
     imports = [".github/workflows/scripts"],
     main = ".github/workflows/scripts/test_runner_policy.py",
 )

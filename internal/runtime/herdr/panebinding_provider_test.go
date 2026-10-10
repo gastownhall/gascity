@@ -190,6 +190,7 @@ func setState(t *testing.T, state, flag string) {
 // one (ga-nqlb8q: it did, once socketPath() started honoring XDG_CONFIG_HOME).
 func listenHerdrSocket(t *testing.T, p *Provider) {
 	t.Helper()
+	shortHome(t)
 	sock := p.c.socketPath()
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		t.Fatal(err)
