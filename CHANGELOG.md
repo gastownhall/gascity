@@ -187,6 +187,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+- **`TestCachingStoreScanFencesStress` no longer flakes on a legitimate
+  recent-local-write keep.** The final assertion raced the stress phase's
+  own out-of-process writer against the cache's last install for a row:
+  `mergeSkipRecentLocal` (#1588) correctly keeps a cached row a local write
+  touched inside its 5s recency window, but the test's writers were still
+  inside that window when the final reconcile ran. Traced to confirm —
+  `mergeSkipRecentLocal` in 43 of 43 failing runs, never
+  `mergeSkipFenced` — this is the test asserting past a working keep, not
+  a fence gap in #6979. Ages every row's local-write stamp before the
+  final reconcile, the same way the setup already does for the initial
+  Creates (#7101).
+
 
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**
