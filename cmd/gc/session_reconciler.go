@@ -5358,8 +5358,9 @@ func drainStepRootFormulaName(root beads.Bead) string {
 }
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
-// should keep a session awake: in-progress work always counts, while open work
-// counts only when it is ready: unblocked, not deferred, and not ready-excluded.
+// should keep a session awake: in-progress work always counts, held or not,
+// while open work counts only when it is ready (unblocked, not deferred, and not
+// ready-excluded) and not parked on a dispatch hold (assignedOpenWorkHeld).
 func sessionHasAwakeAssignedWorkForReachableStore(
 	cityPath string,
 	cfg *config.City,
@@ -5432,7 +5433,7 @@ func firstAssignedWorkBeadForSession(
 // firstOpenClaimableAssignedWorkBeadForReachableStore returns the first OPEN,
 // claimable-now work bead still assigned to the given session in the store the
 // session's configured agent can query, plus whether one was found. "Claimable"
-// here means open and neither blocked nor deferred — the open arm of the
+// here means open and not blocked, deferred or held — the open arm of the
 // drain-ack anomaly classifier (drainAckClaimableAnomalyBead), which suppresses
 // only provably-non-claimable rows. Returns (zero-bead, false, nil) when nothing
 // matches.
@@ -5473,11 +5474,12 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(
 //
 // It walks the raw OpenAssignedTo list (status=open) and suppresses a row ONLY
 // when openAssignedRowProvablyNonClaimable says it is — deferred (defer_until /
-// indefinite deferral, fresh bead-local fields) or confirmed blocked on a
-// genuinely unmet plain `blocks` dependency. That helper owns the whole
-// suppression policy, including why bd's DENORMALIZED is_blocked projection is
-// never trusted on its own here; a row whose flag is stale-true but whose
-// blocking deps are met is a genuine strand and FIRES.
+// indefinite deferral, fresh bead-local fields), held (a canonical dispatch hold
+// label, which the hook never serves) or confirmed blocked on a genuinely unmet
+// plain `blocks` dependency. That helper owns the whole suppression policy,
+// including why bd's DENORMALIZED is_blocked projection is never trusted on its
+// own here; a row whose flag is stale-true but whose blocking deps are met is a
+// genuine strand and FIRES.
 // Every other open assigned row FIRES regardless of type. This deliberately does
 // NOT reuse the beads.Ready projection: Ready's type exclusions (step, molecule,
 // gate, merge-request, …) and label exclusions (gc:order-tracking, gc:session)
@@ -5540,6 +5542,9 @@ func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, i
 //   - deferred — defer_until and bd's indefinite deferral are fresh bead-local
 //     fields, never stale, so this is PROOF: no worker could have claimed the row
 //     and draining past it was correct pull.
+//   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
+//     fresh bead-local field too, and the hook refuses to serve a held row on
+//     every path, so this is PROOF as well: draining past it was correct pull.
 //   - blockedness_unproven — bd's is_blocked projection reads STALE-CAPABLE true,
 //     or (the production reading) is absent entirely. Neither is proof, so the
 //     row's real blockedness is settled against live deps first
@@ -5571,7 +5576,7 @@ func firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store beads.Store, i
 // TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError.
 func openAssignedRowProvablyNonClaimable(store beads.Store, item beads.Bead, now time.Time) (bool, error) {
 	switch classifyDemandRowClaimability(item, now) {
-	case demandRowDeferred:
+	case demandRowDeferred, demandRowHeld:
 		return true, nil
 	case demandRowBlockednessUnproven:
 		return beadHasUnmetPlainBlocksDep(store, item.ID)
@@ -6295,7 +6300,16 @@ func sessionHasReadyAssignedWorkForTier(store beads.Store, assignee string, tier
 	if err != nil {
 		return false, err
 	}
-	return wa.HasNonSessionWork(items), nil
+	// Ready is hold-transparent; the hook is not. Held open work cannot be
+	// served to this session, so it does not keep it awake (assignedOpenWorkHeld,
+	// the same gate desired-state wake demand applies in markReadyAssigned).
+	unheld := items[:0:0]
+	for _, item := range items {
+		if !assignedOpenWorkHeld(item) {
+			unheld = append(unheld, item)
+		}
+	}
+	return wa.HasNonSessionWork(unheld), nil
 }
 
 func sessionHasOpenAssignedWorkForTier(store beads.Store, assignee, status string, tierMode beads.TierMode, live bool) (bool, error) {
