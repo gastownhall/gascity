@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestExecTimeoutChildDiesWithHardParentExit pins that a bd subprocess
@@ -26,7 +28,10 @@ func TestExecTimeoutChildDiesWithHardParentExit(t *testing.T) {
 	}
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.Command(exe, "-test.run=^TestExecTimeoutHardExitHarness$", "--")
-	cmd.Env = append(os.Environ(),
+	// Without Bazel's test-runner variables: a sharded beads_test would
+	// otherwise hand the harness its own shard filter, which can exclude
+	// TestExecTimeoutHardExitHarness ("no tests to run").
+	cmd.Env = append(bazeltest.HelperProcessEnv(os.Environ()),
 		"GC_EXEC_TIMEOUT_HARNESS=1",
 		"GC_EXEC_TIMEOUT_PIDFILE="+pidFile,
 	)

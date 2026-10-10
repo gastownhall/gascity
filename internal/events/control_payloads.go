@@ -15,7 +15,12 @@ type ControlStalledPayload struct {
 	Kind       string `json:"kind,omitempty"`
 	RootBeadID string `json:"root_bead_id,omitempty"`
 	StorePath  string `json:"store_path,omitempty"`
-	// ErrorClass names the tier that ran out of budget ("semantic").
+	// ErrorClass names what ran out of budget: "semantic" for a Tier-B refusal
+	// the dispatcher quarantined (bead closed, order failed), or "pending" for
+	// a drift wait whose loudness horizon expired (bead still open, still
+	// retrying, no order.failed). It is the discriminator between a dead
+	// workflow and a healable one; consumers that treat control.stalled as
+	// uniformly terminal must switch on it.
 	ErrorClass string `json:"error_class"`
 	FirstSeen  string `json:"first_seen"`
 	Attempts   int    `json:"attempts"`

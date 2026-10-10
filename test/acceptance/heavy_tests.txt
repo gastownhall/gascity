@@ -1,0 +1,24 @@
+# Acceptance (Tier A, acceptance_a) tests that each run for about 40 s or
+# more (seconds: the mean of two runs on 2026-10-08 under bazel on rbe-west,
+# 18 shards, --config=ci --config=acceptance --config=fresh
+# --test_arg=-test.v, after helpers.City stopped repeating its teardown;
+# worker load moves these by up to ~2x). rules_go shards a go_test
+# round-robin over its tests in source order, and the lane is as slow as its
+# slowest shard, so two of these in one shard add up. The guard
+# scripts/acceptance_shards_test.go fails when shard_count in BUILD.bazel
+# would put two of them in the same shard, and prints the counts that do not.
+# Add a test here when it takes more than about 40 s. A test much over 90 s is
+# better split into independent top-level tests: Go shards per top-level test,
+# never per subtest.
+TestBlockedRepairOnProxiedCityAndRig 132
+TestBeadsProxiedDefaultStart 111
+TestBeadsProxiedDefaultRig 98
+TestBeadsProxiedDefaultRestart 93
+TestDoctorLeavesAStoppedProxiedCityStopped 82
+TestProxiedNativeLifecycle 75
+TestBeadsProxiedIgnoresUserLevelSharedServer 65
+TestBeadsProxiedDefaultInit 60
+TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped 60
+TestBeadsProxiedDefaultNativeLane 55
+TestBeadsProxiedDefaultLegacyManagedCityUnchanged 55
+TestProxiedNativeSafety 41

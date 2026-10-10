@@ -322,6 +322,13 @@ on_exhausted = "hard_fail"
 
 	steps := listWorkflowSteps(t, cityDir, workflowID)
 	if !hasStepWithSuffix(steps, "review.attempt.2") {
+		// Without the dump this failure carries only the step list, which cannot
+		// distinguish a lost transient injection from a controller that declined
+		// to retry — the ambiguity that left ga-j88sfp unrooted across four gate
+		// sightings. The worker trace shows whether .attempt.1 was closed
+		// class=transient at all, and transient-once-uncommitted names a dropped
+		// close directly.
+		dumpWorkflowState(t, cityDir, workflowID)
 		t.Fatalf("missing retry attempt after transient failure; got: %v", steps)
 	}
 	attempt2 := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review.attempt.2")

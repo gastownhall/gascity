@@ -137,9 +137,13 @@ The order is load-bearing. `BEADS_DOLT_AUTO_START=0` is **inert** on bd's
 proxied path — every ordinary command short-circuits into the proxied UOW
 provider (beads `cmd/bd/main.go:1758`) before auto-start policy is read — so
 **any bd read restarts the proxy and its Dolt child**, measured at ~0.6s. A
-dashboard sample, a `gc doctor`, or one straggler agent surviving the stop
-undoes it. `applyProxiedDoltEnv` therefore drops the variable for proxied
-scopes rather than projecting a promise bd does not keep.
+dashboard sample, a `gc doctor` under a running controller, or one straggler
+agent surviving the stop brings a pair back up; with a finite idle timeout it
+retires again after T to 1.5T instead of staying for good. `applyProxiedDoltEnv`
+therefore drops the variable for proxied scopes rather than projecting a
+promise bd does not keep. On a scope whose proxy already retired, `bd dolt stop`
+is a no-op that exits 0; during an idle exit's shutdown GC it kills the pair
+promptly and skips the GC.
 
 Stop is re-runnable. `bd dolt stop` is idempotent on the proxied path (exit 0,
 `stopped`/`verified` true, with or without a live proxy); on the direct path bd
@@ -163,14 +167,119 @@ force-eligible condition only as message text, and signalling a PID bd could not
 identify is irreversible. Health reports the same way, so one bad scope cannot
 hide the state of the others.
 
+## Suspension is quiescence
+
+A suspended rig, and every scope of a suspended city, gets no bd call from gc:
+any bd read restarts a bd-owned proxied scope's proxy and Dolt child, so a
+periodic read would keep a suspended scope warm for good.
+
+- **Not touched:**
+  - the controller's rig caches: a suspended rig's cache pauses its periodic
+    reconcile from the next tick on, with no reload, and a rig suspended at
+    startup is not primed;
+  - the autoclose sweep: a close due in a suspended rig waits for it to resume;
+  - demand, both order-tracking watchdogs and `gc order sweep-tracking`, the
+    completions sweep, convergence, and the closed-bead worktree reaper;
+  - `beads-health`, `gc start`'s readiness pass and its one-shot
+    `bd recompute-blocked`, which runs on the first tick after the scope
+    resumes instead;
+  - `/status` work counts, which report the rigs they left out in
+    `work.suspended_rigs_excluded`, and the dashboard rig probe;
+  - every order and pack script that enumerates rigs. They read
+    `gc rig list --json`'s `suspended` and skip the rig, or skip a bead whose
+    prefix belongs to it: reaper, jsonl-export, orphan-sweep, renudge,
+    cascade-nudge, notify-on-human-gate-creation, cross-rig-deps and
+    mol-dog-backup.
+- **A suspended city with no running session is quiescent.**
+  - Its tick runs no bead-store phase, and only workspace services are still
+    supervised.
+  - The order lane and the completions, autoclose, route-recovery and orphan
+    backstops stand down.
+  - Every cache pauses its reconcile (`beads.WithReconcileGate`).
+  - A config change made while it is quiescent is applied on the first tick
+    after resume.
+- **Retire on suspend, converging on live state.** Once a suspended scope's
+  sessions have been drained for a whole tick, the controller stops its pair
+  with the lifecycle `stop` op (`bd dolt stop`), the same op gc stop runs
+  last.
+  - A rig is stopped when its own sessions are gone; the city and every rig
+    when nothing runs at all.
+  - The check reads the proxy record and the process table, never a store.
+    The controller stops a proxied pair *whenever it finds it running*, so a
+    late touch that restarted it is undone on the next tick instead of
+    leaking a never-idle pair.
+  - With no controller running, `gc rig suspend` and `gc suspend` stop it
+    directly.
+  - A rig that shares the city's proxy root is not stopped on its own, because
+    its pair also serves the city.
+  - Resuming lets the next read restart the pair.
+- **Deliberate touches still reach a suspended rig.** An operator's
+  `gc bd --rig` or `gc order run --rig` is not a poll. The pair it starts is
+  stopped again on the next tick.
+
 ## Idle policy
 
-GC-owned proxied scopes are initialized with `--proxied-server-idle-timeout 0`
-(bd's `IdleTimeoutNever`, recorded as `"idle_timeout": -1` in the client-info
-sidecar). Both proxied targets get it: local and external alike own a *local*
-proxy plus its Dolt child, only the data upstream differs. Without it bd's
-30s default retires the pair after every quiet period and each later command
-pays a proxy-plus-Dolt cold start.
+bd's proxy retires itself and its Dolt child after an idle timeout, and the
+next bd command restarts them (about +0.5s). gc passes that timeout explicitly
+to every proxied scope it creates, from `gc init`, `gc rig add` (the Go
+initializer and both provider-script arms, which die without it) and
+`gc beads city migrate-proxied`. Both proxied targets get it: local and
+external alike own a *local* proxy plus its Dolt child, only the data upstream
+differs. Passing it is also what makes bd write the client-info sidecar the
+lifecycle reads.
+
+| knob | where | notes |
+| --- | --- | --- |
+| `[beads] proxied_idle_timeout` | city.toml | Go duration; `"0"` = never; unset = default `30m`. A finite value must be at least `1m`. A `[beads]` fragment that omits it keeps the root's value. |
+| `beads_proxied_idle_timeout` | `[[rigs]]` | Per-rig override (`RigPatch` too). Ignored, with a warning at init and in doctor, for a rig that shares the city's proxy root. |
+| `GC_BEADS_PROXIED_IDLE_TIMEOUT` | environment | Overrides both, for tests and diagnosis; may go below `1m`. gc projects the resolved value into the provider script's init env under this name. |
+
+Precedence is env > rig > city > default (`config.ProxiedIdleTimeoutFor`).
+
+**Encoding toward bd.** `0` is passed as `--proxied-server-idle-timeout 0` /
+`--idle-timeout 0`, which bd persists as `"idle_timeout": -1` (`IdleTimeoutNever`);
+a finite value is passed as a Go duration (`30m0s`) and persisted in
+nanoseconds.
+
+**Shared roots.** Whichever scope's bd spawns a proxy decides its timeout from
+its *own* sidecar (beads `uow_factory.go`). On a migrated city one proxy serves
+hq and every rig, so every scope on that root carries the city's value.
+
+**Existing scopes.** bd has no verb that changes an initialized scope's idle
+timeout (`bd init` refuses or no-ops, `bd migrate` reports "already proxied",
+`bd dolt set` has no such key), and gc never edits bd's sidecar. So the value
+applies at creation only; a scope keeps what it was created with (`-1` for
+every scope gc made before 1.5.1), and `gc doctor`'s `proxied-idle-timeout`
+check reports the drift as an advisory. gastownhall/beads#7239 asks for
+`bd dolt set idle-timeout`; with it, `gc start` can apply the configured value
+to existing scopes.
+
+**Why 30m.** bd 1.3.2's idle watcher samples open connections every `T/4`
+instead of tracking the last close, so a scope polled with short connections
+still retires every T to 1.5T. Each retirement costs a `DOLT_GC` that can stall
+the next opener for 8-12s on a loaded host (bounded only by bd's 15s open
+deadline), plus ~0.7 CPU-s for the respawn. At 30m that is ~1.6 cycles an hour
+on a busy scope; 5m measured 6-9 and 30s 46-81. In exchange every pair gc used
+to leak forever — a stray read after `gc stop`, `gc init --no-start`, `gc rig
+add` on an unstarted city — retires within 45 minutes. Revisit toward 10m once
+bd measures idle from the last close (gastownhall/beads#7240) and stops
+stalling opens behind the exit GC (gastownhall/beads#7241).
+
+**Invariant.** gc's periodic backstops must touch a quiet scope less often
+than that scope's idle timeout; anything that must react faster reacts to an
+event, not a poll. Otherwise gc decides the scope's liveness and the timeout is
+dead config. Today a running city still touches every non-suspended scope
+every ≤31s, so on a running city a finite timeout mostly bounds leaks rather
+than saving memory; suspended scopes are left untouched (see "Suspension is
+quiescence"), and activity-gated backstops for quiet scopes are follow-up work
+(`engdocs/design/idle-controller-call-rate.md`, Pillar 3).
+
+The opt-in proxied-native lane admits a long-lived native open only on a
+never-idle proxy (a pool held across an idle exit is pinned to a dead
+generation), so with a finite timeout a `GC_BEADS_PROXIED_NATIVE=1`
+controller's long-lived handles read through bd, with verdict
+`idle_policy_finite`. Short-lived opens (a CLI command, doctor) are still
+served natively.
 
 Readiness is a single `bd ping`, with no outer retry loop: bd's provider open
 already waits up to 15s for the proxy endpoint and then up to 30s for the Dolt
@@ -314,12 +423,60 @@ beads `cmd/bd/proxy_capability.go`; packs and orders that call those verbs
 against a proxied scope fail typed. The dashboard and doctor use `bd ping`
 rather than `bd doctor --readonly` for exactly this reason.
 
-`backup*` is on that list, and it is the one refusal with a data consequence:
-on rc.2 a proxied scope has no backup, by anyone. gc cannot register a Dolt
-backup against a proxy root it does not own, `mol-dog-backup` talks to the
-managed server a proxied scope does not have, and bd refuses its own verb. The
-per-scope doctor checks therefore go quiet — correctly, since there is nothing
-to register and a permanent warning is a line nobody can clear — so doctor says
-it instead in `rig:<name>:dolt-backup`'s message and once per city in the
-`proxied-backup-coverage` advisory. Until beads lifts the refusal, the store
-under the proxy root is the only copy; copy it out of band.
+`gc doctor` never starts a stopped city's servers. On the proxied path any bd
+read of a stopped store starts its proxy and Dolt child (`BEADS_DOLT_AUTO_START`
+does not apply there), and they then stay up until the scope's idle timeout.
+So before the bead-store preflight and before any store-reading check, doctor
+asks gc's own endpoint inspection (the proxy record plus the process table, no
+bd call) whether each proxied scope's proxy is running, and decides per scope:
+
+| city | scope | proxy | doctor |
+| --- | --- | --- | --- |
+| any | suspended rig, or any scope of a suspended city | any | "not checked: suspended", OK; never woken |
+| any | any | running | reads it |
+| stopped | any | not running | "not checked: store not running", OK; never started |
+| running | finite idle timeout | not running | reads it: the proxy retired on its idle timeout, and the read restarts it for one more idle period |
+| running | never | not running | "not checked: store not running", **warning**: a never-idle proxy that is down under a running city is a fault |
+
+Every store-reading check, and every fix that needs the store, uses the
+stand-in; checks that do not read the store run as usual. The
+`proxied-endpoint` account reports a finite scope with no proxy record as idle
+rather than as a gap.
+
+`beads-health` (`gc beads health`) and the dashboard's per-rig probe follow
+the same rule without the doctor stand-ins: a scope whose proxy retired on its
+finite idle timeout counts as healthy and is not pinged, and a suspended rig or
+city is neither pinged nor started at `gc start`. A never-idle scope with no
+proxy is still pinged and recovered.
+
+`backup*` is on that list in rc.2 and v1.3.0, and it is the one refusal with a
+data consequence: there, a proxied scope has no backup, by anyone. gc cannot
+register a Dolt backup against a proxy root it does not own, and
+`mol-dog-backup` backs scopes up only through `bd backup`, which that bd
+refuses. The store under the proxy root is the only copy; copy it out of band.
+
+beads hotfix/1.3.1 lifts the refusal: `bd backup init/sync/status/restore/remove`
+work on a managed-local proxied scope, so `mol-dog-backup` registers a
+destination (`bd backup init`) when a scope has none and syncs it
+(`bd backup sync`) like any other scope.
+
+The per-scope doctor checks stay quiet on a proxy root — there is nothing for
+gc to register, and `rig:<name>:dolt-backup`'s message says only bd can back it
+up. The city-level `proxied-backup-coverage` check asks each proxied scope's
+pinned bd with `bd backup status --json` and follows the answer, not a version
+string. It asks only about a scope whose proxy gc's endpoint inspection (the
+proxy record plus the process table, no dial) shows running: on bd 1.3.1
+`backup status` sizes the database through the proxy, which would start a
+stopped scope's proxy and Dolt, and doctor never starts servers. Other scopes
+read "not checked: store not running"; suspended rigs are left out, and the
+check is registered only when the bead-store preflight passed. All scopes share
+one 45s deadline with at most four bd calls at a time.
+
+- bd refuses (`proxy.backup.unsupported`, v1.3.0): an OK-status advisory that
+  names the scopes and says the store is the only copy — a permanent warning
+  would be a line nobody can clear.
+- bd answers: the check verifies a destination is configured and its
+  `last_sync` is within 24 hours, and warns (advisory severity) for any scope
+  with no destination, no sync, a stale sync, or an unreadable status. That gap
+  is one the operator can close, with `gc order run mol-dog-backup` or
+  `bd backup init <url>` then `bd backup sync` in the scope.

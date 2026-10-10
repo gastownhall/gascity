@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -257,5 +258,51 @@ func TestDecodeBeadEventPayloadMisses(t *testing.T) {
 		if b, ok := DecodeBeadEventPayload(payload); ok {
 			t.Errorf("%s: ok=true bead=%+v, want (Bead{}, false)", name, b)
 		}
+	}
+}
+
+// TestBeadEventIDCanonicalizesSubjectAgainstPayload pins the identity rule for
+// bead.* events: the payload snapshot names the bead, the envelope subject is
+// only a fallback, and a subject that names a different bead is rejected so no
+// consumer applies one bead's snapshot under another bead's key.
+func TestBeadEventIDCanonicalizesSubjectAgainstPayload(t *testing.T) {
+	payload := json.RawMessage(`{"id":"ga-1","title":"work","status":"closed"}`)
+	wrapped := json.RawMessage(`{"bead":{"id":"ga-1","status":"closed"}}`)
+	for _, tc := range []struct {
+		name     string
+		subject  string
+		payload  json.RawMessage
+		wantID   string
+		mismatch bool
+	}{
+		{name: "matching subject", subject: "ga-1", payload: payload, wantID: "ga-1"},
+		{name: "subject whitespace is ignored", subject: "  ga-1\n", payload: payload, wantID: "ga-1"},
+		{name: "missing subject recovered from payload", payload: payload, wantID: "ga-1"},
+		{name: "wrapped payload shape", subject: "ga-1", payload: wrapped, wantID: "ga-1"},
+		{name: "mismatched subject rejected", subject: "ga-2", payload: payload, mismatch: true},
+		{name: "mismatched subject rejected for wrapped payload", subject: "ga-2", payload: wrapped, mismatch: true},
+		{name: "undecodable payload keeps subject", subject: "ga-1", payload: json.RawMessage(`{`), wantID: "ga-1"},
+		{name: "payload without id keeps subject", subject: "ga-1", payload: json.RawMessage(`{"status":"closed"}`), wantID: "ga-1"},
+		{name: "no payload keeps subject", subject: " ga-1 ", wantID: "ga-1"},
+		{name: "nothing names a bead", payload: json.RawMessage(`{`), wantID: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := BeadEventID(tc.subject, tc.payload)
+			if tc.mismatch {
+				if !errors.Is(err, ErrBeadEventIdentityMismatch) {
+					t.Fatalf("BeadEventID(%q) = (%q, %v), want ErrBeadEventIdentityMismatch", tc.subject, got, err)
+				}
+				if got != "" {
+					t.Fatalf("BeadEventID(%q) id = %q on mismatch, want empty", tc.subject, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BeadEventID(%q): %v", tc.subject, err)
+			}
+			if got != tc.wantID {
+				t.Fatalf("BeadEventID(%q) = %q, want %q", tc.subject, got, tc.wantID)
+			}
+		})
 	}
 }

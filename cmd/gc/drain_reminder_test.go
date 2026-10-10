@@ -599,15 +599,36 @@ func TestFinalizeDrainAckStopPendingRemindsTheLiveWedgeOnly(t *testing.T) {
 			e.setMeta(map[string]string{"work_dir": t.TempDir(), "provider": "claude"})
 			cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 
+			// The queued async stop takes the runtime lease in the city's
+			// lock dir: let it finish before the dir is removed.
+			tracker := &asyncStartTracker{}
 			finalizeDrainAckStopPendingSessions(
 				t.TempDir(), cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
-				[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), &asyncStartTracker{},
+				[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 				e.clk, nil, e.out,
 			)
+			tracker.wait(5 * time.Second)
 
 			if n := len(e.nudges()); n != tc.wantNudges {
 				t.Errorf("nudge count = %d, want %d", n, tc.wantNudges)
 			}
 		})
+	}
+}
+
+// An attachment probe that cannot tell is not evidence nobody is at the pane,
+// and it records its own reason so an operator can tell it from a real attach.
+func TestDrainReminderQuietHoldHoldsOnAttachProbeError(t *testing.T) {
+	e := newDrainReminderEnv(t)
+	e.sp.AttachedErrors[e.name] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if got := e.remind(); got != drainReminderHeld {
+		t.Fatalf("outcome = %v, want held", got)
+	}
+	if n := len(e.nudges()); n != 0 {
+		t.Errorf("nudge count = %d, want 0", n)
+	}
+	if got := e.meta(drainReminderHoldKey); got != drainReminderHoldAttachUnknown {
+		t.Errorf("%s = %q, want %q", drainReminderHoldKey, got, drainReminderHoldAttachUnknown)
 	}
 }

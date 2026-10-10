@@ -59,14 +59,16 @@ func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 		queue = append(queue, bead.ID)
 	}
 
-	for len(queue) > 0 {
-		parentID := queue[0]
-		queue = queue[1:]
-
-		children, err := store.Children(parentID, beads.IncludeClosed, beads.WithBothTiers)
+	// Breadth-first, one level at a time, so a store that can read many
+	// parents' children in one round trip does (beads.ChildrenOfAny).
+	frontier := queue
+	for len(frontier) > 0 {
+		children, err := beads.ChildrenOfAny(store, frontier, beads.WithBothTiers)
 		if err != nil {
 			return nil, err
 		}
+		orderChildrenByFrontier(children, frontier)
+		var next []string
 		for _, child := range children {
 			if child.ID == "" {
 				continue
@@ -76,10 +78,41 @@ func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 			}
 			seen[child.ID] = struct{}{}
 			out = append(out, child)
-			queue = append(queue, child.ID)
+			next = append(next, child.ID)
 		}
+		frontier = next
 	}
 	return out, nil
+}
+
+// orderChildrenByFrontier puts one level's children in the order a
+// parent-at-a-time walk visits them: grouped by their parent's position in the
+// frontier, in Children's oldest-first order within a parent, and children
+// whose parent is not in the frontier last.
+func orderChildrenByFrontier(children []beads.Bead, frontier []string) {
+	position := make(map[string]int, len(frontier))
+	for i, id := range frontier {
+		if _, ok := position[id]; !ok {
+			position[id] = i
+		}
+	}
+	rank := func(b beads.Bead) int {
+		if i, ok := position[b.ParentID]; ok {
+			return i
+		}
+		return len(frontier)
+	}
+	slices.SortStableFunc(children, func(a, b beads.Bead) int {
+		return cmp.Compare(rank(a), rank(b))
+	})
+	for start := 0; start < len(children); {
+		end := start + 1
+		for end < len(children) && rank(children[end]) == rank(children[start]) {
+			end++
+		}
+		beads.SortBeads(children[start:end], beads.SortCreatedAsc)
+		start = end
+	}
 }
 
 // CloseSubtree closes the root bead and every open descendant.
@@ -118,6 +151,12 @@ func TeardownTailExclusion(store beads.Store, rootID string) (func(beads.Bead) b
 	if err != nil {
 		return nil, err
 	}
+	return TeardownTailExclusionFromMembers(members), nil
+}
+
+// TeardownTailExclusionFromMembers is TeardownTailExclusion over a member set
+// the caller already read with ListSubtree.
+func TeardownTailExclusionFromMembers(members []beads.Bead) func(beads.Bead) bool {
 	teardownStepIDs := make(map[string]struct{})
 	for _, member := range members {
 		if member.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleTeardown {
@@ -137,7 +176,7 @@ func TeardownTailExclusion(store beads.Store, rootID string) (func(beads.Bead) b
 		}
 		_, ok := teardownStepIDs[stepID]
 		return ok
-	}, nil
+	}
 }
 
 // CloseSubtreeWithMetadataExcept is CloseSubtreeWithMetadata with an exclusion
@@ -152,6 +191,14 @@ func CloseSubtreeWithMetadataExcept(store beads.Store, rootID string, metadata m
 	if err != nil {
 		return 0, err
 	}
+	return CloseMembersWithMetadataExcept(store, matched, metadata, exclude)
+}
+
+// CloseMembersWithMetadataExcept is CloseSubtreeWithMetadataExcept over a
+// member set the caller already read with ListSubtree, so a caller that also
+// needs the members for its exclusion policy reads the subtree once.
+func CloseMembersWithMetadataExcept(store beads.Store, members []beads.Bead, metadata map[string]string, exclude func(beads.Bead) bool) (int, error) {
+	matched := slices.Clone(members)
 	byID := make(map[string]beads.Bead, len(matched))
 	for _, bead := range matched {
 		byID[bead.ID] = bead

@@ -116,6 +116,89 @@ func MergeBackendListResults(results ...BackendListResult) ([]string, error) {
 	return merged, &PartialListError{Err: errors.Join(failures...)}
 }
 
+// ListingAttestation is an optional provider capability declaring that an
+// error-free [Provider.ListRunning] result is complete: every running session
+// matching the prefix is listed, so a name absent from it is not running.
+// Providers that can silently omit a live session (a missed probe, a remote
+// failure read as zero sessions, an unresolved binding) must not declare it.
+// A composite attests only when every backend does.
+type ListingAttestation interface {
+	ListRunningComplete() bool
+}
+
+// ListRunningAttested reports whether an error-free ListRunning result from sp
+// may be read as proof of absence. A provider that does not implement
+// [ListingAttestation] is unattested.
+func ListRunningAttested(sp Provider) bool {
+	a, ok := sp.(ListingAttestation)
+	return ok && a.ListRunningComplete()
+}
+
+// BackendListingProvider is an optional capability of composite providers
+// that exposes each backend's ListRunning result separately, so callers can
+// judge each backend's listing on its own (its error, its [PartialListError]
+// ServerAbsent flag, its [ListingAttestation]). [MergeBackendListings] over
+// the result is exactly what the composite's ListRunning returns.
+//
+// The listing does not recurse. A backend may itself be a composite (auto
+// over hybrid); its entry then carries that composite's merged result, from
+// one ListRunning call per leaf backend. A caller that wants the nested
+// breakdown must not also call the nested ListRunningByBackend for the same
+// observation: that lists the nested leaves a second time, at a different
+// instant, and the two answers need not agree. It walks [BackendsProvider]
+// instead and lists each leaf itself.
+type BackendListingProvider interface {
+	ListRunningByBackend(prefix string) []BackendListing
+}
+
+// BackendListing is one backend's ListRunning result inside a composite
+// provider. Provider is the backend itself, so callers can recurse into a
+// nested composite or ask the backend for its own optional capabilities.
+type BackendListing struct {
+	Label    string
+	Provider Provider
+	Names    []string
+	Err      error
+}
+
+// BackendsProvider is an optional capability of composite providers that
+// names their backends without listing them, in the order
+// [BackendListingProvider.ListRunningByBackend] lists them. It lets a caller
+// walk nested composites and list every leaf backend exactly once, which
+// ListRunningByBackend alone cannot: a nested composite's entry there is
+// already that composite's merged listing.
+type BackendsProvider interface {
+	Backends() []Backend
+}
+
+// Backend is one labeled backend of a composite provider.
+type Backend struct {
+	Label    string
+	Provider Provider
+}
+
+// ListBackends calls ListRunning once on each backend, in order. Composites
+// implement ListRunningByBackend with it, so the per-backend listing agrees
+// with [BackendsProvider.Backends] by construction.
+func ListBackends(backends []Backend, prefix string) []BackendListing {
+	listings := make([]BackendListing, 0, len(backends))
+	for _, b := range backends {
+		names, err := b.Provider.ListRunning(prefix)
+		listings = append(listings, BackendListing{Label: b.Label, Provider: b.Provider, Names: names, Err: err})
+	}
+	return listings
+}
+
+// MergeBackendListings merges per-backend listings exactly as
+// [MergeBackendListResults] merges the same labels, names and errors.
+func MergeBackendListings(listings []BackendListing) ([]string, error) {
+	results := make([]BackendListResult, 0, len(listings))
+	for _, l := range listings {
+		results = append(results, BackendListResult{Label: l.Label, Names: l.Names, Err: l.Err})
+	}
+	return MergeBackendListResults(results...)
+}
+
 // MergeBackendStopErrors standardizes multi-backend Stop semantics.
 // Any successful stop wins. If every backend reports the session as gone,
 // Stop remains idempotent and returns nil.

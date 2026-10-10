@@ -29,6 +29,10 @@ func TestDefaultPricingsCoverKnownClaudeModels(t *testing.T) {
 		"claude-opus-4-7",
 		"claude-opus-4-8",
 		"claude-haiku-4-5-20251001",
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-fable-5",
+		"claude-fable-5-1",
 	}
 	r := New(DefaultPricings())
 	for _, m := range known {
@@ -81,6 +85,34 @@ func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
 			cacheRead:     0.10,
 			cacheCreation: 1.25,
 		},
+		{
+			model:         "claude-opus-5",
+			prompt:        5.00,
+			completion:    25.00,
+			cacheRead:     0.50,
+			cacheCreation: 6.25,
+		},
+		{
+			model:         "claude-sonnet-5",
+			prompt:        2.00,
+			completion:    10.00,
+			cacheRead:     0.20,
+			cacheCreation: 2.50,
+		},
+		{
+			model:         "claude-fable-5",
+			prompt:        10.00,
+			completion:    50.00,
+			cacheRead:     1.00,
+			cacheCreation: 12.50,
+		},
+		{
+			model:         "claude-fable-5-1",
+			prompt:        10.00,
+			completion:    50.00,
+			cacheRead:     0.25,
+			cacheCreation: 12.50,
+		},
 	}
 	r := New(DefaultPricings())
 	for _, tc := range tests {
@@ -117,10 +149,15 @@ func TestDefaultPricingsCacheReadIsCheaperThanPrompt(t *testing.T) {
 			continue
 		}
 		ratio := p.Tier.PromptUSDPer1M / p.Tier.CacheReadUSDPer1M
-		// Anthropic's cache-read is published at ~10% of the prompt rate.
-		// Allow a generous band so future re-pricing doesn't fail this test.
-		if ratio < 5 || ratio > 20 {
-			t.Errorf("default %s/%s prompt/cache-read ratio = %.2f, expected ~10",
+		// Anthropic publishes cache-read at ~10% of the prompt rate for most
+		// models, but that is a convention rather than a rule: Claude Fable
+		// 5.1 prices cache reads at $0.25/MTok against a $10.00 prompt rate,
+		// a ratio of 40. The regression this guards against is conflating the
+		// prompt and cache-read tiers (ratio near 1), so the lower bound is
+		// the tight one; the upper bound only catches an implausibly cheap
+		// cache-read that likely means a misplaced decimal.
+		if ratio < 5 || ratio > 50 {
+			t.Errorf("default %s/%s prompt/cache-read ratio = %.2f, expected cache-read well below prompt",
 				p.Provider, p.Model, ratio)
 		}
 	}

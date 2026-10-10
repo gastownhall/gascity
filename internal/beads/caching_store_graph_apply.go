@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 )
 
 // GraphApplyHandle returns a cache-coherent graph-apply handle when the
@@ -29,11 +28,12 @@ type cachingGraphApplyStore struct {
 }
 
 func (s cachingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
+	startSeq := s.cache.currentMutationSeq()
 	result, err := s.applier.ApplyGraphPlan(ctx, plan)
 	if err != nil {
 		return result, err
 	}
-	s.cache.refreshGraphAppliedBeads(result)
+	s.cache.refreshGraphAppliedBeads(result, startSeq)
 	return result, nil
 }
 
@@ -50,29 +50,38 @@ type cachingStorageGraphApplyStore struct {
 }
 
 func (s cachingStorageGraphApplyStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
+	startSeq := s.cache.currentMutationSeq()
 	result, err := s.storageApplier.ApplyGraphPlanWithStorage(ctx, plan, storage)
 	if err != nil {
 		return result, err
 	}
-	s.cache.refreshGraphAppliedBeads(result)
+	s.cache.refreshGraphAppliedBeads(result, startSeq)
 	return result, nil
 }
 
-func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
+func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startSeq uint64) {
 	if result == nil || len(result.IDs) == 0 {
 		return
 	}
 	ids := uniqueGraphAppliedIDs(result)
 	refreshed := make([]txTouchedBead, 0, len(ids))
+	// edgesUnread names the rows read back without their edges: they notify
+	// but stay marked rather than install.
+	edgesUnread := make(map[string]struct{})
 	var refreshErr error
 	for _, id := range ids {
 		fresh, deps, ok := c.refreshBeadWithDepsAfterWrite(id, "refresh bead after graph apply")
 		item := txTouchedBead{id: id}
-		if ok {
+		switch {
+		case ok:
 			item.bead = fresh
 			item.bead.Dependencies = cloneDeps(deps)
 			item.found = true
-		} else {
+		case fresh.ID != "":
+			item.bead = fresh
+			item.found = true
+			edgesUnread[id] = struct{}{}
+		default:
 			item.err = ErrNotFound
 			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after graph apply %s: %w", id, ErrNotFound))
 		}
@@ -80,33 +89,44 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult) {
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.Lock()
+	raced := c.racedWritesLocked(ids, startSeq)
 	c.noteLocalMutationLocked(ids...)
 	if refreshErr != nil {
 		c.recordProblemLocked("graph apply refresh", refreshErr)
 	}
 	for _, item := range refreshed {
+		_, skip := raced[item.id]
 		if item.found {
 			fresh := cloneBead(item.bead)
-			c.absorbFreshLocked(item.id, item.bead, now, absorbOpts{
-				depsMode:   depsExplicit,
-				deps:       item.bead.Dependencies,
-				seqMode:    seqKeep,
-				clearDirty: true,
-			})
+			_, unread := edgesUnread[item.id]
+			switch {
+			case skip:
+			case unread:
+				c.markDirtyLocked(item.id)
+			default:
+				c.absorbFreshLocked(item.id, item.bead, now, absorbOpts{
+					depsMode:   depsExplicit,
+					deps:       item.bead.Dependencies,
+					seqMode:    seqKeep,
+					clearDirty: true,
+				})
+			}
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.created",
 				bead:      fresh,
 			})
 			continue
 		}
-		c.markDirtyLocked(item.id)
+		if !skip {
+			c.markDirtyLocked(item.id)
+		}
 	}
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	c.notifyChanges(notifications)
+	c.notifyChanges(ChangeLocal, notifications)
 }
 
 func uniqueGraphAppliedIDs(result *GraphApplyResult) []string {

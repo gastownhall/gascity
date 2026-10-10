@@ -1497,3 +1497,27 @@ esac
 		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
 	}
 }
+
+// A script that reports why a bead was closed (bd's close_reason field) has
+// that reason read onto the bead (gastownhall/gascity#2663).
+func TestGetReadsCloseReason(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  get)
+    echo '{"id":"'"$1"'","title":"done","status":"closed","type":"task","created_at":"2026-02-27T10:00:00Z","close_reason":"fixed in commit abc123; tests pass"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	b, err := s.Get("EX-9")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
+	}
+}

@@ -243,3 +243,80 @@ type emptyTestResolver struct{}
 
 func (emptyTestResolver) ListCities() []api.CityInfo   { return nil }
 func (emptyTestResolver) CityState(_ string) api.State { return nil }
+
+// TestOpenAPIBeadCloseReasonContract pins the served contract for why a bead
+// was closed (gastownhall/gascity#2663): the Bead schema carries an optional
+// close_reason string, and POST /bead/{id}/close takes an optional body whose
+// reason is a string.
+func TestOpenAPIBeadCloseReasonContract(t *testing.T) {
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", "", time.Time{})
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json returned %d: %s", rec.Code, rec.Body.String())
+	}
+	var spec struct {
+		Paths      map[string]map[string]json.RawMessage `json:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Type any `json:"type"`
+				} `json:"properties"`
+				Required []string `json:"required"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("parse spec: %v", err)
+	}
+
+	bead := spec.Components.Schemas["Bead"]
+	prop, ok := bead.Properties["close_reason"]
+	if !ok {
+		t.Fatal("Bead schema has no close_reason property")
+	}
+	if prop.Type != "string" {
+		t.Fatalf("Bead.close_reason type = %v, want string", prop.Type)
+	}
+	for _, name := range bead.Required {
+		if name == "close_reason" {
+			t.Fatal("Bead.close_reason is required, want optional")
+		}
+	}
+
+	var op struct {
+		RequestBody *struct {
+			Required bool `json:"required"`
+			Content  map[string]struct {
+				Schema struct {
+					Ref string `json:"$ref"`
+				} `json:"schema"`
+			} `json:"content"`
+		} `json:"requestBody"`
+	}
+	raw, ok := spec.Paths["/v0/city/{cityName}/bead/{id}/close"]["post"]
+	if !ok {
+		t.Fatal("spec has no POST /v0/city/{cityName}/bead/{id}/close")
+	}
+	if err := json.Unmarshal(raw, &op); err != nil {
+		t.Fatalf("parse close operation: %v", err)
+	}
+	if op.RequestBody == nil {
+		t.Fatal("POST /bead/{id}/close has no request body")
+	}
+	if op.RequestBody.Required {
+		t.Fatal("POST /bead/{id}/close request body is required, want optional")
+	}
+	ref := op.RequestBody.Content["application/json"].Schema.Ref
+	const prefix = "#/components/schemas/"
+	if len(ref) <= len(prefix) {
+		t.Fatalf("close request body schema ref = %q", ref)
+	}
+	body, ok := spec.Components.Schemas[ref[len(prefix):]]
+	if !ok {
+		t.Fatalf("close request body schema %q not found", ref)
+	}
+	if reason, ok := body.Properties["reason"]; !ok || reason.Type != "string" {
+		t.Fatalf("close request body properties = %+v, want a string reason", body.Properties)
+	}
+}

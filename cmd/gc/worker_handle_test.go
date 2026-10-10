@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1311,8 +1312,9 @@ session_id_flag = "--session-id"
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("handle.Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("handle.Attach: %v", err)
 	}
 
 	start := sp.LastStartConfig(info.SessionName)
@@ -2746,5 +2748,68 @@ command = "/bin/echo"
 	}
 	if !strings.Contains(string(found.Payload), info.SessionName) {
 		t.Fatalf("%q payload = %s, want it to name session %q", events.WorkerOperation, string(found.Payload), info.SessionName)
+	}
+}
+
+// An attachment probe that cannot tell answers attached with an unavailable
+// error, so the awake input and the detached-at clock defer instead of reading
+// "detached". A probe error that does not itself wrap the sentinel is still
+// "unknown".
+func TestWorkerSessionTargetAttachedReportsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		probeErr error
+	}{
+		{name: "unavailable", probeErr: fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)},
+		{name: "untyped", probeErr: fmt.Errorf("attach probe: unparsable client count")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start(worker): %v", err)
+			}
+			sp.AttachedErrors["worker"] = tc.probeErr
+
+			attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, "worker")
+			if !attached || !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, tc.probeErr) {
+				t.Fatalf("workerSessionTargetAttachedWithConfig = (%v, %v), want (true, unavailable wrapping %v)", attached, err, tc.probeErr)
+			}
+		})
+	}
+}
+
+// attachmentHolds owns the classification every destructive gate shares: only
+// runtime.ErrSessionNotFound reads as "not attached". An unavailable probe
+// whose text happens to match runtime.IsSessionGone still holds.
+func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		attached  bool
+		probeErr  error
+		wantHolds bool
+		wantErr   bool
+	}{
+		{name: "attached", attached: true, wantHolds: true},
+		{name: "confirmed detached"},
+		{name: "session not found", probeErr: fmt.Errorf("probe: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable", probeErr: fmt.Errorf("probe timed out: %w", runtime.ErrRuntimeUnavailable), wantHolds: true, wantErr: true},
+		{name: "unavailable text that IsSessionGone matches", probeErr: fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable), wantHolds: true, wantErr: true},
+		{name: "untyped", probeErr: errors.New("probe: unparsable client count"), wantHolds: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("worker", tc.attached)
+			if tc.probeErr != nil {
+				sp.AttachedErrors["worker"] = tc.probeErr
+			}
+
+			holds, err := attachmentHolds(sp, "worker")
+			if holds != tc.wantHolds || (err != nil) != tc.wantErr {
+				t.Fatalf("attachmentHolds = (%v, %v), want holds=%v err=%v", holds, err, tc.wantHolds, tc.wantErr)
+			}
+			if err != nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("attachmentHolds error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+		})
 	}
 }

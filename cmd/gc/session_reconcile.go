@@ -59,7 +59,7 @@ const (
 // (Info.HeldUntil, Info.QuarantinedUntil, Info.WaitHold — untrimmed, matching the
 // raw session.Metadata reads, Info.SessionNameMetadata, Info.ID) and route every
 // classifier through its Info twin, while keeping the runtime probes
-// (sessionAttachedForWakeReason, pendingInteractionReady) raw (§7 live edge).
+// (sessionAttachedForWakeReason, pendingInteractionProbe) raw (§7 live edge).
 func wakeReasonsInfo(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -133,7 +133,7 @@ func evaluateWakeReasonsInfo(
 		reasons = append(reasons, WakeAttached)
 	}
 
-	if pendingInteractionReady(sp, name) {
+	if answer, _ := pendingInteractionProbe(sp, name); answer == pendingInteractionYes {
 		reasons = append(reasons, WakePending)
 	}
 
@@ -207,6 +207,17 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 // derives as strings.TrimSpace(pending_create_claim) == "true" — identical to the
 // raw read), and keeps the literal "creating" state compare the original uses.
 func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	return sessionStartRequested(i, staleCreatingStateInfo(i, clk))
+}
+
+// sessionStartRequestedAt is sessionStartRequestedInfo at now; past the
+// creating compare, staleCreatingStateInfo is pendingCreateAttemptStale.
+func sessionStartRequestedAt(i sessionpkg.Info, now time.Time) bool {
+	return sessionStartRequested(i, pendingCreateAttemptStaleAt(i, now))
+}
+
+// sessionStartRequested composes the stale-creating answer.
+func sessionStartRequested(i sessionpkg.Info, staleCreating bool) bool {
 	if strings.TrimSpace(i.MetadataState) == string(sessionpkg.StateStartPending) {
 		return true
 	}
@@ -216,7 +227,7 @@ func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if strings.TrimSpace(i.MetadataState) != "creating" {
 		return false
 	}
-	return !staleCreatingStateInfo(i, clk)
+	return !staleCreating
 }
 
 // staleCreatingStateTimeout bounds how long a state=creating bead may sit
@@ -1037,7 +1048,21 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
-// their current projection authoritative for the rest of the pass.
+// their current projection authoritative for the rest of the pass. A nil patch
+// with a nil error means nothing was written: the heal was already converged,
+// or the row changed under it (below).
+//
+// The heal is decided from info, the reconciler's tick snapshot, which can be
+// older than the durable row. Writing it unconditionally was a lost update: a
+// `gc session suspend` (state=suspended, sleep_intent=user-hold, held_until)
+// that landed after the snapshot was read got its state reverted by a heal that
+// never saw it, and a close that landed meanwhile got live-looking state stamped
+// onto the closed row. The write therefore goes through
+// ApplyPatchIfLifecycleUnchanged: it re-reads the row, refuses when its
+// lifecycle facts no longer match the snapshot, and fences the write on the
+// re-read revision where the store has conditional writes. A refused heal is
+// skipped rather than retried. The heal is level-triggered, so the next tick
+// recomputes it from a snapshot that includes the concurrent write.
 func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
@@ -1049,14 +1074,13 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, 
 	if len(batch) == 0 {
 		return nil, nil
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+	applied, err := sessFront.ApplyPatchIfLifecycleUnchanged(info, batch)
+	if err != nil {
 		return nil, err
 	}
-	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
-	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
-	// inspection never records a write that never happened.
-	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
+	if !applied {
+		return nil, nil
+	}
 	return batch, nil
 }
 
@@ -1115,7 +1139,11 @@ func pendingCreateAttemptStaleInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if clk == nil {
 		return false
 	}
-	now := clk.Now()
+	return pendingCreateAttemptStaleAt(i, clk.Now())
+}
+
+// pendingCreateAttemptStaleAt is pendingCreateAttemptStaleInfo at now.
+func pendingCreateAttemptStaleAt(i sessionpkg.Info, now time.Time) bool {
 	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}

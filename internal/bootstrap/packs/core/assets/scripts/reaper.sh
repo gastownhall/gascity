@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# reaper — close stale wisps with closed parents/roots, purge old closed data, auto-close stale and TTL-expired issues.
+# reaper — close stale wisps with closed parents/roots, purge old closed wisps,
+# auto-close stale and TTL-expired issues, and prune closed session beads.
 #
-# Core exec order. All operations are deterministic: SQL queries with age
-# thresholds, gc bd close/update commands, count comparisons against alert
-# thresholds.
+# Core exec order. Every bead scope (the city and each rig) is visited through
+# `gc bd --city <city> [--rig <rig>]`, and bd picks the transport for it, so
+# this script is the same for proxied, direct-server and mixed cities.
+# Selections that no gc bd verb can express run as read-only `gc bd sql` queries;
+# every mutation is a gc bd verb (close, update, purge, prune, delete) that owns
+# its own commit.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -15,9 +19,17 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/dolt-target.sh"
 CITY_ABS="$(cd "$CITY" 2>/dev/null && pwd -P || printf '%s\n' "$CITY")"
 CITY_BEADS_DIR="$CITY_ABS/.beads"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scope_bd.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/order_outcome.sh"
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "reaper: jq is required but not found in PATH" >&2
+    exit 1
+fi
 
 resolve_escalate_script() {
     local candidate
@@ -58,116 +70,60 @@ SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
-# Closing follows only ownership edges. `blocks` is sequencing, not ownership;
-# purge protection may include it because that only prevents deletion.
+# Ids handed to one gc bd verb invocation (close/update/delete).
+VERB_BATCH="${GC_REAPER_VERB_BATCH:-200}"
+case "$VERB_BATCH" in ''|*[!0-9]*|0) VERB_BATCH=200 ;; esac
+# Closing follows only ownership edges. `blocks` is sequencing, not ownership.
 WISP_CLOSE_EDGE_PREDICATE="(d.type = 'parent-child' OR (d.type = 'tracks' AND JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.root_bead_id\"')) = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)))"
-WISP_PURGE_PROTECT_EDGE_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_STATUSES="'open', 'hooked', 'in_progress'"
 WORKFLOW_ROOT_LIVE_STATUSES="'open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing'"
 WORKFLOW_ROOT_DESCENDANT_DEP_TYPES="'parent-child', 'tracks', 'blocks'"
 WORKFLOW_ROOT_CLOSE_REASON="stale inactive workflow root auto-closed by reaper"
+STALE_WISP_CLOSE_REASON="stale wisp whose owning parent or root is closed, auto-closed by reaper"
+# Step 3 purges the whole wisps plane (including --no-history rows, which is
+# where gc keeps order-tracking beads) and relies on gc bd purge to keep a closed
+# wisp that an open, hooked or in-progress wisp still depends on through
+# parent-child, tracks or blocks.
+PURGE_PLANE_FLAG="${GC_REAPER_PURGE_PLANE_FLAG:---wisps-plane}"
+# Closed wisps deleted per bd purge call, and the wall-clock budget (seconds,
+# shared by every scope) the purge step may spend per run. Both keep a large
+# backlog from outrunning the order timeout.
+PURGE_BATCH="${GC_REAPER_PURGE_BATCH:-500}"
+case "$PURGE_BATCH" in ''|*[!0-9]*|0) PURGE_BATCH=500 ;; esac
+PURGE_BUDGET_SECS="${GC_REAPER_PURGE_BUDGET_SECS:-300}"
+case "$PURGE_BUDGET_SECS" in ''|*[!0-9]*) PURGE_BUDGET_SECS=300 ;; esac
+# The purge budget starts with the first purge call (Step 3), not with the run.
+PURGE_DEADLINE=""
+# Wall-clock budget (seconds) for the whole run, below the order's 900s
+# timeout. Once it is spent the run stops starting new work, declares a
+# partial outcome, and the next run picks up where this one stopped (every
+# selection is recomputed from the store). A killed run would instead record
+# order.failed with no outcome and starve the scopes after it.
+RUN_BUDGET_SECS="${GC_REAPER_RUN_BUDGET_SECS:-780}"
+case "$RUN_BUDGET_SECS" in ''|*[!0-9]*) RUN_BUDGET_SECS=780 ;; esac
+RUN_DEADLINE=$(( $(date +%s) + RUN_BUDGET_SECS ))
+# scope_bd_each_chunk (scope_bd.sh) stops issuing verb chunks at this deadline.
+# shellcheck disable=SC2034
+SCOPE_DEADLINE="$RUN_DEADLINE"
+RUN_BUDGET_HIT=0
 
-# Convert Go durations to SQL INTERVAL hours for Dolt.
+# Convert Go-style hour durations to SQL INTERVAL hours.
 duration_to_hours() {
     local dur="$1"
-    # Strip trailing 'h' and return as integer.
     echo "${dur%h}"
 }
 
 MAX_AGE_H=$(duration_to_hours "$MAX_AGE")
-PURGE_AGE_H=$(duration_to_hours "$PURGE_AGE")
 STALE_AGE_H=$(duration_to_hours "$STALE_ISSUE_AGE")
 
-METADATA_DB_RESULT=""
-
-metadata_dolt_database() {
-    local metadata="$1"
-    local db=""
-    METADATA_DB_RESULT=""
-
-    if [ -f "$metadata" ]; then
-        if command -v jq >/dev/null 2>&1; then
-            if ! db=$(jq -er '.dolt_database // empty | strings' "$metadata" 2>/dev/null); then
-                return 0
-            fi
-        elif command -v python3 >/dev/null 2>&1; then
-            if ! db=$(python3 - "$metadata" 2>/dev/null <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as f:
-    value = json.load(f).get("dolt_database", "")
-if isinstance(value, str) and value:
-    print(value)
-PY
-            ); then
-                return 0
-            fi
-        elif command -v grep >/dev/null 2>&1 && command -v sed >/dev/null 2>&1 && command -v head >/dev/null 2>&1; then
-            if grep -q '}' "$metadata" 2>/dev/null; then
-                db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$metadata" 2>/dev/null \
-                    | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' \
-                    | head -1 || true)
-            fi
-        else
-            return 0
-        fi
-    fi
-
-    if [ -n "$db" ]; then
-        METADATA_DB_RESULT="$db"
-    fi
-}
-
-CITY_DB_METADATA_RESULT=""
-
-city_database_name() {
-    metadata_dolt_database "$CITY_BEADS_DIR/metadata.json"
-    CITY_DB_METADATA_RESULT="$METADATA_DB_RESULT"
-}
-
-is_user_database() {
-    case "$1" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*)
-            return 1
-            ;;
-        beads_t*)
-            local suffix="${1#beads_t}"
-            if [[ "$suffix" =~ ^[0-9a-f]{8,}$ ]]; then
-                return 1
-            fi
-            return 0
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-}
-
-# Discover databases from Dolt server. Exclude Dolt/MySQL system schemas,
-# Gas City's internal health-probe database, and test-fixture scratch
-# databases (benchdb, testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*,
-# beads_vr*, beads_test_bench_*, doctest_*, doctortest_* — matching the Go
-# cleanup planner contract); the remainder are bead stores.
-DATABASES=$(
-    while IFS= read -r db; do
-        if is_user_database "$db"; then
-            printf '%s\n' "$db"
-        fi
-    done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
-)
-HAD_DATABASES=1
-if [ -z "$DATABASES" ]; then
-    # The Dolt-backed cleanup loop has no work, but the session-bead
-    # prune below still operates through bd's configured task store.
-    HAD_DATABASES=0
-fi
-
+TOTAL_SCOPES=0
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
 TOTAL_WOULD_CLOSE_WISPS=0
+TOTAL_HELD_WISPS=0
 TOTAL_WOULD_EXPIRE=0
 TOTAL_PURGED=0
+TOTAL_WOULD_PURGE=0
 TOTAL_MAIL_WISPS=0
 TOTAL_WORKFLOW_ROOTS_CLOSED=0
 TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=0
@@ -178,8 +134,21 @@ TOTAL_STALE_ISSUES_SKIPPED=0
 TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
-SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
+CITY_DB=""
+
+# run_budget_exhausted reports whether the run budget is spent, declaring the
+# partial outcome the first time.
+run_budget_exhausted() {
+    if [ "$RUN_BUDGET_HIT" -eq 0 ] && [ "$(date +%s)" -lt "$RUN_DEADLINE" ]; then
+        return 1
+    fi
+    if [ "$RUN_BUDGET_HIT" -eq 0 ]; then
+        RUN_BUDGET_HIT=1
+        order_outcome_scope_skipped "${SCOPE_LABEL:-city}" "run budget exhausted; remaining work carries to the next run"
+    fi
+    return 0
+}
 
 sanitize_output() {
     local flattened
@@ -192,302 +161,45 @@ sanitize_output() {
 }
 
 record_anomaly() {
-    local db="$1"
+    local scope="$1"
     shift
-    ANOMALIES="${ANOMALIES}$db: $*
+    ANOMALIES="${ANOMALIES}$scope: $*
 "
 }
 
-CITY_DB_ANOMALY_RECORDED=0
-
-valid_database_identifier() {
-    local name="$1"
-
-    case "$name" in
-        ''|-*|*[!A-Za-z0-9_-]*)
-            return 1
-            ;;
-    esac
-
-    return 0
+# scope_anomaly records an anomaly keyed by the current scope's database (its
+# label when the database is not known yet).
+scope_anomaly() {
+    record_anomaly "${SCOPE_DB:-$SCOPE_LABEL}" "$@"
 }
 
-database_list_contains() {
-    local needle="$1"
-    local db
-
-    while IFS= read -r db; do
-        if [ "$db" = "$needle" ]; then
-            return 0
-        fi
-    done <<EOF
-$DATABASES
-EOF
-
-    return 1
-}
-
-sql_string_literal() {
-    local value="$1"
-    local escaped
-
-    escaped=$(printf '%s' "$value" | sed "s/'/''/g")
-    printf "'%s'" "$escaped"
-}
-
-toml_rig_bindings() {
-    local file="$1"
-
-    [ -f "$file" ] || return 0
-    awk '
-    function trim(s) {
-        sub(/^[ \t\r\n]+/, "", s)
-        sub(/[ \t\r\n]+$/, "", s)
-        return s
-    }
-    function toml_value(line, v) {
-        sub(/^[^=]*=/, "", line)
-        v = trim(line)
-        if (substr(v, 1, 1) == "\"") {
-            sub(/^"/, "", v)
-            sub(/"[ \t]*(#.*)?$/, "", v)
-            gsub(/\\"/, "\"", v)
-            return v
-        }
-        sub(/[ \t]*#.*/, "", v)
-        return trim(v)
-    }
-    function emit() {
-        if (name != "" && rig_path != "") {
-            print name "|" rig_path
-        }
-    }
-    /^[ \t]*\[\[[ \t]*rigs?[ \t]*\]\][ \t]*$/ {
-        emit()
-        in_rig = 1
-        name = ""
-        rig_path = ""
-        next
-    }
-    /^[ \t]*\[/ {
-        emit()
-        in_rig = 0
-        name = ""
-        rig_path = ""
-        next
-    }
-    in_rig && /^[ \t]*name[ \t]*=/ {
-        name = toml_value($0)
-        next
-    }
-    in_rig && /^[ \t]*path[ \t]*=/ {
-        rig_path = toml_value($0)
-        next
-    }
-    END {
-        emit()
-    }
-    ' "$file"
-}
-
-resolve_scope_path() {
-    local scope_path="$1"
-
-    case "$scope_path" in
-        /*)
-            printf '%s\n' "$scope_path"
-            ;;
-        *)
-            printf '%s\n' "$CITY_ABS/$scope_path"
-            ;;
-    esac
-}
-
-RIG_STORE_REFS_BY_DB=""
-
-append_rig_store_ref_for_db() {
-    local db="$1"
-    local store_ref="$2"
-    local entry
-
-    [ -n "$db" ] && [ -n "$store_ref" ] || return 0
-    valid_database_identifier "$db" || return 0
-    database_list_contains "$db" || return 0
-
-    entry="$db|$store_ref"
-    case "
-$RIG_STORE_REFS_BY_DB
-" in
-        *"
-$entry
-"*)
-            return 0
-            ;;
-    esac
-    RIG_STORE_REFS_BY_DB="${RIG_STORE_REFS_BY_DB}${entry}
-"
-}
-
-add_rig_store_ref_from_scope() {
-    local rig_name="$1"
-    local rig_path="$2"
-    local scope_abs
-    local db
-
-    [ -n "$rig_name" ] && [ -n "$rig_path" ] || return 0
-    scope_abs=$(resolve_scope_path "$rig_path")
-    metadata_dolt_database "$scope_abs/.beads/metadata.json"
-    db="$METADATA_DB_RESULT"
-    append_rig_store_ref_for_db "$db" "rig:$rig_name"
-}
-
-load_rig_store_refs_from_file() {
-    local file="$1"
-    local rig_name
-    local rig_path
-
-    while IFS='|' read -r rig_name rig_path; do
-        add_rig_store_ref_from_scope "$rig_name" "$rig_path"
-    done < <(toml_rig_bindings "$file")
-}
-
-load_rig_store_refs_from_env() {
-    local raw="${GC_REAPER_RIG_DATABASES:-}"
-    local item
-    local rig_name
-    local db
-
-    [ -n "$raw" ] || return 0
-    for item in ${raw//,/ }; do
-        case "$item" in
-            *=*) ;;
-            *) continue ;;
-        esac
-        rig_name="${item%%=*}"
-        db="${item#*=}"
-        rig_name="${rig_name#rig:}"
-        append_rig_store_ref_for_db "$db" "rig:$rig_name"
-    done
-}
-
-discover_rig_store_refs() {
-    load_rig_store_refs_from_file "$CITY_ABS/.gc/site.toml"
-    load_rig_store_refs_from_file "$CITY_ABS/city.toml"
-    load_rig_store_refs_from_env
-}
-
-rig_store_ref_sql_list() {
-    local db="$1"
-    local entry
-    local entry_db
-    local store_ref
-    local refs=""
-
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        entry_db="${entry%%|*}"
-        store_ref="${entry#*|}"
-        [ "$entry_db" = "$db" ] || continue
-        if [ -z "$refs" ]; then
-            refs="$(sql_string_literal "$store_ref")"
-        else
-            refs="$refs, $(sql_string_literal "$store_ref")"
-        fi
-    done <<EOF
-$RIG_STORE_REFS_BY_DB
-EOF
-
-    printf '%s\n' "$refs"
-}
-
-# rig_name_for_db looks up the rig name bound to a non-city database, using
-# the same RIG_STORE_REFS_BY_DB map discover_rig_store_refs populates from
-# city.toml/site.toml [[rigs]] bindings. Prints the rig name and returns 0 on
-# a match; returns 1 with no output when $db has no rig binding (e.g. it is
-# neither the city store nor a discovered rig store).
-rig_name_for_db() {
-    local db="$1"
-    local entry
-    local entry_db
-    local store_ref
-
-    while IFS= read -r entry; do
-        [ -n "$entry" ] || continue
-        entry_db="${entry%%|*}"
-        store_ref="${entry#*|}"
-        [ "$entry_db" = "$db" ] || continue
-        case "$store_ref" in
-            rig:*)
-                printf '%s\n' "${store_ref#rig:}"
-                return 0
-                ;;
-        esac
-    done <<EOF
-$RIG_STORE_REFS_BY_DB
-EOF
-
-    return 1
-}
-
+# workflow_root_store_ref_local_condition keeps workflow roots whose
+# gc.root_store_ref names this scope (or is unset). Roots stamped for another
+# store are skipped: their subtrees need cross-store traversal first.
 workflow_root_store_ref_local_condition() {
     local db="$1"
     local alias="$2"
-    local rig_refs
 
-    rig_refs="$(rig_store_ref_sql_list "$db")"
     cat <<SQL
                 COALESCE(JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')), '') = ''
                 OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) = '$db'
-                OR (
-                    '$CITY_DB' != ''
-                    AND '$db' = '$CITY_DB'
-                    AND JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
-                )
 SQL
-    if [ -n "$rig_refs" ]; then
+    if [ "$SCOPE_KIND" = "city" ]; then
         cat <<SQL
-                OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) IN ($rig_refs)
+                OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) LIKE 'city:%'
+SQL
+    fi
+    if [ -n "$SCOPE_RIG_REFS" ]; then
+        cat <<SQL
+                OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.root_store_ref"')) IN ($SCOPE_RIG_REFS)
 SQL
     fi
 }
 
-CITY_DB=""
-CITY_DB_SOURCE="$CITY_BEADS_DIR/metadata.json"
-city_database_name
-CITY_METADATA_DB="$CITY_DB_METADATA_RESULT"
-
-if [ -n "${GC_REAPER_CITY_DATABASE:-}" ]; then
-    CITY_DB_SOURCE="GC_REAPER_CITY_DATABASE"
-    if [ -z "$CITY_METADATA_DB" ]; then
-        record_anomaly "city" "city database $GC_REAPER_CITY_DATABASE from GC_REAPER_CITY_DATABASE could not be verified against $CITY_BEADS_DIR/metadata.json; stale issue auto-close disabled"
-        CITY_DB_ANOMALY_RECORDED=1
-    elif [ "$GC_REAPER_CITY_DATABASE" != "$CITY_METADATA_DB" ]; then
-        record_anomaly "city" "city database $GC_REAPER_CITY_DATABASE from GC_REAPER_CITY_DATABASE does not match city metadata database $CITY_METADATA_DB; stale issue auto-close disabled"
-        CITY_DB_ANOMALY_RECORDED=1
-    else
-        CITY_DB="$GC_REAPER_CITY_DATABASE"
-    fi
-else
-    CITY_DB="$CITY_METADATA_DB"
-fi
-
-if [ -n "$CITY_DB" ] && ! valid_database_identifier "$CITY_DB"; then
-    record_anomaly "city" "city database $CITY_DB from $CITY_DB_SOURCE is not a safe Dolt identifier; stale issue auto-close disabled"
-    CITY_DB=""
-    CITY_DB_ANOMALY_RECORDED=1
-elif [ -n "$CITY_DB" ] && ! database_list_contains "$CITY_DB"; then
-    record_anomaly "city" "city database $CITY_DB from $CITY_DB_SOURCE was not found in discovered databases; stale issue auto-close disabled"
-    CITY_DB=""
-    CITY_DB_ANOMALY_RECORDED=1
-fi
-
-discover_rig_store_refs
-
 SQL_COUNT_RESULT=0
 get_sql_count() {
-    local db="$1"
-    local label="$2"
-    local query="$3"
+    local label="$1"
+    local query="$2"
     local output
     local stderr_file
     local stderr_output
@@ -495,21 +207,21 @@ get_sql_count() {
 
     SQL_COUNT_RESULT=0
     if ! stderr_file=$(mktemp); then
-        record_anomaly "$db" "$label count failed for $db: could not create stderr capture file"
-        return 0
+        scope_anomaly "$label count failed: could not create stderr capture file"
+        return 1
     fi
-    if ! output=$(dolt_sql -r csv -q "$query" 2>"$stderr_file"); then
+    if ! output=$(scope_sql_read csv "$query" 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label count failed for $db: $(sanitize_output "$stderr_output $output")"
-        return 0
+        scope_anomaly "$label count failed for $SCOPE_DB: $(sanitize_output "$stderr_output $output")"
+        return 1
     fi
     rm -f "$stderr_file"
 
     count=$(printf '%s\n' "$output" | tail -1 | tr -d '\r')
     if [ -z "$count" ] || ! [[ "$count" =~ ^[0-9]+$ ]]; then
-        record_anomaly "$db" "$label count returned non-numeric value for $db: $(sanitize_output "$output")"
-        return 0
+        scope_anomaly "$label count returned non-numeric value for $SCOPE_DB: $(sanitize_output "$output")"
+        return 1
     fi
 
     SQL_COUNT_RESULT="$count"
@@ -517,55 +229,92 @@ get_sql_count() {
 
 SQL_ROWS_RESULT=""
 get_sql_rows() {
-    local db="$1"
-    local label="$2"
-    local query="$3"
+    local label="$1"
+    local query="$2"
     local output
     local stderr_file
     local stderr_output
 
     SQL_ROWS_RESULT=""
     if ! stderr_file=$(mktemp); then
-        record_anomaly "$db" "$label query failed for $db: could not create stderr capture file"
-        return 0
+        scope_anomaly "$label query failed: could not create stderr capture file"
+        return 1
     fi
-    if ! output=$(dolt_sql -r csv -q "$query" 2>"$stderr_file"); then
+    if ! output=$(scope_sql_read csv "$query" 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label query failed for $db: $(sanitize_output "$stderr_output $output")"
-        return 0
+        scope_anomaly "$label query failed for $SCOPE_DB: $(sanitize_output "$stderr_output $output")"
+        return 1
     fi
     rm -f "$stderr_file"
 
-    SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r')
+    SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r' | sed '/^[[:space:]]*$/d')
 }
 
-has_dependency_target_column() {
-    local db="$1"
-    local table="$2"
-    local output
-    local fields
-
-    if ! output=$(dolt_sql -r csv -q "SHOW COLUMNS FROM \`$db\`.$table" 2>/dev/null); then
-        return 1
+count_lines() {
+    if [ -z "$1" ]; then
+        printf '0\n'
+        return
     fi
+    printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+}
 
-    fields=$(printf '%s\n' "$output" | tail -n +2 | cut -d, -f1 | tr -d '\r')
-    if [ -z "$fields" ]; then
-        return 0
+# close_ids <label> <ids> <reason> [force] closes ids in the current scope
+# through `gc bd close`, in chunks. Pass a non-empty fourth argument for --force:
+# bd's close-authority guard (gastownhall/beads#3734) refuses a cross-actor
+# close without it, so rows another actor still holds need it, while rows
+# that were unassigned at selection stay bare so the guard still rejects a
+# close that would clobber a concurrent re-claim. CLOSE_IDS_OK holds the
+# number of ids in chunks bd accepted.
+CLOSE_IDS_OK=0
+CLOSE_IDS_FAILED=""
+close_ids() {
+    local label="$1"
+    local ids="$2"
+    local reason="$3"
+    local force="${4:-}"
+    local ids_file
+
+    CLOSE_IDS_OK=0
+    SCOPE_CHUNK_FAILED_IDS=""
+    [ -n "$ids" ] || return 0
+    ids_file=$(mktemp)
+    printf '%s\n' "$ids" >"$ids_file"
+    if [ -n "$force" ]; then
+        scope_bd_each_chunk "$VERB_BATCH" "$ids_file" close --force --reason "$reason"
+    else
+        scope_bd_each_chunk "$VERB_BATCH" "$ids_file" close --reason "$reason"
     fi
+    rm -f "$ids_file"
+    CLOSE_IDS_OK=$SCOPE_CHUNK_OK
+    if [ "$SCOPE_CHUNK_DEFERRED" -gt 0 ]; then
+        run_budget_exhausted || true
+    fi
+    if [ "$SCOPE_CHUNK_FAILED" -gt 0 ]; then
+        scope_anomaly "$label: gc bd close failed for $SCOPE_CHUNK_FAILED bead(s) in $SCOPE_DB ($(sanitize_output "$SCOPE_CHUNK_FAILED_IDS")): $(sanitize_output "$SCOPE_CHUNK_ERRORS")"
+    fi
+}
 
-    # Check membership with a here-string, never `printf ... | grep -q`. `grep -q`
-    # closes its stdin the instant it matches, so the upstream `printf` races into
-    # a SIGPIPE; under `set -o pipefail` that SIGPIPE becomes the pipeline's exit
-    # status and `|| return 1` fires spuriously, making the reaper skip the whole
-    # database's workflow-root cleanup. A here-string is a simple command
-    # (pipefail does not apply) with no upstream writer to kill.
-    local field
-    for field in issue_id depends_on_issue_id depends_on_wisp_id depends_on_external; do
-        grep -qx "$field" <<<"$fields" || return 1
-    done
-    return 0
+# close_ids_by_mode closes "<id>,<bare|force>" rows: bare rows without
+# --force, force rows with it (see close_ids).
+close_ids_by_mode() {
+    local label="$1"
+    local rows="$2"
+    local reason="$3"
+    local bare_ids
+    local force_ids
+    local total=0
+
+    local failed=""
+
+    bare_ids=$(printf '%s\n' "$rows" | awk -F, '$1 != "" && $2 != "force" { print $1 }')
+    force_ids=$(printf '%s\n' "$rows" | awk -F, '$1 != "" && $2 == "force" { print $1 }')
+    close_ids "$label" "$bare_ids" "$reason"
+    total=$CLOSE_IDS_OK
+    failed="$SCOPE_CHUNK_FAILED_IDS"
+    close_ids "$label" "$force_ids" "$reason" force
+    CLOSE_IDS_OK=$((total + CLOSE_IDS_OK))
+    CLOSE_IDS_FAILED="${failed}${failed:+ }${SCOPE_CHUNK_FAILED_IDS}"
 }
 
 workflow_root_candidates_cte() {
@@ -581,8 +330,8 @@ workflow_root_candidates_cte() {
             WHERE $alias.status IN ($WORKFLOW_ROOT_CLOSE_STATUSES)
             AND $alias.issue_type NOT IN ($issue_type_exclusions)
             AND COALESCE($alias.assignee, '') = ''
-            AND $alias.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
-            AND COALESCE($alias.updated_at, $alias.created_at) < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            AND $alias.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
+            AND COALESCE($alias.updated_at, $alias.created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
             AND (
                 JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.kind"')) = 'workflow'
                 OR JSON_UNQUOTE(JSON_EXTRACT($alias.metadata, '$."gc.formula_contract"')) = 'graph.v2'
@@ -655,7 +404,7 @@ $(workflow_root_store_ref_local_condition "$db" "$alias")
                 descendant_wisp.created_at,
                 descendant_issue.updated_at,
                 descendant_issue.created_at
-            ) >= DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            ) >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
         )
 SQL
 }
@@ -716,316 +465,284 @@ $(workflow_root_closeable_select "$candidate_cte")
 SQL
 }
 
-workflow_wisp_root_update_query() {
+# stale_wisp_subtree_query selects, for Step 1, every stale open wisp whose
+# ownership edge points to a closed parent/root (the subtree roots) and every
+# non-closed descendant reachable from them through ownership edges (wisps)
+# or parent-child edges (durable issues). One row per (node, parent) edge:
+# id, owner_id, depth, ok|keep, bare|force. "ok" marks a wisp the reaper may
+# close (open/hooked/in_progress and older than MAX_AGE); anything else is
+# "keep".
+stale_wisp_subtree_query() {
     local db="$1"
 
     cat <<SQL
-$(workflow_root_candidates_cte "$db" "workflow_wisp_root_candidates" "wisps" "w" "'message'")
-        ,
-        closeable_workflow_wisp_roots AS (
-$(workflow_root_closeable_select "workflow_wisp_root_candidates")
-        )
-        UPDATE \`$db\`.wisps SET status='closed', closed_at=NOW(), metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()), '$."gc.outcome"', 'skipped', '$."close_reason"', '$WORKFLOW_ROOT_CLOSE_REASON')
-        WHERE id IN (SELECT id FROM closeable_workflow_wisp_roots)
-SQL
-}
-
-SQL_CHANGE_ROWS_RESULT=0
-close_city_issue() {
-    local issue_id="$1"
-    local reason="$2"
-    # Pass a non-empty third arg to add --force. Required when reaping a bead
-    # still assigned to another actor (e.g. an in_progress bead owned by a live
-    # agent session) while the reaper runs as order:reaper: bd's close-authority
-    # guard (gastownhall/beads#3734) refuses a cross-actor close without --force.
-    # Reaps of unassigned beads must stay bare so the guard keeps protecting
-    # against overriding a concurrent re-claim.
-    local force="${3:-}"
-
-    if [ ! -d "$CITY_BEADS_DIR" ]; then
-        printf 'city bead store %s is unavailable' "$CITY_BEADS_DIR"
-        return 1
-    fi
-
-    (
-        cd "$CITY_ABS"
-        if [ -n "$force" ]; then
-            gc bd --city "$CITY_ABS" close "$issue_id" --force --reason "$reason"
-        else
-            gc bd --city "$CITY_ABS" close "$issue_id" --reason "$reason"
-        fi
-    )
-}
-
-# close_rig_issue mirrors close_city_issue but closes an issue in a
-# rig-scoped bead store instead of the city store, via the --city+--rig flag
-# combination (see cmd/gc/cmd_bd.go resolveBdScopeTarget/extractBdScopeFlags).
-# Needed because sling-delivered nudge shadows are enqueued into the sling
-# target's rig store (cmd/gc/cmd_sling.go deliverSlingNudge), not the city
-# store, so the reaper's TTL sweep (Step 4) must be able to close them there
-# too (gastownhall/gascity#5285).
-close_rig_issue() {
-    local issue_id="$1"
-    local reason="$2"
-    local rig_name="$3"
-    # See close_city_issue above for why the reaper closes bare unless the
-    # caller explicitly requests --force.
-    local force="${4:-}"
-
-    if [ ! -d "$CITY_BEADS_DIR" ]; then
-        printf 'city bead store %s is unavailable' "$CITY_BEADS_DIR"
-        return 1
-    fi
-
-    (
-        cd "$CITY_ABS"
-        if [ -n "$force" ]; then
-            gc bd --city "$CITY_ABS" --rig "$rig_name" close "$issue_id" --force --reason "$reason"
-        else
-            gc bd --city "$CITY_ABS" --rig "$rig_name" close "$issue_id" --reason "$reason"
-        fi
-    )
-}
-
-run_sql_change() {
-    local db="$1"
-    local label="$2"
-    local query="$3"
-    local output
-    local rows
-    local stderr_file
-    local stderr_output
-
-    SQL_CHANGE_ROWS_RESULT=0
-    if ! stderr_file=$(mktemp); then
-        record_anomaly "$db" "$label failed for $db: could not create stderr capture file"
-        return 1
-    fi
-    # DML (DELETE/UPDATE) against a database-qualified table still needs an
-    # active database selected, or Dolt can reject it with "no database
-    # selected" (Error 1105) even though the target is fully qualified —
-    # reads (get_sql_count/get_sql_rows) do not. USE the target db first,
-    # mirroring the DOLT_COMMIT block below.
-    if ! output=$(dolt_sql -r csv -q "
-USE \`$db\`;
-$query;
-SELECT ROW_COUNT();
-    " 2>"$stderr_file"); then
-        stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
-        rm -f "$stderr_file"
-        record_anomaly "$db" "$label failed for $db: $(sanitize_output "$stderr_output $output")"
-        return 1
-    fi
-    stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
-    rm -f "$stderr_file"
-
-    rows=$(printf '%s\n' "$output" | tail -1 | tr -d '\r')
-    if [ -z "$rows" ] || ! [[ "$rows" =~ ^[0-9]+$ ]]; then
-        record_anomaly "$db" "$label returned non-numeric row count for $db: $(sanitize_output "$stderr_output $output")"
-        return 1
-    fi
-
-    SQL_CHANGE_ROWS_RESULT="$rows"
-    return 0
-}
-
-while IFS= read -r DB; do
-    [ -z "$DB" ] && continue
-    if ! valid_database_identifier "$DB"; then
-        record_anomaly "$DB" "unsafe Dolt database identifier skipped by reaper"
-        continue
-    fi
-    if ! has_wisps_table "$DB"; then
-        # Not a bd-managed bead store. Skip silently; recording an
-        # anomaly here would just turn every schemaless DB on the
-        # server into noise. See gastownhall/gascity#1816.
-        continue
-    fi
-    if ! has_dependency_target_column "$DB" "dependencies" || ! has_dependency_target_column "$DB" "wisp_dependencies"; then
-        # Older or incompatible dependency schema. Skip silently like the
-        # has_wisps_table gate above; the only fix is a bead-store schema
-        # migration, which the reaper cannot perform.
-        continue
-    fi
-
-    DB_MUTATIONS=0
-
-    # Step 1: Count stale non-closed wisps, then close only candidates whose
-    # explicit ownership edge points to a closed parent/root. Wisps
-    # without an ownership edge are reported but not closed by age alone.
-    get_sql_count "$DB" "stale non-closed wisp" "
-        SELECT COUNT(*) FROM \`$DB\`.wisps
-        WHERE status IN ('open', 'hooked', 'in_progress')
-        AND issue_type NOT IN ('message')
-        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
-    "
-    STALE_WISP_COUNT=$SQL_COUNT_RESULT
-
-    if [ "$STALE_WISP_COUNT" -gt 0 ]; then
-        TOTAL_STALE_WISPS=$((TOTAL_STALE_WISPS + STALE_WISP_COUNT))
-    fi
-
-    CLOSE_WISP_COUNT=0
-    DB_CLOSED_WISPS=0
-    DB_PURGED=0
-    DB_WORKFLOW_ROOTS_CLOSED=0
-    while [ "$STALE_WISP_COUNT" -gt 0 ] && [ "$CLOSE_WISP_COUNT" -lt "$STALE_WISP_COUNT" ]; do
-        get_sql_count "$DB" "schema-safe stale wisp" "
-            SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
-            INNER JOIN \`$DB\`.wisp_dependencies d
+        WITH RECURSIVE reap_roots(id) AS (
+            SELECT DISTINCT w.id
+            FROM \`$db\`.wisps w
+            INNER JOIN \`$db\`.wisp_dependencies d
                 ON d.issue_id = w.id
                 AND $WISP_CLOSE_EDGE_PREDICATE
-            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
-            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
+            LEFT JOIN \`$db\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+            LEFT JOIN \`$db\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
-            AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
+            AND w.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
             AND (
                 parent_wisp.status = 'closed'
                 OR parent_issue.status = 'closed'
             )
-        "
-        CLOSE_WISP_BATCH=$SQL_COUNT_RESULT
-        if [ "$CLOSE_WISP_BATCH" -eq 0 ]; then
-            break
-        fi
-        if [ -n "$DRY_RUN" ]; then
-            TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + CLOSE_WISP_BATCH))
-            break
-        fi
-
-        if run_sql_change "$DB" "closing stale wisps" "
-            UPDATE \`$DB\`.wisps SET status='closed', closed_at=NOW()
-            WHERE status IN ('open', 'hooked', 'in_progress')
-            AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
-            AND id IN (
-                SELECT id FROM (
-                    SELECT w.id FROM \`$DB\`.wisps w
-                    INNER JOIN \`$DB\`.wisp_dependencies d
-                        ON d.issue_id = w.id
-                        AND $WISP_CLOSE_EDGE_PREDICATE
-                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
-                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
-                    WHERE w.status IN ('open', 'hooked', 'in_progress')
-                    AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
-                    AND (
-                        parent_wisp.status = 'closed'
-                        OR parent_issue.status = 'closed'
-                    )
-                ) reaper_wisp_candidates
-            )
-        "; then
-            CLOSE_WISP_ROWS=$SQL_CHANGE_ROWS_RESULT
-            if [ "$CLOSE_WISP_ROWS" -eq 0 ]; then
-                break
-            fi
-            CLOSE_WISP_COUNT=$((CLOSE_WISP_COUNT + CLOSE_WISP_ROWS))
-            DB_CLOSED_WISPS=$((DB_CLOSED_WISPS + CLOSE_WISP_ROWS))
-            TOTAL_CLOSED_WISPS=$((TOTAL_CLOSED_WISPS + CLOSE_WISP_ROWS))
-            DB_MUTATIONS=$((DB_MUTATIONS + CLOSE_WISP_ROWS))
-        else
-            break
-        fi
-    done
-
-    # Step 2: Close stale inactive workflow roots. This is the
-    # finalize-crash safety net: it only reaps old, unassigned topology roots
-    # whose stamped and parent-child subtree has no live descendants. Workflow
-    # subtrees are assumed to be co-located in the current bead store. Roots
-    # stamped with gc.root_store_ref for another store are skipped; cross-store
-    # subtrees require cross-store traversal before reaping can be safe.
-    # Wisp roots can be closed in every bead store. Issue roots are city issues,
-    # so their city-store close path uses gc bd close below.
-    get_sql_count "$DB" "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
-    TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
-
-    get_sql_count "$DB" "stale inactive workflow wisp root" "$(workflow_root_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"
-    WORKFLOW_WISP_ROOT_COUNT=$SQL_COUNT_RESULT
-    if [ "$WORKFLOW_WISP_ROOT_COUNT" -gt 0 ]; then
-        if [ -n "$DRY_RUN" ]; then
-            TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_WISP_ROOT_COUNT))
-        elif run_sql_change "$DB" "closing stale inactive workflow wisp roots" "$(workflow_wisp_root_update_query "$DB")"; then
-            WORKFLOW_WISP_ROOT_ROWS=$SQL_CHANGE_ROWS_RESULT
-            DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
-            TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + WORKFLOW_WISP_ROOT_ROWS))
-            DB_MUTATIONS=$((DB_MUTATIONS + WORKFLOW_WISP_ROOT_ROWS))
-        fi
-    fi
-
-    get_sql_count "$DB" "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"
-    TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
-
-    get_sql_rows "$DB" "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"
-    WORKFLOW_ISSUE_ROOT_IDS=$SQL_ROWS_RESULT
-    WORKFLOW_ISSUE_ROOT_COUNT=$(printf '%s\n' "$WORKFLOW_ISSUE_ROOT_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-    if [ "$WORKFLOW_ISSUE_ROOT_COUNT" -gt 0 ]; then
-        if [ -z "$CITY_DB" ]; then
-            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
-                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; workflow issue-root close disabled"
-                CITY_DB_ANOMALY_RECORDED=1
-            fi
-            TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + WORKFLOW_ISSUE_ROOT_COUNT))
-        elif [ "$DB" != "$CITY_DB" ]; then
-            TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + WORKFLOW_ISSUE_ROOT_COUNT))
-        elif [ -n "$DRY_RUN" ]; then
-            TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + WORKFLOW_ISSUE_ROOT_COUNT))
-        else
-            while IFS= read -r issue_id; do
-                [ -z "$issue_id" ] && continue
-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "$WORKFLOW_ROOT_CLOSE_REASON" 2>&1); then
-                    DB_WORKFLOW_ROOTS_CLOSED=$((DB_WORKFLOW_ROOTS_CLOSED + 1))
-                    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + 1))
-                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
-                else
-                    record_anomaly "$DB" "closing stale inactive workflow issue root $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
-                fi
-            done <<< "$WORKFLOW_ISSUE_ROOT_IDS"
-        fi
-    fi
-
-    # Step 3: Purge — delete closed wisps past purge_age.
-    get_sql_count "$DB" "closed wisp purge" "
-        SELECT COUNT(*) FROM \`$DB\`.wisps
-        WHERE status = 'closed'
-        AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
-        AND id NOT IN (
-            SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.wisp_dependencies d
-            INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
-            WHERE d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)
-            AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+        ),
+        reap_edges(child_id, owner_id) AS (
+            SELECT d.issue_id, COALESCE(d.depends_on_wisp_id, d.depends_on_issue_id, d.depends_on_external)
+            FROM \`$db\`.wisp_dependencies d
+            INNER JOIN \`$db\`.wisps w ON w.id = d.issue_id
+            WHERE w.status != 'closed'
+            AND $WISP_CLOSE_EDGE_PREDICATE
+            UNION ALL
+            SELECT d.issue_id, COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)
+            FROM \`$db\`.dependencies d
+            INNER JOIN \`$db\`.issues i ON i.id = d.issue_id
+            WHERE i.status != 'closed'
+            AND d.type = 'parent-child'
+        ),
+        reap_tree(id, owner_id, depth) AS (
+            SELECT id, CAST('' AS CHAR(255)), 0 FROM reap_roots
+            UNION ALL
+            SELECT e.child_id, t.id, t.depth + 1
+            FROM reap_tree t
+            INNER JOIN reap_edges e ON e.owner_id = t.id
+            WHERE t.depth < 32
         )
-    "
-    PURGE_COUNT=$SQL_COUNT_RESULT
+        SELECT t.id, t.owner_id, t.depth,
+            CASE WHEN w.id IS NOT NULL
+                AND w.status IN ('open', 'hooked', 'in_progress')
+                AND w.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
+            THEN 'ok' ELSE 'keep' END,
+            CASE WHEN COALESCE(w.assignee, '') = '' THEN 'bare' ELSE 'force' END
+        FROM reap_tree t
+        LEFT JOIN \`$db\`.wisps w ON w.id = t.id
+SQL
+}
 
-    if [ "$PURGE_COUNT" -gt 0 ] && [ -z "$DRY_RUN" ]; then
-        if run_sql_change "$DB" "purging closed wisps" "
-            DELETE FROM \`$DB\`.wisps
-            WHERE status = 'closed'
-            AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
-            AND id NOT IN (
-                SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.wisp_dependencies d
-                INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
-                WHERE d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)
-                AND child_wisp.status IN ('open', 'hooked', 'in_progress')
-            )
-        "; then
-            PURGED_ROWS=$SQL_CHANGE_ROWS_RESULT
-            DB_PURGED=$((DB_PURGED + PURGED_ROWS))
-            TOTAL_PURGED=$((TOTAL_PURGED + PURGED_ROWS))
-            DB_MUTATIONS=$((DB_MUTATIONS + PURGED_ROWS))
+# closeable_subtree_leaf_first reads stale_wisp_subtree_query rows on stdin
+# and prints "depth,id,bare|force" for every wisp that may close: a node is
+# held open when it is not closeable itself or when any descendant is held
+# open, so a printed node's open children are all printed too, deeper. The
+# caller closes deepest first.
+#
+# With "held" as $1 it prints instead the ids of the stale wisps held open by
+# a descendant the reaper may not close (their own state is "ok").
+closeable_subtree_leaf_first() {
+    awk -F, -v want="${1:-closeable}" '
+        NF >= 5 && $1 != "" {
+            id = $1
+            if (!(id in depth) || $3 + 0 > depth[id]) depth[id] = $3 + 0
+            if ($4 != "ok") { held[id] = 1; notok[id] = 1 }
+            mode[id] = $5
+            if ($2 != "") parents[id] = parents[id] " " $2
+        }
+        END {
+            changed = 1
+            while (changed) {
+                changed = 0
+                for (id in held) {
+                    n = split(parents[id], ps, " ")
+                    for (i = 1; i <= n; i++) {
+                        if (ps[i] != "" && !(ps[i] in held)) {
+                            held[ps[i]] = 1
+                            changed = 1
+                        }
+                    }
+                }
+            }
+            for (id in depth) {
+                if (want == "held") {
+                    if ((id in held) && !(id in notok)) print id
+                } else if (!(id in held)) {
+                    print depth[id] "," id "," mode[id]
+                }
+            }
+        }'
+}
+
+# subtree_ancestors <subtree-rows> <ids...> prints every owner, transitively,
+# of the given ids in stale_wisp_subtree_query rows.
+subtree_ancestors() {
+    local tree="$1"
+    shift
+    printf '%s\n' "$tree" | awk -F, -v seeds="$*" '
+        NF >= 5 && $2 != "" { parents[$1] = parents[$1] " " $2 }
+        END {
+            n = split(seeds, queue, " ")
+            for (i = 1; i <= n; i++) seen[queue[i]] = 1
+            head = 1
+            while (head <= n) {
+                id = queue[head++]
+                m = split(parents[id], ps, " ")
+                for (j = 1; j <= m; j++) {
+                    p = ps[j]
+                    if (p != "" && !(p in seen)) {
+                        seen[p] = 1
+                        queue[++n] = p
+                        print p
+                    }
+                }
+            }
+        }'
+}
+
+# reap_scope runs Steps 1-6b against the current scope.
+reap_scope() {
+    local DB="$SCOPE_DB"
+    local stale_wisp_count
+    local rows
+    local ids
+    local count
+
+    # Step 1: close stale non-closed wisps whose ownership edge points to a
+    # closed parent/root, together with their stale ownership descendants.
+    # Wisps without an ownership edge are counted but not closed by age alone.
+    #
+    # bd refuses to close a bead that still has open children, and a wisp
+    # under a closed owner can itself own open wisps (root closed -> mid open
+    # -> leaf open). So the whole orphaned subtree is selected at once and
+    # closed deepest-first: every child is closed before its parent. A wisp
+    # with any open descendant that is not itself closeable (too young, not
+    # a wisp, or in a status the reaper does not close) keeps its whole
+    # ancestry open, so no close — bare or --force — ever lands on a bead
+    # whose open child stays open.
+    get_sql_count "stale non-closed wisp" "
+        SELECT COUNT(*) FROM \`$DB\`.wisps
+        WHERE status IN ('open', 'hooked', 'in_progress')
+        AND issue_type NOT IN ('message')
+        AND created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
+    " || true
+    stale_wisp_count=$SQL_COUNT_RESULT
+    TOTAL_STALE_WISPS=$((TOTAL_STALE_WISPS + stale_wisp_count))
+
+    if [ "$stale_wisp_count" -gt 0 ] && get_sql_rows "stale wisp subtree" "$(stale_wisp_subtree_query "$DB")"; then
+        local tree=$SQL_ROWS_RESULT
+        local held_count
+        rows=$(printf '%s\n' "$tree" | closeable_subtree_leaf_first)
+        count=$(count_lines "$rows")
+        # Stale wisps held open by a descendant the reaper may not close (a
+        # durable issue, a blocked or young wisp) are reported every run
+        # rather than closed; they clear once that descendant closes.
+        held_count=$(count_lines "$(printf '%s\n' "$tree" | closeable_subtree_leaf_first held)")
+        if [ "$held_count" -gt 0 ]; then
+            TOTAL_HELD_WISPS=$((TOTAL_HELD_WISPS + held_count))
+            order_outcome_scope_skipped "$SCOPE_LABEL" "$held_count stale wisp(s) held open under a live descendant"
+        fi
+        if [ "$count" -gt 0 ]; then
+            if [ -n "$DRY_RUN" ]; then
+                TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + count))
+            else
+                local depth
+                local dropped
+                local level
+                for depth in $(printf '%s\n' "$rows" | awk -F, '{ print $1 }' | sort -rnu); do
+                    run_budget_exhausted && break
+                    level=$(printf '%s\n' "$rows" | awk -F, -v d="$depth" '$1 == d { print $2 "," $3 }')
+                    [ -n "$level" ] || continue
+                    close_ids_by_mode "closing stale wisps" "$level" "$STALE_WISP_CLOSE_REASON"
+                    TOTAL_CLOSED_WISPS=$((TOTAL_CLOSED_WISPS + CLOSE_IDS_OK))
+                    if [ -n "$CLOSE_IDS_FAILED" ]; then
+                        # A close bd rejected at run time (e.g. a leaf
+                        # re-claimed since selection) leaves that bead open,
+                        # so none of its owners may close this run -- not
+                        # even with --force.
+                        # shellcheck disable=SC2086 # space-separated ids
+                        dropped=$(subtree_ancestors "$tree" $CLOSE_IDS_FAILED)
+                        if [ -n "$dropped" ]; then
+                            rows=$(printf '%s\n' "$rows" | awk -F, -v drop="$(printf '%s' "$dropped" | tr '\n' ' ')" '
+                                BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) skip[d[i]] = 1 }
+                                !($2 in skip)')
+                        fi
+                    fi
+                done
+            fi
         fi
     fi
 
-    # Step 4: Close nudge beads whose metadata.expires_at is in the past.
+    run_budget_exhausted && return 0
+
+    # Step 2: close stale inactive workflow roots. This is the finalize-crash
+    # safety net: it only reaps old, unassigned topology roots whose stamped
+    # and parent-child subtree has no live descendants. Roots stamped with
+    # gc.root_store_ref for another store are skipped; cross-store subtrees
+    # need cross-store traversal before reaping can be safe. Wisp roots are
+    # closed in every scope; issue roots are city issues and close only in the
+    # city scope.
+    if get_sql_count "workflow wisp roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
+        TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
+    fi
+
+    if get_sql_rows "stale inactive workflow wisp root" "$(workflow_root_ids_query "$DB" "workflow_wisp_root_candidates" "wisps" "w" "'message'")"; then
+        ids=$SQL_ROWS_RESULT
+        count=$(count_lines "$ids")
+        if [ "$count" -gt 0 ]; then
+            if [ -n "$DRY_RUN" ]; then
+                TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
+            else
+                # Stamp the skipped outcome first: a crash between the two
+                # verbs leaves an open root that the next run selects again.
+                local ids_file
+                ids_file=$(mktemp)
+                printf '%s\n' "$ids" >"$ids_file"
+                scope_bd_each_chunk "$VERB_BATCH" "$ids_file" update \
+                    --set-metadata "gc.outcome=skipped" \
+                    --set-metadata "close_reason=$WORKFLOW_ROOT_CLOSE_REASON"
+                rm -f "$ids_file"
+                if [ "$SCOPE_CHUNK_FAILED" -gt 0 ]; then
+                    scope_anomaly "stamping stale workflow wisp roots failed for $SCOPE_CHUNK_FAILED bead(s) in $DB: $(sanitize_output "$SCOPE_CHUNK_ERRORS")"
+                fi
+                if [ "$SCOPE_CHUNK_OK" -gt 0 ]; then
+                    close_ids "closing stale inactive workflow wisp roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
+                    TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
+                fi
+            fi
+        fi
+    fi
+
+    if get_sql_count "workflow issue roots skipped by root store ref" "$(workflow_root_store_ref_skipped_count_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
+        TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED=$((TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED + SQL_COUNT_RESULT))
+    fi
+
+    if get_sql_rows "stale inactive workflow issue root" "$(workflow_root_ids_query "$DB" "workflow_issue_root_candidates" "issues" "i" "'message', 'epic'")"; then
+        ids=$SQL_ROWS_RESULT
+        count=$(count_lines "$ids")
+        if [ "$count" -gt 0 ]; then
+            if [ "$SCOPE_KIND" != "city" ]; then
+                TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED=$((TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED + count))
+            elif [ -n "$DRY_RUN" ]; then
+                TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS=$((TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS + count))
+            else
+                close_ids "closing stale inactive workflow issue roots" "$ids" "$WORKFLOW_ROOT_CLOSE_REASON"
+                TOTAL_WORKFLOW_ROOTS_CLOSED=$((TOTAL_WORKFLOW_ROOTS_CLOSED + CLOSE_IDS_OK))
+            fi
+        fi
+    fi
+
+    run_budget_exhausted && return 0
+
+    # Step 3: purge closed wisps past purge_age through gc bd purge, which keeps
+    # a closed wisp that a live wisp still depends on (parent-child, tracks,
+    # blocks) and removes each purged wisp's labels, dependencies, comments
+    # and events with it.
+    reap_scope_purge
+
+    run_budget_exhausted && return 0
+
+    # Step 4: close gc:nudge beads whose metadata.expires_at is in the past.
     # Only beads labelled gc:nudge are candidates — other bead types that stamp
     # expires_at (e.g. gc:extmsg-binding session bindings) must not be closed
-    # here.  The COALESCE handles whole-second RFC3339+Z, microsecond-width
+    # here. The COALESCE handles whole-second RFC3339+Z, microsecond-width
     # RFC3339 (MySQL %f tops out at 6 fractional digits), and full
     # RFC3339Nano (7-9 fractional digits) by truncating the fractional part to
-    # whole seconds for parsing — sub-second precision is immaterial for TTL
-    # expiry.  Rows where every pattern fails STR_TO_DATE return NULL and are
-    # recorded as anomalies rather than silently skipped.
-    DB_EXPIRED_ISSUES_CLOSED=0
-    get_sql_rows "$DB" "expired nudge bead with parse anomaly" "
+    # whole seconds for parsing. Rows where every pattern fails STR_TO_DATE
+    # return NULL and are recorded as anomalies rather than silently skipped.
+    # Nudge shadows land in the sling target's store (a rig for a rig-scoped
+    # sling, gastownhall/gascity#5285), so this runs in every scope.
+    if get_sql_rows "expired nudge bead with parse anomaly" "
         SELECT i.id
         FROM \`$DB\`.issues i
         INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
@@ -1037,24 +754,20 @@ while IFS= read -r DB; do
             STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
             STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
         ) IS NULL
-    "
-    if [ -n "$SQL_ROWS_RESULT" ]; then
+    "; then
         while IFS= read -r bad_id; do
             [ -z "$bad_id" ] && continue
-            record_anomaly "$DB" "nudge bead $bad_id in $DB has unparseable expires_at; skipped by TTL reaper"
+            scope_anomaly "nudge bead $bad_id in $DB has unparseable expires_at; skipped by TTL reaper"
         done <<< "$SQL_ROWS_RESULT"
     fi
 
-    # Expired nudge beads are closed bare (no --force) below, which is only safe
+    # Expired nudge beads are closed bare (no --force), which is only safe
     # when they are unassigned: bd's cross-actor close guard would otherwise
     # reject the reaper's bare close and the expired nudge would leak. Nudge
     # shadow beads are created unassigned, so the COALESCE(i.assignee,'')=''
-    # filter makes that invariant explicit rather than relying on producers to
-    # never assign one. An assigned expired nudge is skipped here, and the
-    # stale path below skips it too because that query excludes rows with a
-    # non-empty expires_at; that is acceptable because an assigned nudge would
-    # be a producer anomaly rather than expected TTL work.
-    get_sql_rows "$DB" "expired nudge bead" "
+    # filter makes that invariant explicit. An assigned expired nudge is a
+    # producer anomaly and is skipped here and by the stale path below.
+    if get_sql_rows "expired nudge bead" "
         SELECT i.id
         FROM \`$DB\`.issues i
         INNER JOIN \`$DB\`.labels lbl ON lbl.issue_id = i.id AND lbl.label = 'gc:nudge'
@@ -1067,65 +780,28 @@ while IFS= read -r DB; do
             STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '%Y-%m-%dT%H:%i:%sZ'),
             STR_TO_DATE(CONCAT(SUBSTRING_INDEX(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at')), '.', 1), 'Z'), '%Y-%m-%dT%H:%i:%sZ')
         ) < UTC_TIMESTAMP()
-    "
-    EXPIRED_IDS=$SQL_ROWS_RESULT
-    if [ -n "$EXPIRED_IDS" ]; then
-        WOULD_EXPIRE_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-        TOTAL_WOULD_EXPIRE=$((TOTAL_WOULD_EXPIRE + WOULD_EXPIRE_COUNT))
-    fi
-
-    if [ -n "$EXPIRED_IDS" ] && [ -z "$DRY_RUN" ]; then
-        if [ -z "$CITY_DB" ]; then
-            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
-                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; expired nudge close disabled"
-                CITY_DB_ANOMALY_RECORDED=1
-            fi
-            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        elif [ "$DB" = "$CITY_DB" ]; then
-            while IFS= read -r issue_id; do
-                [ -z "$issue_id" ] && continue
-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "ttl:expired by reaper" 2>&1); then
-                    DB_EXPIRED_ISSUES_CLOSED=$((DB_EXPIRED_ISSUES_CLOSED + 1))
-                    TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
-                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
-                else
-                    record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
-                fi
-            done <<< "$EXPIRED_IDS"
-        elif EXPIRED_RIG_NAME=$(rig_name_for_db "$DB"); then
-            # $DB is a rig-scoped store bound via a [[rigs]] entry in
-            # city.toml/site.toml (see discover_rig_store_refs). Nudge
-            # shadows created by a sling land here — deliverSlingNudge
-            # enqueues into the sling target's rig store, not the city
-            # store — so close them via gc bd --rig instead of only
-            # counting them as skipped (gastownhall/gascity#5285).
-            while IFS= read -r issue_id; do
-                [ -z "$issue_id" ] && continue
-                if CLOSE_OUTPUT=$(close_rig_issue "$issue_id" "ttl:expired by reaper" "$EXPIRED_RIG_NAME" 2>&1); then
-                    DB_EXPIRED_ISSUES_CLOSED=$((DB_EXPIRED_ISSUES_CLOSED + 1))
-                    TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
-                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
-                else
-                    record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB (rig:$EXPIRED_RIG_NAME): $(sanitize_output "$CLOSE_OUTPUT")"
-                fi
-            done <<< "$EXPIRED_IDS"
-        else
-            # $DB is neither the city store nor a discovered rig store (e.g.
-            # an unbound or undiscoverable scope) — no scoped close path
-            # exists, so fall back to the prior skip+anomaly behavior.
-            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
+    "; then
+        ids=$SQL_ROWS_RESULT
+        count=$(count_lines "$ids")
+        TOTAL_WOULD_EXPIRE=$((TOTAL_WOULD_EXPIRE + count))
+        if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
+            close_ids "closing expired nudge beads" "$ids" "ttl:expired by reaper"
+            TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + CLOSE_IDS_OK))
+            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + count - CLOSE_IDS_OK))
         fi
     fi
 
-    # Step 5: Auto-close stale issues (exclude P0/P1, epics, active deps).
-    DB_ISSUES_CLOSED=0
-    get_sql_rows "$DB" "stale issue" "
+    run_budget_exhausted && return 0
+
+    # Step 5: auto-close stale issues (exclude P0/P1, epics, durable extmsg
+    # records, TTL-stamped beads and beads with an active dependency in either
+    # direction). Only the city scope's issues are auto-closed; stale rig
+    # issues are counted as skipped.
+    if get_sql_rows "stale issue" "
         SELECT id, CASE WHEN COALESCE(assignee, '') = '' THEN 'bare' ELSE 'force' END
         FROM \`$DB\`.issues
         WHERE status IN ('open', 'in_progress')
-        AND updated_at < DATE_SUB(NOW(), INTERVAL $STALE_AGE_H HOUR)
+        AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $STALE_AGE_H HOUR)
         AND priority > 1
         AND issue_type != 'epic'
         AND (
@@ -1148,255 +824,286 @@ while IFS= read -r DB; do
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
+            AND d.issue_id IS NOT NULL
             UNION
             SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
+            AND d.depends_on_issue_id IS NOT NULL
         )
-    "
-    STALE_IDS=$SQL_ROWS_RESULT
-
-    if [ -n "$STALE_IDS" ] && [ -z "$DRY_RUN" ]; then
-        if [ -z "$CITY_DB" ]; then
-            if [ "$CITY_DB_ANOMALY_RECORDED" -eq 0 ]; then
-                record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or $CITY/.beads/metadata.json; stale issue auto-close disabled"
-                CITY_DB_ANOMALY_RECORDED=1
+    "; then
+        rows=$SQL_ROWS_RESULT
+        count=$(count_lines "$rows")
+        if [ "$count" -gt 0 ] && [ -z "$DRY_RUN" ]; then
+            if [ "$SCOPE_KIND" != "city" ]; then
+                TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + count))
+            else
+                # close_mode comes from the query's per-row CASE: 'force' when
+                # the row carried a non-empty assignee at select time and
+                # 'bare' otherwise (see close_ids).
+                close_ids_by_mode "closing stale issues" "$rows" "stale:auto-closed by reaper"
+                TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + CLOSE_IDS_OK))
             fi
-            SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
-        elif [ "$DB" != "$CITY_DB" ]; then
-            SKIPPED_ISSUES=$(printf '%s\n' "$STALE_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_STALE_ISSUES_SKIPPED=$((TOTAL_STALE_ISSUES_SKIPPED + SKIPPED_ISSUES))
-        else
-            while IFS=, read -r issue_id close_mode; do
-                [ -z "$issue_id" ] && continue
-                # close_mode comes from the query's per-row CASE: 'force' when the
-                # row carried a non-empty assignee at select time and 'bare'
-                # otherwise. A 'force' row is another actor's bead (the reaper runs
-                # as order:reaper), so it needs --force to pass bd's cross-actor
-                # close guard. A 'bare' row was open/unassigned; keeping its close
-                # bare lets the guard reject it if the row was concurrently
-                # re-claimed after the select, instead of clobbering the new claim.
-                STALE_FORCE=""
-                [ "$close_mode" = "force" ] && STALE_FORCE="force"
-                if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "stale:auto-closed by reaper" "$STALE_FORCE" 2>&1); then
-                    DB_ISSUES_CLOSED=$((DB_ISSUES_CLOSED + 1))
-                    TOTAL_ISSUES_CLOSED=$((TOTAL_ISSUES_CLOSED + 1))
-                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
-                else
-                    record_anomaly "$DB" "closing stale issue $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
-                fi
-            done <<< "$STALE_IDS"
         fi
     fi
 
-    # Step 6a: Anomaly check — stale open wisp count. Fresh workflow load can
+    # Step 6a: anomaly check — stale open wisp count. Fresh workflow load can
     # legitimately exceed the threshold on busy cities; only old non-message
     # rows indicate a reaper leak.
-    get_sql_count "$DB" "stale open wisp anomaly" "
+    if get_sql_count "stale open wisp anomaly" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
         AND issue_type NOT IN ('message')
-        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
-    "
-    REAPABLE_WISPS=$SQL_COUNT_RESULT
-
-    if [ "$REAPABLE_WISPS" -gt "$ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})\n"
+        AND created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)
+    "; then
+        if [ "$SQL_COUNT_RESULT" -gt "$ALERT_THRESHOLD" ]; then
+            scope_anomaly "$SQL_COUNT_RESULT stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})"
+        fi
     fi
 
-    # Step 6b: Mail-wisp backlog count, observed separately from reapable wisps.
-    get_sql_count "$DB" "open mail wisp" "
+    # Step 6b: mail-wisp backlog count, observed separately from reapable wisps.
+    if get_sql_count "open mail wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
         AND issue_type = 'message'
-    "
-    MAIL_WISPS=$SQL_COUNT_RESULT
-    TOTAL_MAIL_WISPS=$((TOTAL_MAIL_WISPS + MAIL_WISPS))
-
-    if [ "$MAIL_ALERT_THRESHOLD" -gt 0 ] && [ "$MAIL_WISPS" -gt "$MAIL_ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $MAIL_WISPS open mail-wisps (mail threshold: $MAIL_ALERT_THRESHOLD)\n"
-    fi
-
-    # Commit Dolt changes. Must use CALL (not SELECT) and have an active
-    # database via USE so CALL DOLT_COMMIT(...) runs in the target database.
-    # Commit failures are surfaced as anomalies so the dog loop does not
-    # silently retry forever.
-    if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
-        if ! COMMIT_OUTPUT=$(dolt_sql -q "
-            USE \`$DB\`;
-            CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS workflow_roots=$DB_WORKFLOW_ROOTS_CLOSED purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED expired_issues=$DB_EXPIRED_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
-        " 2>&1); then
-            case "$COMMIT_OUTPUT" in
-                *"nothing to commit"*|*"Nothing to commit"*)
-                    :
-                    ;;
-                *)
-                    record_anomaly "$DB" "Dolt commit failed for $DB: $(sanitize_output "$COMMIT_OUTPUT")"
-                    ;;
-            esac
+    "; then
+        TOTAL_MAIL_WISPS=$((TOTAL_MAIL_WISPS + SQL_COUNT_RESULT))
+        if [ "$MAIL_ALERT_THRESHOLD" -gt 0 ] && [ "$SQL_COUNT_RESULT" -gt "$MAIL_ALERT_THRESHOLD" ]; then
+            scope_anomaly "$SQL_COUNT_RESULT open mail-wisps (mail threshold: $MAIL_ALERT_THRESHOLD)"
         fi
     fi
-done <<EOF
-$DATABASES
-EOF
+}
 
-# Step 6: prune closed session beads from the city's Dolt work store.
+# reap_scope_purge is Step 3 for the current scope.
+reap_scope_purge() {
+    local out
+    local err_file
+    local count
+    local more
+    local batches=0
+    local purge_args=(purge "$PURGE_PLANE_FLAG" --older-than "$PURGE_AGE" --json)
+
+    if [ -n "$DRY_RUN" ]; then
+        purge_args+=(--dry-run)
+    else
+        # One purge runs in one transaction, so a large backlog is cleared in
+        # bounded batches (oldest closed first) within this run's purge
+        # budget; whatever is left is picked up by the next run.
+        purge_args+=(--force --limit "$PURGE_BATCH")
+    fi
+    if [ -z "$PURGE_DEADLINE" ]; then
+        PURGE_DEADLINE=$(( $(date +%s) + PURGE_BUDGET_SECS ))
+    fi
+    err_file=$(mktemp)
+    while :; do
+        if ! out=$(scope_bd "${purge_args[@]}" 2>"$err_file"); then
+            out="$(cat "$err_file" 2>/dev/null) $out"
+            case "$out" in
+                *"unknown flag: $PURGE_PLANE_FLAG"* | *"unknown flag: --limit"*)
+                    # A bd whose purge cannot select the wisps plane or purge
+                    # in bounded batches (bd v1.3.0, and builds between). The
+                    # store is fine; the step waits for a bd that supports
+                    # both, and the run says so without escalating.
+                    order_outcome_scope_skipped "$SCOPE_LABEL" "bd-purge-unsupported"
+                    rm -f "$err_file"
+                    return 0
+                    ;;
+            esac
+            scope_anomaly "purging closed wisps failed for $SCOPE_DB: $(sanitize_output "$out")"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "purge failed"
+            rm -f "$err_file"
+            return 0
+        fi
+        if [ -n "$DRY_RUN" ]; then
+            count=$(printf '%s' "$out" | jq -r '.purge_count // .purged_count // 0' 2>/dev/null || echo 0)
+            case "$count" in ''|*[!0-9]*) count=0 ;; esac
+            TOTAL_WOULD_PURGE=$((TOTAL_WOULD_PURGE + count))
+            break
+        fi
+        count=$(printf '%s' "$out" | jq -r '.purged_count // 0' 2>/dev/null || echo "")
+        case "$count" in
+            ''|*[!0-9]*)
+                scope_anomaly "gc bd purge returned an unreadable result for $SCOPE_DB: $(sanitize_output "$out")"
+                break
+                ;;
+        esac
+        TOTAL_PURGED=$((TOTAL_PURGED + count))
+        batches=$((batches + 1))
+        # bd reports whether closed wisps are left beyond this batch; a
+        # result without that signal is read as "a full batch may have more".
+        more=$(printf '%s' "$out" | jq -r --argjson limit "$PURGE_BATCH" '
+            if has("has_more") then .has_more
+            elif has("remaining") then (.remaining > 0)
+            else (.purged_count // 0) >= $limit end' 2>/dev/null || echo false)
+        if [ "$more" != "true" ] || [ "$count" -eq 0 ]; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$PURGE_DEADLINE" ]; then
+            order_outcome_scope_skipped "$SCOPE_LABEL" "purge backlog remains after this run's purge budget"
+            break
+        fi
+        run_budget_exhausted && break
+    done
+    rm -f "$err_file"
+}
+
+# Scopes are resolved first so that scopes sharing one database (a rig bound
+# to the city store) are reaped once, with every sharing rig's store ref.
+# A scope bd cannot reach is recorded and skipped; the others still run.
+SCOPE_TABLE=""
+resolve_scope_row() {
+    scope_select "$@"
+    if ! scope_resolve_db; then
+        if [ "$SCOPE_NOT_BD" -eq 1 ]; then
+            echo "reaper: $SCOPE_LABEL is not a bd bead store; nothing to reap there"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
+            return 0
+        fi
+        record_anomaly "$SCOPE_LABEL" "bead store unreachable through gc bd: $(sanitize_output "$SCOPE_LAST_ERROR")"
+        order_outcome_scope_skipped "$SCOPE_LABEL" "bead store unreachable"
+        return 0
+    fi
+    SCOPE_TABLE="${SCOPE_TABLE}${SCOPE_DB}|${SCOPE_KIND}|${SCOPE_RIG}
+"
+}
+
+resolve_scope_row city
+if RIG_NAMES=$(core_rig_names); then
+    while IFS= read -r rig_name; do
+        [ -n "$rig_name" ] || continue
+        resolve_scope_row rig "$rig_name"
+    done <<< "$RIG_NAMES"
+else
+    record_anomaly "rigs" "gc rig list failed; rig scopes were not reaped this run"
+    order_outcome_scope_skipped "rigs" "rig list unavailable"
+fi
+
+# SCOPE_RIG_REFS lists 'rig:<name>' store refs (SQL literals) of every rig
+# scope served by the database being reaped.
+SCOPE_RIG_REFS=""
+while IFS= read -r scope_db; do
+    [ -n "$scope_db" ] || continue
+    rows=$(printf '%s' "$SCOPE_TABLE" | awk -F'|' -v db="$scope_db" '$1 == db')
+    SCOPE_RIG_REFS=$(printf '%s\n' "$rows" | awk -F'|' '$2 == "rig" && $3 ~ /^[A-Za-z0-9_.-]+$/ { printf "%s'"'"'rig:%s'"'"'", sep, $3; sep=", " }')
+    if printf '%s\n' "$rows" | awk -F'|' '$2 == "city" { found=1 } END { exit found ? 0 : 1 }'; then
+        scope_select city
+        CITY_DB="$scope_db"
+    else
+        scope_select rig "$(printf '%s\n' "$rows" | awk -F'|' 'NR == 1 { print $3 }')"
+    fi
+    SCOPE_DB="$scope_db"
+    if run_budget_exhausted; then
+        order_outcome_scope_skipped "$SCOPE_LABEL" "run budget exhausted before this scope"
+        continue
+    fi
+    TOTAL_SCOPES=$((TOTAL_SCOPES + 1))
+    reap_scope
+done < <(printf '%s' "$SCOPE_TABLE" | awk -F'|' '!seen[$1]++ { print $1 }')
+
+# Step 6: prune closed session beads from the city store.
 # GC_REAPER_SESSION_BEAD_PATTERN defaults to 'gm-*' (legacy Gas Manager prefix).
-# Set to empty string to activate the type-safe SQL path (targets issue_type=session only).
+# Set it to the empty string to use the type-safe path (issue_type=session only).
 #
-# This step is the combined Dolt work/infra topology: sessions are rows in
-# that database's issues table. On a split city, agent sessions (gcg-session-*,
-# gcs-*) live in the sqlite infra ledger (.gc/store/graph/beads.sqlite), which
-# this Dolt loop cannot see. Those rows are purged by the daemon wisp GC
-# (purgeClosedInfraSessions) after GC_INFRA_SESSION_PURGE_AGE (default 72h),
-# only when the city's sessions class is relocated onto that SQLite ledger and
-# wisp_ttl is set; it reads that variable from the controller's environment,
-# not this order's. This step's own clock stays GC_REAPER_SESSION_PURGE_AGE
-# (default 720h). On an unsplit city the wisp GC leaves sessions alone and
-# this step is the only session prune.
-# Do not point this script at an unrelated Dolt server to reach them.
-if [ -d "$CITY_BEADS_DIR" ]; then
-    SESSION_PRUNE_ATTEMPTED=1
+# On a split city, agent sessions (gcg-session-*, gcs-*) live in the sqlite
+# infra ledger (.gc/store/graph/beads.sqlite), which bd does not serve here.
+# Those rows are purged by the daemon wisp GC (purgeClosedInfraSessions) after
+# GC_INFRA_SESSION_PURGE_AGE (default 72h), only when the city's sessions class
+# is relocated onto that SQLite ledger and wisp_ttl is set; it reads that
+# variable from the controller's environment, not this order's. This step's
+# own clock stays GC_REAPER_SESSION_PURGE_AGE (default 720h). On an unsplit
+# city the wisp GC leaves sessions alone and this step is the only session
+# prune.
+if [ -n "$CITY_DB" ] && [ -d "$CITY_BEADS_DIR" ]; then
+    scope_select city
+    SCOPE_DB="$CITY_DB"
     if [ -n "$SESSION_BEAD_PATTERN" ]; then
-        # ── gc bd prune path (existing behaviour, now pattern-configurable) ──────
+        # ── gc bd prune path (pattern-configurable) ──────────────────────────────
         SESSION_PRUNE_ANOMALY_SCOPE="session"
         case "$SESSION_BEAD_PATTERN" in
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
         esac
 
-        # Backup-age gate: skip bulk prune when no recent backup exists.
-        # Which state file decides freshness mirrors doctor's
-        # scanBackupFreshness: a scope with a registered Dolt destination is
-        # judged on its Dolt sync state, and only a scope that never migrated is
-        # judged on the legacy embedded-store state. `bd backup sync` writes
-        # only dolt-backup-state.json, so reading the legacy file on a migrated
-        # scope would latch this gate closed with no backup action able to clear it.
+        # Backup-age gate: skip bulk prune unless bd reports a backup of the
+        # city store newer than the threshold. bd owns the backup (the dolt
+        # pack's backup order runs `gc bd backup sync` per scope), so
+        # `gc bd backup status` is the evidence; a scope bd cannot back up
+        # reports no evidence and the prune waits. Which record decides
+        # mirrors doctor's scanBackupFreshness: a scope with a Dolt backup
+        # destination configured is judged on its Dolt sync time only (a fresh
+        # JSONL-era backup state must not open the gate while the Dolt backup
+        # is stale or never ran); only a scope with no Dolt destination is
+        # judged on bd's legacy backup state.
         _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
         case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
-            _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
-            _BACKUP_FIELD="last_sync"
-        else
-            _BACKUP_STATE="$CITY_BEADS_DIR/backup/backup_state.json"
-            _BACKUP_FIELD="timestamp"
-        fi
-        # Third case: a Dolt-native backup destination. Backups registered
-        # directly in the `dolt_backups` table (synced by a city order calling
-        # DOLT_BACKUP) never pass through bd, so bd writes neither state file
-        # and `bd backup status` reports "No backup has been performed yet"
-        # against a backup that is minutes old. Both branches above then take
-        # the absent path and the gate latches closed with no backup action able
-        # to clear it — a permanent per-tick escalation against real, current
-        # backups. This is consulted only as a SECOND OPINION, after the bd or
-        # legacy state file has already failed: it can rescue that false
-        # positive, and can never permit a prune the primary evidence refused.
-        dolt_native_backup_epoch() {
-            local urls url dir newest best=""
-            [ -n "$CITY_DB" ] || return 0
-            command -v dolt_sql >/dev/null 2>&1 || return 0
-            urls=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT url FROM dolt_backups;" 2>/dev/null \
-                | tail -n +2 | tr -d '\r' | grep -v '^$') || urls=""
-            while IFS= read -r url; do
-                url="${url%\"}"; url="${url#\"}"
-                # Only a file:// destination can be dated from here. A remote
-                # one (DoltHub &c.) carries no locally observable timestamp, so
-                # it is no evidence either way and is passed over. A scope whose
-                # ONLY destination is remote therefore yields nothing and the
-                # primary verdict stands.
-                case "$url" in
-                    file://*) dir="${url#file://}" ;;
-                    *) continue ;;
-                esac
-                [ -d "$dir" ] || continue
-                # Freshness is the newest object written into the backup, never
-                # `now`: if the syncing order stops, this ages out on its own
-                # and the gate correctly starts complaining again.
-                # Reduced with awk rather than `sort -rn | head -1`: under
-                # `set -o pipefail`, `head` exiting early SIGPIPEs `sort`, the
-                # pipeline reports 141 and the `|| newest=""` then discards a
-                # correct answer. That happens once the listing exceeds the pipe
-                # buffer — a few hundred files — which is exactly the busy
-                # destination this gate exists to read.
-                newest=$(find "$dir" -type f -printf '%T@\n' 2>/dev/null \
-                    | awk '{ if ($1+0 > m+0) m=$1 } END { if (NR) print m }') || newest=""
-                if [ -z "$newest" ]; then
-                    newest=$(find "$dir" -type f -exec stat -f '%m' {} + 2>/dev/null \
-                        | awk '{ if ($1+0 > m+0) m=$1 } END { if (NR) print m }') || newest=""
-                fi
-                case "$newest" in ''|*[!0-9.]*) continue ;; esac
-                newest="${newest%%.*}"
-                if [ -z "$best" ] || [ "$newest" -gt "$best" ]; then
-                    best="$newest"
-                fi
-            done <<EOF
-$urls
-EOF
-            [ -n "$best" ] && printf '%s\n' "$best"
-            return 0
-        }
-
         _PRUNE_SKIP=0
         _PRUNE_SKIP_REASON=""
-        if [ ! -f "$_BACKUP_STATE" ]; then
-            _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=absent"
-            _PRUNE_SKIP=1
-        else
-            _BACKUP_TS=$(sed -n "s/.*\"$_BACKUP_FIELD\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BACKUP_STATE" | head -1)
+        _PRUNE_BACKUP_UNSUPPORTED=0
+        _BACKUP_TS=""
+        _BACKUP_ERR_FILE=$(mktemp)
+        if _BACKUP_STATUS=$(scope_bd backup status --json 2>"$_BACKUP_ERR_FILE"); then
+            _BACKUP_TS=$(printf '%s' "$_BACKUP_STATUS" | jq -r '
+                (if (.dolt.configured // false) == true
+                 then (.dolt.last_sync // empty)
+                 else (.backup.timestamp // empty) end)
+                | select(type == "string" and . != "" and (startswith("0001-") | not))' 2>/dev/null || true)
             if [ -z "$_BACKUP_TS" ]; then
-                _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=unparseable"
+                _PRUNE_SKIP_REASON="source=bd-backup-status age=absent"
+                _PRUNE_SKIP=1
+            fi
+        else
+            _BACKUP_STATUS="$(cat "$_BACKUP_ERR_FILE" 2>/dev/null) $_BACKUP_STATUS"
+            case "$_BACKUP_STATUS" in
+                *'"proxy.backup.unsupported"'* | *"not supported in proxied-server mode"*)
+                    # This bd cannot back up the city scope's transport, so no
+                    # backup evidence can exist yet. The prune waits; the run
+                    # reports it without escalating every cooldown.
+                    _PRUNE_BACKUP_UNSUPPORTED=1
+                    ;;
+            esac
+            _PRUNE_SKIP_REASON="source=bd-backup-status unavailable: $(sanitize_output "$_BACKUP_STATUS")"
+            _PRUNE_SKIP=1
+        fi
+        rm -f "$_BACKUP_ERR_FILE"
+        if [ "$_PRUNE_SKIP" -eq 0 ]; then
+            case "$_BACKUP_TS" in
+                [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*) ;;
+                *)
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
+                    _PRUNE_SKIP=1
+                    ;;
+            esac
+        fi
+        if [ "$_PRUNE_SKIP" -eq 0 ]; then
+            # bd timestamps are RFC3339 (possibly with fractional seconds).
+            # Truncate to whole seconds, as Step 4's SQL does.
+            case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
+            _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
+                || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
+                || echo "")
+            if [ -z "$_BACKUP_EPOCH" ]; then
+                _PRUNE_SKIP_REASON="source=bd-backup-status age=unparseable ($_BACKUP_TS)"
                 _PRUNE_SKIP=1
             else
-                # Real on-disk timestamps are RFC3339Nano. Truncate to whole
-                # seconds, the same normalization Step 4's SQL does with
-                # SUBSTRING_INDEX(..., '.', 1).
-                case "$_BACKUP_TS" in *.*) _BACKUP_TS="${_BACKUP_TS%%.*}Z" ;; esac
-                _BACKUP_EPOCH=$(date -u -d "$_BACKUP_TS" '+%s' 2>/dev/null \
-                    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$_BACKUP_TS" '+%s' 2>/dev/null \
-                    || python3 -c 'import datetime,calendar,sys; print(calendar.timegm(datetime.datetime.strptime(sys.argv[1],"%Y-%m-%dT%H:%M:%SZ").timetuple()))' "$_BACKUP_TS" 2>/dev/null \
-                    || echo "")
-                _NOW_EPOCH=$(date -u '+%s')
-                if [ -z "$_BACKUP_EPOCH" ]; then
-                    _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=unparseable"
+                _BACKUP_AGE=$(( $(date -u '+%s') - _BACKUP_EPOCH ))
+                if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
+                    _PRUNE_SKIP_REASON="source=bd-backup-status age=${_BACKUP_AGE}s"
                     _PRUNE_SKIP=1
-                else
-                    _BACKUP_AGE=$(( _NOW_EPOCH - _BACKUP_EPOCH ))
-                    if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
-                        _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=${_BACKUP_AGE}s"
-                        _PRUNE_SKIP=1
-                    fi
                 fi
             fi
         fi
 
-        if [ "$_PRUNE_SKIP" -eq 1 ]; then
-            _DOLT_BACKUP_EPOCH="$(dolt_native_backup_epoch)"
-            if [ -n "$_DOLT_BACKUP_EPOCH" ]; then
-                _DOLT_BACKUP_AGE=$(( $(date -u '+%s') - _DOLT_BACKUP_EPOCH ))
-                if [ "$_DOLT_BACKUP_AGE" -le "$_PRUNE_MAX_AGE" ]; then
-                    _PRUNE_SKIP=0
-                    _PRUNE_SKIP_REASON=""
-                else
-                    _PRUNE_SKIP_REASON="$_PRUNE_SKIP_REASON dolt_backups=${_DOLT_BACKUP_AGE}s"
-                fi
-            fi
-        fi
-
-        if [ "$_PRUNE_SKIP" -eq 1 ]; then
+        if [ "$_PRUNE_BACKUP_UNSUPPORTED" -eq 1 ]; then
+            order_outcome_scope_skipped "city" "session prune skipped: bd-backup-unsupported"
+        elif [ "$_PRUNE_SKIP" -eq 1 ]; then
             record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+            order_outcome_scope_skipped "city" "session prune skipped: no fresh backup"
         fi
 
-        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced directly
-        # into a SQL LIKE literal below (type-scope gate) and passed as bd's
-        # own --pattern flag further down. A value outside this charset
-        # (e.g. a single quote) would corrupt the guard's own COUNT query --
-        # id LIKE 'x' OR '1'='1' always matches, silently defeating the very
-        # guard it is supposed to be. Fail closed: reject before any SQL is
-        # built, matching the backup-age gate above. Inlined (not a shared
-        # helper like valid_database_identifier) because every per-file test
-        # harness in test/ extracts only this Step 6 block via awk, and a
-        # call to a helper defined outside that boundary would resolve to
-        # nothing in those harnesses.
+        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced into a SQL
+        # LIKE literal below (type-scope gate) and passed as bd's own --pattern
+        # flag. A value outside this charset (e.g. a single quote) would corrupt
+        # the guard's own COUNT query -- id LIKE 'x' OR '1'='1' always matches,
+        # silently defeating the guard. Fail closed before any SQL is built.
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
             case "$SESSION_BEAD_PATTERN" in
                 ''|*[!A-Za-z0-9_.*?-]*)
@@ -1406,105 +1113,106 @@ EOF
             esac
         fi
 
-        # Type-scope gate: bd's prune SweepRequest has no issue_type filter
-        # (only ID glob + age), so a pattern like the default gm-* would
-        # delete any closed, non-session bead sharing that ID prefix. Cheap
-        # mechanical count mirroring bd's own prune candidate selection
-        # (pattern + closed + older-than), restricted to non-session rows --
-        # fail closed on a nonzero hit, matching the backup-age gate above.
-        # When the city database can't be resolved the count can't be
-        # computed at all; record once (like every other CITY_DB-unresolved
-        # branch in this file) and let bd's own prune proceed unverified --
-        # bd resolves its store independently of this file's direct-SQL
-        # CITY_DB, so blocking it here would regress that guarantee.
-        if [ "$_PRUNE_SKIP" -eq 0 ] && [ -n "$CITY_DB" ]; then
+        # Type-scope gate: bd's prune has no issue_type filter (only ID glob +
+        # age), so a pattern like the default gm-* would delete any closed,
+        # non-session bead sharing that ID prefix. Count bd's own prune
+        # candidates (pattern + closed + older-than) restricted to non-session
+        # rows, and fail closed on a nonzero hit or on a count that could not
+        # be computed.
+        if [ "$_PRUNE_SKIP" -eq 0 ]; then
             # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A
             # literal % or _ in a custom pattern would not round-trip.
             _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
             _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
             case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
-            # get_sql_count zeroes SQL_COUNT_RESULT and returns 0 on every
-            # failure path (mktemp, dolt_sql nonzero, non-numeric output), so
-            # a transient Dolt fault is indistinguishable from "scope is
-            # clear" -- which would let the forced prune through unguarded.
-            # It does record an anomaly on each of those paths, so snapshot
-            # the anomaly log across the call and treat any growth as "count
-            # could not be computed": fail closed, like every other gate
-            # here. Done inline rather than by changing get_sql_count's
-            # contract -- its other call sites legitimately treat a failed
-            # count as benign-zero.
-            _TYPE_GUARD_ANOMALIES_BEFORE="${ANOMALIES:-}"
-            get_sql_count "$CITY_DB" "type scope guard" "
+            if ! get_sql_count "type scope guard" "
                 SELECT COUNT(*) FROM \`$CITY_DB\`.issues
                 WHERE id LIKE '$_TYPE_GUARD_LIKE'
                 AND status = 'closed'
-                AND closed_at < DATE_SUB(NOW(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
+                AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
                 AND issue_type != 'session'
-            "
-            if [ "${ANOMALIES:-}" != "$_TYPE_GUARD_ANOMALIES_BEFORE" ]; then
+            "; then
                 record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: type-scope guard count could not be computed (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
                 _PRUNE_SKIP=1
             elif [ "$SQL_COUNT_RESULT" -gt 0 ]; then
                 record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: $SQL_COUNT_RESULT non-session bead(s) matching pattern=$SESSION_BEAD_PATTERN would be caught by prune (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
                 _PRUNE_SKIP=1
             fi
-        elif [ "$_PRUNE_SKIP" -eq 0 ] && [ -z "$CITY_DB" ] && [ "${CITY_DB_ANOMALY_RECORDED:-0}" -eq 0 ]; then
-            record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or ${CITY:-}/.beads/metadata.json; session-prune type-scope guard disabled, prune proceeding unverified"
-            CITY_DB_ANOMALY_RECORDED=1
         fi
 
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")
-        if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); fi
+        # Without --force `gc bd prune` refuses (exit 1, "would prune N"), so a dry
+        # run asks for bd's own preview instead.
+        if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); else BD_PRUNE_ARGS+=(--dry-run); fi
         BD_PRUNE_ARGS+=(--json)
+        if [ "$_PRUNE_SKIP" -eq 0 ] && run_budget_exhausted; then
+            order_outcome_scope_skipped "city" "session prune skipped: run budget exhausted"
+            _PRUNE_SKIP=1
+        fi
         if [ "$_PRUNE_SKIP" -eq 0 ]; then
-            if PRUNE_JSON=$( ( cd "$CITY_ABS" && gc bd --city "$CITY_ABS" "${BD_PRUNE_ARGS[@]}" ) 2>/dev/null ); then :
-            else PRUNE_JSON='{"pruned_count":0}'; fi
-            PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
-            [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
+            PRUNE_ERR_FILE=$(mktemp)
+            PRUNE_COUNT=""
+            if PRUNE_JSON=$(scope_bd "${BD_PRUNE_ARGS[@]}" 2>"$PRUNE_ERR_FILE"); then
+                PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | jq -r '.pruned_count // .prune_count // empty' 2>/dev/null || true)
+            fi
+            case "$PRUNE_COUNT" in
+                ''|*[!0-9]*)
+                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "session bead prune failed (pattern=$SESSION_BEAD_PATTERN): $(sanitize_output "$(cat "$PRUNE_ERR_FILE" 2>/dev/null) $PRUNE_JSON")"
+                    PRUNE_COUNT=0
+                    ;;
+            esac
+            rm -f "$PRUNE_ERR_FILE"
             TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
             if [ "$PRUNE_COUNT" -gt 1000 ]; then
                 record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "$PRUNE_COUNT closed session beads pruned (pattern=$SESSION_BEAD_PATTERN threshold: 1000)"
             fi
         fi
     else
-        # ── type-safe SQL path (issue_type=session only) ──────────────────────
-        # Activated when GC_REAPER_SESSION_BEAD_PATTERN="". Targets only rows
-        # with issue_type='session' so it cannot accidentally prune non-session beads.
+        # ── type-safe path (issue_type=session only) ──────────────────────────
+        # Activated when GC_REAPER_SESSION_BEAD_PATTERN="". Selects only rows
+        # with issue_type='session' so it cannot prune non-session beads, and
+        # deletes them through bd in batches of 500.
         SESSION_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
-        if [ -z "$CITY_DB" ]; then
-            record_anomaly "session" "type-safe SQL path: city database unresolved — skipping"
+        case "$SESSION_AGE_H" in ''|*[!0-9]*) SESSION_AGE_H=720 ;; esac
+        if [ -n "$DRY_RUN" ]; then
+            if get_sql_count "type-safe session prune" "SELECT COUNT(*) FROM \`$CITY_DB\`.issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ${SESSION_AGE_H} HOUR)"; then
+                TOTAL_SESSIONS_PRUNED=$SQL_COUNT_RESULT
+            fi
         else
-            if [ -n "$DRY_RUN" ]; then
-                RAW=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT COUNT(*) FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR);") 2>/dev/null || RAW=""
-                COUNT=$(printf '%s\n' "$RAW" | tail -n +2 | tr -d ',' | grep -v '^$' | head -1)
-                TOTAL_SESSIONS_PRUNED="${COUNT:-0}"
-            else
-                TOTAL=0
-                while true; do
-                    RAW=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT id FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500;") 2>/dev/null || break
-                    BATCH_IDS=$(printf '%s\n' "$RAW" | tail -n +2 | grep -v '^$')
-                    BATCH_COUNT=$(printf '%s\n' "$BATCH_IDS" | grep -c . || true)
-                    [ "$BATCH_COUNT" -gt 0 ] || break
-                    SQL_IDS=$(printf '%s\n' "$BATCH_IDS" | sed "s/.*/'&'/" | tr '\n' ',' | sed 's/,$//')
-                    dolt_sql -r csv -q "USE \`${CITY_DB}\`;
-DELETE FROM labels WHERE issue_id IN (${SQL_IDS});
-DELETE FROM dependencies WHERE issue_id IN (${SQL_IDS}) OR depends_on_issue_id IN (${SQL_IDS});
-DELETE FROM issues WHERE id IN (${SQL_IDS});
-CALL DOLT_COMMIT('-A', '-m', 'reaper: session_beads_pruned=${BATCH_COUNT} type=session age>${SESSION_AGE_H}h', '--author', 'reaper <reaper@gascity.local>');" >/dev/null \
-                        || { record_anomaly "session" "SQL cascade failed at offset $TOTAL"; break; }
-                    TOTAL=$((TOTAL + BATCH_COUNT))
-                done
-                TOTAL_SESSIONS_PRUNED=$TOTAL
-                if [ "$TOTAL_SESSIONS_PRUNED" -gt 1000 ]; then
-                    record_anomaly "session" "$TOTAL_SESSIONS_PRUNED closed session beads pruned via SQL path (threshold: 1000)"
+            TOTAL=0
+            while true; do
+                get_sql_rows "type-safe session prune" "SELECT id FROM \`$CITY_DB\`.issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500" || break
+                BATCH_COUNT=$(count_lines "$SQL_ROWS_RESULT")
+                [ "$BATCH_COUNT" -gt 0 ] || break
+                run_budget_exhausted && break
+                SESSION_IDS_FILE=$(mktemp)
+                DELETE_ERR_FILE=$(mktemp)
+                printf '%s\n' "$SQL_ROWS_RESULT" >"$SESSION_IDS_FILE"
+                DELETED_COUNT=""
+                if DELETE_OUT=$(scope_bd delete --force --json --from-file "$SESSION_IDS_FILE" 2>"$DELETE_ERR_FILE"); then
+                    DELETED_COUNT=$(printf '%s' "$DELETE_OUT" | jq -r '.deleted_count // empty' 2>/dev/null || true)
                 fi
+                case "$DELETED_COUNT" in
+                    ''|*[!0-9]*)
+                        record_anomaly "session" "type-safe session prune failed after $TOTAL deletions: $(sanitize_output "$(cat "$DELETE_ERR_FILE" 2>/dev/null) $DELETE_OUT")"
+                        rm -f "$SESSION_IDS_FILE" "$DELETE_ERR_FILE"
+                        break
+                        ;;
+                esac
+                rm -f "$SESSION_IDS_FILE" "$DELETE_ERR_FILE"
+                TOTAL=$((TOTAL + DELETED_COUNT))
+                # A batch that deleted nothing would select the same rows again.
+                [ "$DELETED_COUNT" -gt 0 ] || break
+            done
+            TOTAL_SESSIONS_PRUNED=$TOTAL
+            if [ "$TOTAL_SESSIONS_PRUNED" -gt 1000 ]; then
+                record_anomaly "session" "$TOTAL_SESSIONS_PRUNED closed session beads pruned via the type-safe path (threshold: 1000)"
             fi
         fi
     fi
 fi
 
 if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&1; then
-    SESSION_PRUNE_ATTEMPTED=1
     if SESSION_STATE_PRUNE_JSON=$( (
         cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" gc session prune --state drained --before "$SESSION_STATE_PRUNE_AGE" --json
     ) 2>&1); then
@@ -1521,9 +1229,10 @@ if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&
     fi
 fi
 
-if [ "$HAD_DATABASES" -eq 0 ] && [ "$SESSION_PRUNE_ATTEMPTED" -eq 0 ]; then
-    exit 0
+if [ "$TOTAL_SCOPES" -eq 0 ]; then
+    order_outcome_set skipped "no bd bead scope was reaped"
 fi
+order_outcome_write
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
@@ -1532,9 +1241,9 @@ if [ -n "$ANOMALIES" ]; then
         --message "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+SUMMARY="reaper — scopes:$TOTAL_SCOPES, stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, held_wisps:$TOTAL_HELD_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_purge:$TOTAL_WOULD_PURGE, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
 
 maintenance_done "$SUMMARY"

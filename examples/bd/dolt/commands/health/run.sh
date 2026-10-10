@@ -556,7 +556,8 @@ fi
 # positives from processes that merely mention "dolt" in their args
 # (e.g., Claude sessions whose prompt text contains "dolt sql-server").
 #
-# Rig-local Dolt servers (configured via dolt.port in config.yaml)
+# Rig-local Dolt servers (configured via dolt.port in config.yaml, flat or
+# nested)
 # are legitimate — exclude any PID listening on a known rig port.
 #
 # Foreign Dolt servers (managed by OTHER cities on the same host) are
@@ -591,7 +592,7 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -f "$meta" ] || continue
     config_file="$(dirname "$meta")/config.yaml"
     [ -f "$config_file" ] || continue
-    rig_port=$(grep '^dolt\.port:' "$config_file" 2>/dev/null | sed "s/^dolt\\.port:[[:space:]]*//; s/[[:space:]]*#.*$//; s/['\\\"]//g; s/[[:space:]]*$//" | head -1)
+    rig_port=$(beads_config_value "$config_file" dolt.port)
     case "$rig_port" in ''|*[!0-9]*) continue ;; esac
     [ "$rig_port" = "$GC_DOLT_PORT" ] && continue
     rig_pid=$(managed_runtime_listener_pid "$rig_port" || true)

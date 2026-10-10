@@ -1,0 +1,23 @@
+# pnpm view of this package for rules_js (MODULE.bazel npm_openclaw).
+# npm (package-lock.json) drives local use; pnpm-lock.yaml is its `pnpm
+# import` translation.
+
+# No install scripts under Bazel. openclaw's postinstall prunes/patches
+# packaged plugin dist the bridge never imports; the others build optional
+# native or generated pieces the bridge does not load. The suite passes the
+# same under `npm ci --ignore-scripts`.
+allowBuilds:
+  "@google/genai": false
+  openclaw: false
+  protobufjs: false
+  tree-sitter-bash: false
+
+# openclaw publishes an npm-shrinkwrap.json, which npm honors and pnpm
+# ignores. These pins are where pnpm's own resolution differs from it;
+# pinning them keeps pnpm-lock.yaml the same tree as package-lock.json
+# (lockfiles_in_sync_test). Update them from the shrinkwrap with openclaw.
+overrides:
+  "@types/retry": 0.12.5
+  node-domexception: npm:@nolyfill/domexception@1.0.28
+  protobufjs: 8.4.0
+  "@openclaw/fs-safe>tar": 7.5.15

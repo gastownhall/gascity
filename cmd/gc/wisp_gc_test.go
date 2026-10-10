@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -349,6 +350,22 @@ func TestRelocatedSQLiteSessionLedgerRequiresSQLite(t *testing.T) {
 	ledger := openSessionPurgeSQLiteStore(t)
 	if got := relocatedSQLiteSessionLedger(wholeSplitRoutes(ledger), ledger, beads.NewMemStore()); got != ledger {
 		t.Fatalf("relocatedSQLiteSessionLedger over the SQLite binding = %v, want the ledger", got)
+	}
+}
+
+// The controller serves the sessions class through its CachingStore over the
+// ledger. Kills: an engine check that type-asserts the cache instead of the
+// engine under it, which returns nil and silently stops the closed session
+// purge on every split city.
+func TestRelocatedSQLiteSessionLedgerSeesThroughTheBindingCache(t *testing.T) {
+	ledger := openSessionPurgeSQLiteStore(t)
+	routes := wholeSplitRoutes(ledger).withControllerCache(context.Background(), nil)
+	sessions := routes.stores[coordclass.ClassSessions]
+	if _, cached := sessions.(*beads.CachingStore); !cached {
+		t.Fatalf("sessions class is %T, want the controller's cache", sessions)
+	}
+	if got := relocatedSQLiteSessionLedger(routes, sessions, beads.NewMemStore()); got != sessions {
+		t.Fatalf("relocatedSQLiteSessionLedger over the cached ledger = %v, want the cache %v", got, sessions)
 	}
 }
 
@@ -2131,6 +2148,11 @@ func TestWispGC_LeavesOpenRootWithLiveDescendant(t *testing.T) {
 	}
 }
 
+// TestWispGC_LeavesSteplessRoot pins the instantiator race window: a stepless
+// root that is still INSIDE the close TTL may simply be mid-instantiation (root
+// written, steps not yet), so the sweep must leave it alone. The TTL — not
+// steplessness alone — is what bounds that window; see
+// TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL for the far side of it.
 func TestWispGC_LeavesSteplessRoot(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -2138,10 +2160,14 @@ func TestWispGC_LeavesSteplessRoot(t *testing.T) {
 	})
 
 	withCloseAbandonedEnforced(t, func() {
-		wg := newWispGC(5*time.Minute, time.Hour, 0)
-		if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
-			t.Fatalf("runGC: %v", err)
-		}
+		// Close TTL well beyond the root's 2h idle age: the root is inside the
+		// instantiator race window.
+		withCloseAbandonedTTL(t, 24*time.Hour, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
 	})
 
 	root, err := store.Get("mol-root")
@@ -2150,6 +2176,377 @@ func TestWispGC_LeavesSteplessRoot(t *testing.T) {
 	}
 	if root.Status != "open" {
 		t.Fatalf("stepless mol-root status = %q, want open (must not race instantiator)", root.Status)
+	}
+}
+
+// TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL covers the leaked
+// root-only patrol wisp (ga-98b): poured stepless, left at the unclaimed pour
+// status, never picked up, idle past the TTL. Before this case the sweep
+// skipped every stepless root unconditionally, so this exact shape — the one
+// that actually accumulates — was the one shape GC could never reap.
+func TestWispGC_ClosesAbandonedSteplessUnclaimedRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-leaked",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-leaked")
+	if err != nil {
+		t.Fatalf("Get(wisp-leaked): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("stepless unclaimed wisp status = %q, want closed (leaked past TTL)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+// TestWispGC_ClosesAssignedButUnclaimedSteplessRootPastTTL pins the behavior
+// steplessRootIsAbandoned's doc comment declares intentional: routed demand
+// that has sat unclaimed past the TTL is reaped. The candidate query applies
+// no assignee filter, so an assigned root reaches the predicate exactly as an
+// unassigned one does — asserted here so a future edit cannot flip it silently.
+func TestWispGC_ClosesAssignedButUnclaimedSteplessRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-routed",
+			Status:    "open",
+			Type:      "molecule",
+			Assignee:  "repo/refinery",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-routed")
+	if err != nil {
+		t.Fatalf("Get(wisp-routed): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("assigned unclaimed wisp status = %q, want closed (stale routed demand past TTL)", root.Status)
+	}
+}
+
+// TestWispGC_LeavesSteplessClaimedRootPastTTL is the safety half of the
+// stepless allowance. A claimed (in_progress) stepless root is held by a live
+// worker, and a root bead's UpdatedAt does NOT advance while its agent works —
+// so idle age alone cannot distinguish "abandoned" from "busy" here. Only the
+// unclaimed pour status can, and this root no longer carries it.
+func TestWispGC_LeavesSteplessClaimedRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-live",
+			Status:    "in_progress",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-live")
+	if err != nil {
+		t.Fatalf("Get(wisp-live): %v", err)
+	}
+	if root.Status != "in_progress" {
+		t.Fatalf("stepless claimed wisp status = %q, want in_progress (live worker holds it)", root.Status)
+	}
+}
+
+// TestWispGC_DryRunDefaultDoesNotCloseSteplessRoot proves the stepless
+// allowance inherits the sweep's dry-run default rather than bypassing it.
+func TestWispGC_DryRunDefaultDoesNotCloseSteplessRoot(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-leaked",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp"},
+		},
+	})
+
+	var logOutput string
+	withCloseAbandonedTTL(t, 5*time.Minute, func() {
+		logOutput = captureWispGCLog(t, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-leaked")
+	if err != nil {
+		t.Fatalf("Get(wisp-leaked): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless wisp status = %q, want open (dry-run default must not close)", root.Status)
+	}
+	if !strings.Contains(logOutput, "would be closed (dry-run") {
+		t.Fatalf("log output = %q, want dry-run would-close log", logOutput)
+	}
+}
+
+// TestWispGC_LeavesSteplessExemptRootPastTTL proves the gc.gc_exempt opt-out
+// still protects a stepless unclaimed root, so a deployment can park a
+// perpetual root-only root without the sweep reaping it.
+func TestWispGC_LeavesSteplessExemptRootPastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-exempt",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+			Metadata:  map[string]string{"gc.kind": "wisp", beadmeta.GCExemptMetadataKey: "true"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-exempt")
+	if err != nil {
+		t.Fatalf("Get(wisp-exempt): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("exempt stepless wisp status = %q, want open (gc.gc_exempt opt-out)", root.Status)
+	}
+}
+
+// TestWispGC_LeavesSteplessRootWithLiveAttachmentSourcePastTTL pins the
+// attached-wisp exception. privatizeAttachedRootOnlyWisp
+// (internal/sling/sling.go) leaves an attached root-only wisp as a type=molecule
+// root with gc.kind stripped, deliberately never routed and never claimed — the
+// SOURCE bead is the claimable unit — so it is unclaimed by construction and the
+// claim predicate alone would close it one TTL after pour. The source bead's
+// forward molecule_id pointer is what keeps it alive; closing the root out from
+// under a live source would un-block findBlockingMolecule and let a second
+// attachment land on the same source bead.
+func TestWispGC_LeavesSteplessRootWithLiveAttachmentSourcePastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-live",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("attached stepless wisp status = %q, want open (live source bead still attached)", root.Status)
+	}
+}
+
+// TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal is the far side of
+// the attachment guard: once the source bead goes terminal there is no live
+// attachment state left to protect, so the root reaps normally. Without this
+// case the guard above could silently blunt the fix into "never close a
+// stepless root" again.
+func TestWispGC_ClosesSteplessRootWhenAttachmentSourceTerminal(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-done",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("attached stepless wisp status = %q, want closed (source bead terminal)", root.Status)
+	}
+	if got := root.Metadata["close_reason"]; got != abandonedRootCloseReason {
+		t.Fatalf("close_reason = %q, want %q", got, abandonedRootCloseReason)
+	}
+}
+
+// TestWispGC_LeavesSteplessRootWithLiveGraphV2AttachmentSourcePastTTL is the
+// graph.v2 half of the attachment guard. The v1 attach path writes molecule_id
+// on the source bead; the graph.v2 path writes workflow_id
+// (internal/sling/sling_core.go). steplessRootHasLiveAttachmentSource checks
+// both keys, so both need a case — without this one, deleting the workflow_id
+// iteration would fail no test.
+func TestWispGC_LeavesSteplessRootWithLiveGraphV2AttachmentSourcePastTTL(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+		{
+			ID:        "src-live-graphv2",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Metadata:  map[string]string{"workflow_id": "wisp-attached"},
+		},
+	})
+
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			wg := newWispGC(5*time.Minute, time.Hour, 0)
+			if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+				t.Fatalf("runGC: %v", err)
+			}
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("graph.v2-attached stepless wisp status = %q, want open (live source bead still attached)", root.Status)
+	}
+}
+
+// TestWispGC_LeavesSteplessRootWhenAttachmentQueryFails pins the fail-CLOSED
+// posture steplessRootHasLiveAttachmentSource promises: an unreadable store
+// must never widen what the sweep destroys. With the attachment-holder query
+// erroring, the root is indistinguishable from one with a live source, so it
+// stays open and the sweep says why.
+func TestWispGC_LeavesSteplessRootWhenAttachmentQueryFails(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "wisp-attached",
+			Status:    "open",
+			Type:      "molecule",
+			CreatedAt: now.Add(-30 * time.Minute),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			Ephemeral: true,
+		},
+	})
+	store.listErrors[gcQueryKey{Metadata: metadataQueryKey(map[string]string{beadmeta.MoleculeIDMetadataKey: "wisp-attached"})}] = fmt.Errorf("attachment holder list failed")
+
+	var logOutput string
+	withCloseAbandonedEnforced(t, func() {
+		withCloseAbandonedTTL(t, 5*time.Minute, func() {
+			logOutput = captureWispGCLog(t, func() {
+				wg := newWispGC(5*time.Minute, time.Hour, 0)
+				if _, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now); err != nil {
+					t.Fatalf("runGC: %v", err)
+				}
+			})
+		})
+	})
+
+	root, err := store.Get("wisp-attached")
+	if err != nil {
+		t.Fatalf("Get(wisp-attached): %v", err)
+	}
+	if root.Status != "open" {
+		t.Fatalf("stepless wisp status = %q, want open (attachment query failed; fail closed)", root.Status)
+	}
+	if !strings.Contains(logOutput, "leaving it open") {
+		t.Fatalf("log output = %q, want unresolvable-attachment-holder log", logOutput)
 	}
 }
 
@@ -2343,6 +2740,20 @@ func (s *gcTestStore) Delete(id string) error {
 	return nil
 }
 
+// DeleteIfMatch records exactly as Delete does, so the fenced session purge
+// stays observable through deleteAttempts, deleteErrors and deletedIDs.
+func (s *gcTestStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	s.deleteAttempts = append(s.deleteAttempts, id)
+	if err := s.deleteErrors[id]; err != nil {
+		return err
+	}
+	if err := s.MemStore.DeleteIfMatch(id, expectedRevision); err != nil {
+		return err
+	}
+	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
 //nolint:unparam // helper mirrors makeGCBeadWithLabels signature for readability
 func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.Bead {
 	return makeGCBeadWithLabels(id, createdAt, status, beadType)
@@ -2481,3 +2892,114 @@ func assertDeletedIDs(t *testing.T, deleted []string, want ...string) {
 }
 
 var _ beads.Store = (*gcTestStore)(nil)
+
+// closedRowCachedWithEdgeAddedBehind returns a cache over a SQLite ledger in
+// which id is closed through the cache (so the cache holds the closed row and
+// its edge set) and then gains a parent-child edge behind the cache, as a
+// write from another process that emitted nothing would add it.
+func closedRowCachedWithEdgeAddedBehind(t *testing.T, id, typ string, ephemeral bool) *beads.CachingStore {
+	t.Helper()
+	ledger := openSessionPurgeSQLiteStore(t)
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: id, Title: id, Type: typ, Status: "open", Ephemeral: ephemeral, CreatedAt: old, UpdatedAt: old})
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: "gcg-owner", Title: "owner", Type: "molecule", Status: "open", CreatedAt: old, UpdatedAt: old})
+	cache := beads.NewCachingStore(ledger, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close(id); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := ledger.DepAdd(id, "gcg-owner", "parent-child"); err != nil {
+		t.Fatalf("DepAdd behind the cache: %v", err)
+	}
+	if deps, _ := cache.DepList(id, "down"); len(deps) != 0 {
+		t.Fatalf("precondition: the cache already sees the edge (%v)", deps)
+	}
+	return cache
+}
+
+// Kills (M9): a session purge whose parent-child edge check reads the cache,
+// which deletes a session another process just linked into a live subtree.
+func TestPurgeClosedInfraSessionsChecksEdgesLive(t *testing.T) {
+	cache := closedRowCachedWithEdgeAddedBehind(t, "gcg-session-linked", "session", false)
+	purged, err := purgeClosedInfraSessions(cache, time.Now().Add(60*24*time.Hour), 720*time.Hour, 500)
+	if err != nil {
+		t.Fatalf("purgeClosedInfraSessions: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("purged %d; a session the store links into a subtree was deleted on the cache's word", purged)
+	}
+}
+
+// Kills (M8): a session purge whose pre-delete re-read reads the cache. The
+// store closed the session behind the cache; the cache still says open, so a
+// cached re-read skips a row the live list already proved purgeable.
+func TestPurgeClosedInfraSessionsReReadsLive(t *testing.T) {
+	ledger := openSessionPurgeSQLiteStore(t)
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: "gcg-session-done", Title: "done", Type: "session", Status: "open", CreatedAt: old, UpdatedAt: old})
+	cache := beads.NewCachingStore(ledger, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := ledger.Close("gcg-session-done"); err != nil {
+		t.Fatalf("Close behind the cache: %v", err)
+	}
+	purged, err := purgeClosedInfraSessions(cache, time.Now().Add(60*24*time.Hour), 720*time.Hour, 1)
+	if err != nil {
+		t.Fatalf("purgeClosedInfraSessions: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged %d, want 1: the re-read must see the store's closed row, not the cache's open one", purged)
+	}
+}
+
+// Kills: the rootless-orphan reaper's parent-child edge check reading the
+// cache, which deletes a closed wisp another process just linked under a live
+// parent.
+func TestWispGC_ReapChecksRootlessEdgesLive(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	cache := closedRowCachedWithEdgeAddedBehind(t, "gcg-rootless", "task", true)
+	reaped, err := reapOrphanedClosedWisps(cache, time.Now().Add(time.Hour), 500)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped %d; a wisp the store links under a live parent was deleted on the cache's word", reaped)
+	}
+}
+
+// Kills: the orphan reaper resolving a wisp's root from the cache. The root was
+// closed through the cache and then reopened behind it without an event; a
+// cached Get still says terminal, and the reaper deletes a live root's step.
+func TestWispGC_ReapResolvesRootsLive(t *testing.T) {
+	withReapOrphansEnforced(t, true)
+	ledger := openSessionPurgeSQLiteStore(t)
+	old := time.Now().Add(-2 * time.Hour)
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{ID: "gcg-root", Title: "root", Type: "molecule", Status: "open", CreatedAt: old, UpdatedAt: old})
+	mustCreateSessionPurgeBead(t, ledger, beads.Bead{
+		ID: "gcg-step", Title: "step", Type: "task", Status: "closed", Ephemeral: true, CreatedAt: old, UpdatedAt: old,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-root"},
+	})
+	cache := beads.NewCachingStore(ledger, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := cache.Close("gcg-root"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := ledger.Reopen("gcg-root"); err != nil {
+		t.Fatalf("Reopen behind the cache: %v", err)
+	}
+	if got, _ := cache.Get("gcg-root"); got.Status != "closed" {
+		t.Fatalf("precondition: cached root = %q, want the stale closed row", got.Status)
+	}
+	reaped, err := reapOrphanedClosedWisps(cache, time.Now().Add(time.Hour), 500)
+	if err != nil {
+		t.Fatalf("reapOrphanedClosedWisps: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped %d; a step of a root the store has reopened was deleted on the cache's word", reaped)
+	}
+}

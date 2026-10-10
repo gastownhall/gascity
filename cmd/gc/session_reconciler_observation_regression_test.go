@@ -384,7 +384,7 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 		t.Fatalf("Get before drain advance: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
@@ -407,5 +407,65 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 	}
 	if livenessCalls, _ := sp.counts(); livenessCalls != 2 {
 		t.Fatalf("liveness observations = %d, want initial plus post-stop", livenessCalls)
+	}
+}
+
+// Idle sleep: an attachment probe that cannot tell must not start the detached
+// clock that later authorizes the idle drain.
+func TestReconcileSessionBeads_AttachProbeErrorDoesNotRecordDetachedAt(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
+		Agents:       []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{"state": "awake"})
+	before, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get before reconcile: %v", err)
+	}
+	startsBefore := env.sp.CountCalls("Start", "worker")
+	stopsBefore := env.sp.CountCalls("Stop", "worker")
+	env.sp.AttachedErrors["worker"] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if woken := reconcileWithSequencedRuntimeObservation(env, []beads.Bead{before}, env.sp, map[string]int{"worker": 1}); woken != 0 {
+		t.Fatalf("woken = %d, want 0 while attachment is unknown", woken)
+	}
+	assertObservationDeferralPreservedSession(t, env, before, "worker", startsBefore, stopsBefore)
+}
+
+// Config drift: the direct-probe fallback must read a probe error as attached,
+// not as the bool's "detached". The worker observation targets another runtime
+// name here, so only the fallback sees the failing probe.
+func TestConfigDriftAttachFallbackTreatsProbeErrorAsAttached(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	sp.AttachedErrors["worker"] = errors.New("attach probe: unparsable client count")
+
+	attached, err := sessionAttachedForConfigDrift("unrelated-id", sp, "", nil, nil, "worker")
+	if !attached || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("sessionAttachedForConfigDrift = (%v, %v), want (true, runtime unavailable)", attached, err)
+	}
+}
+
+// Named-session config drift is an immediate kill; an attachment probe that
+// cannot tell must defer it like a real attach.
+func TestNamedActiveUseDefersOnAttachProbeError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	env.sp.AttachedErrors["worker"] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	info := env.createSessionInfo("worker", "worker")
+
+	if reason, active, err := namedSessionActiveUseReasonInfo(info, env.sp, "worker", env.clk); err != nil || !active || reason != "attach_unknown" {
+		t.Fatalf("namedSessionActiveUseReasonInfo = (%q, %v, %v), want (attach_unknown, true, nil)", reason, active, err)
+	}
+	if reason, deferred, err := shouldDeferNamedSessionConfigDrift(info, nil, env.sp, "worker", env.clk, "drift-key"); err != nil || !deferred || reason != "attach_unknown" {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift = (%q, %v, %v), want (attach_unknown, true, nil)", reason, deferred, err)
 	}
 }

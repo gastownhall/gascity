@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -41,8 +42,9 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 	if err := store.SetMetadata(info.ID, "state", string(sessionpkg.StateActive)); err != nil {
 		t.Fatalf("set active: %v", err)
 	}
-	if err := manager.BeginDrain(info.ID, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
+	// The controller's drain-ack path is the only writer of state=draining.
+	if err := manager.PersistedStore().ApplyPatch(info.ID, sessionpkg.DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
 
 	handle, err := NewSessionHandle(SessionHandleConfig{

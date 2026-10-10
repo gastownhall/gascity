@@ -256,8 +256,14 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
+	// A suspended rig's loops wait for it to resume: reading its store would
+	// restart the bd proxy suspension retired.
+	suspendedRigs := buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath))
 	for _, scope := range cr.convergenceScopes() {
 		scope := scope
+		if scope.rig != "" && suspendedRigs[scope.rig] {
+			continue
+		}
 		cr.safeTick(func() {
 			cr.convergenceTickScope(ctx, scope)
 		}, scope.triggerName("convergence-tick"))
@@ -562,8 +568,14 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
+	suspendedRigs := buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath))
 	for _, scope := range cr.convergenceScopes() {
 		scope := scope
+		if scope.rig != "" && suspendedRigs[scope.rig] {
+			// Reconciled by the first tick after the rig resumes.
+			scope.needsStartupReconcile = true
+			continue
+		}
 		run := func() {
 			cr.convergenceStartupReconcileScope(ctx, scope)
 		}
