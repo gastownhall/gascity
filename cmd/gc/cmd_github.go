@@ -49,6 +49,11 @@ type githubPRBackfillOptions struct {
 	timeout        time.Duration
 	actionableOnly bool
 	createRepairs  bool
+	// authors is an additional fail-closed author allow-list supplied for this
+	// invocation. It unions with each monitor's configured authors; when the
+	// combined set is non-empty, only PRs whose author login matches exactly
+	// (case-sensitively) are acted on.
+	authors []string
 }
 
 type githubPRBackfillResult struct {
@@ -146,6 +151,7 @@ behind their base. By default clean and pending-only PRs are omitted; pass
 	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "emit JSON")
 	cmd.Flags().BoolVar(&opts.includeClean, "all", false, "include clean and pending-only PRs")
 	cmd.Flags().BoolVar(&opts.createRepairs, "create-repair-beads", false, "create deduped repair beads for actionable PRs")
+	cmd.Flags().StringArrayVar(&opts.authors, "author", nil, "restrict to PRs by this GitHub author login (repeatable); fail-closed and unions with each monitor's configured authors")
 	cmd.Flags().DurationVar(&opts.timeout, "timeout", opts.timeout, "GitHub query timeout")
 	return cmd
 }
@@ -193,7 +199,7 @@ func doGitHubPRBackfill(opts githubPRBackfillOptions, stdout, stderr io.Writer) 
 			fmt.Fprintf(stderr, "gc github pr backfill: monitor %q: %v\n", monitor.Name, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		evaluated := githubmonitor.EvaluatePullRequests(monitor, prs)
+		evaluated := githubmonitor.EvaluatePullRequestsWithAllowedAuthors(monitor, prs, opts.authors)
 		for _, prResult := range evaluated {
 			if prResult.Actionable {
 				result.ActionableCount++
