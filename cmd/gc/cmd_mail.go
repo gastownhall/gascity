@@ -1707,10 +1707,14 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 func newMailMarkReadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "mark-read <id>",
-		Short: "Mark a message as read",
-		Long:  `Mark a message as read without displaying it. The message will no longer appear in inbox results.`,
-		Args:  cobra.ArbitraryArgs,
+		Use:   "mark-read <id>...",
+		Short: "Mark one or more messages as read",
+		Long: `Mark one or more messages as read without displaying them. They will no
+longer appear in inbox results. When multiple IDs are passed (as separate
+arguments, or as one whitespace-separated argument such as an unsplit "$IDS"),
+each is marked in input order; a failure on one is reported and the rest are
+still marked.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
 			if jsonOut {
@@ -2460,28 +2464,46 @@ func doMailMarkRead(mp mail.Provider, rec events.Recorder, args []string, stdout
 }
 
 func doMailMarkReadJSON(mp mail.Provider, rec events.Recorder, args []string, jsonOut bool, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
+	// Split like archive does: a shell can hand over "$IDS" as one argument,
+	// which used to be looked up as a single id and fail "not found".
+	ids := splitMessageIDArgs(args)
+	if len(ids) < 1 {
 		fmt.Fprintln(stderr, "gc mail mark-read: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
-	if err := mp.MarkRead(id); err != nil {
-		telemetry.RecordMailOp(context.Background(), "mark_read", err)
-		fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	exit := 0
+	marked := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if err := mp.MarkRead(id); err != nil {
+			telemetry.RecordMailOp(context.Background(), "mark_read", err)
+			if len(ids) > 1 {
+				fmt.Fprintf(stderr, "gc mail mark-read %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc mail mark-read: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			exit = 1
+			continue
+		}
+		telemetry.RecordMailOp(context.Background(), "mark_read", nil)
+		rec.Record(events.Event{
+			Type:    events.MailMarkedRead,
+			Actor:   eventActor(),
+			Subject: id,
+			Payload: mailEventPayload(nil),
+		})
+		marked = append(marked, id)
+		if !jsonOut {
+			fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
+		}
 	}
-	telemetry.RecordMailOp(context.Background(), "mark_read", nil)
-	rec.Record(events.Event{
-		Type:    events.MailMarkedRead,
-		Actor:   eventActor(),
-		Subject: id,
-		Payload: mailEventPayload(nil),
-	})
-	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", ID: id, IDs: []string{id}, Count: intRef(1)})
+	if jsonOut && exit == 0 {
+		result := mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", IDs: marked, Count: intRef(len(marked))}
+		if len(marked) == 1 {
+			result.ID = marked[0]
+		}
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", result)
 	}
-	fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
-	return 0
+	return exit
 }
 
 // cmdMailMarkUnread marks a message as unread.

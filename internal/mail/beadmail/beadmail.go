@@ -429,13 +429,32 @@ func (p *Provider) Archive(id string) error {
 	if b.Status == "closed" {
 		return mail.ErrAlreadyArchived
 	}
-	if err := p.store.Close(id); err != nil {
+	if err := p.closeArchived(id, hasLabel(b.Labels, "read")); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived
 		}
 		return fmt.Errorf("beadmail archive: %w", err)
 	}
 	return nil
+}
+
+// closeArchived marks an unread message read, then closes it. Archive means
+// "dismissed", and a dismissed message left unread was lost twice over: it
+// kept reading as unread in any history view, and the read-gated retention
+// sweep (SweepReadMessagesBefore / PurgeReadMessageWisps) never reclaims an
+// unread message, so it lingered forever. Marking read first is the
+// same order ArchiveInjectedAutoHandoffs already uses. alreadyRead skips the
+// write when the caller has seen the read label.
+func (p *Provider) closeArchived(id string, alreadyRead bool) error {
+	if !alreadyRead {
+		if err := p.store.Update(id, beads.UpdateOpts{
+			Labels:   []string{"read"},
+			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+		}); err != nil {
+			return err
+		}
+	}
+	return p.store.Close(id)
 }
 
 // ArchiveCandidates returns open messages that match filter without archiving
@@ -496,7 +515,7 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 		return candidates, results, nil
 	}
 	for i, id := range ids {
-		if err := p.store.Close(id); err != nil {
+		if err := p.closeArchived(id, candidates[i].Read); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				results[i].Err = mail.ErrAlreadyArchived
 				continue

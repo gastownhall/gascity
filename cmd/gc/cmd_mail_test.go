@@ -2705,6 +2705,37 @@ func TestMailMarkReadSuccess(t *testing.T) {
 	}
 }
 
+// TestMailMarkReadList covers mark-read takes several ids, as
+// separate arguments or as one whitespace-separated argument (an unsplit
+// "$IDS"), which used to be looked up as a single id and mark nothing. A bad
+// id is reported and the rest are still marked.
+func TestMailMarkReadList(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for _, body := range []string{"one", "two", "three"} {
+		if _, err := mp.Send("human", "mayor", "", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailMarkRead(mp, events.Discard, []string{"gc-1 gc-2", "gc-missing", "gc-3"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailMarkRead = %d, want 1 for the missing id; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc-missing") {
+		t.Errorf("stderr = %q, want the failing id named", stderr.String())
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		if !strings.Contains(stdout.String(), "Marked "+id+" as read") {
+			t.Errorf("stdout = %q, want %s confirmed", stdout.String(), id)
+		}
+	}
+	if _, unread, err := mp.Count("mayor"); err != nil || unread != 0 {
+		t.Fatalf("Count(mayor) unread = %d, err = %v; want 0 after marking all three", unread, err)
+	}
+}
+
 func TestMailMarkUnreadSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

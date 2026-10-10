@@ -1046,6 +1046,46 @@ func TestArchive(t *testing.T) {
 	}
 }
 
+// TestArchiveUnreadMarksReadFirst covers archiving an unread
+// message marks it read before closing it, so the dismissed message is not
+// left unread forever (the read-gated retention sweep never reclaims unread
+// mail). Both the by-id and the filtered archive paths do it.
+func TestArchiveUnreadMarksReadFirst(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	byID, err := p.Send("human", "mayor", "", "archive by id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Send("human", "mayor", "noise: filtered", "archive by filter"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Archive(byID.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	_, results, err := p.ArchiveMatching(ArchiveFilter{Recipients: []string{"mayor"}, SubjectPrefix: "noise:", Limit: 10})
+	if err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("ArchiveMatching results = %+v, want one success", results)
+	}
+
+	for _, id := range []string{byID.ID, results[0].ID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, b.Status)
+		}
+		if !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" {
+			t.Errorf("%s labels = %v, mail.read = %q; want read before archive", id, b.Labels, b.Metadata[mail.ReadMetadataKey])
+		}
+	}
+}
+
 func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
 	store := beads.NewMemStore()
 	cs := beads.NewCachingStoreForTest(store, nil)
