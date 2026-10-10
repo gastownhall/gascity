@@ -980,7 +980,11 @@ func (m *Manager) dismissKnownDialogsLocked(ctx context.Context, sessName string
 	if !ok {
 		return false
 	}
-	if err := dp.DismissKnownDialogs(ctx, sessName, timeout); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+	switch err := dp.DismissKnownDialogs(ctx, sessName, timeout); {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		// A composite whose backend for this session cannot dismiss dialogs.
+		return false
+	case errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed):
 		log.Printf("session: %q: %v", sessName, err)
 	}
 	return true
