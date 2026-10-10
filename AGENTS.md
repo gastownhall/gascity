@@ -285,6 +285,11 @@ and policy targets, and a green `go test` is not evidence a change passes CI.
 
 ## Code quality gates
 
+The JSONL exporter publishes a fresh archive only after Git initialization
+succeeds, so concurrent doctor checks never see its partial setup. Preserve
+existing archive contents, fail on initialization errors, and clean staging
+directories on both success and failure.
+
 Before considering any task complete:
 
 - `make check` passes (`bazel test //...` plus the shell guards; nogo is

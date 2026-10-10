@@ -824,11 +824,32 @@ move_legacy_snapshot_files() {
     fi
 }
 
-# Ensure archive repo exists.
-if [ ! -d "$ARCHIVE_REPO/.git" ]; then
-    mkdir -p "$ARCHIVE_REPO"
-    git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
-fi
+# Publish a fresh archive only after git init succeeds. Doctor may inspect it
+# while this order is starting; mkdir followed by git init exposes a malformed
+# repository in that interval. Keep the staging directory on the same filesystem
+# so the final move is atomic, and retain existing archive contents on repair.
+ensure_archive_repo() (
+    if [ -d "$ARCHIVE_REPO/.git" ]; then
+        return 0
+    fi
+    if [ -e "$ARCHIVE_REPO" ]; then
+        git -C "$ARCHIVE_REPO" init -q
+        return
+    fi
+    parent="$(dirname "$ARCHIVE_REPO")"
+    name="$(basename "$ARCHIVE_REPO")"
+    mkdir -p "$parent"
+    staging="$(mktemp -d "$parent/.jsonl-init.XXXXXX")"
+    trap 'rm -r -- "$staging"' EXIT
+    git init -q "$staging/$name" || return
+    # Move into the parent, using the destination basename. A concurrent
+    # initializer's nonempty repository makes rename fail instead of nesting
+    # the staging directory inside that repository.
+    if ! mv "$staging/$name" "$parent/"; then
+        [ -d "$ARCHIVE_REPO/.git" ] || return 1
+    fi
+)
+ensure_archive_repo
 
 TOTAL_EXPORTED=0
 TOTAL_DBS=0

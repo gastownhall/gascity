@@ -7101,6 +7101,81 @@ func advanceArchiveRemoteMain(t *testing.T, remoteRepo string) string {
 	return strings.TrimSpace(string(headOut))
 }
 
+func TestJsonlExportPublishesInitializedArchive(t *testing.T) {
+	for _, scenario := range []string{"success", "failure", "concurrent-winner"} {
+		t.Run(scenario, func(t *testing.T) {
+			failInit := scenario == "failure"
+			cityDir, binDir, stateDir := t.TempDir(), t.TempDir(), t.TempDir()
+			archive := filepath.Join(cityDir, "archive")
+			gitPath, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeMultiRecordDoltStub(t, binDir, 3)
+			writeJsonlExportGCStub(t, binDir)
+			writeExecutable(t, filepath.Join(binDir, "git"), `#!/bin/bash
+if [[ " $* " == *" init "* ]]; then
+    if [[ -e "$GC_JSONL_ARCHIVE_REPO" ]]; then
+        echo "archive was published before initialization" > "$INIT_OBSERVATION"
+        exit 91
+    fi
+    if [[ "$FAIL_INIT" == true ]]; then
+        exit 92
+    fi
+    "$REAL_GIT" "$@" || exit
+    if [[ -e "$GC_JSONL_ARCHIVE_REPO" ]]; then
+        echo "archive was published during initialization" > "$INIT_OBSERVATION"
+        exit 93
+    fi
+    if [[ "$CONCURRENT_WINNER" == true ]]; then
+        "$REAL_GIT" init -q "$GC_JSONL_ARCHIVE_REPO" || exit
+        echo preserved > "$GC_JSONL_ARCHIVE_REPO/winner"
+    fi
+    exit 0
+fi
+exec "$REAL_GIT" "$@"
+`)
+			env := jsonlExportEnv(t, cityDir, binDir, stateDir, archive,
+				filepath.Join(t.TempDir(), "gc.log"), filepath.Join(t.TempDir(), "mail.log"))
+			env["REAL_GIT"] = gitPath
+			env["FAIL_INIT"] = strconv.FormatBool(failInit)
+			env["CONCURRENT_WINNER"] = strconv.FormatBool(scenario == "concurrent-winner")
+			env["INIT_OBSERVATION"] = filepath.Join(t.TempDir(), "observation")
+			out, runErr := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
+			if data, err := os.ReadFile(env["INIT_OBSERVATION"]); err == nil {
+				t.Fatalf("initialization exposed invalid archive: %s", data)
+			}
+			if failInit {
+				if runErr == nil {
+					t.Fatalf("failed git init was ignored: %s", out)
+				}
+				if _, err := os.Stat(archive); !os.IsNotExist(err) {
+					t.Fatalf("failed initialization published archive: %v", err)
+				}
+			} else {
+				if runErr != nil {
+					t.Fatalf("export failed: %v\n%s", runErr, out)
+				}
+				if _, err := os.Stat(filepath.Join(archive, ".git")); err != nil {
+					t.Fatalf("published archive is not initialized: %v", err)
+				}
+			}
+			if scenario == "concurrent-winner" {
+				if data, err := os.ReadFile(filepath.Join(archive, "winner")); err != nil || string(data) != "preserved\n" {
+					t.Fatalf("concurrent archive contents lost: %q (%v)", data, err)
+				}
+				if _, err := os.Stat(filepath.Join(archive, "archive")); !os.IsNotExist(err) {
+					t.Fatalf("initializer nested its repository inside the winner: %v", err)
+				}
+			}
+			leftovers, err := filepath.Glob(filepath.Join(cityDir, ".jsonl-init.*"))
+			if err != nil || len(leftovers) != 0 {
+				t.Fatalf("initialization left staging directories: %v (%v)", leftovers, err)
+			}
+		})
+	}
+}
+
 func TestJsonlExportCountsRecordsViaJq(t *testing.T) {
 	// Bug 1 (#1547): `wc -l` on `dolt -r json` output measures formatting, not
 	// records — the JSON object is one physical line regardless of row count.
