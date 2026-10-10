@@ -83,7 +83,7 @@ func (x *createEffects) createNamed(ctx context.Context, pass *createPass, p cre
 		return err
 	})
 	if err == nil && plan.AdoptLive {
-		x.adoptLiveIdentity(pass, p, info)
+		x.adoptLiveIdentity(ctx, pass, p, info)
 	}
 	return info, err
 }
@@ -98,10 +98,14 @@ func (x *createEffects) createNamed(ctx context.Context, pass *createPass, p cre
 // runtime stamped (stampAdoptedRuntime)
 // with the epoch the row holds: a lost CAS leaves the runtime with no session
 // ID and a token that is not the row's, which the comparator reads as
-// Unknown. All of it runs under the runtime's lease, taken without waiting
-// (I-LEASE): a busy name stamps nothing. A failure or a panic is logged and
-// leaves the landed create landed.
-func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, written session.Info) {
+// Unknown. All of it runs under the runtime's lease (I-LEASE), its record
+// lasting the effect's remaining deadline + 60s, waited for up to
+// adoptLiveLeaseWait (the create holds no other lock here), with the reads
+// and the stamp bounded by its SafeUntil. A failure a later read may clear
+// (the name still busy, a lost CAS, presence unconfirmed) is tried again, up
+// to adoptLiveAttempts. A failure or a panic is logged and leaves the
+// landed create landed.
+func (x *createEffects) adoptLiveIdentity(ctx context.Context, pass *createPass, p createPlan, written session.Info) {
 	defer func() {
 		if r := recover(); r != nil {
 			x.logf("allocator: named session %q adopted as %s, identity stamp panicked: %v\n", p.Named.Identity, written.ID, r)
@@ -110,30 +114,60 @@ func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, writte
 	if pass.sp == nil {
 		return
 	}
-	if err := adoptLiveStamp(pass.sp, pass.store, x.host.cityPath, p.Named.SessionName, written); err != nil {
+	var err error
+	for attempt := 1; ; attempt++ {
+		err = adoptLiveStamp(ctx, pass.sp, pass.store, x.host.cityPath, p.Named.SessionName, written)
+		if err == nil || !errors.Is(err, errStampRetriable) || attempt == adoptLiveAttempts || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(adoptLiveRetryDelay):
+		}
+	}
+	if err != nil {
 		x.logf("allocator: named session %q adopted as %s, identity not stamped: %v\n", p.Named.Identity, written.ID, err)
 	}
 }
 
-func adoptLiveStamp(sp runtime.Provider, store beads.Store, cityPath, name string, written session.Info) error {
-	lease, release, err := tryRuntimeLease(store, cityPath, name, written.ID, session.RuntimeLeaseTTL(2*fenceProbeTimeout))
-	if err != nil {
+// The AdoptLive stamp's bounds: its wait for a busy name, its attempts, and
+// the pause between them.
+const (
+	adoptLiveLeaseWait  = 10 * time.Second
+	adoptLiveAttempts   = 3
+	adoptLiveRetryDelay = 250 * time.Millisecond
+)
+
+// errStampRetriable marks an AdoptLive stamp failure a later read may clear.
+var errStampRetriable = errors.New("retriable")
+
+func adoptLiveStamp(ctx context.Context, sp runtime.Provider, store beads.Store, cityPath, name string, written session.Info) error {
+	lease, release, err := waitRuntimeLease(ctx, store, cityPath, name, written.ID, session.RuntimeLeaseTTL(effectBudget(ctx)), adoptLiveLeaseWait)
+	switch {
+	case errors.Is(err, session.ErrRuntimeLeaseBusy):
+		return fmt.Errorf("the runtime's lease: %w: %w", errStampRetriable, err)
+	case err != nil:
 		return fmt.Errorf("the runtime's lease: %w", err)
 	}
 	defer release()
+	if lease != nil && lease.Epoch() > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, lease.SafeUntil())
+		defer cancel()
+	}
 	leaf, _, known := runtime.ResolveBackend(sp, name)
 	if !known {
 		return errors.New("the runtime's backend is unknown")
 	}
-	rt := readRuntimeIdentity(context.Background(), leaf, name)
+	rt := readRuntimeIdentity(ctx, leaf, name)
 	if !adoptableIdentity(rt) {
 		return fmt.Errorf("the runtime's identity is not adoptable (%s)", compareIdentity(written, rt))
 	}
 	// Liveness first: a token read off a runtime that is gone (acp's leftover
 	// sidecar) proves nothing, so presence is re-confirmed after the read.
-	live, status, err := runtime.ObserveLivenessBoundedSince(context.Background(), leaf, name, nil, time.Now(), fenceProbeTimeout)
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, time.Now(), fenceProbeTimeout)
 	if status != runtime.ObservationComplete || err != nil || !live.Present() {
-		return errors.New("the runtime is not confirmed present after its identity read")
+		return fmt.Errorf("%w: the runtime is not confirmed present after its identity read", errStampRetriable)
 	}
 	token, minted := strings.TrimSpace(rt.Token), ""
 	if token == "" {
@@ -141,8 +175,14 @@ func adoptLiveStamp(sp runtime.Provider, store beads.Store, cityPath, name strin
 		token = minted
 	}
 	generation, err := recordRowToken(store, lease, written, token)
-	if err != nil {
+	var lost *beads.PreconditionFailedError
+	switch {
+	case errors.As(err, &lost):
+		return fmt.Errorf("%w: %w", errStampRetriable, err)
+	case err != nil:
 		return err
+	case ctx.Err() != nil: // past the lease's SafeUntil, or the effect's deadline
+		return fmt.Errorf("stamping the runtime: %w", context.Cause(ctx))
 	}
 	return stampAdoptedRuntime(sp, name, written.ID, generation, minted)
 }
