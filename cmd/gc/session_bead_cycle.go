@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -49,14 +48,19 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 
 // prevAssignedBeadStatus looks up a single bead by id over the caller's
 // residency topology — rather than a single fixed store — and reports
-// whether it is still open (non-terminal, via convoycore.IsTerminalStatus)
-// and, when terminal, the time it closed. Resolving over the topology
-// (byIDBeadForTopology) rather than one store is what lets this answer for a
-// rig-scoped id: every ga-* work bead lives in a rig store, and a lookup
-// against the city/session store alone always misses it. One store round
-// trip answers both questions, so the fresh-cycle guard in
-// session_reconciler.go does not need a second lookup to get the close time
-// after checking status.
+// whether it is still open (non-terminal, via convoycore.IsTerminalStatus),
+// who it is assigned to right now, and, when terminal, the time it closed.
+// Resolving over the topology (byIDBeadForTopology) rather than one store is
+// what lets this answer for a rig-scoped id: every ga-* work bead lives in a
+// rig store, and a lookup against the city/session store alone always misses
+// it. One store round trip answers all three questions, so the fresh-cycle
+// guard in session_reconciler.go does not need a second lookup to get the
+// close time or the live assignee after checking status.
+//
+// assignee is the live, trimmed assignee. ga-pvjbx3 Q3: the guard defers on an
+// open previous bead only while this session still owns it, and a bead that
+// has since been handed to another agent (or unassigned) answers that with
+// the assignee read here, from the same lookup that reported it open.
 //
 // closedAt prefers the metadata "closed_at" timestamp when present and
 // RFC3339Nano-parseable, but falls back to the bead's UpdatedAt: no real `bd
@@ -66,13 +70,14 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // close closes it. The UpdatedAt fallback is rounded up to the next whole
 // second, since BdStore truncates it to seconds. closedAt is the zero Time
 // only when the bead is open.
-func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, closedAt time.Time, err error) {
+func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, assignee string, closedAt time.Time, err error) {
 	b, err := byIDBeadForTopology(topo, id)
 	if err != nil {
-		return false, time.Time{}, err
+		return false, "", time.Time{}, err
 	}
+	assignee = strings.TrimSpace(b.Assignee)
 	if !convoycore.IsTerminalStatus(b.Status) {
-		return true, time.Time{}, nil
+		return true, assignee, time.Time{}, nil
 	}
 	// UpdatedAt is second-truncated on BdStore; round up so a wake
 	// earlier in the same second as the close never reads as "after".
@@ -84,39 +89,7 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 			closedAt = t
 		}
 	}
-	return false, closedAt, nil
-}
-
-// prevBeadStillAssignedToSession fetches id over the caller's residency
-// topology with one fresh read and reports whether its LIVE assignee is still
-// one of this session's own identifiers. ga-pvjbx3 Q3: after ga-2weagw's
-// store/closed_at fix, row A/C can defer on a previous bead that is still open
-// but has since been handed to someone else (e.g. a reviewer) — that deferral
-// is then keyed to an unrelated future close event with no relationship to
-// what this session is doing by then. Narrowing row A/C to require the live
-// assignee still match is a strict subset of the pre-existing (open ⇒ defer)
-// condition, so it cannot regress any case where the assignee still matches;
-// when it does not match, the caller falls through immediately to the Q1/Q2
-// checks instead of deferring on a bead this session no longer owns. The read
-// goes through the same topology as prevAssignedBeadStatus: a rig-scoped
-// previous bead is absent from the city store, so a single-store read would
-// report an error and drop the deferral for exactly the rig work it exists to
-// protect.
-func prevBeadStillAssignedToSession(topo storeref.Topology, id string, identifiers []string) (bool, error) {
-	b, err := byIDBeadForTopology(topo, id)
-	if err != nil {
-		return false, err
-	}
-	assignee := strings.TrimSpace(b.Assignee)
-	if assignee == "" {
-		return false, nil
-	}
-	for _, ident := range identifiers {
-		if ident != "" && ident == assignee {
-			return true, nil
-		}
-	}
-	return false, nil
+	return false, assignee, closedAt, nil
 }
 
 // sessionHasFreshInProgressClaim reports whether this session currently
@@ -133,58 +106,30 @@ func prevBeadStillAssignedToSession(topo storeref.Topology, id string, identifie
 // check, which already sweeps the unrestricted store+rig topology
 // (assignedWorkSweepPlan, not the agent-scoped
 // assignedWorkPlanForSessionInfo) and already excludes mail and session
-// beads — the same population workBeadHasAwakeDemand treats as
-// awake-eligible.
+// beads. It does not exclude a blocked bead, which workBeadHasAwakeDemand
+// does, so this population is a superset of awake demand: an extra claim can
+// only retain the session, never kill it.
+//
+// An error means the scan could not read a store, never "no claim" — the
+// existence probe fails closed on a leg that went dark — and the caller must
+// retain the session rather than read it as an absent claim.
 func sessionHasFreshInProgressClaim(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
 	return sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, info)
 }
 
 // freshAnchorBeadTerminal fetches the fresh-cycle guard's anchor bead
 // (ComputeAwakeSet's decision.AssignedWorkBeadID) with one fresh, uncached
-// read and reports whether it is already terminal (closed). ga-pvjbx3 Q2:
-// the tick's assigned-work snapshot can already be several minutes stale by
-// the time the kill decision runs; cycling a session onto an anchor that has
-// since closed is pure loss — there is no work left to reassign onto.
-// Sweeps the same unrestricted store+rig topology assignedWorkSweepPlan
-// gives sessionHasFreshInProgressClaim (not the agent-scoped
-// assignedWorkPlanForSessionInfo), because the anchor itself was resolved
-// from that same unrestricted candidate population, not from this session's
-// own reachable stores.
-func freshAnchorBeadTerminal(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info, anchorID string) (bool, error) {
-	anchorID = strings.TrimSpace(anchorID)
-	if anchorID == "" {
-		return false, nil
-	}
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
+// read over the caller's residency topology and reports whether it is
+// already terminal (closed). ga-pvjbx3 Q2: the tick's assigned-work snapshot
+// can already be several minutes stale by the time the kill decision runs;
+// cycling a session onto an anchor that has since closed is pure loss — there
+// is no work left to reassign onto. An error (including a bead no leg holds)
+// is "could not tell", and the caller then proceeds to the cycle: Q1 has
+// already established that the session holds no claim a kill could cost.
+func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, error) {
+	anchor, err := byIDBeadForTopology(topo, anchorID)
 	if err != nil {
 		return false, err
-	}
-	var anchor beads.Bead
-	var found bool
-	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
-		if leg.Store == nil {
-			return false, nil
-		}
-		b, gerr := leg.Store.Get(anchorID)
-		if gerr != nil {
-			if errors.Is(gerr, beads.ErrNotFound) {
-				return false, nil
-			}
-			return false, gerr
-		}
-		anchor = b
-		found = true
-		return true, nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		if serr := assignedWorkScanComplete(res); serr != nil {
-			return false, serr
-		}
-		return false, nil
 	}
 	return convoycore.IsTerminalStatus(anchor.Status), nil
 }

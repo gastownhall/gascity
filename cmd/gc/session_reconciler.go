@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -4618,24 +4619,24 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// this incarnation's awake_started_at is already after the
 					// previous bead's closed_at (already fresh — the stamp below
 					// just hasn't caught up yet). Fail toward the pre-existing
-					// cycle behavior on any lookup or parse error. ga-pvjbx3 Q3:
-					// once the previous bead has been handed to someone else, its
+					// cycle behavior on any lookup or parse error. ga-pvjbx3 Q3
+					// narrows only the open-previous-bead deferral: once that bead
+					// has been handed to another agent (or unassigned), its
 					// eventual close has no relationship to this session's current
-					// work, so it must not gate the decision — fall through
-					// immediately to the self-claim/anchor-liveness checks below.
+					// work, so it no longer gates the decision and the claim and
+					// anchor checks below decide. The closed-previous-bead
+					// deferral keys on closed_at alone, whoever the bead was
+					// assigned to.
+					topo := residencyTopologyForCity(cityPath, cfg, store, rigStores)
 					if prev := strings.TrimSpace(info.CurrentlyProcessingBeadID); prev != "" {
-						prevTopo := residencyTopologyForCity(cityPath, cfg, store, rigStores)
-						identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-						if stillMine, ownErr := prevBeadStillAssignedToSession(prevTopo, prev, identifiers); ownErr == nil && stillMine {
-							prevOpen, prevClosedAt, err := prevAssignedBeadStatus(prevTopo, prev)
-							if err == nil && prevOpen {
+						prevOpen, prevAssignee, prevClosedAt, err := prevAssignedBeadStatus(topo, prev)
+						if err == nil && prevOpen && slices.Contains(sessionAssignmentIdentifiersForConfigInfo(info, cfg), prevAssignee) {
+							continue
+						}
+						if err == nil && !prevOpen {
+							if awakeStart, perr := time.Parse(time.RFC3339Nano, info.AwakeStartedAt); perr == nil &&
+								!prevClosedAt.IsZero() && awakeStart.After(prevClosedAt) {
 								continue
-							}
-							if err == nil && !prevOpen {
-								if awakeStart, perr := time.Parse(time.RFC3339Nano, info.AwakeStartedAt); perr == nil &&
-									!prevClosedAt.IsZero() && awakeStart.After(prevClosedAt) {
-									continue
-								}
 							}
 						}
 					}
@@ -4645,15 +4646,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// when this session's real self-claim is a different, legitimate
 					// candidate. A fresh, uncached read for ANY in_progress work still
 					// assigned to this session — independent of which bead the anchor
-					// resolved to — is the correct discriminator.
-					if hasClaim, err := sessionHasFreshInProgressClaim(cityPath, cfg, store, rigStores, info); err == nil && hasClaim {
+					// resolved to — is the correct discriminator. A scan that cannot
+					// read a store cannot rule a claim out, so it retains the session
+					// (the progress-stall recycle above does the same) instead of
+					// reading the failure as "no claim" and killing in-flight work.
+					hasClaim, err := sessionHasFreshInProgressClaim(cityPath, cfg, store, rigStores, info)
+					if err != nil {
+						fmt.Fprintf(stderr, "session reconciler: deferring fresh cycle for %s after claim-scan failure: %v\n", name, err) //nolint:errcheck
+						continue
+					}
+					if hasClaim {
 						continue
 					}
 					// ga-pvjbx3 Q2: the anchor itself may have closed since the
 					// stale tick-start snapshot was taken. Cycling onto an anchor
 					// that is already closed on a live read is pure loss, so
-					// re-check it before killing.
-					if terminal, err := freshAnchorBeadTerminal(cityPath, cfg, store, rigStores, info, decision.AssignedWorkBeadID); err == nil && terminal {
+					// re-check it before killing. Failing to read it falls through
+					// to the cycle: Q1 just established a complete scan with no
+					// claim, so the cycle costs no in-flight work.
+					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
 						continue
 					}
 					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
