@@ -820,6 +820,80 @@ func (s *failingWriteStore) SetMetadataBatch(id string, kvs map[string]string) e
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// TestRuntimeLeaseHeld: only a live holder holds a lease. A holder on this
+// host holds the name's flock; another host's unexpired record holds; a
+// record that expired, or whose holder's flock this host now holds (it died),
+// is free, so a start it names was abandoned (mc-5a1ma). The probe writes
+// nothing and keeps the lock file's proof for the takeover that follows.
+func TestRuntimeLeaseHeld(t *testing.T) {
+	f, city := newLeaseFixture(t), t.TempDir()
+	held := func(now time.Time) bool {
+		t.Helper()
+		got, err := RuntimeLeaseHeld(f.front, f.req(city, now))
+		if err != nil {
+			t.Fatalf("RuntimeLeaseHeld: %v", err)
+		}
+		return got
+	}
+	if held(leaseT0) {
+		t.Fatal("a row nobody leased reads held")
+	}
+	live, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held(leaseT0) {
+		t.Fatal("a live holder on this host reads unheld")
+	}
+	if got, err := RuntimeLeaseHeld(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"}); err != nil || !got {
+		t.Fatalf("the name's flock alone under a live holder = %v, %v; want held", got, err)
+	}
+	live.Release()
+
+	remote := MetadataPatch{
+		RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseEpochKey: "4", RuntimeLeaseTTLKey: "240",
+		RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339), RuntimeLeaseFlockKey: "another-boot/1/2/0123",
+	}
+	f.write(t, remote)
+	before := f.meta(t)
+	if !held(leaseT0) {
+		t.Fatal("another host's unexpired record reads unheld")
+	}
+	if held(leaseT0.Add(time.Minute)) {
+		t.Fatal("another host's expired record reads held; it must be reclaimable")
+	}
+	if after := f.meta(t); after[RuntimeLeaseHolderKey] != before[RuntimeLeaseHolderKey] || after[RuntimeLeaseEpochKey] != "4" {
+		t.Fatalf("the probe wrote the record: %v", after)
+	}
+
+	if runtimeLeaseBootID() != "" {
+		dead, err := TryRuntimeLease(f.front, f.req(city, leaseT0.Add(2*time.Minute)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		flock := lockFileIdentity(t, dead)
+		dead.Release()
+		remote[RuntimeLeaseHolderKey], remote[RuntimeLeaseFlockKey] = "host-a/99999/dead", flock
+		f.write(t, remote)
+		if held(leaseT0) {
+			t.Fatal("a dead holder on this host (its flock free, its record naming it) reads held")
+		}
+		// The probe kept the lock file's token: the takeover is immediate.
+		l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+		if err != nil {
+			t.Fatalf("takeover after the probe: %v; want the dead holder taken over", err)
+		}
+		l.Release()
+	}
+
+	if err := f.store.Close(f.id); err != nil {
+		t.Fatal(err)
+	}
+	if held(leaseT0) {
+		t.Fatal("a closed row reads held")
+	}
+}
+
 // TestRuntimeLeaseFailedAcquireKeepsTheProof: an acquire whose record write
 // fails restores the lock file's token, so a dead holder's record is still
 // taken over at once afterwards.

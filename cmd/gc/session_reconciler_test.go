@@ -9134,10 +9134,19 @@ func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t 
 		t.Fatalf("Create(bead): %v", err)
 	}
 
+	// The spawn in flight holds the row's runtime lease, as every start does
+	// from before its PreWake through its commit (mc-5a1ma).
+	city := t.TempDir()
+	inFlight, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(store), sessionpkg.RuntimeLeaseRequest{City: city, Name: "helper", ID: bead.ID, TTL: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Release()
+
 	var stdout, stderr bytes.Buffer
 	cfgNames := configuredSessionNames(cfg, "", store)
 	_ = reconcileSessionBeadsAtPath(
-		context.Background(), t.TempDir(), []beads.Bead{bead}, desired, cfgNames,
+		context.Background(), city, []beads.Bead{mustGetBead(t, store, bead.ID)}, desired, cfgNames,
 		cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)

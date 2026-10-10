@@ -36,6 +36,23 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 	return lease, lease.Release, nil
 }
 
+// startHolderLive reports whether a live holder has the runtime lease of
+// info's row (session.RuntimeLeaseHeld), so the start its in-flight marker
+// (state creating, a fresh last_woke_at) names is still running: every
+// PreWake is written under that lease, held through its commit. A dead
+// holder's start is abandoned, and the reconciler relaunches it under its
+// own lease (CONTRACT S7, §12.5; mc-5a1ma). What cannot be probed (no store,
+// a city path that is not absolute, a failed read) reads as held, keeping
+// the marker's time-based meaning.
+func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
+	name := strings.TrimSpace(info.SessionName)
+	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
+		return true
+	}
+	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
+	return err != nil || held
+}
+
 // controllerStopLease takes, without waiting, the runtime lease a controller
 // stop sequence holds across all its kills (a kill, its confirm-dead
 // re-kills, an escalation's process-table kill), and returns ctx carrying it

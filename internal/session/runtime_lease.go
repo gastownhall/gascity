@@ -262,6 +262,40 @@ func (l *RuntimeLease) TakeRecord(s *Store, req RuntimeLeaseRequest) error {
 	return nil
 }
 
+// RuntimeLeaseHeld reports whether a live holder has req's lease: the name's
+// flock is busy (a holder on this host), or the open row's record is one a
+// contender could not take (another host's, unexpired). A dead holder's lease
+// is not held: its flock died with it and its record names that flock, or the
+// record expired. It writes no record, leaves the lock file's token as it
+// found it, and takes the flock only for the read, so a start that reads its
+// row's in-flight marker unheld knows that start was abandoned (mc-5a1ma).
+func RuntimeLeaseHeld(s *Store, req RuntimeLeaseRequest) (bool, error) {
+	now := req.now
+	if now == nil {
+		now = time.Now
+	}
+	lock, _, prev, err := lockRuntimeNameFile(req.City, strings.TrimSpace(req.Name), now())
+	if errors.Is(err, ErrRuntimeLeaseBusy) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer unlockRuntimeNameFile(lock)
+	if req.ID == "" {
+		return false, nil
+	}
+	bead, err := s.freshBead(req.ID)
+	if err != nil {
+		return false, err
+	}
+	if bead.Status == "closed" {
+		return false, nil
+	}
+	free, _ := parseRuntimeLease(bead.Metadata).free(now(), runtimeLeaseFlockIdentity(lock, prev))
+	return !free, nil
+}
+
 // WaitRuntimeLease retries TryRuntimeLease until it succeeds, fails for
 // another reason, ctx ends, or bound passes, which returns the last busy error.
 // Operators use it (CONTRACT O3: attach waits 10s). It never blocks in the
