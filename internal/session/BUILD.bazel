@@ -167,6 +167,7 @@ go_test(
         "store_start_commit_fence_test.go",
         "store_start_fence_test.go",
         "store_test.go",
+        "submit_delivered_unobserved_test.go",
         "submit_family_test.go",
         "submit_poller_env_test.go",
         "submit_test.go",

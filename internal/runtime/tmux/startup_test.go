@@ -1200,6 +1200,11 @@ func TestSendStartupNudgeWithRetry_DeliveredButUnobservedNeverRetried(t *testing
 	if !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 		t.Fatalf("err = %v, want ErrNudgeSubmitDeliveredUnobserved", err)
 	}
+	// internal/session cannot import tmux; it recognizes this case through
+	// the provider-neutral runtime sentinel.
+	if !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+		t.Fatalf("err = %v, want runtime.ErrNudgeDeliveredUnobserved", err)
+	}
 	if calls != 1 {
 		t.Fatalf("send calls = %d, want 1 (a delivered-but-unobserved submit must never be retried or re-pasted)", calls)
 	}

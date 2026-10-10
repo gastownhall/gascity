@@ -236,8 +236,9 @@ var (
 	// callers must NOT retry this: retrying would re-inject a message the
 	// session already received, which is the ga-civwyz duplicate-reminder
 	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
-	// days of production logs).
-	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+	// days of production logs). It is runtime.ErrNudgeDeliveredUnobserved so
+	// callers that cannot import tmux can recognize it.
+	ErrNudgeSubmitDeliveredUnobserved = runtime.ErrNudgeDeliveredUnobserved
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
