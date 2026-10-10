@@ -241,6 +241,25 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
+	// Startup dialogs can prevent herdr from ever observing idle. Handle them
+	// before readiness, even when there is no first turn or session_setup.
+	// An adopted holder already completed its startup; leave its pane alone.
+	if !adopted && info.PaneID != "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+		trustRoot := runtime.WorkspaceImportTrustRoot(ctx, workDir)
+		err := runtime.AcceptStartupDialogsWithTimeout(ctx, runtime.StartupDialogTimeout(),
+			func(lines int) (string, error) {
+				return p.c.paneRead(ctx, info.PaneID, "visible", lines)
+			},
+			func(keys ...string) error { return p.c.sendKeys(ctx, info.PaneID, keys...) },
+			runtime.WithTrustedImportRoot(trustRoot),
+		)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "herdr: accepting startup dialogs for %q: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+		}
+	}
 	// Post-launch steps mirror tmux's doStartSession ordering: wait for
 	// readiness, run session_setup (Step 5.5), then deliver the startup nudge
 	// (Step 6).
