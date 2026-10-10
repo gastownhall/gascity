@@ -126,6 +126,29 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
+		// An operator's own gc.kind is not one of the engine's, so it does not
+		// take a work bead out of the contract.
+		{
+			name: "operator work kind is gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
+			want: true,
+		},
+		{
+			name: "operator review kind is gated",
+			bead: beads.Bead{Metadata: map[string]string{beadmeta.KindMetadataKey: "review"}},
+			want: true,
+		},
+	}
+	for _, kind := range beadmeta.EngineKinds {
+		tests = append(tests, struct {
+			name string
+			bead beads.Bead
+			want bool
+		}{
+			name: "engine kind " + kind + " is not gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: kind}},
+			want: false,
+		})
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,6 +220,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "wr-operator-kind", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: "work", beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
 
@@ -209,6 +233,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	}{
 		{"non-close subcommand is ignored", []string{"show", "wr-shipped-nocommit"}, true, false, ""},
 		{"control bead is exempt", []string{"close", "wr-control"}, true, false, ""},
+		{"operator gc.kind does not exempt a shipped-no-commit close", []string{"close", "wr-operator-kind"}, true, true, "close of wr-operator-kind"},
 		{"no-op close passes", []string{"close", "wr-noop"}, true, false, ""},
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
@@ -403,6 +428,66 @@ func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "work-record gate (enforced)") {
 		t.Fatalf("expected enforced gate output, got %q", stderr.String())
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateSkipsNoHistoryAndEphemeral pins that the
+// gate does not hold a bead the runtime writes for itself. An order's tracking
+// bead is created NoHistory with no type and no gc.kind (internal/orders
+// CreateRun), so before this rule the enforced gate read it as a worker task
+// and refused its close with "missing gc.work_outcome", leaving one open
+// tracking bead per order firing. An ephemeral (wisps-tier) bead is the same
+// class. A durable bead of the same shape must still be held, alone and in a
+// batch close beside the exempt one.
+func TestEvaluateWorkRecordCloseGateSkipsNoHistoryAndEphemeral(t *testing.T) {
+	tracking := beads.Bead{
+		ID:        "wr-order-tracking",
+		Title:     "order:archive-repack",
+		Status:    "open",
+		NoHistory: true,
+		Labels:    []string{"order-run:archive-repack", "order-tracking"},
+	}
+	ephemeral := beads.Bead{ID: "wr-ephemeral", Status: "open", Type: "task", Ephemeral: true}
+	durable := beads.Bead{ID: "wr-durable", Status: "in_progress", Type: "task"}
+	preFetched := map[string]beads.Bead{tracking.ID: tracking, ephemeral.ID: ephemeral, durable.ID: durable}
+
+	tests := []struct {
+		name      string
+		ids       []string
+		wantBlock bool
+		wantNamed []string
+		notNamed  []string
+	}{
+		{name: "no-history order tracking bead closes", ids: []string{tracking.ID}, notNamed: []string{tracking.ID}},
+		{name: "ephemeral bead closes", ids: []string{ephemeral.ID}, notNamed: []string{ephemeral.ID}},
+		{name: "durable task is still held", ids: []string{durable.ID}, wantBlock: true, wantNamed: []string{durable.ID}},
+		{
+			name:      "batch close holds only the durable task",
+			ids:       []string{tracking.ID, durable.ID},
+			wantBlock: true,
+			wantNamed: []string{durable.ID},
+			notNamed:  []string{tracking.ID},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr strings.Builder
+			args := append([]string{"close"}, tc.ids...)
+			block := evaluateWorkRecordCloseGate(args, panicOnGetStore{}, preFetched, workRecordRepoDirs{legacy: t.TempDir()}, true, &stderr)
+			if block != tc.wantBlock {
+				t.Fatalf("block = %v, want %v; stderr=%q", block, tc.wantBlock, stderr.String())
+			}
+			for _, id := range tc.wantNamed {
+				if !strings.Contains(stderr.String(), "close of "+id+":") {
+					t.Fatalf("stderr does not name %s: %q", id, stderr.String())
+				}
+			}
+			for _, id := range tc.notNamed {
+				if strings.Contains(stderr.String(), id) {
+					t.Fatalf("stderr names %s, which the gate must not hold: %q", id, stderr.String())
+				}
+			}
+		})
 	}
 }
 

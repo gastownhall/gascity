@@ -153,6 +153,50 @@ func TestScopeCheckExemptKindsComposition(t *testing.T) {
 	}
 }
 
+// TestEngineKindsComposition pins EngineKinds to its declared composition —
+// ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {wisp, task,
+// closed} — and pins that an operator's own classification is not a member.
+// The work-record close gate (internal/workrecord.Gated) exempts exactly the
+// members, so a kind missing here would put engine beads under the gate, and
+// an extra member would let an operator's beads skip it.
+func TestEngineKindsComposition(t *testing.T) {
+	if dup := firstDuplicate(EngineKinds); dup != "" {
+		t.Errorf("EngineKinds contains duplicate %q", dup)
+	}
+
+	var derived []string
+	for _, set := range [][]string{ControlKinds, StructuralGraphKinds, WorkflowTopologyKinds, {KindWisp, KindTask, KindClosed}} {
+		for _, k := range set {
+			if !slices.Contains(derived, k) {
+				derived = append(derived, k)
+			}
+		}
+	}
+	slices.Sort(derived)
+	got := slices.Clone(EngineKinds)
+	slices.Sort(got)
+	if !slices.Equal(got, derived) {
+		t.Errorf("EngineKinds = %v\nwant ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {wisp, task, closed} = %v", got, derived)
+	}
+
+	// Every declared gc.kind constant is the engine's own, including any that
+	// sits outside the named sets above.
+	for _, k := range []string{
+		KindRetry, KindRalph, KindCheck, KindRetryEval, KindFanout, KindDrain,
+		KindScopeCheck, KindWorkflowFinalize, KindScope, KindCleanup, KindRun,
+		KindRetryRun, KindWorkflow, KindWisp, KindSpec, KindTask, KindClosed,
+	} {
+		if !IsEngineKind(k) {
+			t.Errorf("IsEngineKind(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{"", "work", "review", "bug", "step", "Workflow", " task"} {
+		if IsEngineKind(k) {
+			t.Errorf("IsEngineKind(%q) = true, want false", k)
+		}
+	}
+}
+
 func firstDuplicate(set []string) string {
 	seen := make(map[string]struct{}, len(set))
 	for _, k := range set {

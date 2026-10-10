@@ -68,15 +68,30 @@ func ValidOutcome(v string) bool {
 
 // Gated reports whether the work-record close contract applies to bead. It
 // applies to worker-claimable work units — plain task beads — and deliberately
-// NOT to control/structural beads (anything carrying gc.kind: workflow roots,
-// scope/run/check/drain steps, etc.) or non-task beads (convoy, message). Those
-// use the disjoint control-plane gc.outcome vocabulary and are closed by the
-// dispatch engine, not by a worker reporting a work outcome.
+// NOT to the engine's own control/structural beads (a gc.kind from
+// beadmeta.EngineKinds: workflow roots, scope/run/check/drain steps, attempt
+// roots stamped task, etc.) or non-task beads (convoy, message). Those use the
+// disjoint control-plane gc.outcome vocabulary and are closed by the dispatch
+// engine, not by a worker reporting a work outcome.
+//
+// A gc.kind the engine does not own (an operator's own classification, such as
+// "work" or "review") does not exempt a bead: the engine gives it no
+// control-plane meaning, so the bead is still a worker's unit of work and its
+// close is checked like any other.
+//
+// It also does not apply to a no-history or ephemeral bead. Those are records
+// the runtime writes for itself, such as an order's tracking bead
+// (internal/orders CreateRun writes it NoHistory with no type and no gc.kind),
+// and no worker ever reports a work outcome on them, so refusing their close
+// only leaves them open.
 func Gated(bead beads.Bead) bool {
+	if bead.NoHistory || bead.Ephemeral {
+		return false
+	}
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
+	if beadmeta.IsEngineKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
 		return false
 	}
 	return true

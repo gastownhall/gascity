@@ -188,6 +188,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The work-record close gate checks beads that carry an operator's own
+  `gc.kind`.** `workrecord.Gated` used to skip every bead with any `gc.kind`
+  value, so a city that classifies its work beads with a kind of its own
+  (for example `gc.kind=work` or `gc.kind=review`) had none of their closes
+  checked. The gate now skips only the engine's own kinds
+  (`beadmeta.EngineKinds`: control, structural, topology, `wisp`, `task`,
+  `closed`) and checks every other kind like a plain task. It also no longer
+  checks no-history or ephemeral beads, such as an order's tracking bead,
+  whose closes it used to refuse under `GC_WORK_RECORD_ENFORCE`. Behavior
+  change: with `GC_WORK_RECORD_ENFORCE` set, closing an operator-kinded task
+  with no valid `gc.work_outcome` is now refused; without it, the close logs
+  a warning and proceeds.
+
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**
   `gc-beads-bd init` now stamps bd's version witness on a store that already

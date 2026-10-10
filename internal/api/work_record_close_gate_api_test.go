@@ -159,6 +159,13 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 			meta:    map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
 			enforce: true,
 		},
+		{
+			name:         "an operator gc.kind does not exempt a bead",
+			meta:         map[string]string{beadmeta.KindMetadataKey: "work"},
+			enforce:      true,
+			wantConflict: "missing " + beadmeta.WorkOutcomeMetadataKey,
+			wantWarn:     "missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
 	}
 
 	for _, spelling := range closeSpellings() {
