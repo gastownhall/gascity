@@ -385,3 +385,32 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 		})
 	}
 }
+
+// TestNudgeOnRouteReadsCreatedEventsSinceLastSeq guards two silent-drop paths
+// (#4382, sys-8war2): routing stamped in the CREATE payload only ever emits
+// bead.created, so the script must read that type too; and the controller
+// fires this order on its own dispatch cadence, so a fixed wall-clock lookback
+// drops every routing event between two runs — the script must cut on the
+// high-water event seq it persisted last run, and tolerate both the nested
+// ({"bead": …}) and flat bead payload shapes `gc events` emits (#5968).
+func TestNudgeOnRouteReadsCreatedEventsSinceLastSeq(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
+	if err != nil {
+		t.Fatalf("reading nudge-on-route.sh: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`.type == "bead.created"`,
+		`.type == "bead.updated"`,
+		`(.seq // 0) > $last`,
+		`(.payload.bead // .payload)`,
+		"nudge-on-route-seq",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("nudge-on-route.sh must read created+updated events past the persisted seq; missing %q", want)
+		}
+	}
+	if strings.Contains(body, "--type bead.updated") {
+		t.Errorf("nudge-on-route.sh must not filter to bead.updated only")
+	}
+}
