@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -213,5 +215,60 @@ func TestControllerStateSubjectlessCloseEventUsesPayloadIdentity(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("convoy status = %q after its last member closed via a subjectless event, want closed", got.Status)
+	}
+}
+
+// A bead.closed the autoclose dispatcher gets to after the city went
+// quiescent reads nothing: the quiescent city retired its bd pairs, and a
+// read would restart them. The close is owed to the sweep, which confirms it
+// after resume (acceptance: TestProxiedSuspensionIsQuiescenceSuspendedCity,
+// whose window caught a drained session's wisp autoclose restarting the
+// city's pair).
+func TestBeadCloseAutocloseDefersWhileTheCityIsQuiescent(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() }
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	backing := beads.NewMemStore()
+	convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy: %v", err)
+	}
+	child, err := backing.Create(beads.Bead{Title: "task", ParentID: convoy.ID})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	payload := closedSnapshotInBacking(t, backing, child.ID)
+	quiescent := new(atomic.Bool)
+	quiescent.Store(true)
+	cs := &controllerState{
+		beadStores:     map[string]beads.Store{"test": cached},
+		pokeCh:         make(chan struct{}, 1),
+		beadsQuiescent: quiescent,
+	}
+
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Subject: child.ID, Payload: payload})
+
+	got, err := backing.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("Get convoy: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("a quiescent city's autoclose closed the convoy: it read and wrote a store it had retired")
+	}
+	if !cs.autocloseSweepOf().isPending(child.ID) {
+		t.Fatalf("the close of %s is not owed to the sweep; it would never be confirmed after resume", child.ID)
+	}
+
+	quiescent.Store(false)
+	if res := cs.runAutocloseSweepPass(time.Now().Add(time.Second)); res.Ran != 1 {
+		t.Fatalf("after resume the sweep = %+v, want one confirmed close", res)
+	}
+	if got, err := backing.Get(convoy.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("convoy after resume = (%+v, %v), want closed", got, err)
 	}
 }
