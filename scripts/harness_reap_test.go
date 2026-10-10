@@ -523,3 +523,70 @@ func TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe(t *testing.T) 
 		t.Fatal("a process of the terminated runner's tree still holds its stdout 20s later: the runner must take its watchdog down with its run")
 	}
 }
+
+// TestHarnessSignalDuringLaunchStillTearsDownTheJustForkedJob pins the
+// ga-96smfk.61 race. Bash runs a signal trap between any two commands, so a
+// signal can land after a supervised run or its watchdog has been forked but
+// before the runner has recorded its PID. A teardown that consults only the
+// recorded PIDs then finds nothing to end: the just-forked job outlives the
+// runner holding the caller's stdout. Under remote-exec load that window was
+// wide enough to strand the watchdog, failing
+// TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe. Here the
+// signal is raised inside the window on purpose, so the race is exercised
+// every run instead of once in a few hundred.
+func TestHarnessSignalDuringLaunchStillTearsDownTheJustForkedJob(t *testing.T) {
+	for _, kind := range []string{"run", "watchdog"} {
+		t.Run(kind, func(t *testing.T) {
+			script := fmt.Sprintf(`
+set -euo pipefail
+source %q
+on_term() {
+  gc_harness_terminate_supervised 5
+  trap - TERM
+  kill -TERM $$
+}
+trap on_term TERM
+gc_harness_launch_begin %s
+set -m
+sleep %d &
+# The trap runs as soon as this builtin returns: after the fork, before the
+# PID is published below.
+kill -TERM $$
+gc_harness_launch_publish
+`, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), kind, fixtureLifetimeSeconds)
+
+			stdout, stdoutWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("create stdout pipe: %v", err)
+			}
+			t.Cleanup(func() { _ = stdout.Close() })
+
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Stdout = stdoutWriter
+			cmd.Stderr = stdoutWriter
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start launch-window script: %v", err)
+			}
+			_ = stdoutWriter.Close()
+			t.Cleanup(func() { _ = cmd.Wait() })
+
+			// EOF on stdout proves every process that inherited it is gone,
+			// the just-forked job included. Left behind, that job is a sleep
+			// outlasting this test, so the read below never returns on its own.
+			drained := make(chan error, 1)
+			go func() {
+				_, err := io.Copy(io.Discard, stdout)
+				drained <- err
+			}()
+			select {
+			case err := <-drained:
+				if err != nil {
+					t.Fatalf("read script stdout: %v", err)
+				}
+			case <-time.After(60 * time.Second):
+				t.Fatalf("a %s job forked just before the signal still holds the runner's stdout: teardown must adopt a job whose PID was not yet published", kind)
+			}
+		})
+	}
+}

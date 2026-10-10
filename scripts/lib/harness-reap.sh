@@ -31,6 +31,42 @@ gc_harness_supervised_pgid=""
 # reason. Empty when no run is in flight or the run has no watchdog.
 gc_harness_watchdog_pgid=""
 
+# A launch whose PID is not yet published: "run" or "watchdog" from just before
+# its fork until gc_harness_launch_publish records the PID, otherwise empty.
+# gc_harness_launch_prior_pid is $! as it stood before that fork, which is how
+# publishing tells whether the fork has happened yet.
+gc_harness_launching=""
+gc_harness_launch_prior_pid=""
+
+# gc_harness_launch_begin opens the launch window for kind ("run" or
+# "watchdog"). Call it immediately before forking the job with `&`, and call
+# gc_harness_launch_publish immediately after.
+#
+# The window exists because bash runs a signal trap between any two commands:
+# a signal that lands after the fork but before `pgid=$!` would find no PID to
+# tear down, and the just-forked job would outlive the runner holding every
+# descriptor it inherited, the caller's stdout included (ga-96smfk.61).
+gc_harness_launch_begin() {
+  gc_harness_launch_prior_pid="${!:-}"
+  gc_harness_launching="${1}"
+}
+
+# gc_harness_launch_publish records the PID of the job forked since
+# gc_harness_launch_begin, then closes the window. It is idempotent, and safe
+# to call from a signal trap: bash sets $! in the same step as the fork, before
+# any trap can run, so if $! has moved the fork has happened and $! is its PID;
+# if not, nothing was forked and there is nothing to record.
+gc_harness_launch_publish() {
+  [[ -n "${gc_harness_launching}" ]] || return 0
+  if [[ "${!:-}" != "${gc_harness_launch_prior_pid}" ]]; then
+    case "${gc_harness_launching}" in
+      run) gc_harness_supervised_pgid="$!" ;;
+      watchdog) gc_harness_watchdog_pgid="$!" ;;
+    esac
+  fi
+  gc_harness_launching=""
+}
+
 # gc_harness_duration_seconds converts a Go-style duration of the form
 # <n>[s|m|h] (a bare <n> is seconds) to whole seconds on stdout. It fails on
 # any other spelling rather than guessing, so an unrecognized GO_TEST_TIMEOUT
@@ -95,6 +131,9 @@ gc_harness_terminate_group() {
 # handed to an unrelated group (ga-880tzy).
 gc_harness_terminate_supervised() {
   local drain_ticks="${1:-25}"
+  # A signal can arrive between a fork and the assignment of its PID; adopt
+  # that job so it is torn down like any other.
+  gc_harness_launch_publish
   if [[ -n "${gc_harness_watchdog_pgid:-}" ]]; then
     gc_harness_signal_group "$gc_harness_watchdog_pgid" KILL
     # Reaped here, as on the normal path, so bash does not report the killed
@@ -143,12 +182,13 @@ gc_harness_run_supervised() {
     *m*) monitor_was_on=1 ;;
   esac
   set -m
+  gc_harness_launch_begin run
   "$@" &
-  local job_pgid=$!
+  gc_harness_launch_publish
+  local job_pgid="$gc_harness_supervised_pgid"
   if (( monitor_was_on == 0 )); then
     set +m
   fi
-  gc_harness_supervised_pgid="$job_pgid"
 
   # The watchdog gets a process group of its own, for two separate reasons.
   # It must not be inside the supervised group, or its own first signal would
@@ -162,10 +202,9 @@ gc_harness_run_supervised() {
   local watchdog_pgid=""
   if [[ -n "$deadline" ]]; then
     set -m
+    gc_harness_launch_begin watchdog
     gc_harness_watchdog "$job_pgid" "$deadline" "$quit_grace" "$label" &
-    # Publish first: until this assignment runs, a trap cannot see the
-    # watchdog to end it.
-    gc_harness_watchdog_pgid=$!
+    gc_harness_launch_publish
     watchdog_pgid="$gc_harness_watchdog_pgid"
     if (( monitor_was_on == 0 )); then
       set +m
