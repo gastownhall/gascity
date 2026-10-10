@@ -43,10 +43,11 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    # The integration build (//test:integration_packages): one ~65 s test plus
-    # ~40 s of the rest. The guard scripts/integration_packages_shards_test.go
-    # keeps the tests in heavy_tests.txt apart.
-    shard_count = 4,
+    # The integration build (//test:integration_packages): ~110 s of tests,
+    # the longest 15-25 s each. The guard
+    # scripts/integration_packages_shards_test.go keeps the tests in
+    # heavy_tests.txt apart.
+    shard_count = 5,
     deps = [
         "//examples/bd/dolt",
         "//internal/bazeltest",
