@@ -324,15 +324,18 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 
 // doHandoffAuto sends handoff mail to self without requesting restart.
 func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
-	b, ok := createHandoffMail(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
+	b, suppressed, ok := createHandoffMailWithDedup(msgStore, sessStore, rec, sessionAddress, sessionAddress, args, "context cycle", []string{
 		mail.AutoHandoffLabel,
 		mail.ArchiveAfterInjectLabel,
 		"priority:1",
-	}, stderr)
+	}, "auto-handoff:"+sessionAddress, stderr)
 	if !ok {
 		return 1
 	}
 	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
+	if suppressed {
+		message = fmt.Sprintf("Handoff: auto mail %s already pending.\n", b.ID)
+	}
 	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -346,6 +349,11 @@ func doHandoffAuto(msgStore, sessStore beads.Store, rec events.Recorder, session
 // confined inside beadmail.Provider.SendHandoff. The returned mail.Message
 // carries the assigned ID for the caller's confirmation output.
 func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, stderr io.Writer) (mail.Message, bool) {
+	msg, _, ok := createHandoffMailWithDedup(msgStore, sessStore, rec, senderAddress, recipientAddress, args, defaultSubject, extraLabels, "", stderr)
+	return msg, ok
+}
+
+func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, extraLabels []string, dedupKey string, stderr io.Writer) (mail.Message, bool, bool) {
 	subject := defaultSubject
 	if len(args) > 0 {
 		subject = args[0]
@@ -362,17 +370,21 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 	// two-store provider (mirroring newCityMailProvider): the message bead is
 	// ClassMessaging, beadmail's addressing reads are ClassSessions.
 	provider := beadmail.NewWithStores(msgStore, sessStore)
-	msg, err := provider.SendHandoff(mail.HandoffIntent{
+	msg, suppressed, err := provider.SendHandoff(mail.HandoffIntent{
 		From:        senderAddress,
 		To:          recipientAddress,
 		Subject:     subject,
 		Body:        message,
 		ThreadID:    handoffThreadID(),
 		ExtraLabels: extraLabels,
+		DedupKey:    dedupKey,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
-		return mail.Message{}, false
+		return mail.Message{}, false, false
+	}
+	if suppressed {
+		return msg, true, true
 	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
@@ -381,7 +393,7 @@ func createHandoffMail(msgStore, sessStore beads.Store, rec events.Recorder, sen
 		Message: recipientAddress,
 		Payload: mailEventPayload(nil),
 	})
-	return msg, true
+	return msg, false, true
 }
 
 // sessionRestartableByController reports whether the controller is willing to

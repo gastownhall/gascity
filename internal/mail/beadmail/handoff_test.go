@@ -17,7 +17,7 @@ func TestSendHandoffConfinesBeadSerialization(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     "mayor",
 		To:       "mayor",
 		Subject:  "HANDOFF: context full",
@@ -101,7 +101,7 @@ func TestSendHandoffResolvesSenderRoute(t *testing.T) {
 		t.Fatalf("Create session: %v", err)
 	}
 
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     sess.ID,
 		To:       "human",
 		Subject:  "HANDOFF: context cycle",

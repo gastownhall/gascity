@@ -216,21 +216,12 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	if to == "" {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
 	}
-	existing, err := p.store.List(beads.ListQuery{
-		Type:     messageBeadType,
-		Status:   "open",
-		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
-		TierMode: beads.TierBoth,
-		Live:     true,
-	})
+	existing, suppressed, err := p.findLiveDuplicate(to, key)
 	if err != nil {
 		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
 	}
-	routes := p.recipientRoutes(to)
-	for _, b := range existing {
-		if matchesRecipientRoute(routes, b.Assignee) {
-			return beadToMessage(b), true, nil
-		}
+	if suppressed {
+		return existing, true, nil
 	}
 	msg, err := p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.DedupKeyMetadataKey: key})
 	if err != nil {
@@ -239,18 +230,56 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 	return msg, false, nil
 }
 
+func (p *Provider) findLiveDuplicate(to, key string) (mail.Message, bool, error) {
+	existing, err := p.store.List(beads.ListQuery{
+		Type:     messageBeadType,
+		Status:   "open",
+		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
+		TierMode: beads.TierBoth,
+		Live:     true,
+	})
+	if err != nil {
+		return mail.Message{}, false, err
+	}
+	routes := p.recipientRoutes(to)
+	for _, b := range existing {
+		if matchesRecipientRoute(routes, b.Assignee) {
+			return beadToMessage(b), true, nil
+		}
+	}
+	return mail.Message{}, false, nil
+}
+
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
 // mail.Message at the boundary while confining the type=message bead, the
 // stable thread label, and the handoff-specific extra labels to this
 // implementation. Sender-route metadata is resolved exactly as [Provider.Send]
 // does, so handoff mail replies route correctly.
-func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) {
+func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, bool, error) {
 	if intent.To == "" {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: recipient is required")
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: recipient is required")
+	}
+	dedupKey := strings.TrimSpace(intent.DedupKey)
+	if dedupKey != "" {
+		existing, suppressed, err := p.findLiveDuplicate(intent.To, dedupKey)
+		if err != nil {
+			return mail.Message{}, false, fmt.Errorf("beadmail handoff: dedup probe for key %q: %w", dedupKey, err)
+		}
+		if suppressed {
+			return existing, true, nil
+		}
 	}
 	from, metadata, err := p.resolveSenderRoute(intent.From)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: %w", err)
+	}
+	if dedupKey != "" {
+		withDedup := make(map[string]string, len(metadata)+1)
+		for key, value := range metadata {
+			withDedup[key] = value
+		}
+		withDedup[mail.DedupKeyMetadataKey] = dedupKey
+		metadata = withDedup
 	}
 	labels := make([]string, 0, 1+len(intent.ExtraLabels))
 	labels = append(labels, "thread:"+intent.ThreadID)
@@ -258,9 +287,9 @@ func (p *Provider) SendHandoff(intent mail.HandoffIntent) (mail.Message, error) 
 
 	b, err := p.createMessageBead(intent.Subject, intent.Body, from, intent.To, labels, metadata)
 	if err != nil {
-		return mail.Message{}, fmt.Errorf("beadmail handoff: %w", err)
+		return mail.Message{}, false, fmt.Errorf("beadmail handoff: %w", err)
 	}
-	return beadToMessage(b), nil
+	return beadToMessage(b), false, nil
 }
 
 // createMessageBead is the single confined edge where a mail message becomes a

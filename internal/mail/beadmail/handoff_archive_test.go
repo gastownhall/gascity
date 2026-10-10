@@ -14,7 +14,7 @@ import (
 // sessionStartAutoHandoffInjection fetches and hands to ArchiveInjectedAutoHandoffs.
 func sendInjectableAutoHandoff(t *testing.T, p *Provider, subject string) mail.Message {
 	t.Helper()
-	msg, err := p.SendHandoff(mail.HandoffIntent{
+	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     "worker",
 		To:       "worker",
 		Subject:  subject,
