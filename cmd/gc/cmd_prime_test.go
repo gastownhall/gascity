@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 type primeHookFailWriter struct {
@@ -1493,6 +1494,118 @@ func createPrimeHookSession(t *testing.T, cityDir, sessionName, template string)
 		t.Fatalf("Create(session %s) returned empty ID", sessionName)
 	}
 	return created.ID
+}
+
+func TestDoPrimeWithHookResolvesNudgePollerProviderOnceAcrossResolvedAgents(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "furiosa"
+start_command = "true"
+
+[[agent]]
+name = "polecat"
+start_command = "true"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "polecat")
+	t.Setenv("GC_SESSION_NAME", "furiosa")
+	t.Setenv("GC_SESSION_ID", "sess-once")
+
+	calls := 0
+	orig := hookNudgePollerSessionProviderFn
+	hookNudgePollerSessionProviderFn = func(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
+		calls++
+		return orig(spctx, stderr)
+	}
+	t.Cleanup(func() { hookNudgePollerSessionProviderFn = orig })
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"furiosa"}, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("hookNudgePollerSessionProviderFn called %d times, want 1; stdout=%q stderr=%q", calls, stdout.String(), stderr.String())
+	}
+}
+
+func TestDoPrimeWithHookSuppressesPollerForKnownEventCapableDefaultRoute(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[session]
+provider = "fake"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+
+[[agent]]
+name = "reviewer"
+session = "acp"
+start_command = "true"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-worker")
+
+	evented := newNudgeEventedFake()
+	origBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return runtime.NewFake(), nil
+		}
+		return evented, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = origBuild })
+
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	spctx := sessionProviderContextForCity(cfg, cityDir, "fake")
+	sp := hookNudgePollerSessionProvider(spctx, io.Discard)
+	target := nudgeTarget{sessionName: cliSessionName(cityDir, "gastown", "worker", cfg.Workspace.SessionTemplate)}
+	if !providerRetiresNudgePollers(target, sp) {
+		t.Fatal("hook provider did not know the event-capable default route")
+	}
+
+	stubNudgePollerDispatcherLive(t, true)
+	spawns := 0
+	origStart := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		spawns++
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = origStart })
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if spawns != 0 {
+		t.Fatalf("poller spawns = %d, want 0 for a known event-capable default route", spawns)
+	}
 }
 
 func TestBuildPrimeContextConfigDir(t *testing.T) {

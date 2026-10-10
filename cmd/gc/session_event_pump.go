@@ -57,6 +57,7 @@ type sessionEventPump struct {
 	// poke, so a death reaches the observation cache ahead of the patrol
 	// cadence. Set it before the first restart.
 	wakeInventory func()
+	observe       func(runtime.SessionEvent)
 
 	mu     sync.Mutex
 	gen    int64              // subscription generation counter
@@ -88,7 +89,7 @@ func newSessionEventPump(parent context.Context, wake *controllerWake, stderr io
 // patrol-polling fallback, so the degradation is never silent and never
 // reads like a broken transport. Callers serialize restarts (startup and
 // config reload both run on the reconciler goroutine).
-func (p *sessionEventPump) restart(sp runtime.Provider) {
+func (p *sessionEventPump) restart(sp runtime.Provider) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.cancel != nil {
@@ -100,7 +101,7 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		p.logNoEventSource()
-		return
+		return false
 	}
 	ctx, cancel := context.WithCancel(p.parent)
 	events, err := sep.SubscribeSessionEvents(ctx)
@@ -111,15 +112,16 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 		// subscribe: line stays reserved for a transport that really failed.
 		if errors.Is(err, runtime.ErrNoSessionEventSource) {
 			p.logNoEventSource()
-			return
+			return false
 		}
 		fmt.Fprintf(p.stderr, "%s: session-event subscribe: %v (session liveness stays on patrol polling)\n", p.logPrefix, err) //nolint:errcheck // best-effort stderr
-		return
+		return false
 	}
 	p.cancel = cancel
 	p.streamGen.Store(p.gen)
 	fmt.Fprintf(p.stderr, "%s: session-event stream active: session death pokes the reconciler\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 	go p.forward(ctx, p.gen, events)
+	return true
 }
 
 // logNoEventSource announces the patrol-polling fallback for a provider that
@@ -163,6 +165,9 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 					fmt.Fprintf(p.stderr, "%s: session-event stream ended; session liveness falls back to patrol polling\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 				}
 				return
+			}
+			if p.observe != nil {
+				p.observe(ev)
 			}
 			switch ev.Kind {
 			case runtime.SessionEventExited, runtime.SessionEventClosed:

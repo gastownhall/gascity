@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,10 +286,12 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
 	sessionEvents       *sessionEventPump            // provider event stream → wake bridge; wired by run()
-	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
-	wake                *controllerWake              // the wake over pokeCh and controlDispatcherCh; built once by initWake
-	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
-	reloadMu            sync.Mutex                   // guards activeReload
+	nudgeEvents         *nudgeEventDispatcher
+	controlDispatcherCh chan struct{}
+	wake                *controllerWake
+	nudgeWakeCh         chan struct{}
+	nudgeWakeListener   net.Listener
+	reloadMu            sync.Mutex
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
@@ -929,17 +932,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Start the supervisor nudge dispatcher when configured. The wake-socket
-	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
-	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
-	// eventual delivery if the wake is missed (socket race, listener
-	// restart). Legacy mode skips the listener entirely; per-session
-	// pollers continue to own delivery.
-	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
-		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
-	}
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, func(cfg *config.City) (beads.NudgesStore, beads.Store) {
+		return nudgeDispatchStores(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)
+	})
+	cr.nudgeEvents.update(cr.sp, cr.cfg)
 
 	// Bridge the provider's push session-event stream (if it has one) into
 	// the wake: a session death pokes the reconciler within seconds instead
@@ -949,7 +945,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if cr.inventoryLane != nil {
 		cr.sessionEvents.wakeInventory = cr.inventoryLane.wake
 	}
-	cr.sessionEvents.restart(cr.sp)
+	cr.sessionEvents.observe = cr.nudgeEvents.handleEvent
+	cr.nudgeEvents.setEventCapable(cr.sessionEvents.restart(cr.sp))
+	cr.ensureNudgeWakeListener(ctx)
 
 	// Reload acceptance runs on its own goroutine so that a slow tick
 	// body (e.g., a session-start wave that waits for startup_timeout)
@@ -2865,6 +2863,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if providerChanged && cr.sessionEvents != nil {
 		cr.sessionEvents.restart(nextSp)
 	}
+	nudgeEventsWereActive := cr.nudgeEvents != nil && cr.nudgeEvents.active()
+	if cr.nudgeEvents != nil {
+		cr.nudgeEvents.update(nextSp, nextCfg)
+		cr.nudgeEvents.setEventCapable(cr.sessionEvents != nil && cr.sessionEvents.streaming())
+	}
+	cr.ensureNudgeWakeListener(ctx)
+	if nudgeEventsWereActive && !cr.nudgeEvents.active() {
+		cr.nudgeEvents.handQueueToPollers()
+	}
 
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {
@@ -3353,7 +3360,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	phaseStart = time.Now()
 	if err == nil {
-		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), cr.sp, time.Now(), dispatchSessionBeads); nudgeErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
 		}
 	}
@@ -4019,6 +4026,10 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 // at the end of each patrol tick so a missed wake doesn't strand a queue
 // item past the patrol interval.
 func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+	if cr.nudgeEvents != nil && cr.nudgeEvents.active() {
+		cr.nudgeEvents.kickAll()
+		return
+	}
 	if !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return
 	}
@@ -4036,6 +4047,31 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads, cr.stderr); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
+}
+
+func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
+	if cr.cityPath == "" {
+		return
+	}
+	gateOpen := cr.nudgeEvents != nil && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	if cr.nudgeWakeListener != nil {
+		if !gateOpen {
+			if err := cr.nudgeWakeListener.Close(); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: closing wake listener: %v\n", cr.logPrefix, err) //nolint:errcheck
+			}
+			cr.nudgeWakeListener = nil
+		}
+		return
+	}
+	if !gateOpen {
+		return
+	}
+	lis, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck
+		return
+	}
+	cr.nudgeWakeListener = lis
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
@@ -4863,6 +4899,20 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 	})
 }
 
+func (cr *CityRuntime) awaitNudgeEventsDown() {
+	if cr.nudgeEvents == nil {
+		return
+	}
+	cr.nudgeEvents.stop()
+	timer := time.NewTimer(nudgeEventDeliveryDrainGrace + 2*time.Second)
+	defer timer.Stop()
+	select {
+	case <-cr.nudgeEvents.workerDone:
+	case <-timer.C:
+		fmt.Fprintf(cr.stderr, "%s: nudge event dispatcher did not come down within its drain grace; continuing shutdown\n", cr.logPrefix) //nolint:errcheck
+	}
+}
+
 // shutdown performs graceful two-pass agent shutdown for this city.
 // Safe to call multiple times (e.g., from both panic recovery and
 // normal shutdown) — only the first call takes effect.
@@ -4892,6 +4942,7 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+		cr.awaitNudgeEventsDown()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
