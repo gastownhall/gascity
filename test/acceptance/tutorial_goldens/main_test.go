@@ -305,6 +305,12 @@ func cleanupStaleTutorialProcesses(t *testing.T, tmpRoot string) {
 	}
 }
 
+// tutorialSupervisorReadyTimeout bounds startTutorialSupervisor's wait for
+// the control socket. It matches gc's own supervisorReadyTimeout
+// (cmd/gc/cmd_supervisor_lifecycle.go), the budget `gc supervisor start`
+// gives the same readiness condition.
+const tutorialSupervisorReadyTimeout = 15 * time.Second
+
 func startTutorialSupervisor(env *tutorialEnv) error {
 	if env == nil || env.Env == nil {
 		return fmt.Errorf("tutorial env is not initialized")
@@ -340,10 +346,13 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 	env.supervisorDone = done
 	env.supervisorLog = logFile
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(tutorialSupervisorReadyTimeout)
 	for time.Now().Before(deadline) {
+		// Ready means the control socket answers with this supervisor's PID:
+		// the only liveness signal `gc init`/`gc start` trust, and the last
+		// thing the supervisor binds at startup, after its lock and its API.
 		out, err := runEnvCommandWithTimeout(env, env.Home, 2*time.Second, "gc", "supervisor", "status")
-		if err == nil && strings.Contains(out, "Supervisor is running") {
+		if err == nil && helpers.SupervisorStatusConfirmsPID(out, cmd.Process.Pid) {
 			return nil
 		}
 		select {
@@ -378,13 +387,26 @@ func TestStartTutorialSupervisorUsesAcceptanceBinaryForStatus(t *testing.T) {
 set -eu
 case "$1 $2" in
   "supervisor run")
+    echo $$ > "$GC_HOME/fake-supervisor.pid"
     echo "Supervisor API listening on http://127.0.0.1:7777"
     echo "Supervisor started."
     trap 'exit 0' TERM INT
-    while :; do sleep 1; done
+    while :; do /bin/sleep 1; done
     ;;
   "supervisor status")
-    echo "Supervisor is running (PID 4242)"
+    # The first probes see what status reports while the supervisor holds
+    # its lock but has not bound its control socket: liveness from a
+    # fallback, with no PID.
+    n=0
+    [ -s "$GC_HOME/status-calls" ] && read -r n < "$GC_HOME/status-calls"
+    n=$((n + 1))
+    echo "$n" > "$GC_HOME/status-calls"
+    if [ "$n" -lt 3 ] || [ ! -s "$GC_HOME/fake-supervisor.pid" ]; then
+      echo "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via api)"
+    else
+      read -r pid < "$GC_HOME/fake-supervisor.pid"
+      echo "Supervisor is running (PID $pid)"
+    fi
     ;;
   *)
     echo "unexpected args: $*" >&2
@@ -401,6 +423,13 @@ esac
 
 	if err := startTutorialSupervisor(tutorial); err != nil {
 		t.Fatalf("startTutorialSupervisor: %v", err)
+	}
+	calls, err := os.ReadFile(filepath.Join(home, "status-calls"))
+	if err != nil {
+		t.Fatalf("reading status call count: %v", err)
+	}
+	if n, _ := strconv.Atoi(strings.TrimSpace(string(calls))); n < 3 {
+		t.Fatalf("startTutorialSupervisor returned after %d status probe(s), want it to wait for the control socket to report the supervisor's PID", n)
 	}
 	defer func() {
 		if tutorial.supervisor != nil && tutorial.supervisor.Process != nil {
