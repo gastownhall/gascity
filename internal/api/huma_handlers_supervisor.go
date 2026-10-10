@@ -676,7 +676,7 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 	}
 	var evts []events.TaggedEvent
 	var err error
-	optimizedTail := input.Limit > 0 && supervisorEventListFilterIsEmpty(filter)
+	optimizedTail := input.Limit > 0 && filterIsEmpty(filter)
 	if optimizedTail {
 		evts, err = mux.ListTail(filter, input.Limit)
 	} else {
@@ -709,10 +709,6 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 	}
 	out.Body.Items = wires
 	return out, nil
-}
-
-func supervisorEventListFilterIsEmpty(filter events.Filter) bool {
-	return filter == (events.Filter{})
 }
 
 func (sm *SupervisorMux) currentSupervisorEventTotal() int {

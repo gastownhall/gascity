@@ -3,21 +3,28 @@ package api
 import (
 	"errors"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
-// failRouteStore refuses the gc.routed_to write for one bead, so a convoy
-// sling routes every other child and fails that one.
+// failRouteStore refuses the gc.routed_to write for one bead with err (a
+// generic failure when err is nil), so a convoy sling routes every other child
+// and fails that one.
 type failRouteStore struct {
 	beads.Store
 	failID string
+	err    error
 }
 
 func (s failRouteStore) SetMetadata(id, key, value string) error {
 	if id == s.failID && key == beadmeta.RoutedToMetadataKey {
+		if s.err != nil {
+			return s.err
+		}
 		return errors.New("injected route failure")
 	}
 	return s.Store.SetMetadata(id, key, value)
@@ -85,6 +92,61 @@ func TestSlingConvoyPartialFailureReturnsPerChildOutcomes(t *testing.T) {
 	}
 	if got.Metadata[beadmeta.RoutedToMetadataKey] != "myrig/worker" {
 		t.Fatalf("routed child gc.routed_to = %q, want myrig/worker", got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+// TestSlingConvoyPartialFailureCarriesChildConflict: a child refused because
+// its source bead already has a live workflow still yields 200 partial, and its
+// outcome names the blocking workflows and the cleanup command, the detail a
+// whole-request conflict puts in its 409 problem. gc sling exits 3 on it, as it
+// does locally.
+func TestSlingConvoyPartialFailureCarriesChildConflict(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var children []beads.Bead
+	for _, title := range []string{"routed", "conflicted"} {
+		child, err := store.Create(beads.Bead{Title: title, Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+			t.Fatal(err)
+		}
+		children = append(children, child)
+	}
+	routedChild, conflictedChild := children[0], children[1]
+	state.stores["myrig"] = failRouteStore{
+		Store:  store,
+		failID: conflictedChild.ID,
+		err:    &sourceworkflow.ConflictError{SourceBeadID: conflictedChild.ID, WorkflowIDs: []string{"wf-1"}},
+	}
+
+	rec, resp := postSlingJSON(t, h, state, `{"target":"myrig/worker","bead":"`+convoy.ID+`"}`)
+	if rec.Code != http.StatusOK || resp.Status != SlingStatusPartial {
+		t.Fatalf("status = %d/%q, want 200 partial; body = %s", rec.Code, resp.Status, rec.Body.String())
+	}
+	byID := map[string]SlingChildOutcome{}
+	for _, c := range resp.Children {
+		byID[c.BeadID] = c
+	}
+	if got := byID[routedChild.ID]; got.Outcome != "routed" || got.Conflict != nil {
+		t.Fatalf("routed child = %+v, want outcome routed with no conflict", got)
+	}
+	got := byID[conflictedChild.ID]
+	if got.Outcome != "failed" || got.Reason == "" {
+		t.Fatalf("conflicted child = %+v, want outcome failed with a reason", got)
+	}
+	want := &SlingChildConflict{
+		SourceBeadID:        conflictedChild.ID,
+		BlockingWorkflowIDs: []string{"wf-1"},
+		Hint:                "gc workflow delete-source " + conflictedChild.ID + " --store-ref rig:myrig --apply",
+	}
+	if !reflect.DeepEqual(got.Conflict, want) {
+		t.Fatalf("conflicted child conflict = %+v, want %+v", got.Conflict, want)
 	}
 }
 

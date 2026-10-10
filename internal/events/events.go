@@ -250,7 +250,9 @@ const (
 	// per detection pass. The city's controller emits them whether or not any
 	// client watches the stream; see internal/pendingwatch for the detection
 	// cadence and cmd/gc/pending_interaction_lane.go for the restart
-	// contract (the announced set is rebuilt from this event log).
+	// contract (the announced set is rebuilt from this event log). That
+	// contract can miss the clear of an interaction outstanding when a clean
+	// stop parked its session; pendingwatch.RebuildSince says when.
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
 	ConvoyCreated         = "convoy.created"

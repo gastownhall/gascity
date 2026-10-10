@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -316,6 +317,31 @@ func TestCmdSlingRemote_PartialConvoyPrintsPerChildResults(t *testing.T) {
 	}
 }
 
+// A remote --on convoy sling sends the convoy as attached_bead_id, so the
+// server echoes no bead. The convoy header and summary still name the convoy:
+// it is the one id an operator needs to retry a partial failure.
+func TestCmdSlingRemote_OnConvoyNamesTheConvoy(t *testing.T) {
+	srv, _ := newCannedSlingServer(t, `{"status":"partial","target":"mayor","formula":"review","attached_bead_id":"BL-c","root_bead_id":"BL-c","mode":"attached",`+
+		`"batch":{"container_type":"convoy","total":2,"routed":1,"failed":1,"skipped":0,"idempotent":0},`+
+		`"children":[{"bead_id":"BL-1","outcome":"routed","formula":"review","molecule_id":"BL-m1"},{"bead_id":"BL-2","outcome":"failed","reason":"boom"}]}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "review" /*onFormula*/, false, false, false, "", "", false, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 for a partial convoy; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	for _, want := range []string{
+		"Expanding convoy BL-c (2 children, 2 open)",
+		`Attached wisp BL-m1 (formula "review") → BL-1`,
+		"Slung 1/2 children of BL-c → mayor",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 // --json for a partial convoy reports success=false with the per-child
 // outcomes, and exits non-zero.
 func TestCmdSlingRemote_PartialConvoyJSON(t *testing.T) {
@@ -341,6 +367,84 @@ func TestCmdSlingRemote_PartialConvoyJSON(t *testing.T) {
 	failed, _ := children[1].(map[string]any)
 	if failed["bead_id"] != "BL-2" || failed["outcome"] != "failed" || failed["reason"] == "" {
 		t.Errorf("failed child = %v", failed)
+	}
+}
+
+const conflictConvoySlingResponse = `{"status":"partial","target":"worker","bead":"BL-c","mode":"direct",` +
+	`"batch":{"container_type":"convoy","total":2,"routed":1,"failed":1,"skipped":0,"idempotent":0},` +
+	`"children":[{"bead_id":"BL-1","outcome":"routed"},` +
+	`{"bead_id":"BL-2","outcome":"failed","reason":"setting gc.routed_to on BL-2: source bead BL-2 already has live workflow(s): wf-1",` +
+	`"conflict":{"source_bead_id":"BL-2","blocking_workflow_ids":["wf-1"],"hint":"gc workflow delete-source BL-2 --store-ref rig:r --apply"}}]}`
+
+// A remote convoy sling whose failed child was refused for a live source
+// workflow prints the conflict lines gc sling prints locally, with the server's
+// cleanup command, and exits 3 as the local path does, in place of the
+// "children failed" summary.
+func TestCmdSlingRemote_PartialConvoyConflictExits3(t *testing.T) {
+	srv, _ := newCannedSlingServer(t, conflictConvoySlingResponse)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"worker", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 for a child refused on a source-workflow conflict; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "Slung BL-1 → worker") {
+		t.Errorf("stdout missing the routed child:\n%s", out.String())
+	}
+	for _, want := range []string{
+		"Failed BL-2: setting gc.routed_to on BL-2",
+		"gc sling: source bead BL-2 already has live workflow(s): wf-1\n",
+		"gc sling: use --force to override, or gc workflow delete-source BL-2 --store-ref rig:r --apply to clean up\n",
+	} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, errb.String())
+		}
+	}
+	if strings.Contains(errb.String(), "children failed") {
+		t.Errorf("stderr carries the children-failed summary the local path skips on a conflict:\n%s", errb.String())
+	}
+}
+
+// --json for a partial convoy with a conflicted child keeps the conflict on
+// that child and exits 3.
+func TestCmdSlingRemote_PartialConvoyConflictJSON(t *testing.T) {
+	srv, _ := newCannedSlingServer(t, conflictConvoySlingResponse)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"worker", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 for a child refused on a source-workflow conflict; stderr=%q", code, errb.String())
+	}
+	var got struct {
+		Success  bool `json:"success"`
+		Children []struct {
+			BeadID   string `json:"bead_id"`
+			Outcome  string `json:"outcome"`
+			Conflict *struct {
+				SourceBeadID        string   `json:"source_bead_id"`
+				BlockingWorkflowIDs []string `json:"blocking_workflow_ids"`
+				Hint                string   `json:"hint"`
+			} `json:"conflict"`
+		} `json:"children"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output not JSON: %v (%q)", err, out.String())
+	}
+	if got.Success || len(got.Children) != 2 {
+		t.Fatalf("json = %s, want success=false with 2 children", out.String())
+	}
+	if got.Children[0].Conflict != nil {
+		t.Errorf("routed child carries a conflict: %s", out.String())
+	}
+	c := got.Children[1].Conflict
+	if c == nil || c.SourceBeadID != "BL-2" || !slices.Equal(c.BlockingWorkflowIDs, []string{"wf-1"}) ||
+		c.Hint != "gc workflow delete-source BL-2 --store-ref rig:r --apply" {
+		t.Errorf("conflicted child = %s, want its conflict with source_bead_id, blocking_workflow_ids and hint", out.String())
+	}
+	if !strings.Contains(errb.String(), "gc sling: source bead BL-2 already has live workflow(s): wf-1") {
+		t.Errorf("stderr missing the conflict line:\n%s", errb.String())
 	}
 }
 

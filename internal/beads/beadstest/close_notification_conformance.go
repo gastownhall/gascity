@@ -50,11 +50,11 @@ func RunCloseNotificationTests(t *testing.T, newBacking func(t *testing.T) beads
 		{"UpdateStatusClosed", always, func(t *testing.T, cs *beads.CachingStore, _ beads.Store, seed beads.Bead) {
 			mustNoErr(t, "Update(status=closed)", cs.Update(seed.ID, beads.UpdateOpts{Status: &closedStatus}))
 		}},
-		{"CloseIfMatch", conditional, func(t *testing.T, cs *beads.CachingStore, _ beads.Store, seed beads.Bead) {
-			mustConditional(t, "CloseIfMatch", cs.CloseIfMatch(seed.ID, currentRevision(t, cs, seed.ID)))
+		{"CloseIfMatch", conditional, func(t *testing.T, cs *beads.CachingStore, backing beads.Store, seed beads.Bead) {
+			mustConditional(t, "CloseIfMatch", cs.CloseIfMatch(seed.ID, currentRevision(t, backing, seed.ID)))
 		}},
-		{"UpdateIfMatchStatusClosed", conditional, func(t *testing.T, cs *beads.CachingStore, _ beads.Store, seed beads.Bead) {
-			mustConditional(t, "UpdateIfMatch(status=closed)", cs.UpdateIfMatch(seed.ID, currentRevision(t, cs, seed.ID), beads.UpdateOpts{Status: &closedStatus}))
+		{"UpdateIfMatchStatusClosed", conditional, func(t *testing.T, cs *beads.CachingStore, backing beads.Store, seed beads.Bead) {
+			mustConditional(t, "UpdateIfMatch(status=closed)", cs.UpdateIfMatch(seed.ID, currentRevision(t, backing, seed.ID), beads.UpdateOpts{Status: &closedStatus}))
 		}},
 		{"UpdateIfAssignmentStatusClosed", func(backing beads.Store) bool {
 			_, ok := beads.AssignmentGuardedUpdaterFor(backing)
@@ -173,6 +173,10 @@ func primedNotifyingCache(t *testing.T, backing beads.Store) (*beads.CachingStor
 	return cs, rec
 }
 
+// currentRevision reads id's revision token from s.Get. The conditional cases
+// read it from the backing, not the cache: a cache primed from a store whose
+// list rows publish no token (NativeDoltStore) holds Revision 0 for the bead,
+// which means absent and fences nothing.
 func currentRevision(t *testing.T, s beads.Store, id string) int64 {
 	t.Helper()
 	b, err := s.Get(id)

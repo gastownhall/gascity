@@ -71,17 +71,28 @@ const (
 // SlingChildOutcome is the outcome of one child of a convoy sling. It mirrors
 // the per-child lines gc sling prints for a convoy.
 type SlingChildOutcome struct {
-	BeadID     string `json:"bead_id" doc:"Child bead ID."`
-	Outcome    string `json:"outcome" enum:"routed,failed,skipped" doc:"routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status)."`
-	Status     string `json:"status,omitempty" doc:"The child's bead status when it was skipped because it was not open."`
-	Reason     string `json:"reason,omitempty" doc:"Why routing the child failed. Present only for outcome failed."`
-	Formula    string `json:"formula,omitempty" doc:"Formula attached to the child, when one was."`
-	WorkflowID string `json:"workflow_id,omitempty" doc:"Graph workflow launched for the child, when one was."`
-	MoleculeID string `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the child, when a non-graph formula was attached."`
+	BeadID     string              `json:"bead_id" doc:"Child bead ID."`
+	Outcome    string              `json:"outcome" enum:"routed,failed,skipped" doc:"routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status)."`
+	Status     string              `json:"status,omitempty" doc:"The child's bead status when it was skipped because it was not open."`
+	Reason     string              `json:"reason,omitempty" doc:"Why routing the child failed. Present only for outcome failed."`
+	Formula    string              `json:"formula,omitempty" doc:"Formula attached to the child, when one was."`
+	WorkflowID string              `json:"workflow_id,omitempty" doc:"Graph workflow launched for the child, when one was."`
+	MoleculeID string              `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the child, when a non-graph formula was attached."`
+	Conflict   *SlingChildConflict `json:"conflict,omitempty" doc:"Set when the child failed because its source bead already has a live workflow."`
+}
+
+// SlingChildConflict names the live workflows that refused a convoy child's
+// launch: the per-child form of the sling-source-workflow-conflict problem.
+type SlingChildConflict struct {
+	SourceBeadID        string   `json:"source_bead_id" doc:"Source bead whose live workflow refused the launch."`
+	BlockingWorkflowIDs []string `json:"blocking_workflow_ids" doc:"Live workflow roots that refused the launch."`
+	Hint                string   `json:"hint" doc:"Command that deletes the blocking workflows. Re-slinging with force launches beside them instead."`
 }
 
 // slingChildOutcomes projects the domain's per-child results onto the wire.
-func slingChildOutcomes(children []sling.SlingChildResult) []SlingChildOutcome {
+// storeRef scopes the cleanup hint of a child refused on a source-workflow
+// conflict, as it does for a whole-request conflict.
+func slingChildOutcomes(children []sling.SlingChildResult, storeRef string) []SlingChildOutcome {
 	if len(children) == 0 {
 		return nil
 	}
@@ -97,6 +108,13 @@ func slingChildOutcomes(children []sling.SlingChildResult) []SlingChildOutcome {
 		}
 		if child.Failed {
 			outcome.Reason = child.FailReason
+		}
+		if c := child.Conflict; c != nil {
+			outcome.Conflict = &SlingChildConflict{
+				SourceBeadID:        c.SourceBeadID,
+				BlockingWorkflowIDs: append([]string{}, c.WorkflowIDs...),
+				Hint:                sourceWorkflowCleanupHint(c.SourceBeadID, storeRef),
+			}
 		}
 		out = append(out, outcome)
 	}
@@ -313,7 +331,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			Skipped:       result.Skipped,
 			Idempotent:    result.IdempotentCt,
 		}
-		resp.Children = slingChildOutcomes(result.Children)
+		resp.Children = slingChildOutcomes(result.Children, storeRef)
 	}
 	explicitFormula := opts.IsFormula || opts.OnFormula != ""
 	// The domain names the formula it cooked. On a plain bead that is the

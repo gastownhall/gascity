@@ -5014,10 +5014,23 @@ type SlingBatchSummary struct {
 	Total int64 `json:"total"`
 }
 
+// SlingChildConflict defines model for SlingChildConflict.
+type SlingChildConflict struct {
+	// BlockingWorkflowIds Live workflow roots that refused the launch.
+	BlockingWorkflowIds *[]string `json:"blocking_workflow_ids"`
+
+	// Hint Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+	Hint string `json:"hint"`
+
+	// SourceBeadId Source bead whose live workflow refused the launch.
+	SourceBeadId string `json:"source_bead_id"`
+}
+
 // SlingChildOutcome defines model for SlingChildOutcome.
 type SlingChildOutcome struct {
 	// BeadId Child bead ID.
-	BeadId string `json:"bead_id"`
+	BeadId   string              `json:"bead_id"`
+	Conflict *SlingChildConflict `json:"conflict,omitempty"`
 
 	// Formula Formula attached to the child, when one was.
 	Formula *string `json:"formula,omitempty"`

@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +27,7 @@ type fakeCity struct {
 	pending    map[string]*runtime.PendingInteraction
 	activity   map[string]time.Time
 	noActivity bool
+	now        time.Time
 	probeErr   map[string]error
 	unsupp     map[string]bool
 	probes     map[string]int
@@ -35,6 +41,7 @@ func newFakeCity(sessions ...Session) *fakeCity {
 		sessions: sessions,
 		pending:  map[string]*runtime.PendingInteraction{},
 		activity: map[string]time.Time{},
+		now:      t0.Add(time.Hour),
 		probeErr: map[string]error{},
 		unsupp:   map[string]bool{},
 		probes:   map[string]int{},
@@ -56,6 +63,11 @@ func (f *fakeCity) deps() Deps {
 			}
 			at, ok := f.activity[name]
 			return at, ok
+		},
+		Now: func() time.Time {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.now
 		},
 		Probe: func(_ context.Context, name string) Observation {
 			f.mu.Lock()
@@ -97,6 +109,12 @@ func (f *fakeCity) set(name string, p *runtime.PendingInteraction, at time.Time)
 	defer f.mu.Unlock()
 	f.pending[name] = p
 	f.activity[name] = at
+}
+
+func (f *fakeCity) setNow(now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now = now
 }
 
 func (f *fakeCity) transitions() []string {
@@ -185,6 +203,28 @@ func TestPassSkipsCaptureWhenActivityUnchanged(t *testing.T) {
 	}
 	if got := f.probeCount("w1"); got != 1 {
 		t.Fatalf("w1 recaptured with unchanged activity: %d", got)
+	}
+}
+
+// Activity stamps are whole seconds (tmux), so a prompt painted later in the
+// second of a capture that found none leaves the stamp unchanged. That capture
+// must not let the next pass skip the session.
+func TestPassRecapturesWhenTheCaptureSharesTheStampSecond(t *testing.T) {
+	f := newFakeCity(Session{ID: "s-1", Name: "w1"})
+	f.set("w1", nil, t0)
+	f.setNow(t0.Add(300 * time.Millisecond))
+	w := New(f.deps(), nil)
+	ctx := context.Background()
+	w.Pass(ctx)
+
+	f.set("w1", approval("r1"), t0) // painted at t0+600ms: the stamp stays t0
+	for i := 2; i <= 10; i++ {
+		f.setNow(t0.Add(time.Duration(i) * time.Second))
+		w.Pass(ctx)
+	}
+	assertTransitions(t, f, "session.pending s-1 r1")
+	if got := f.probeCount("w1"); got != 2 {
+		t.Fatalf("captures over 10 passes = %d, want 2 (the same-second one, then one trusted)", got)
 	}
 }
 
@@ -340,7 +380,7 @@ func TestRestartFromEventLogEmitsNoDuplicates(t *testing.T) {
 	// Controller down: s-2's prompt is answered.
 	f.set("w2", nil, t0.Add(time.Second))
 
-	published, err := RebuildFrom(log)
+	published, err := RebuildFrom(context.Background(), log, time.Time{})
 	if err != nil {
 		t.Fatalf("RebuildFrom: %v", err)
 	}
@@ -351,6 +391,174 @@ func TestRestartFromEventLogEmitsNoDuplicates(t *testing.T) {
 		"session.pending s-1 r1", "session.pending s-2 q1",
 		"session.pending_cleared s-2 q1 resolved",
 	)
+}
+
+func TestRebuildSinceReachesBeforeTheOldestSession(t *testing.T) {
+	now := t0.Add(24 * time.Hour)
+	for name, tc := range map[string]struct {
+		listing Listing
+		want    time.Time
+	}{
+		"oldest session": {
+			listing: Listing{Sessions: []Session{
+				{ID: "s-1", Created: t0.Add(2 * time.Hour)},
+				{ID: "s-2", Created: t0},
+				{ID: "s-3", Created: t0.Add(time.Hour)},
+			}},
+			want: t0.Add(-RebuildSlack),
+		},
+		"no sessions":                {want: now.Add(-RebuildSlack)},
+		"session stamped after now":  {listing: Listing{Sessions: []Session{{ID: "s-1", Created: now.Add(time.Minute)}}}, want: now.Add(-RebuildSlack)},
+		"partial listing":            {listing: Listing{Sessions: []Session{{ID: "s-1", Created: t0}}, Partial: true}},
+		"a session's creation unset": {listing: Listing{Sessions: []Session{{ID: "s-1", Created: t0}, {ID: "s-2"}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := RebuildSince(tc.listing, now); !got.Equal(tc.want) {
+				t.Fatalf("RebuildSince = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// recordingLog is an event log that records the filter of every List.
+type recordingLog struct {
+	*events.Fake
+	mu      sync.Mutex
+	filters []events.Filter
+}
+
+func (l *recordingLog) List(filter events.Filter) ([]events.Event, error) {
+	l.mu.Lock()
+	l.filters = append(l.filters, filter)
+	l.mu.Unlock()
+	return l.Fake.List(filter)
+}
+
+func (l *recordingLog) reads() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.filters)
+}
+
+func stamped(e events.Event, at time.Time) events.Event {
+	e.Ts = at
+	return e
+}
+
+func TestRebuildFromReadsBothTypesOnceSinceTheBound(t *testing.T) {
+	log := &recordingLog{Fake: events.NewFake()}
+	log.Record(stamped(pendingEvent(0, events.SessionPending, "s-old", "o1", ""), t0.Add(-time.Second)))
+	log.Record(stamped(pendingEvent(0, events.SessionPending, "s-1", "r1", ""), t0))
+	log.Record(stamped(events.Event{Type: "bead.closed", Payload: []byte(`{}`)}, t0.Add(time.Second)))
+	log.Record(stamped(pendingEvent(0, events.SessionPendingCleared, "s-1", "r1", ReasonResolved), t0.Add(2*time.Second)))
+	log.Record(stamped(pendingEvent(0, events.SessionPending, "s-2", "q1", ""), t0.Add(3*time.Second)))
+
+	got, err := RebuildFrom(context.Background(), log, t0)
+	if err != nil {
+		t.Fatalf("RebuildFrom: %v", err)
+	}
+	if want := map[string]Published{"s-2": {RequestID: "q1", Kind: "approval"}}; !maps.Equal(got, want) {
+		t.Fatalf("RebuildFrom = %+v, want %+v", got, want)
+	}
+	if n := log.reads(); n != 1 {
+		t.Fatalf("RebuildFrom read the log %d times, want once", n)
+	}
+}
+
+func TestRebuildFromReturnsOnceCtxEnds(t *testing.T) {
+	log := &recordingLog{Fake: events.NewFake()}
+	log.Record(pendingEvent(0, events.SessionPending, "s-1", "r1", ""))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := RebuildFrom(ctx, log, time.Time{})
+	if !errors.Is(err, context.Canceled) || got != nil {
+		t.Fatalf("RebuildFrom = %+v, %v; want nil, %v", got, err, context.Canceled)
+	}
+	if n := log.reads(); n != 0 {
+		t.Fatalf("RebuildFrom read the log %d times after ctx ended, want none", n)
+	}
+}
+
+// inFlightLog is an event log whose plain List misses a segment still being
+// rotated, as the file log's does; ListInFlight folds it in.
+type inFlightLog struct {
+	*events.Fake
+	rotating []events.Event
+}
+
+func (l *inFlightLog) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	listed, err := l.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	return append(events.ApplyFilter(l.rotating, filter), listed...), nil
+}
+
+func TestRebuildFromFoldsInTheSegmentBeingRotated(t *testing.T) {
+	log := &inFlightLog{Fake: events.NewFake(), rotating: []events.Event{pendingEvent(1, events.SessionPending, "s-1", "r1", "")}}
+	got, err := RebuildFrom(context.Background(), log, time.Time{})
+	if err != nil {
+		t.Fatalf("RebuildFrom: %v", err)
+	}
+	if want := map[string]Published{"s-1": {RequestID: "r1", Kind: "approval"}}; !maps.Equal(got, want) {
+		t.Fatalf("RebuildFrom = %+v, want %+v", got, want)
+	}
+}
+
+// segmentName is the file log's name for a rotated segment: kind is "archive"
+// or "rotating", at is the rotation instant.
+func segmentName(kind string, at time.Time, first, last uint64) string {
+	return fmt.Sprintf("events.jsonl.%s-%s-seq-%d-%d", kind, at.UTC().Format("20060102T150405Z"), first, last)
+}
+
+func writeEventLines(t *testing.T, path string, evs ...events.Event) {
+	t.Helper()
+	var buf []byte
+	for _, e := range evs {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("encoding event %d: %v", e.Seq, err)
+		}
+		buf = append(append(buf, line...), '\n')
+	}
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// On the file log the rebuild includes the segment a rotation has not yet
+// compressed, and never opens an archive rotated away before the bound.
+func TestRebuildFromFileLogReadsTheRotatingSegmentAndSkipsOlderArchives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	since := t0
+	// Not gzip: opening it fails the read.
+	if err := os.WriteFile(filepath.Join(dir, segmentName("archive", since.Add(-2*time.Hour), 1, 2)+".gz"), []byte("not gzip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeEventLines(t, filepath.Join(dir, segmentName("rotating", since.Add(10*time.Minute), 3, 4)),
+		stamped(pendingEvent(3, events.SessionPending, "s-1", "r1", ""), since.Add(time.Minute)),
+		stamped(pendingEvent(4, events.SessionPending, "s-2", "q1", ""), since.Add(2*time.Minute)),
+	)
+	writeEventLines(t, path,
+		stamped(pendingEvent(5, events.SessionPendingCleared, "s-2", "q1", ReasonResolved), since.Add(11*time.Minute)),
+		stamped(pendingEvent(6, events.SessionPending, "s-3", "x1", ""), since.Add(12*time.Minute)),
+	)
+	log := events.NewReadOnlyFileProvider(path, io.Discard)
+
+	got, err := RebuildFrom(context.Background(), log, since)
+	if err != nil {
+		t.Fatalf("RebuildFrom: %v", err)
+	}
+	want := map[string]Published{"s-1": {RequestID: "r1", Kind: "approval"}, "s-3": {RequestID: "x1", Kind: "approval"}}
+	if !maps.Equal(got, want) {
+		t.Fatalf("RebuildFrom = %+v, want %+v", got, want)
+	}
+	// Unbounded, the same read opens the old archive and fails.
+	if got, err := RebuildFrom(context.Background(), log, time.Time{}); err == nil {
+		t.Fatalf("RebuildFrom over the whole log = %+v, want the unreadable archive's error", got)
+	}
 }
 
 // Run publishes without any caller-side polling: a poke drives a pass.

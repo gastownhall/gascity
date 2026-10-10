@@ -875,6 +875,12 @@ func setBeadStatus(b *Bead, status string) {
 // reopened bead that kept it handed the old reason to a later close made
 // without one. The metadata map is replaced, never mutated in place, since
 // callers may share it.
+//
+// The stores that clear the key before reopening (BdStore, NativeDoltStore,
+// exec; staleCloseReasonToClear) set it to "" rather than removing it.
+// CachingStore's Reopen fallback patch removes it over any backing, so over
+// those three the next reconcile reads the backing's "" as a metadata change
+// and announces a bead.updated that no write made (ga-et1toc).
 func dropCloseReasonMetadata(b *Bead) {
 	if _, ok := b.Metadata[closeReasonMetadataKey]; !ok {
 		return
@@ -895,9 +901,12 @@ const closeReasonMetadataKey = "close_reason"
 // staleCloseReasonToClear reports whether b, about to be reopened, carries a
 // metadata.close_reason that must be cleared first. Stores whose reopen cannot
 // edit metadata in the same write (BdStore, NativeDoltStore, exec) clear it
-// BEFORE reopening: a closed bead reports its reason from the store's own
-// close_reason column, so clearing the input key first changes no read, and a
-// reopen that fails or is replayed afterwards still finds it cleared.
+// BEFORE reopening, so a reopen replayed afterwards still finds it cleared. A
+// closed bead reports CloseReason from the store's own close_reason column,
+// which the clear leaves alone, but a reader of the key itself sees the clear
+// while the bead is still closed, and keeps seeing it if the reopen fails: a
+// retention-swept message (beadmail's isRemovedMessageBead) then reads as
+// removed by its user.
 func staleCloseReasonToClear(b Bead) bool {
 	return b.Status != "open" && strings.TrimSpace(b.Metadata[closeReasonMetadataKey]) != ""
 }

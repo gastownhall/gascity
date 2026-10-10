@@ -35,37 +35,77 @@ const pendingInteractionActor = "controller"
 // city event log with only the controller running, whether or not any client
 // watches the stream. The announced set is rebuilt from the event log, so a
 // restart re-announces nothing and clears what was answered while it was down.
-// It does nothing when the runtime has no event recorder.
+// A clean stop stops the lane before shutdown parks the sessions, so the next
+// lane's rebuild clears their interactions as gone, except one announced
+// before the rebuild's bound (pendingwatch.RebuildSince). The rebuild runs on
+// the lane's goroutine: on a long-lived city it reads minutes of archives,
+// which must not hold back the controller's ticks. Until it finishes nothing
+// is probed and a respond's poke finds no lane. It does nothing when the
+// runtime has no event recorder.
 func (cr *CityRuntime) startPendingInteractionLane(ctx context.Context) func() {
 	if cr.rec == nil || cr.rec == events.Discard {
 		return func() {}
 	}
-	published := map[string]pendingwatch.Published{}
-	if ep := cr.pendingInteractionEventProvider(); ep != nil {
-		rebuilt, err := pendingwatch.RebuildFrom(ep)
-		if err != nil {
-			fmt.Fprintf(cr.stderr, "%s: pending interactions: reading the event log: %v (starting with none announced)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		} else {
-			published = rebuilt
-		}
-	}
-	w := pendingwatch.New(cr.pendingInteractionDeps(), published)
-	if cr.cs != nil {
-		cr.cs.setPendingInteractionPoke(w.Poke)
-	}
+	cs := cr.cs
 	laneCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		cr.safeTick(func() { w.Run(laneCtx, pendingInteractionInterval) }, "pending-interactions")
+		cr.safeTick(func() { cr.runPendingInteractionLane(laneCtx, cs) }, "pending-interactions")
 	}()
 	return func() {
-		if cr.cs != nil {
-			cr.cs.setPendingInteractionPoke(nil)
-		}
 		cancel()
 		<-done
+		if cs != nil {
+			cs.setPendingInteractionPoke(nil)
+		}
 	}
+}
+
+// runPendingInteractionLane rebuilds the announced set, then installs the
+// watcher's poke on cs and runs the watcher until ctx ends.
+func (cr *CityRuntime) runPendingInteractionLane(ctx context.Context, cs *controllerState) {
+	deps := cr.pendingInteractionDeps()
+	published := cr.rebuildPendingInteractions(ctx, deps)
+	if ctx.Err() != nil {
+		return
+	}
+	w := pendingwatch.New(deps, published)
+	if cs != nil {
+		cs.setPendingInteractionPoke(w.Poke)
+	}
+	w.Run(ctx, pendingInteractionInterval)
+}
+
+// rebuildPendingInteractions reads the announced set back from the event log,
+// as far back as the probe set needs (pendingwatch.RebuildSince), and logs how
+// long that took. A failed read starts the lane with nothing announced.
+func (cr *CityRuntime) rebuildPendingInteractions(ctx context.Context, deps pendingwatch.Deps) map[string]pendingwatch.Published {
+	ep := cr.pendingInteractionEventProvider()
+	if ep == nil {
+		return nil
+	}
+	var since time.Time
+	if listing, err := deps.List(); err != nil {
+		deps.Logf("pending interactions: listing sessions to bound the event-log read: %v (reading the whole log)", err)
+	} else {
+		since = pendingwatch.RebuildSince(listing, time.Now())
+	}
+	began := time.Now()
+	published, err := pendingwatch.RebuildFrom(ctx, ep, since)
+	if err != nil {
+		if ctx.Err() == nil {
+			deps.Logf("pending interactions: reading the event log: %v (starting with none announced)", err)
+		}
+		return nil
+	}
+	from := "its start"
+	if !since.IsZero() {
+		from = since.UTC().Format(time.RFC3339)
+	}
+	deps.Logf("pending interactions: rebuilt %d announced interaction(s) from the event log since %s in %s",
+		len(published), from, time.Since(began).Round(time.Millisecond))
+	return published
 }
 
 // pendingInteractionEventProvider is the readable event log the lane rebuilds
@@ -126,7 +166,13 @@ func pendingInteractionListing(store beads.Store) (pendingwatch.Listing, error) 
 		if name == "" {
 			continue
 		}
-		out.Sessions = append(out.Sessions, pendingwatch.Session{ID: info.ID, Name: name, Template: info.Template, Alias: info.Alias})
+		out.Sessions = append(out.Sessions, pendingwatch.Session{
+			ID:       info.ID,
+			Name:     name,
+			Template: info.Template,
+			Alias:    info.Alias,
+			Created:  info.CreatedAt,
+		})
 	}
 	return out, nil
 }

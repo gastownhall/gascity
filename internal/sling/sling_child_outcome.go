@@ -1,5 +1,11 @@
 package sling
 
+import (
+	"errors"
+
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
+)
+
 // Per-child outcomes of a convoy (batch) sling. Every child of an expanded
 // container ends in exactly one of them; callers render or serialize the
 // outcome instead of re-deriving it from SlingChildResult's flags.
@@ -24,6 +30,17 @@ func (c SlingChildResult) Outcome() string {
 		return ChildOutcomeRouted
 	default:
 		return ChildOutcomeSkipped
+	}
+}
+
+// fail marks the child failed with err, keeping the source-workflow conflict
+// err carries so a caller can name the blocking workflows.
+func (c *SlingChildResult) fail(err error) {
+	c.Failed = true
+	c.FailReason = err.Error()
+	var conflict *sourceworkflow.ConflictError
+	if errors.As(err, &conflict) {
+		c.Conflict = conflict
 	}
 }
 

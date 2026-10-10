@@ -2873,8 +2873,15 @@ export const zSlingBatchSummary = z.object({
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zSlingChildConflict = z.object({
+    blocking_workflow_ids: z.array(z.string()).nullable(),
+    hint: z.string(),
+    source_bead_id: z.string()
+});
+
 export const zSlingChildOutcome = z.object({
     bead_id: z.string(),
+    conflict: zSlingChildConflict.optional(),
     formula: z.string().optional(),
     molecule_id: z.string().optional(),
     outcome: z.enum([

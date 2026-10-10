@@ -244,6 +244,9 @@ type SlingChildResult struct {
 	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
+	// Conflict is the live source workflow that refused the child's launch,
+	// when that is why it failed.
+	Conflict *sourceworkflow.ConflictError
 }
 
 // Sling provides intent-based work routing operations. Construct via New.

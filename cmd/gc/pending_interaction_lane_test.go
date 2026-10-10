@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"io"
+	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pendingwatch"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -109,7 +114,7 @@ func TestPendingInteractionLaneRestartRebuildsFromTheEventLog(t *testing.T) {
 	log := events.NewFake()
 	pendingwatch.New(pendingLaneDeps(store, sp, log), nil).Pass(context.Background())
 
-	published, err := pendingwatch.RebuildFrom(log)
+	published, err := pendingwatch.RebuildFrom(context.Background(), log, time.Time{})
 	if err != nil {
 		t.Fatalf("RebuildFrom: %v", err)
 	}
@@ -144,4 +149,154 @@ func TestPendingInteractionListingWithoutStoreIsPartial(t *testing.T) {
 	if err != nil || !got.Partial || len(got.Sessions) != 0 {
 		t.Fatalf("pendingInteractionListing(nil) = %+v, %v; want an empty partial listing", got, err)
 	}
+}
+
+// blockingRebuildLog is an event log whose pending-interaction rebuild read
+// blocks until release is called or the read's ctx ends. Every other read is
+// the Fake's.
+type blockingRebuildLog struct {
+	*events.Fake
+	entered     chan struct{}
+	enteredOnce sync.Once
+	released    chan struct{}
+	releaseOnce sync.Once
+
+	mu     sync.Mutex
+	filter events.Filter
+}
+
+func newBlockingRebuildLog() *blockingRebuildLog {
+	return &blockingRebuildLog{Fake: events.NewFake(), entered: make(chan struct{}), released: make(chan struct{})}
+}
+
+func isPendingRebuildRead(f events.Filter) bool {
+	return f.Type == events.SessionPending || f.Type == events.SessionPendingCleared ||
+		slices.Contains(f.Types, events.SessionPending)
+}
+
+func (l *blockingRebuildLog) enter(f events.Filter) {
+	l.mu.Lock()
+	l.filter = f
+	l.mu.Unlock()
+	l.enteredOnce.Do(func() { close(l.entered) })
+}
+
+func (l *blockingRebuildLog) release() { l.releaseOnce.Do(func() { close(l.released) }) }
+
+func (l *blockingRebuildLog) rebuildFilter() events.Filter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.filter
+}
+
+func (l *blockingRebuildLog) List(f events.Filter) ([]events.Event, error) {
+	if isPendingRebuildRead(f) {
+		l.enter(f)
+		<-l.released
+	}
+	return l.Fake.List(f)
+}
+
+func (l *blockingRebuildLog) ListHistoryTail(ctx context.Context, f events.Filter, limit int, _ bool) ([]events.Event, int, error) {
+	if isPendingRebuildRead(f) {
+		l.enter(f)
+		select {
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		case <-l.released:
+		}
+	}
+	evs, err := l.Fake.List(f)
+	if len(evs) > limit {
+		evs = evs[len(evs)-limit:]
+	}
+	return evs, len(evs), err
+}
+
+// startRuntimeWithBlockingRebuild runs a city runtime whose event log blocks
+// the pending-interaction rebuild, and returns once that read has begun.
+func startRuntimeWithBlockingRebuild(t *testing.T) (*CityRuntime, *controllerState, *blockingRebuildLog, context.CancelFunc, <-chan struct{}) {
+	t.Helper()
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	appendToFile(t, tomlPath, "\n[daemon]\npatrol_interval = \"10ms\"\n")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	log := newBlockingRebuildLog()
+	cr, err := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    log,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("building the city runtime: %v", err)
+	}
+	cs := newControllerState(context.Background(), cfg, sp, log, "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		log.release()
+		awaitClose(t, done, "run to return")
+	})
+	awaitClose(t, log.entered, "the pending-interaction rebuild read")
+	return cr, cs, log, cancel, done
+}
+
+// Rebuilding the announced set reads the event log, which on a long-lived
+// city takes minutes. It must not hold the controller: run keeps ticking
+// while the read blocks, the read takes both transition types in one pass
+// bounded by a Since, and the poke is installed only once the rebuilt set is
+// in place.
+func TestCityRuntimeRunTicksWhilePendingInteractionRebuildBlocks(t *testing.T) {
+	cr, cs, log, cancel, done := startRuntimeWithBlockingRebuild(t)
+
+	awaitCond(t, func() bool { return cr.ordersLaneOf().wakePasses.Load() > 0 }, "a controller tick while the rebuild blocks")
+	if cs.pendingPoke.Load() != nil {
+		t.Fatal("the lane's poke was installed before its announced set was rebuilt")
+	}
+	f := log.rebuildFilter()
+	if f.Type != "" || !slices.Contains(f.Types, events.SessionPending) || !slices.Contains(f.Types, events.SessionPendingCleared) {
+		t.Fatalf("rebuild filter = %+v, want one read of both transition types", f)
+	}
+	if f.Since.IsZero() {
+		t.Fatalf("rebuild filter = %+v, want the read bounded by a Since", f)
+	}
+
+	log.release()
+	awaitCond(t, func() bool { return cs.pendingPoke.Load() != nil }, "the lane's poke after the rebuild")
+	cancel()
+	awaitClose(t, done, "run to return")
+	if cs.pendingPoke.Load() != nil {
+		t.Fatal("the lane's poke outlived the lane")
+	}
+}
+
+// Stopping the city ends a rebuild still reading the event log.
+func TestCityRuntimeRunStopsDuringPendingInteractionRebuild(t *testing.T) {
+	cr, _, _, cancel, done := startRuntimeWithBlockingRebuild(t)
+
+	awaitCond(t, func() bool { return cr.ordersLaneOf().wakePasses.Load() > 0 }, "a controller tick while the rebuild blocks")
+	cancel()
+	awaitClose(t, done, "run to return while the rebuild read blocks")
 }

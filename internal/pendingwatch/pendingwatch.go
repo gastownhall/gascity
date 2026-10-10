@@ -11,20 +11,26 @@
 // State. The set of interactions already announced lives in memory and is
 // rebuilt from the durable city event log when the controller starts
 // (Rebuild): the last session.pending / session.pending_cleared event per
-// session wins. There is no side state file to go stale.
+// session wins. There is no side state file to go stale. The rebuild reads
+// the log back only to just before the oldest probed session was created
+// (RebuildSince), in one ctx-aware pass (RebuildFrom).
 //
 // Cost. A pass reads each probed session's last-activity time (for tmux, from
 // the fleet snapshot the runtime already keeps, not a fork per session) and
 // captures the session's screen only when its output changed since the last
 // capture, the session was never captured, or a poke (an answered
-// interaction) forced it. A city whose sessions sit unchanged costs no
-// captures at all; a session whose output keeps moving costs at most one
-// capture per pass. Probes run at most ProbeConcurrency at a time.
+// interaction) forced it. A capture that began within ActivityResolution of
+// the session's last output is taken again on the next pass: output later in
+// that second would not have moved the stamp. A city whose sessions sit
+// unchanged costs no captures at all; a session whose output keeps moving
+// costs at most one capture per pass. Probes run at most ProbeConcurrency at
+// a time.
 package pendingwatch
 
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -50,6 +56,12 @@ const (
 // ProbeConcurrency bounds how many sessions one pass probes at once.
 const ProbeConcurrency = 4
 
+// ActivityResolution is the coarsest last-activity stamp a runtime reports:
+// tmux stamps whole seconds. Output painted later in a stamp's second leaves
+// the stamp unchanged, so only a capture that began a full resolution after
+// the stamp shows the screen as of that stamp.
+const ActivityResolution = time.Second
+
 // Session is one session a pass may probe.
 type Session struct {
 	// ID is the session bead ID: the transitions' session_id.
@@ -58,6 +70,8 @@ type Session struct {
 	Name     string
 	Template string
 	Alias    string
+	// Created is when the session's bead was created; zero when unknown.
+	Created time.Time
 }
 
 // Listing is the probe set of one pass. Partial means the listing itself was
@@ -102,6 +116,9 @@ type Deps struct {
 	// Activity returns a session's last output time; ok is false when the
 	// runtime cannot tell, in which case the session is probed every pass.
 	Activity func(name string) (at time.Time, ok bool)
+	// Now reads the clock the activity stamps are kept in; nil means
+	// time.Now.
+	Now func() time.Time
 	// Probe reads a session's pending interaction.
 	Probe func(ctx context.Context, name string) Observation
 	// Publish appends one transition to the durable event log and returns
@@ -136,6 +153,9 @@ func New(deps Deps, published map[string]Published) *Watcher {
 	}
 	if deps.Activity == nil {
 		deps.Activity = func(string) (time.Time, bool) { return time.Time{}, false }
+	}
+	if deps.Now == nil {
+		deps.Now = time.Now
 	}
 	w := &Watcher{
 		deps:        deps,
@@ -245,10 +265,11 @@ func (w *Watcher) Pass(ctx context.Context) {
 		jobs = append(jobs, &probeJob{session: s, activity: at, known: known})
 	}
 
+	began := w.deps.Now()
 	w.probe(ctx, jobs)
 
 	for _, job := range jobs {
-		w.apply(job)
+		w.apply(job, began)
 	}
 	for id := range w.probedAt {
 		if !seen[id] {
@@ -299,10 +320,12 @@ func (w *Watcher) probe(ctx context.Context, jobs []*probeJob) {
 	wg.Wait()
 }
 
-// apply diffs one probe against what was announced and publishes the
-// transition, if any. Only a probe whose transitions all landed records the
-// activity it saw, so a failed probe or publish is retried on the next pass.
-func (w *Watcher) apply(job *probeJob) {
+// apply diffs one probe, whose capture began no earlier than began, against
+// what was announced and publishes the transition, if any. Only a probe whose
+// transitions all landed and whose capture began ActivityResolution after the
+// activity it saw records that activity, so a failed probe or publish, or a
+// capture the stamp cannot vouch for, is retried on the next pass.
+func (w *Watcher) apply(job *probeJob, began time.Time) {
 	id := job.session.ID
 	if job.obs.Err != nil {
 		// Unknown is not "none": keep what was announced.
@@ -325,7 +348,7 @@ func (w *Watcher) apply(job *probeJob) {
 	case cur != nil && had && cur.RequestID != prev.RequestID:
 		ok = w.publishCleared(job.session, prev, ReasonReplaced) && w.publishPending(job.session, *cur)
 	}
-	if ok && job.known {
+	if ok && job.known && !began.Before(job.activity.Add(ActivityResolution)) {
 		w.probedAt[id] = job.activity
 	} else {
 		delete(w.probedAt, id)
@@ -396,16 +419,60 @@ func Rebuild(evs []events.Event) map[string]Published {
 	return out
 }
 
-// RebuildFrom reads both transition types from the log and rebuilds the
-// announced set (see Rebuild).
-func RebuildFrom(p events.Provider) (map[string]Published, error) {
-	var all []events.Event
-	for _, t := range []string{events.SessionPending, events.SessionPendingCleared} {
-		evs, err := p.List(events.Filter{Type: t})
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, evs...)
+// RebuildSlack is how far before the oldest probed session's creation
+// RebuildSince reaches, to absorb skew between the clock that stamps session
+// beads and the one that stamps events.
+const RebuildSlack = time.Hour
+
+// RebuildSince is the oldest event time the rebuild must read so every
+// session in l is decided: no session has a transition from before its bead
+// was created. It is zero (read the whole log) when l is partial or a
+// session's creation time is unknown, and now less RebuildSlack when l is
+// empty.
+//
+// The bound gives up one case: an interaction announced before it, for a
+// session no longer in l whose clear was never recorded, is not rebuilt, so
+// it is never cleared as gone. That is a session closed or slept while no
+// watcher ran, which includes one a clean city stop parked with a prompt
+// outstanding: the controller stops its watcher before it parks the sessions.
+func RebuildSince(l Listing, now time.Time) time.Time {
+	if l.Partial {
+		return time.Time{}
 	}
-	return Rebuild(all), nil
+	oldest := now
+	for _, s := range l.Sessions {
+		if s.Created.IsZero() {
+			return time.Time{}
+		}
+		if s.Created.Before(oldest) {
+			oldest = s.Created
+		}
+	}
+	return oldest.Add(-RebuildSlack)
+}
+
+// RebuildFrom reads both transition types at or after since (zero: the whole
+// log) from p in one pass and rebuilds the announced set (see Rebuild). A p
+// with [events.HistoryTailProvider] reads the active log, the segments still
+// being rotated and the archives, skips archives older than since, and stops
+// when ctx ends; otherwise [events.InFlightProvider] or List reads it.
+func RebuildFrom(ctx context.Context, p events.Provider, since time.Time) (map[string]Published, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	filter := events.Filter{Types: []string{events.SessionPending, events.SessionPendingCleared}, Since: since}
+	var evs []events.Event
+	var err error
+	switch lp := p.(type) {
+	case events.HistoryTailProvider:
+		evs, _, err = lp.ListHistoryTail(ctx, filter, math.MaxInt, false)
+	case events.InFlightProvider:
+		evs, err = lp.ListInFlight(filter)
+	default:
+		evs, err = p.List(filter)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return Rebuild(evs), nil
 }

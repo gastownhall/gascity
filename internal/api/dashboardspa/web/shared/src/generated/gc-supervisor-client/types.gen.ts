@@ -4767,11 +4767,30 @@ export type SlingBatchSummary = {
     total: number;
 };
 
+export type SlingChildConflict = {
+    /**
+     * Live workflow roots that refused the launch.
+     */
+    blocking_workflow_ids: Array<string> | null;
+    /**
+     * Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+     */
+    hint: string;
+    /**
+     * Source bead whose live workflow refused the launch.
+     */
+    source_bead_id: string;
+};
+
 export type SlingChildOutcome = {
     /**
      * Child bead ID.
      */
     bead_id: string;
+    /**
+     * Set when the child failed because its source bead already has a live workflow.
+     */
+    conflict?: SlingChildConflict;
     /**
      * Formula attached to the child, when one was.
      */

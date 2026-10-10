@@ -342,7 +342,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// so it also declares 403 for the CSRF/read-only middleware.
 	cityPost(sm, "/sling", (*Server).humaHandleSling, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict),
 		describes("A convoy bead is expanded and each open child is routed separately, as gc sling does; the response then carries batch counts and one children entry per child. "+
-			"When some children were routed and others failed, the sling has already changed state, so it answers 200 with status \"partial\" and the per-child outcomes (failed children carry a reason) rather than an error; do not retry such a request as a whole. "+
+			"When some children were routed and others failed, the sling has already changed state, so it answers 200 with status \"partial\" and the per-child outcomes (failed children carry a reason, and a conflict naming the blocking workflows when a live source workflow refused them) rather than an error; do not retry such a request as a whole. "+
 			"A convoy sling that routed no child and failed at least one is an error, as before."))
 
 	// Maintenance (Dolt store gc + snapshot).

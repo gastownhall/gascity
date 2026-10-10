@@ -1657,6 +1657,7 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 				Formula:    derefStr(c.Formula),
 				WorkflowID: derefStr(c.WorkflowId),
 				MoleculeID: derefStr(c.MoleculeId),
+				Conflict:   slingChildConflictFromWire(c.Conflict),
 			})
 		}
 	}
@@ -1664,6 +1665,19 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 		out.Warnings = *r.Warnings
 	}
 	return out, nil
+}
+
+// slingChildConflictFromWire converts a convoy child's wire conflict; nil when
+// the child was not refused on a source-workflow conflict.
+func slingChildConflictFromWire(c *genclient.SlingChildConflict) *SlingChildConflict {
+	if c == nil {
+		return nil
+	}
+	conflict := &SlingChildConflict{SourceBeadID: c.SourceBeadId, Hint: c.Hint}
+	if c.BlockingWorkflowIds != nil {
+		conflict.BlockingWorkflowIDs = *c.BlockingWorkflowIds
+	}
+	return conflict
 }
 
 // setStrPtr points *dst at a copy of v when v is non-empty, leaving it nil
