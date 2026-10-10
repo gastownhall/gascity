@@ -652,7 +652,7 @@ func TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead(t *testing.T) 
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.StartRuntimeOnly(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	err := mgr.StartRuntimeOnly(context.Background(), testActor(mgr, ActorController), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -695,7 +695,7 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.StartRuntimeOnly(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := mgr.StartRuntimeOnly(context.Background(), testActor(mgr, ActorController), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}

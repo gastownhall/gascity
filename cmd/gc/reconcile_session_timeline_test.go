@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1127,7 +1128,7 @@ func operatorTimeline() []timelineFixture {
 		[]parityStep{
 			{Name: "suspend", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
-				if err := session.NewManagerWithOptions(st, tw.sp, session.WithClock(&clock.Fake{Time: tw.now}), session.WithCityPath(tw.city)).Suspend("gc-1"); err != nil {
+				if err := session.NewManagerWithOptions(st, tw.sp, session.WithClock(&clock.Fake{Time: tw.now}), session.WithCityPath(tw.city)).Suspend(context.Background(), testActorIn(tw.t, session.ActorOperator, tw.city), "gc-1", false); err != nil {
 					tw.t.Fatal(err)
 				}
 			}},

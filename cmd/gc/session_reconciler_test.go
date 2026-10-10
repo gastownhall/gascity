@@ -1772,7 +1772,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead(context.Background(), testCity, store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr, drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll)
+	dead := confirmDrainAckRuntimeDead(context.Background(), testActorIn(t, sessionpkg.ActorController, testCity), testCity, store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr, drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -1901,7 +1901,7 @@ func TestConfirmDeadSkipsReKillOnUnverifiableToken(t *testing.T) {
 	var stderr synchronizedBuffer
 	// The fence answers before the first re-kill, so the deadline never
 	// elapses and the zero poll never sleeps.
-	if confirmDrainAckRuntimeDead(context.Background(), testCity, beads.NewMemStore(), sp, &config.City{}, "", "worker", "original-token", nil, &stderr, time.Hour, 0) {
+	if confirmDrainAckRuntimeDead(context.Background(), testActorIn(t, sessionpkg.ActorController, testCity), testCity, beads.NewMemStore(), sp, &config.City{}, "", "worker", "original-token", nil, &stderr, time.Hour, 0) {
 		t.Fatal("confirm-dead reported the runtime dead on an unreadable instance token")
 	}
 	if sp.CountCalls("Stop", "worker") != 0 || !sp.IsRunning("worker") {

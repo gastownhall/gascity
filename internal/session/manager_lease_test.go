@@ -160,7 +160,7 @@ func TestManagerStartWaitsForTheRuntimeLease(t *testing.T) {
 		t.Fatalf("provider Start ran under another holder's lease: %q", m.sp.starts)
 	}
 	releaseWithinTheWait(t, held)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatalf("Start over a lease released within the wait: %v", err)
 	}
 	if len(m.sp.starts) != 1 {
@@ -206,7 +206,7 @@ func TestManagerKillTakesTheRuntimeLease(t *testing.T) {
 	}
 	waited := m.hold(t)
 	releaseWithinTheWait(t, waited)
-	if err := m.mgr.Kill(m.info.ID); err != nil {
+	if err := m.mgr.Kill(context.Background(), m.operator(nil), m.info.ID); err != nil {
 		t.Fatalf("Kill over a lease released within the wait: %v", err)
 	}
 	if err := m.start(m.operator(nil)); err != nil {
@@ -459,17 +459,17 @@ func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	m := newManagerLeaseFixture(t)
 	mgr := NewManagerWithOptions(m.f.store, m.sp)
 	cmd, hints := BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}
-	if err := mgr.Start(context.Background(), m.info.ID, cmd, hints, ResumeOperator); !errors.Is(err, ErrRuntimeLeaseNoCity) {
+	if err := mgr.Start(context.Background(), Actor{Kind: ActorOperator}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("start without a city = %v, want ErrRuntimeLeaseNoCity", err)
 	}
-	if err := mgr.StartRuntimeOnly(context.Background(), m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
+	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("runtime-only start without a city or a lease = %v, want ErrRuntimeLeaseNoCity", err)
 	}
 	if m.sp.IsRunning(m.info.SessionName) {
 		t.Fatal("the refused runtime-only start started the runtime")
 	}
 	held := m.hold(t)
-	err := mgr.StartRuntimeOnly(ContextWithRuntimeLease(context.Background(), held), m.info.ID, cmd, hints)
+	err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController, Lease: held}, m.info.ID, cmd, hints)
 	held.Release()
 	if err != nil {
 		t.Fatalf("runtime-only start under its caller's lease: %v", err)

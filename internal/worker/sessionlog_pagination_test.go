@@ -407,7 +407,7 @@ func TestSessionHandleTranscriptAndHistoryPropagateCursorErrors(t *testing.T) {
 	handle.adapter.SearchPaths = []string{
 		filepath.Join("workertest", "testdata", "fixtures", "claude", "fresh"),
 	}
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -444,7 +444,7 @@ func TestSessionHandleHistoryCursorPagesBypassContinuityCache(t *testing.T) {
 		Provider: "copilot",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -492,7 +492,7 @@ func TestSessionHandleTranscriptAndHistoryPropagateDuplicateEntryID(t *testing.T
 		Provider: "copilot",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 

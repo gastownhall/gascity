@@ -95,7 +95,7 @@ func TestSessionHandleReadsCustomZCodeProviderTranscriptByKind(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
 	handle := newCustomKindHandle(t, root, workDir, "glm53", "zcode", sessionpkg.ProviderResume{})
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	mirror := filepath.Join(root, "sess_glm53.json")
@@ -142,7 +142,7 @@ func TestSessionHandleReadsClaudeKindTranscriptDespiteKimiName(t *testing.T) {
 		SessionIDFlag: "--session-id",
 		ResumeFlag:    "--resume",
 	})
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := handle.manager.Get(handle.sessionID)
@@ -195,7 +195,7 @@ func TestSessionHandleStateDerivesBusyFromZCodeMirrorByKind(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
 	handle := newCustomKindHandle(t, root, workDir, "glm53", "zcode", sessionpkg.ProviderResume{})
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	mirror := filepath.Join(root, "sess_glm53.json")

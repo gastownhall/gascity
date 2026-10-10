@@ -70,7 +70,7 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 func TestSessionHandleStopKeepsOperatorIntentOnDrainingSeat(t *testing.T) {
 	handle, sp, sessName, store, id := newDrainingStopHandle(t)
 
-	err := handle.Stop(context.Background(), testOperator)
+	err := handle.Stop(context.Background(), testOperator(t))
 	if !errors.Is(err, sessionpkg.ErrIllegalTransition) {
 		t.Fatalf("Stop(draining) = %v, want ErrIllegalTransition — the operator seam must not carry shutdown latitude", err)
 	}

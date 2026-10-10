@@ -90,7 +90,7 @@ func (e *reconcilerTestEnv) assertResumedStaysUp(t *testing.T, id string, dops d
 func TestAttachAfterManagedSuspendStaysUp(t *testing.T) {
 	env, b, dops := heldDrainedSession(t)
 	mgr := session.NewManagerWithOptions(env.store, env.sp, session.WithClock(env.clk), session.WithCityPath(env.city))
-	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, env.city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	env.assertResumedStaysUp(t, b.ID, dops, 6)
@@ -157,7 +157,7 @@ func TestAttachAfterManagedSuspendSurvivesAMidResumeTick(t *testing.T) {
 		}
 	}
 	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(env.city))
-	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, env.city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	if sp.tick != nil {

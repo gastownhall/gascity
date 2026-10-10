@@ -115,7 +115,8 @@ func TestBackgroundSendKeepsUserHold(t *testing.T) {
 	store := beads.NewMemStore()
 	b := userHeldRow(t, store)
 	sp := runtime.NewFake()
-	out, err := newTestManager(t, store, sp).Send(context.Background(), b.ID, "hello", "claude", runtime.Config{}, ResumeIfUnheld)
+	mgr := newTestManager(t, store, sp)
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorAgent), b.ID, "hello", "claude", runtime.Config{})
 	if err != nil || !out.Queued || sp.CountCalls("Start", "s-held") != 0 {
 		t.Fatalf("Send = %+v, %v with %d starts; want queued, nothing started", out, err, sp.CountCalls("Start", "s-held"))
 	}
@@ -221,7 +222,8 @@ func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
 					t.Error(err)
 				}
 			}
-			err := newTestManager(t, store, sp).Attach(context.Background(), b.ID, "claude", runtime.Config{})
+			mgr := newTestManager(t, store, sp)
+			err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
 			if gotErr := err != nil; gotErr != tc.wantErr || (err != nil && !errors.Is(err, ErrStateSync)) {
 				t.Fatalf("Attach = %v, want error=%v (ErrStateSync)", err, tc.wantErr)
 			}
