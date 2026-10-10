@@ -1031,7 +1031,9 @@ func scopeHasOwnConfigYAML(dir string) bool {
 // scopeHasCompleteStorageBinding recognizes the opaque workspace binding
 // before legacy metadata parsing. Only all three non-empty fields authorize
 // this dispatch; absent fields remain ordinary legacy metadata and partial
-// fields fail closed.
+// fields fail closed. A scope whose metadata names a backend the linked beads
+// library registered as an extension (contract.IsLibraryExtensionBackend) and
+// carries no storage fields is the same opaque binding by another shape.
 func scopeHasCompleteStorageBinding(path string) (bool, error) {
 	data, err := fsys.OSFS{}.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1051,7 +1053,16 @@ func scopeHasCompleteStorageBinding(path string) (bool, error) {
 		return false, nil
 	}
 	if len(presence.StorageEndpoint) == 0 && len(presence.StorageDatabase) == 0 {
-		return false, nil
+		// A backend the linked beads library registered as an extension keeps
+		// its target beside metadata.json rather than in it, and is just as
+		// opaque to gc: the library opens it and bd reads its own credentials.
+		var named struct {
+			Backend string `json:"backend"`
+		}
+		if err := json.Unmarshal(data, &named); err != nil {
+			return false, fmt.Errorf("parse beads storage binding %s: %w", path, err)
+		}
+		return contract.IsLibraryExtensionBackend(strings.TrimSpace(named.Backend)), nil
 	}
 
 	var binding struct {

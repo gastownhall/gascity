@@ -329,8 +329,15 @@ func (s *BdStore) readyProjectionBlockedDoorLatched() bool {
 // a Dolt SQL server is REACHABLE, only that gc implements the backend; a bd
 // that then refuses anyway is caught by the runtime latch in
 // fetchReadyProjection.
+//
+// A backend the linked library registered as an extension is recognized by the
+// metadata loader yet still one gc does not implement, so it is refused here
+// by name.
 func (s *BdStore) readyProjectionBackendRefusal() error {
-	_, _, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(s.dir, ".beads", "metadata.json"))
+	state, _, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(s.dir, ".beads", "metadata.json"))
+	if err == nil && contract.IsLibraryExtensionBackend(state.Backend) {
+		return fmt.Errorf("backend %q is served by the linked beads library, which gc does not implement a SQL projection for", state.Backend)
+	}
 	if err == nil || !errors.Is(err, contract.ErrUnknownBackend) {
 		return nil
 	}

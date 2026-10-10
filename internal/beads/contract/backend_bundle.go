@@ -1,8 +1,12 @@
 package contract
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"sync"
+
+	beadsbackend "github.com/steveyegge/beads/backend"
 )
 
 // The sole backend-name composition root.
@@ -21,7 +25,10 @@ import (
 //
 // An assembly that serves a backend this list omits adds it here — one line, in
 // one file — and every refusal message, in all four paths, enumerates the new
-// set with no other edit.
+// set with no other edit. A backend gc does not implement but the linked beads
+// library serves is not added here: the assembly registers it with the library,
+// and RecognizeBackend admits it from there when selfSufficientLibraryBackends
+// names it (IsLibraryExtensionBackend).
 
 // compiledBackendNames returns the backend names this build recognizes, in the
 // order refusals enumerate them.
@@ -36,7 +43,9 @@ import (
 // implements it — reads its metadata shape, projects its environment, and
 // manages its runtime. A workspace served by the linked beads library through
 // an opaque storage binding needs none of that and is not listed: gc withholds
-// the whole projected namespace for it and never learns the name.
+// the whole projected namespace for it and never learns the name. The same
+// holds for a backend the linked library registered as an extension (see
+// IsLibraryExtensionBackend): it is recognized, never listed.
 func compiledBackendNames() []BackendName {
 	return []BackendName{
 		UnsetBackend,
@@ -62,16 +71,62 @@ func newCompiledBackendRegistry() (*BackendRegistry, error) {
 	return registry, nil
 }
 
+// selfSufficientLibraryBackends names the backends whose library open is
+// self-sufficient: the workspace's metadata and its own sidecar files carry
+// everything the linked beads library needs, so gc may open it with no Dolt
+// preflight, no bd front-door fallback, and no runtime of its own. A backend
+// the library registers but that still depends on gc's preflight verdict or
+// fallback (postgres, whose workspaces carry storage fields and fall back to
+// BdStore) is deliberately absent — registration alone never makes a name an
+// extension.
+func selfSufficientLibraryBackends() []BackendName {
+	return []BackendName{"http"}
+}
+
 // RecognizeBackend reports whether this build registers the given backend name.
 // A registered name — including the empty name, which is metadata that names no
-// backend — returns nil. Anything else returns an *UnknownBackendError naming
-// the backend and enumerating what is registered.
+// backend — returns nil, as does a backend the linked beads library registered
+// as an extension (IsLibraryExtensionBackend). Anything else returns an
+// *UnknownBackendError naming the backend and enumerating what gc registers.
 func RecognizeBackend(backend string) error {
 	registry, err := compiledBackendRegistry()
 	if err != nil {
 		return err
 	}
-	return registry.Lookup(BackendName(backend))
+	err = registry.Lookup(BackendName(backend))
+	if errors.Is(err, ErrUnknownBackend) && IsLibraryExtensionBackend(backend) {
+		return nil
+	}
+	return err
+}
+
+// IsLibraryExtensionBackend reports whether backend names a storage backend the
+// linked beads library has registered as an extension and gc does not itself
+// implement. The name must also be one whose library open is self-sufficient
+// (selfSufficientLibraryBackends); a library registration alone is not enough.
+//
+// The library's registry is consulted directly rather than mirrored into gc's,
+// so the two cannot disagree: whatever a build's distribution wiring registers
+// with the library (process-start wiring that precedes every metadata read) is
+// exactly what gc recognizes here, and a build that wires nothing — OSS — sees
+// no extension names at all. gc treats such a workspace as opaque: the library
+// opens it, bd reads its own metadata and credentials, and gc projects no
+// backend environment and manages no runtime for it. A name in the compiled
+// bundle is never an extension, even if a library also registers it.
+func IsLibraryExtensionBackend(backend string) bool {
+	if backend == "" {
+		return false
+	}
+	registry, err := compiledBackendRegistry()
+	if err != nil {
+		// Not an answer this predicate can give; RecognizeBackend surfaces it
+		// on the metadata read every caller of this predicate also makes.
+		return false
+	}
+	if registry.Lookup(BackendName(backend)) == nil {
+		return false
+	}
+	return slices.Contains(selfSufficientLibraryBackends(), BackendName(backend)) && beadsbackend.Registered(backend)
 }
 
 // RegisteredBackends returns the operator-selectable backend names this build
