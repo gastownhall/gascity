@@ -65,14 +65,50 @@ func IsACPCapturePath(path string) bool {
 	return strings.Contains(clean, marker)
 }
 
+// acpCaptureFilePath confines path to the gc ACP capture layout and returns
+// it cleaned and absolute. The path must be
+// <transcripts>/<sessionID>/<epoch>.jsonl, where <transcripts> ends in
+// citylayout.ACPTranscriptsRoot and the components pass the same validation
+// the capture writer applies (citylayout.ACPTranscriptPathForDir), so a
+// traversal, a nested path, or an unrelated file is rejected before any read.
+func acpCaptureFilePath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("acp capture path: empty path")
+	}
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("acp capture path %q: %w", path, err)
+	}
+	sessionDir := filepath.Dir(cleanPath)
+	transcriptsDir := filepath.Dir(sessionDir)
+	if !strings.HasSuffix(filepath.ToSlash(transcriptsDir), "/"+filepath.ToSlash(citylayout.ACPTranscriptsRoot)) {
+		return "", fmt.Errorf("acp capture path %q is not under a %s directory", path, citylayout.ACPTranscriptsRoot)
+	}
+	want, err := citylayout.ACPTranscriptPathForDir(transcriptsDir, filepath.Base(sessionDir), strings.TrimSuffix(filepath.Base(cleanPath), citylayout.ACPTranscriptExt))
+	if err != nil {
+		return "", fmt.Errorf("acp capture path %q: %w", path, err)
+	}
+	if want != cleanPath || !strings.HasPrefix(cleanPath, transcriptsDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("acp capture path %q is not <session>/<epoch>%s under %s", path, citylayout.ACPTranscriptExt, transcriptsDir)
+	}
+	return cleanPath, nil
+}
+
 // ReadACPCaptureFile reads a gc ACP capture transcript and converts it to the
 // standard Session format. The first well-formed line must be a capture
 // header. Lines that do not parse are skipped and counted; a torn final line
 // sets Diagnostics.MalformedTail. tailCompactions > 0 attaches pagination
 // metadata (captures have no compaction boundaries, so every entry is
 // returned).
+//
+// path must name a capture file in the layout citylayout.ACPTranscriptPath
+// produces; any other path is rejected before it is opened.
 func ReadACPCaptureFile(path string, tailCompactions int) (*Session, error) {
-	f, err := os.Open(path)
+	capturePath, err := acpCaptureFilePath(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(capturePath)
 	if err != nil {
 		return nil, err
 	}

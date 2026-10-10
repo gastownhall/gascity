@@ -124,8 +124,8 @@ func SessionDiagnosticsDirForRuntimeDir(runtimeDir string) string {
 // runtime dir, and transcripts must outlive a supervisor restart.
 const ACPTranscriptsRoot = ".gc/transcripts/acp"
 
-// acpTranscriptExt is the file extension of an ACP capture transcript.
-const acpTranscriptExt = ".jsonl"
+// ACPTranscriptExt is the file extension of an ACP capture transcript.
+const ACPTranscriptExt = ".jsonl"
 
 // ACPTranscriptsDir returns the directory holding ACP capture transcripts for
 // a city.
@@ -160,7 +160,7 @@ func ACPTranscriptPathForDir(transcriptsDir, sessionID, continuationEpoch string
 	if err := validateACPTranscriptComponent("continuation epoch", continuationEpoch); err != nil {
 		return "", err
 	}
-	return filepath.Join(transcriptsDir, sessionID, continuationEpoch+acpTranscriptExt), nil
+	return filepath.Join(transcriptsDir, sessionID, continuationEpoch+ACPTranscriptExt), nil
 }
 
 func validateACPTranscriptComponent(label, value string) error {

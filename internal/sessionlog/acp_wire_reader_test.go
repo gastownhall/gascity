@@ -585,3 +585,80 @@ func TestACPCaptureTailActivity(t *testing.T) {
 		}
 	})
 }
+
+// TestReadACPCaptureFileConfinedToCaptureLayout pins the path guard: the
+// reader opens only <transcripts>/<sessionID>/<epoch>.jsonl under a city's
+// capture root, so a caller-supplied path cannot steer it at another file,
+// even one holding a well-formed capture.
+func TestReadACPCaptureFileConfinedToCaptureLayout(t *testing.T) {
+	content := acpHeaderLine("1") + "\n"
+	valid := writeACPCapture(t, content)
+	if _, err := ReadACPCaptureFile(valid, 0); err != nil {
+		t.Fatalf("ReadACPCaptureFile(valid layout): %v", err)
+	}
+
+	transcripts := filepath.Dir(filepath.Dir(valid))
+	outside := filepath.Join(filepath.Dir(filepath.Dir(transcripts)), "secret.jsonl")
+	nested := filepath.Join(transcripts, "gc-s1", "sub", "1.jsonl")
+	wrongExt := filepath.Join(transcripts, "gc-s1", "1.json")
+	for _, p := range []string{outside, nested, wrongExt} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rejected := []string{
+		"",
+		outside,
+		nested,
+		wrongExt,
+		// Traversal out of the capture root after cleaning.
+		filepath.Join(transcripts, "gc-s1") + "/../../../../secret.jsonl",
+		// Capture root directly, with no session directory.
+		filepath.Join(transcripts, "1.jsonl"),
+	}
+	for _, p := range rejected {
+		if _, err := ReadACPCaptureFile(p, 0); err == nil {
+			t.Errorf("ReadACPCaptureFile(%q) succeeded, want a path-confinement error", p)
+		} else if errors.Is(err, os.ErrNotExist) {
+			t.Errorf("ReadACPCaptureFile(%q) reached the filesystem (%v), want rejection before open", p, err)
+		}
+	}
+}
+
+func TestACPCaptureFilePath(t *testing.T) {
+	tests := []struct {
+		path    string
+		want    string
+		wantErr bool
+	}{
+		{path: "/city/.gc/transcripts/acp/gc-1/1.jsonl", want: "/city/.gc/transcripts/acp/gc-1/1.jsonl"},
+		{path: "/city/.gc/transcripts/acp/../acp/gc-1/2.jsonl", want: "/city/.gc/transcripts/acp/gc-1/2.jsonl"},
+		{path: "/city/.gc/transcripts/acp/gc-1/../../../../etc/passwd", wantErr: true},
+		{path: "/city/.gc/transcripts/acp/gc-1/x/1.jsonl", wantErr: true},
+		{path: "/city/.gc/transcripts/acp/1.jsonl", wantErr: true},
+		{path: "/city/.gc/transcripts/acp/gc-1/1.txt", wantErr: true},
+		{path: "/city/.gc/transcripts/acpx/gc-1/1.jsonl", wantErr: true},
+		{path: "/etc/passwd", wantErr: true},
+		{path: "   ", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := acpCaptureFilePath(tt.path)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("acpCaptureFilePath(%q) = %q, want error", tt.path, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("acpCaptureFilePath(%q): %v", tt.path, err)
+			continue
+		}
+		if got != filepath.FromSlash(tt.want) {
+			t.Errorf("acpCaptureFilePath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
