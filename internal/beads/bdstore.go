@@ -1236,19 +1236,42 @@ func isBdOperationUnsupported(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "not supported")
 }
 
-// isBdNotFoundEnvelope reports whether bd's --json stdout is a structured
-// not-found error ({"error": "no issues found ..."}). Against a remote bd serve
-// (BEADS_SERVER_URL), bd show of a missing ID exits 1 with this envelope on
-// stdout and only an unrelated "not served over HTTP" line on stderr, so the
-// error text alone does not say not-found.
+// isBdNotFoundEnvelope reports whether bd's --json stdout is its not-found
+// error envelope ({"error": "no issues found matching the provided IDs"}).
+// bd show prints that one constant sentence whenever no requested ID
+// resolved, whatever the per-ID cause: a missing bead, but equally a rejected
+// token, an unreachable bd serve, or a lookup that failed against Dolt. It
+// proves only that bd show resolved nothing, never that the bead is absent.
+// Against a remote bd serve (BEADS_SERVER_URL) it is still the only sign of a
+// miss, because stderr carries just an unrelated "not served over HTTP" line,
+// so Get takes it as a trigger to confirm absence (bdShowMissError).
 func isBdNotFoundEnvelope(out []byte) bool {
-	var env struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(extractJSON(out), &env) != nil || env.Error == "" {
+	detail := bdStdoutErrorDetail(out)
+	return detail != "" && isBdBeadNotFound(errors.New(detail))
+}
+
+// isExactIDQueryable reports whether id can travel verbatim as the quoted
+// value of an exact `id="<id>"` bd query clause. bd's query lexer copies a
+// quoted string through as is, so the clause carries the three forms Get is
+// asked about besides plain bead IDs: child bead IDs ("ga-abc.1"), slash
+// aliases ("rig/agent.name") and runtime session names ("rig--pack__agent").
+// The literal cannot carry a '"', which ends it, or a '\', which starts an
+// escape. The lexer also reads one byte at a time, so a non-ASCII byte would
+// come back re-encoded as a different ID. Such IDs are refused, along with
+// control characters, which no ID contains, leaving absence unproven rather
+// than confirmed for an ID bd was never asked about. A trailing '*' turns the
+// clause into a prefix match, whose empty answer still proves the exact ID
+// absent.
+func isExactIDQueryable(id string) bool {
+	if id == "" {
 		return false
 	}
-	return isBdBeadNotFound(errors.New(env.Error))
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; c < ' ' || c > '~' || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func isBdClaimConflictMessage(msg string) bool {
@@ -1459,7 +1482,9 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// Only a bead-level miss may become ErrNotFound. Callers treat
 		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
 		// SIGTERMs a live runtime on it), so an infrastructure failure whose
-		// text happens to say "not found" must surface as itself.
+		// text happens to say "not found" must surface as itself. bd's
+		// not-found envelope only admits the failure to the checks below;
+		// bdShowMissError must still confirm it before it is ErrNotFound.
 		if !isBdBeadNotFound(err) && !isBdNotFoundEnvelope(out) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
@@ -1484,7 +1509,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 				return Bead{}, fmt.Errorf("getting bead %q: %w", id, queryErr)
 			}
 		}
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+		return Bead{}, s.bdShowMissError(id, err)
 	}
 	var issues []bdIssue
 	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
@@ -1508,6 +1533,37 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
 	}
 	return bead, nil
+}
+
+// bdShowMissError is Get's verdict on a bd show failure that read as a miss
+// and that the wisp fallback could not answer. A miss on stderr names the
+// requested bead, so it is ErrNotFound as is. bd's not-found envelope alone
+// cannot tell a missing bead from a failed lookup (isBdNotFoundEnvelope), so
+// absence must be confirmed by an exact-ID bd query that succeeds with no
+// rows. That query matches wisps too, which is why it runs only after the
+// wisp fallback has had its chance at the bead. Any other outcome (an ID the
+// query cannot carry, a query error, a row, unparseable output) leaves
+// absence unproven and returns the bd show error.
+func (s *BdStore) bdShowMissError(id string, showErr error) error {
+	if isBdBeadNotFound(showErr) {
+		return fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+	}
+	unproven := fmt.Errorf("getting bead %q: %w", id, showErr)
+	if !isExactIDQueryable(id) {
+		return unproven
+	}
+	out, err := s.runBDTransientRead("query", "--json", `id="`+id+`"`, "--all", "--limit", "1")
+	if err != nil {
+		return fmt.Errorf("%w (confirming absence: bd query: %w)", unproven, err)
+	}
+	rows, err := bdListIssueRows(extractJSON(out))
+	if err != nil {
+		return fmt.Errorf("%w (confirming absence: parsing bd query: %w)", unproven, err)
+	}
+	if len(rows) > 0 {
+		return unproven
+	}
+	return fmt.Errorf("getting bead %q: %w (bd show: %w)", id, ErrNotFound, showErr)
 }
 
 // bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
