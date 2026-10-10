@@ -116,6 +116,17 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Readiness check: routing a bead that open dependencies hold out of the
+	// ready set writes gc.routed_to and reports success, but no session can
+	// ever spawn for it — pool demand is counted with a ready query. Refuse
+	// before routing rather than print a success line for a dispatch that
+	// cannot possibly result in a claim.
+	if shouldCheckBlocked(opts) {
+		if err := checkBlocked(opts, deps, a, &result); err != nil {
+			return result, err
+		}
+	}
+
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
 		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
@@ -264,6 +275,51 @@ func shouldCheckDepCycle(opts SlingOpts) bool {
 
 func shouldGuardCrossRig(opts SlingOpts) bool {
 	return !opts.IsFormula && !opts.Force && !opts.DryRun
+}
+
+// shouldCheckBlocked reports whether the routed target is an existing bead
+// whose readiness can be resolved from the bead graph.
+//
+// It mirrors shouldCheckDepCycle's scope, for the same reasons: inline text
+// mints a brand-new bead and formula slings mint molecules, neither of which
+// can carry blockers; --on routes the workflow root rather than the source
+// bead, so the source bead's blockers do not decide the root's readiness; and
+// --force is documented to suppress warnings and to dispatch even when the
+// bead does not resolve in the local store, which is precisely the state this
+// check cannot read. --force therefore stays the escape hatch the refusal
+// points operators at, and costs no extra store round-trip.
+//
+// --dry-run stays in scope. It downgrades to a warning inside checkBlocked
+// rather than being skipped, because a preview that preserves the misleading
+// output is exactly what this check exists to remove.
+func shouldCheckBlocked(opts SlingOpts) bool {
+	return !opts.IsFormula && opts.OnFormula == "" && !opts.InlineText && !opts.Force && opts.BeadOrFormula != ""
+}
+
+// checkBlocked resolves the routed bead's open blockers and decides whether to
+// refuse the sling or warn and proceed. A dry run must not fail, so it warns
+// with the blockers named instead. A store fault while resolving them is not
+// proof of anything — it warns and proceeds rather than refusing legitimate
+// work.
+func checkBlocked(opts SlingOpts, deps SlingDeps, a config.Agent, result *SlingResult) error {
+	blockers, err := OpenBlockers(opts.BeadOrFormula, deps.Store)
+	if err != nil {
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: could not verify that %s is ready to be claimed: %v", opts.BeadOrFormula, err))
+		return nil
+	}
+	if len(blockers) == 0 {
+		return nil
+	}
+	target := a.QualifiedName()
+	if opts.DryRun {
+		result.BeadWarnings = append(result.BeadWarnings, BlockedWarning(opts.BeadOrFormula, target, blockers))
+		for _, b := range blockers {
+			result.BeadWarnings = append(result.BeadWarnings, "  blocked by "+b.String())
+		}
+		return nil
+	}
+	return &BlockedError{BeadID: opts.BeadOrFormula, Target: target, Blockers: blockers}
 }
 
 func shouldCheckBeadState(opts SlingOpts) bool {
