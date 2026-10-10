@@ -21,7 +21,7 @@ on:
       - "go.mod"
       - "go.sum"
   pull_request:
-    branches: [main]
+    branches: [main, 'hotfix/**', 'release/**']
     types:
       - opened
       - reopened
