@@ -180,14 +180,81 @@ Capabilities:
 
 | Capability | Effect |
 |------------|--------|
-| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. |
-| `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. |
-| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). |
+| `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
+| `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
+| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 
 The handshake runs once per provider instance and is cached.
+
+### Idle sleep
+
+An idle sandbox still costs money and capacity. With a `[session_sleep]`
+policy (or an agent's `sleep_after_idle`), the orchestrator stops a session
+that has been idle long enough and starts it again when work, a nudge, or an
+attach arrives. Which sessions a script-backed runtime can put to sleep
+depends on its handshake:
+
+| Handshake declares | `sleep_capability` | What sleeps |
+|---|---|---|
+| `report-activity`, `report-attachment` **and** `proc.exec` | `full` | Every session class, interactive ones included. |
+| anything less (or no handshake) | `timed_only` | Non-interactive sessions only. An interactive policy resolves to `off` with `sleep_policy_adjustment_reason = interactive_capability_insufficient`. |
+
+`full` needs a safe idle boundary, so an interactive session is never stopped
+in the middle of a turn. A runtime that declares all three must:
+
+- **Run the agent in the in-box tmux session `main`.** The orchestrator reads
+  the pane over `exec` (`tmux capture-pane -t main -p -S -120`). It treats the
+  session as idle after two consecutive captures, 200 ms apart, that show the
+  agent's ready prompt (`ready_prompt_prefix`, default `❯ `) and no busy
+  indicator such as `esc to interrupt`. This is the same check a local tmux
+  session gets.
+- **Answer `is-attached` honestly.** Print `false` and exit 0 for a session
+  that does not exist. Exit non-zero only when you cannot tell; that keeps the
+  session awake.
+- **Treat `stop` as the sleep.** Sleeping a session calls `stop`, and waking it
+  calls `start`. Anything the runtime keeps only inside the box, such as the
+  agent's conversation, is lost across a sleep unless `stop` preserves it.
+
+Each capture is a full round trip to the box, so the orchestrator gives one
+idle check 5 s, not the 1 s a local tmux session gets. Two captures and the
+pause between them fit in 5 s when each capture finishes in under about
+2.4 s. A check in a process that has not yet remembered the session's ready
+prompt (see below) first reads it from the box within the same 5 s, so that
+check needs three round trips, each under about 1.6 s. Every check needs the
+read while `GC_READY_PROMPT_PREFIX` is absent from the session. A slower check
+fails closed: the session stays awake, and the check runs again on the next
+orchestrator tick.
+
+Once the agent's tmux session exists, the orchestrator stores the session's
+`ready_prompt_prefix` in that session's environment as
+`GC_READY_PROMPT_PREFIX` (`tmux -u set-environment -t main`; a blank prefix
+stores the default prompt, `❯ `), as local tmux sessions do. A process that
+did not start the session, such as a restarted orchestrator or a `gc` command
+that cannot reach the API, reads it back with `tmux -u show-environment -t
+main` and then remembers it. Like local tmux, gc passes `-u` to these
+commands, so the prompt survives an exec environment without a UTF-8 locale.
+Do not clear the `main` session's environment. While the read fails or the
+variable is absent, that process looks for the default prompt and reads again
+on its next wait. The variable is absent when storing it failed (gc does not
+retry; the next start stores it again) and for a session started by an older
+gc. A session whose agent shows another prompt then never reads as idle. It
+stays awake, and every wait for its idle boundary runs to its timeout:
+interrupting it (`interrupt_now`) can restart the session, and stopping a turn
+reports an error.
+
+The `is-attached` rule above applies to every runtime that declares
+`report-attachment`, even without the other two capabilities. gc runs the op
+directly and treats a non-zero exit as "attached": the session stays awake and
+destructive actions on it are held.
+
+```toml
+[session_sleep]
+interactive_resume = "10m"   # interactive sessions: needs sleep_capability = full
+noninteractive = "60s"
+```
 
 ### Start Config (JSON on stdin)
 

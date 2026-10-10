@@ -4511,15 +4511,21 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 	return fmt.Errorf("timeout waiting for runtime prompt")
 }
 
+// PromptObservationLines is how many trailing pane lines prompt and idle
+// detection capture. Claude's welcome/idle UI can leave several blank rows
+// below the prompt, so capturing only the last handful of lines misses the
+// ready indicator. Runtimes that apply [PaneShowsIdlePrompt] to a pane they
+// capture themselves should capture this many lines.
+const PromptObservationLines = 120
+
 // DefaultReadyPromptPrefix is the Claude Code prompt prefix used for idle detection.
 // Claude Code uses ❯ (U+276F) as the prompt character.
 const (
 	DefaultReadyPromptPrefix = "❯ "
 	sessionReadyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
-	// promptObservationLines widens prompt detection beyond the pane footer.
-	// Claude's welcome/idle UI can leave several blank rows below the prompt,
-	// so capturing only the last handful of lines misses the ready indicator.
-	promptObservationLines = 120
+	// promptObservationLines is the in-package name for
+	// PromptObservationLines, kept so existing call sites stay unchanged.
+	promptObservationLines = PromptObservationLines
 	// codexInterruptBoundaryTailBytes is the transcript tail window scanned for
 	// Codex's durable interrupt acknowledgement marker.
 	codexInterruptBoundaryTailBytes = 16 * 1024
@@ -4560,18 +4566,30 @@ func (t *Tmux) resolveIdlePromptPrefix(session string) string {
 // can distinguish a session that has gone away (ErrSessionNotFound /
 // ErrNoServer) from a transient read failure.
 func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	lines, err := t.CapturePaneLines(session, promptObservationLines)
 	if err != nil {
 		return false, err
 	}
+	return PaneShowsIdlePrompt(lines, promptPrefix), nil
+}
+
+// PaneShowsIdlePrompt is the pure scan behind tmux idle detection: it reports
+// whether captured pane lines show promptPrefix with no active-processing
+// indicator. It does not substitute a default for a blank promptPrefix;
+// callers resolve the prefix first (DefaultReadyPromptPrefix when the session
+// configures none).
+//
+// Runtimes that run the agent in a tmux session inside a remote box capture
+// the pane over their own connection (PromptObservationLines lines) and apply
+// this same scan, so their idle boundary matches local tmux exactly.
+func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
+	prefix := strings.TrimSpace(promptPrefix)
 
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
 	if paneContainsBusyIndicator(lines) {
-		return false, nil
+		return false
 	}
 
 	// Scan captured lines for the prompt prefix.
@@ -4583,10 +4601,10 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 			continue
 		}
 		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
