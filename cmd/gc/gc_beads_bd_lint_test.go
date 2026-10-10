@@ -278,12 +278,21 @@ func TestDoltliteMaintenanceGatesStampOnReindex(t *testing.T) {
 // `unset` statement rather than merely somewhere in the helper body. Anchoring
 // on the statement form is what makes this a scrub assertion instead of a
 // spelling assertion: a bare substring match is equally satisfied by a line
-// that *sets* the socket, which is the exact regression being guarded.
-var ambientSocketUnsetPattern = regexp.MustCompile(`(?m)^\s*unset\b[^\n]*\bBEADS_DOLT_SERVER_SOCKET\b`)
+// that *sets* the socket, which is the exact regression being guarded. The
+// name must be a bare operand and every operand before it a plain variable
+// name: `unset $BEADS_DOLT_SERVER_SOCKET` unsets whatever variable the socket
+// path names, and `unset -f` removes a function, so neither is a scrub.
+var ambientSocketUnsetPattern = regexp.MustCompile(
+	`(?m)^[ \t]*unset(?:[ \t]+-v)?(?:[ \t]+[A-Za-z_]\w*)*[ \t]+BEADS_DOLT_SERVER_SOCKET\b`)
 
 // ambientSocketAssignPattern is the inverse guard: assigning the socket inside
 // these helpers re-establishes the ambient topology the unset exists to drop.
-var ambientSocketAssignPattern = regexp.MustCompile(`(?m)^\s*(export\b[^\n]*\s)?BEADS_DOLT_SERVER_SOCKET=`)
+// The assignment counts wherever a shell word can start (line start,
+// whitespace, `;`, `&`, `|`, `(`), which covers plain and exported
+// assignments, a prefix on the bd command itself, and env's operands, which
+// may also be quoted.
+var ambientSocketAssignPattern = regexp.MustCompile(
+	`(?m)(?:^|[\s;&|(])BEADS_DOLT_SERVER_SOCKET=|\benv\b[^\n]*\bBEADS_DOLT_SERVER_SOCKET=`)
 
 // ambientSocketBdInvocations lists the call-site spellings the ordering check
 // recognizes. Each carries the argument expansion so an anchor cannot land on
@@ -291,15 +300,25 @@ var ambientSocketAssignPattern = regexp.MustCompile(`(?m)^\s*(export\b[^\n]*\s)?
 // hoisted without moving either the scrub or the invocation.
 var ambientSocketBdInvocations = []string{`"$bd_bin" "$@"`, `"${BD_BIN:-bd}" "$@"`}
 
-// TestBeadsHelpersClearAmbientSocket proves the proxied and DoltLite helpers
-// scrub BEADS_DOLT_SERVER_SOCKET before invoking bd. An inherited socket must
-// not override the explicit proxied or DoltLite selection: gc's own env
-// projection (cmd/gc/bd_env.go) drops host/port whenever a socket is present,
-// so a leaked socket silently redirects an explicitly selected topology.
+// TestBeadsHelpersClearAmbientSocket guards the socket scrub in the proxied and
+// DoltLite helpers: each must unset BEADS_DOLT_SERVER_SOCKET before invoking
+// bd. An inherited socket must not override the explicit proxied or DoltLite
+// selection: gc's own env projection (cmd/gc/bd_env.go) drops host/port
+// whenever a socket is present, so a leaked socket silently redirects an
+// explicitly selected topology.
 //
-// run_bd_pinned is deliberately not asserted: it does not scrub the socket
-// today, and whether it should depends on beads' own connection-resolution
-// order, which is tracked separately (ga-kbcwc).
+// The check is textual: it orders the unset statement against the bd call in
+// the helper body, so it assumes both run in the helper's own subshell. An
+// unset confined to a nested subshell or a conditional branch still reads as
+// a scrub.
+//
+// The remaining bd fork sites are deliberately not asserted. run_bd_pinned and
+// op_init's proxied `bd context` probe do not scrub the socket today; whether
+// they should depends on beads' own connection-resolution order, which is
+// tracked separately (ga-kbcwc). run_provider_owned_bd scrubs conditionally:
+// an external-target provider init keeps the socket, which
+// op_provider_owned_init forwards to a direct init as --server-socket.
+// bd_version_output runs `bd version`, which opens no store.
 func TestBeadsHelpersClearAmbientSocket(t *testing.T) {
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
@@ -348,9 +367,87 @@ func TestBeadsHelpersClearAmbientSocket(t *testing.T) {
 	}
 }
 
+// countShellFunctionDefinitions counts every header that defines name in a
+// spelling the shell accepts: indented (a definition nested in an if/fi still
+// binds), with space around or inside the parens, with the brace on the next
+// line, or through bash's `function` keyword. Counting only the canonical
+// `name() {` would miss exactly the duplicate a last-definition-wins shadow
+// needs.
 func countShellFunctionDefinitions(script, name string) int {
-	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\(\) \{`)
+	q := regexp.QuoteMeta(name)
+	pattern := regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+` + q + `\b|` + q + `[ \t]*\([ \t]*\))`)
 	return len(pattern.FindAllStringIndex(script, -1))
+}
+
+func TestCountShellFunctionDefinitionsMatchesHeaderSpellings(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		want   int
+	}{
+		{name: "canonical", script: "helper() {\n}\n", want: 1},
+		{name: "space before parens", script: "helper () {\n}\n", want: 1},
+		{name: "space inside parens", script: "helper ( ) {\n}\n", want: 1},
+		{name: "no space before brace", script: "helper(){\n}\n", want: 1},
+		{name: "brace on next line", script: "helper()\n{\n}\n", want: 1},
+		{name: "indented in conditional", script: "if true; then\n    helper() {\n    }\nfi\n", want: 1},
+		{name: "function keyword", script: "function helper {\n}\n", want: 1},
+		{name: "function keyword with parens", script: "function helper() {\n}\n", want: 1},
+		{name: "shadowing duplicate", script: "helper() {\n}\nhelper () {\n}\n", want: 2},
+		{name: "longer name", script: "helper_extra() {\n}\n", want: 0},
+		{name: "prefixed name", script: "my_helper() {\n}\n", want: 0},
+		{name: "function keyword longer name", script: "function helper_extra {\n}\n", want: 0},
+		{name: "call site", script: "helper \"$dir\"\n", want: 0},
+		{name: "comment", script: "# helper() {\n", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := countShellFunctionDefinitions(tt.script, "helper"); got != tt.want {
+				t.Fatalf("countShellFunctionDefinitions(%q) = %d, want %d", tt.script, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAmbientSocketPatternsClassifyShellForms(t *testing.T) {
+	tests := []struct {
+		line       string
+		wantUnset  bool
+		wantAssign bool
+	}{
+		{line: "unset BEADS_DOLT_SERVER_SOCKET", wantUnset: true},
+		{line: "        unset BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER", wantUnset: true},
+		{line: "unset -v BEADS_DOLT_SERVER_SOCKET", wantUnset: true},
+		{line: "unset $BEADS_DOLT_SERVER_SOCKET"},
+		{line: "unset ${BEADS_DOLT_SERVER_SOCKET}"},
+		{line: "unset -f BEADS_DOLT_SERVER_SOCKET"},
+		{line: "unset BEADS_DOLT_SERVER_SOCKET_PATH"},
+		{line: "# unset BEADS_DOLT_SERVER_SOCKET"},
+		{line: "echo unset BEADS_DOLT_SERVER_SOCKET"},
+		{line: "BEADS_DOLT_SERVER_SOCKET=\"$sock\"", wantAssign: true},
+		{line: "    export BEADS_DOLT_SERVER_SOCKET=\"$sock\"", wantAssign: true},
+		{line: "export BEADS_DIR=\"$dir\" BEADS_DOLT_SERVER_SOCKET=\"$sock\"", wantAssign: true},
+		{line: "BEADS_DIR=\"$dir\" BEADS_DOLT_SERVER_SOCKET=\"$sock\" \"$bd_bin\" \"$@\"", wantAssign: true},
+		{line: "cd \"$dir\"; BEADS_DOLT_SERVER_SOCKET=\"$sock\" \"$bd_bin\" \"$@\"", wantAssign: true},
+		{line: "true && BEADS_DOLT_SERVER_SOCKET=\"$sock\" \"$bd_bin\" \"$@\"", wantAssign: true},
+		{line: "(BEADS_DOLT_SERVER_SOCKET=\"$sock\" \"$bd_bin\" \"$@\")", wantAssign: true},
+		{line: "env BEADS_DOLT_SERVER_SOCKET=\"$sock\" \"${BD_BIN:-bd}\" \"$@\"", wantAssign: true},
+		{line: "env \"BEADS_DOLT_SERVER_SOCKET=$sock\" \"${BD_BIN:-bd}\" \"$@\"", wantAssign: true},
+		{line: "if [ -n \"${BEADS_DOLT_SERVER_SOCKET:-}\" ]; then"},
+		{line: "set -- \"$@\" --server-socket \"$BEADS_DOLT_SERVER_SOCKET\""},
+		{line: "GC_BEADS_DOLT_SERVER_SOCKET=\"$sock\""},
+		{line: "echo \"BEADS_DOLT_SERVER_SOCKET=$sock\""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			if got := ambientSocketUnsetPattern.MatchString(tt.line); got != tt.wantUnset {
+				t.Errorf("unset match = %v, want %v", got, tt.wantUnset)
+			}
+			if got := ambientSocketAssignPattern.MatchString(tt.line); got != tt.wantAssign {
+				t.Errorf("assign match = %v, want %v", got, tt.wantAssign)
+			}
+		})
+	}
 }
 
 func bdConfigSetOffenders(path string, r io.Reader) ([]string, error) {
