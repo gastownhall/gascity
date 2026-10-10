@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -241,18 +240,15 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
-// reserveFreePort asks the kernel for a free TCP port on loopback, then
-// releases it. The caller uses the port number to spawn the supervisor.
-// There's a small race between release and bind; in practice it's fine
-// for test runs.
+// reserveFreePort returns a loopback port for the supervisor this test
+// spawns (reserveLoopbackPort). On Linux the port is leased for the life of
+// the test binary.
 func reserveFreePort(t *testing.T) int {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	port, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
 	}
-	port := lis.Addr().(*net.TCPAddr).Port
-	_ = lis.Close()
 	return port
 }
 
