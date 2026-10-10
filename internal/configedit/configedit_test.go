@@ -2114,6 +2114,34 @@ path = "/tmp/my-rig"
 	}
 }
 
+// Deleting a rig must drop its runtime suspension override. Otherwise a
+// later rig registered under the same name inherits the stale explicit
+// resume, which beats its suspended_on_start = true.
+func TestDeleteRigClearsRuntimeSuspensionOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, cityWithRig())
+	resumed := false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, dir, "my-rig", &resumed); err != nil {
+		t.Fatalf("seeding resume: %v", err)
+	}
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	if err := ed.DeleteRig("my-rig"); err != nil {
+		t.Fatalf("DeleteRig: %v", err)
+	}
+
+	st, err := suspensionstate.Load(fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("Load suspension state: %v", err)
+	}
+	if v, ok := suspensionstate.ExplicitRig(st, "my-rig"); ok {
+		t.Fatalf("runtime override survived DeleteRig: suspended=%v", v)
+	}
+	if !suspensionstate.EffectiveRigSuspended(st, "my-rig", true) {
+		t.Fatal("re-registered rig with suspended_on_start = true would come up unsuspended")
+	}
+}
+
 func TestDeleteRigRemovesDeletedSiteBindingAndPreservesOrphan(t *testing.T) {
 	dir := t.TempDir()
 	city := `[workspace]

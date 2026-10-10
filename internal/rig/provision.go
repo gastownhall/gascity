@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // Provision runs the full rig-add provisioning against the injected deps.
@@ -160,6 +161,15 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	}
 	committed = true
 	emit(ProvisionStep{Name: "routes", Detail: "  Generated routes.jsonl for cross-rig routing"})
+
+	// A fresh add owns its suspension default: drop any runtime suspend/resume
+	// override left behind by an earlier rig of the same name, which would
+	// otherwise beat this rig's suspended_on_start.
+	if !plan.reAdd {
+		if err := suspensionstate.SetRigSuspended(fs, cityPath, req.Name, nil); err != nil {
+			emit(ProvisionStep{Name: "suspension-state", Warn: true, Detail: fmt.Sprintf("warning: clearing stale runtime suspension state for rig %q: %v", req.Name, err)})
+		}
+	}
 
 	// Resolve the returned rig from the post-write config (a fresh add returns
 	// the stored, possibly-empty prefix, not the effective one).

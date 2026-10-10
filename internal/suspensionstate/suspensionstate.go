@@ -46,6 +46,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -238,6 +239,36 @@ func SetRigSuspended(fs fsys.FS, cityPath, name string, suspended *bool) error {
 	}
 	SetRig(&st, name, suspended)
 	return Save(fs, cityPath, st)
+}
+
+// PruneRigsNotIn removes the rig overrides whose names are not in
+// declared and saves the result atomically. It returns the pruned names
+// in sorted order. The file is not rewritten when nothing is pruned, and
+// the city and agent blocks are never touched. Callers must pass the rig
+// set of a fully loaded config: any rig missing from declared loses its
+// explicit preference and defers to suspended_on_start if re-added.
+func PruneRigsNotIn(fs fsys.FS, cityPath string, declared map[string]bool) ([]string, error) {
+	st, err := Load(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	var pruned []string
+	for name := range st.Rigs {
+		if !declared[name] {
+			pruned = append(pruned, name)
+		}
+	}
+	if len(pruned) == 0 {
+		return nil, nil
+	}
+	sort.Strings(pruned)
+	for _, name := range pruned {
+		SetRig(&st, name, nil)
+	}
+	if err := Save(fs, cityPath, st); err != nil {
+		return nil, err
+	}
+	return pruned, nil
 }
 
 // SuspendedRigNames returns the set of rig names whose runtime state

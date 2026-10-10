@@ -2445,7 +2445,24 @@ func (cr *CityRuntime) applyStartupConfigReload(
 	}
 }
 
+// reloadConfigTraced runs one config reload attempt and, once the runtime
+// holds a successfully loaded config, prunes runtime suspension overrides for
+// rigs that config no longer declares.
 func (cr *CityRuntime) reloadConfigTraced(
+	ctx context.Context,
+	lastProviderName *string,
+	cityRoot string,
+	trace *sessionReconcilerTraceCycle,
+	source reloadSource,
+) reloadControlReply {
+	reply := cr.reloadConfigOnce(ctx, lastProviderName, cityRoot, trace, source)
+	cr.pruneRemovedRigSuspensionOverrides(reply)
+	return reply
+}
+
+// reloadConfigOnce loads city.toml and applies it to the runtime, keeping
+// the old config on any failure.
+func (cr *CityRuntime) reloadConfigOnce(
 	ctx context.Context,
 	lastProviderName *string,
 	cityRoot string,

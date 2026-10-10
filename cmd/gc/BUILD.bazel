@@ -1815,6 +1815,7 @@ go_test(
         "supervisor_init_retry_test.go",
         "supervisor_log_rotation_test.go",
         "supervisor_systemd_delegate_test.go",
+        "suspension_state_prune_test.go",
         "suspension_state_test.go",
         "synthetic_cache_verifier_test.go",
         "telemetry_lifecycle_metrics_test.go",
