@@ -1,7 +1,17 @@
 package workertest
 
-import sessionpkg "github.com/gastownhall/gascity/internal/session"
+import (
+	"testing"
 
-// testAgent is an Actor with no City, for the package's tests of leaseless
-// Managers (runtime_lease_optout_test.go).
-var testAgent = sessionpkg.Actor{Kind: sessionpkg.ActorAgent}
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+)
+
+// testAgent is an agent on a fresh t.TempDir() city.
+func testAgent(t testing.TB) sessionpkg.Actor {
+	t.Helper()
+	city, err := sessionpkg.NewCityDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sessionpkg.Actor{Kind: sessionpkg.ActorAgent, City: city}
+}

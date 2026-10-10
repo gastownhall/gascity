@@ -25,7 +25,7 @@ func TestOperationEventCarriesAgentNameFromMetadata(t *testing.T) {
 		},
 	}, recorder)
 
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -50,7 +50,7 @@ func TestOperationEventCarriesAgentNameFromAliasFallback(t *testing.T) {
 		Provider: "claude",
 	}, recorder)
 
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestOperationEventOmitsAgentNameWhenAliasUnset(t *testing.T) {
 		Provider: "claude",
 	}, recorder)
 
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -100,7 +100,7 @@ func TestOperationEventNew1aFieldsAreOmitEmpty(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	}, recorder)
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	raw := string(lastRecordedWorkerOperation(t, recorder).Payload)

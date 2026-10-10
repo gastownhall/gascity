@@ -121,17 +121,19 @@ func TestEachActorTakesItsLeaseMode(t *testing.T) {
 	}
 }
 
-// TestLifecycleVerbsRefuseAnActorWithoutCityOrKind: with no package opt-out,
+// TestLifecycleVerbsRefuseAnActorWithoutCityOrKind: with the refusal expected,
 // every lifecycle verb that would start or stop a runtime refuses an Actor
 // with no City (ErrRuntimeLeaseNoCity), and every one refuses an Actor with no
 // kind (ErrNoActor), before any provider call.
 func TestLifecycleVerbsRefuseAnActorWithoutCityOrKind(t *testing.T) {
-	leaselessManagersAllowed.Store(false)
-	defer leaselessManagersAllowed.Store(true)
+	ExpectNoCityRefusalsForTest(t)
 	type verb func(m managerLeaseFixture, by Actor) error
 	hints := func(m managerLeaseFixture) runtime.Config { return runtime.Config{WorkDir: m.info.WorkDir} }
 	starts := map[string]verb{
 		"Start": func(m managerLeaseFixture, by Actor) error { return m.start(by) },
+		"StartRuntimeOnly": func(m managerLeaseFixture, by Actor) error {
+			return m.mgr.StartRuntimeOnly(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), hints(m))
+		},
 		"Attach": func(m managerLeaseFixture, by Actor) error {
 			return m.mgr.Attach(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), hints(m))
 		},

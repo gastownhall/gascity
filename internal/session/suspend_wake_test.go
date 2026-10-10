@@ -192,7 +192,7 @@ func TestOperatorSuspendHoldsBeforeTheStop(t *testing.T) {
 		if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
-		err := newTestManager(t, store, sp).Suspend(b.ID)
+		err := operatorSuspend(newTestManager(t, store, sp), b.ID)
 		if sp.seen["sleep_intent"] != string(SleepReasonUserHold) || sp.seen["held_until"] == "" {
 			t.Fatalf("fail=%v: the stop found sleep_intent=%q held_until=%q, want the hold already written", fail, sp.seen["sleep_intent"], sp.seen["held_until"])
 		}
@@ -219,7 +219,7 @@ func TestFailedStopRollbackLeavesANewerWriteAlone(t *testing.T) {
 	if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := newTestManager(t, store, sp).Suspend(b.ID); err == nil {
+	if err := operatorSuspend(newTestManager(t, store, sp), b.ID); err == nil {
 		t.Fatal("Suspend with a failing stop succeeded")
 	}
 	if got, _ := store.Get(b.ID); got.Metadata["state"] != string(StateAsleep) || got.Metadata["wake_request"] != "" {

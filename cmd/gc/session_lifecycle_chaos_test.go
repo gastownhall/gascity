@@ -1362,7 +1362,7 @@ func (h *sessionChaosHarness) suspendSession() {
 		h.record("suspend skipped: pending create")
 		return
 	}
-	if err := h.manager.Suspend(context.Background(), testOperator, b.ID, false); err != nil {
+	if err := h.manager.Suspend(context.Background(), testActorIn(h.t, sessionpkg.ActorOperator, h.env.city), b.ID, false); err != nil {
 		h.record("suspend skipped: %v", err)
 		return
 	}

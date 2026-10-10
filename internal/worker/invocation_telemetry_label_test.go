@@ -46,7 +46,7 @@ func TestMessageRecordsNormalizedProviderFamilyLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background(), testAgent); err != nil {
+	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(handle.sessionID)
@@ -62,7 +62,7 @@ func TestMessageRecordsNormalizedProviderFamilyLabel(t *testing.T) {
 		usageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 
-	if _, err := handle.Message(context.Background(), testAgent, MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), testAgent(t), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
