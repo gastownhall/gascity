@@ -164,6 +164,99 @@ func TestWaitForIdleCancelDuringCapture(t *testing.T) {
 	})
 }
 
+// slowReadyPromptReader answers the published-prompt read with prefix after
+// delay, or when the read context ends, as a real exec op does. A zero delay
+// with hang set never answers until release is closed, ignoring its context.
+func slowReadyPromptReader(delay time.Duration, prefix string, hang bool, release <-chan struct{}) readyPromptReader {
+	return func(ctx context.Context) (string, bool, error) {
+		if hang {
+			<-release
+			return prefix, true, nil
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return "", false, ctx.Err()
+		case <-timer.C:
+			return prefix, true, nil
+		}
+	}
+}
+
+// The ready-prompt read of an instance that did not start the session counts
+// against the WaitForIdle timeout like a capture: a read that never answers
+// is abandoned at the deadline, and after a slow read the capture loop only
+// gets what is left.
+// Kills: a prompt read outside the timeout (a hung show-environment would
+// hold the wait for the 30s exec op timeout), and a capture loop handed the
+// full timeout after the read (a slow read would stretch the wait to about
+// twice its timeout).
+func TestWaitForIdleReadyPromptReadSharesTimeout(t *testing.T) {
+	fastIdlePoll(t)
+
+	t.Run("hung read", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			release := make(chan struct{})
+			defer close(release)
+			c := &slowCarrier{pane: idleClaudePane}
+			p := &Provider{}
+			const timeout = time.Second
+			start := time.Now()
+			err := p.waitForIdle(context.Background(), c, "s", timeout, slowReadyPromptReader(0, "❯ ", true, release))
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("waitForIdle = %v, want DeadlineExceeded", err)
+			}
+			if elapsed := time.Since(start); elapsed != timeout {
+				t.Fatalf("returned after %v, want exactly %v", elapsed, timeout)
+			}
+			if got := c.count(); got != 0 {
+				t.Fatalf("captures = %d, want 0 (the read used the whole timeout)", got)
+			}
+		})
+	})
+
+	t.Run("slow read", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			// 900ms read, then 900ms captures: within a 1s timeout the first
+			// capture is canceled 100ms in.
+			c := &slowCarrier{perCapture: 900 * time.Millisecond, pane: idleClaudePane}
+			p := &Provider{}
+			const timeout = time.Second
+			start := time.Now()
+			err := p.waitForIdle(context.Background(), c, "s", timeout, slowReadyPromptReader(900*time.Millisecond, "❯ ", false, nil))
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("waitForIdle = %v, want DeadlineExceeded", err)
+			}
+			if elapsed := time.Since(start); elapsed != timeout {
+				t.Fatalf("returned after %v, want exactly %v", elapsed, timeout)
+			}
+			if got := c.count(); got != 1 {
+				t.Fatalf("captures = %d, want 1 (canceled at the deadline)", got)
+			}
+		})
+	})
+
+	t.Run("slow read within budget", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			// The same read and captures fit the 5s exec budget, and the
+			// prefix read is remembered.
+			c := &slowCarrier{perCapture: 900 * time.Millisecond, pane: idleCodexPane}
+			p := &Provider{}
+			start := time.Now()
+			if err := p.waitForIdle(context.Background(), c, "s", execIdleProbeBudget, slowReadyPromptReader(900*time.Millisecond, "› ", false, nil)); err != nil {
+				t.Fatalf("waitForIdle with the exec budget: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > 3*time.Second {
+				t.Fatalf("returned after %v, want the read plus two captures", elapsed)
+			}
+			if got, ok := p.readyPrompts.Load("s"); !ok || got != "› " {
+				t.Fatalf("remembered prefix = (%v, %v), want (\"› \", true)", got, ok)
+			}
+		})
+	})
+}
+
 // Only a pack with an idle boundary asks for the larger budget, through the
 // raw and the seam-backed provider alike.
 // Kills: a budget for packs that cannot run the probe, and a seam that drops
