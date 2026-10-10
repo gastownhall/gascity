@@ -55,6 +55,7 @@ var (
 // the readback makes this report an error for a close that did commit, and
 // the returned Bead can carry a later writer's revision.
 func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	noteSessionKeysByID(s.Get, id, metadata)
 	if err := s.readOnlyGuard(); err != nil {
 		return Bead{}, err
 	}
@@ -215,6 +216,7 @@ func (s *NativeDoltStore) conditionalLabelsGuarded() bool { return true }
 // TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this beside the
 // routes that accept such a key.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -635,6 +637,7 @@ func (s *NativeDoltStore) conditionalWriteError(
 //     value is retried once with the stored bytes when, and only when, its
 //     rendering equals expected.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	noteSessionKeysByID(s.Get, id, map[string]string{key: next})
 	if err := s.readOnlyGuard(); err != nil {
 		return false, err
 	}

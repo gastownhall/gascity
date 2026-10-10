@@ -12,16 +12,20 @@ import (
 // sessionBeadFixture builds a persisted session bead with the given id, status,
 // and metadata, carrying the canonical type and label so the read seam
 // recognizes it.
+// sessionBeadFixture is a session bead with meta; a "__title" entry is its
+// title, not a metadata key.
 func sessionBeadFixture(id, status string, meta map[string]string) beads.Bead {
 	m := map[string]string{}
 	for k, v := range meta {
 		m[k] = v
 	}
+	title := m["__title"]
+	delete(m, "__title")
 	return beads.Bead{
 		ID:        id,
 		Type:      BeadType,
 		Status:    status,
-		Title:     m["__title"],
+		Title:     title,
 		Labels:    []string{LabelSession},
 		Metadata:  m,
 		CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),

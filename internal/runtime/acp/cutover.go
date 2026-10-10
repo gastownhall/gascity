@@ -80,6 +80,9 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 // through; the seams route GetMeta to the same sidecar.
 func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
 
+// LivenessReadsFresh forwards [runtime.FreshByConstruction].
+func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessReadsFresh() }
+
 // ListRunningComplete passes the underlying provider's listing attestation
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {

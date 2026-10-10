@@ -570,3 +570,40 @@ func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdSessionKill_ClearsAUserHoldsTimer: a kill clears a user-hold
+// intent, and with it the operator's held_until, so no heartbeat-shaped hold
+// is left; a heartbeat hold (no intent) keeps its timer, and a failed kill's
+// rollback restores both.
+func TestCmdSessionKill_ClearsAUserHoldsTimer(t *testing.T) {
+	heldUntil := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for name, tc := range map[string]struct {
+		intent   string
+		stopFail bool
+		want     string
+	}{
+		"user hold":             {intent: "user-hold", want: ""},
+		"heartbeat":             {want: heldUntil},
+		"user hold, stop fails": {intent: "user-hold", stopFail: true, want: heldUntil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sessionName := "s-gc-kill-hold"
+			store, bead, _ := newKillPokeSession(t, sessionName)
+			stubKillPoke(t)
+			setKillFixtureMetadata(t, store, bead.ID, map[string]string{"held_until": heldUntil, "sleep_intent": tc.intent})
+			fake := wrapKillPokeProvider(t, &killHookProvider{}).(*runtime.Fake)
+			if tc.stopFail {
+				fake.StopErrors[sessionName] = errors.New("tmux: kill-session refused")
+			}
+			var stdout, stderr bytes.Buffer
+			_ = cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr)
+			final := mustGetBead(t, store, bead.ID)
+			if got := final.Metadata["held_until"]; got != tc.want {
+				t.Fatalf("held_until = %q, want %q; stderr=%s", got, tc.want, stderr.String())
+			}
+			if tc.stopFail && final.Metadata["sleep_intent"] != tc.intent {
+				t.Fatalf("rollback sleep_intent = %q, want %q", final.Metadata["sleep_intent"], tc.intent)
+			}
+		})
+	}
+}

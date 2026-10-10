@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/gocritic"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/misspell"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/revive"
+	"github.com/gastownhall/gascity/tools/nogo/analyzers/runtimelease"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/unconvert"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/unparam"
 	"github.com/gastownhall/gascity/tools/nogo/analyzers/unused"
@@ -91,6 +92,7 @@ func wrapped() []*analysis.Analyzer {
 		unconvert.Analyzer,
 		unparam.Analyzer,
 		unused.Analyzer,
+		runtimelease.Analyzer,
 		errcheck.Analyzer,
 		ineffassign.Analyzer,
 	}
@@ -109,7 +111,7 @@ func TestAnalyzersValidate(t *testing.T) {
 		names = append(names, a.Name)
 	}
 	sort.Strings(names)
-	want := []string{"errcheck", "errorlint", "gocritic", "ineffassign", "misspell", "revive", "unconvert", "unparam", "unused"}
+	want := []string{"errcheck", "errorlint", "gocritic", "ineffassign", "misspell", "revive", "runtimelease", "unconvert", "unparam", "unused"}
 	if !slices.Equal(names, want) {
 		t.Errorf("analyzer names = %v, want %v", names, want)
 	}

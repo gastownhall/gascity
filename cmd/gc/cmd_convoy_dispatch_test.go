@@ -3527,7 +3527,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		sequence = sequence[1:]
 		return next, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -3602,7 +3602,7 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -3683,7 +3683,7 @@ func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
 		}
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		if beadID == "gc-ctrl-bad" {
 			return retryableErr
@@ -4929,7 +4929,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 		sequence = sequence[1:]
 		return next, nil
 	}
-	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, _ *executionEmitDeferral) error {
 		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
@@ -5061,7 +5061,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 		sequence = sequence[1:]
 		return next, nil
 	}
-	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, _ *executionEmitDeferral) error {
 		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
@@ -5816,7 +5816,7 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 		capturedEnv = maps.Clone(env)
 		return nil, nil // no work: exits immediately
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		return nil
 	}
 
@@ -5896,7 +5896,7 @@ name = "myrig"
 	}
 
 	var gotCityPath, gotStorePath, gotBeadID string
-	controlDispatcherServe = func(cityPath, storePath, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		gotCityPath = cityPath
 		gotStorePath = storePath
 		gotBeadID = beadID
@@ -6164,7 +6164,7 @@ name = "rigrepo"
 		gotDir = dir
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatal("controlDispatcherServe should not run when no control work is returned")
 		return nil
 	}
@@ -6221,7 +6221,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -6276,7 +6276,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-pending" {
 			return dispatch.ErrControlPending
@@ -6427,7 +6427,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlBeadAndProcessesLaterRead
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -6478,7 +6478,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlOnly(t *testing.T) {
 			{ID: "gc-task", Metadata: map[string]string{"gc.routed_to": "workflows.codex-max"}},
 		}, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -6540,7 +6540,7 @@ func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
 		}
 		return []hookBead{{ID: nonControl.ID, Metadata: map[string]string{"gc.kind": "workflow"}}}, nil
 	}
-	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, _ *executionEmitDeferral) error {
 		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 	}
@@ -6602,7 +6602,7 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 		}
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if beadID != "gc-retry-control" {
 			t.Fatalf("controlDispatcherServe beadID = %q, want gc-retry-control", beadID)
 		}
@@ -6653,7 +6653,7 @@ func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
 		}
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-transient" {
 			return fmt.Errorf("gc-transient: spawning iteration 2: adding dep: failed to check for dependency cycle: invalid connection: i/o timeout")
@@ -7154,7 +7154,7 @@ func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 			{ID: "gc-legacy", Metadata: map[string]string{"gc.kind": "ralph"}},
 		}, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-legacy" {
 			return fmt.Errorf("gc-legacy: recording attempt log: setting metadata on %q: failed to record event: old_value is too large", beadID)
@@ -7199,7 +7199,7 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, os.ErrDeadlineExceeded
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatal("controlDispatcherServe should not be called on query failure")
 		return nil
 	}
@@ -7256,7 +7256,7 @@ dir = "backend"
 	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, errors.New("signal: killed")
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatal("controlDispatcherServe should not be called on query failure")
 		return nil
 	}
@@ -7363,7 +7363,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		processed = append(processed, beadID)
 		return errors.New("synthetic dispatch failure")
 	}
@@ -7446,7 +7446,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if beadID == "gc-pending" {
 			return dispatch.ErrControlPending
 		}
@@ -7536,7 +7536,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 		}
 	}
 	processedAfterWake := false
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if beadID == "gc-woke" {
 			processedAfterWake = true
 		}

@@ -19,6 +19,7 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint",
+        "//internal/clock",
         "//internal/deps",
         "//internal/doltversion",
         "//internal/fsys",
@@ -119,6 +120,7 @@ go_test(
         "caching_store_watermark_holes_internal_test.go",
         "caching_store_watermark_internal_test.go",
         "caching_store_writes_internal_test.go",
+        "children_batch_test.go",
         "class_store_test.go",
         "close_reason_internal_test.go",
         "conditional_labels_conformance_test.go",
@@ -135,6 +137,7 @@ go_test(
         "event_payload_contract_test.go",
         "event_payload_test.go",
         "exec_timeout_linux_test.go",
+        "export_integration_test.go",
         "export_test.go",
         "factory_test.go",
         "filestore_atomic_close_test.go",
@@ -212,6 +215,8 @@ go_test(
         "runview_lifecycle_test.go",
         "runview_roundtrip_test.go",
         "schema_cursor_drift_test.go",
+        "session_key_hook_bd_integration_test.go",
+        "session_key_hook_test.go",
         "sqlite_sequence_floor_lock_test.go",
         "sqlite_sequence_test.go",
         "sqlite_store_atomic_close_test.go",
@@ -231,6 +236,7 @@ go_test(
         "testenv_import_test.go",
         "unread_store_notice_internal_test.go",
         "unread_store_notice_test.go",
+        "update_reporting_test.go",
         "updated_at_store_test.go",
     ],
     data = glob(
@@ -258,6 +264,11 @@ go_test(
         },
         "//conditions:default": {},
     }),
+    # The integration build (//test:integration_packages) runs ~1700 tests for
+    # ~300 s on one worker; 9 shards bring each to about a minute. The guard
+    # scripts/integration_packages_shards_test.go keeps the tests in
+    # heavy_tests.txt apart.
+    shard_count = 9,
     deps = [
         "//internal/beadmeta",
         "//internal/beads/beadstest",

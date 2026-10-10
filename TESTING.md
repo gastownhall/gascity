@@ -124,6 +124,37 @@ Run the same thing locally with:
 bazel test //... --config=fresh
 ```
 
+The nightly run also adds `//test/acceptance:acceptance_realtime_tests` to
+the acceptance lane: the timer-bound acceptance rows at their real timers,
+which PR and push runs shorten (next section).
+
+### Test-only timer hooks
+
+A few acceptance rows assert what a running city does *not* do over a window
+long enough for the controller's periodic backstops to come round several
+times. To keep them out of the lane's critical path they run shortened on PRs
+and pushes, through these variables. `GC_TEST_BACKSTOP_SPEEDUP` is read by
+non-test code, so it is in the GC_* env-read inventory
+(`internal/testenv/testdata/gc_env_read_baseline.golden`);
+`GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` is read only by a test file, which that
+inventory does not scan.
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides the controller backstop cadences that go through `internal/clock.Backstop` (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. Other cadences (the supervisor patrol, the proxied guard tick, the Dolt scope watchdog, the lanes' intervals and retries) keep their real periods, so they come round fewer times in the shortened window; the nightly real-timer rows cover them. |
+| `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures: 20 s when unset; a value that is not a duration of at least 5 s fails the row. |
+
+`GC_TEST_BACKSTOP_SPEEDUP` cannot be turned on in a binary users run: gc
+honors it only when linked with
+`-X github.com/gastownhall/gascity/internal/clock.testHooks=enabled`, which
+only the testonly `//cmd/gc:gc_testhooks` target does
+(`scripts/cmd_gc_testhooks_test.go` keeps the stamp out of every other link,
+`.goreleaser.yml` and the Makefile). Any gc run with the variable set prints a
+`gc: WARNING: GC_TEST_BACKSTOP_SPEEDUP=...` line on stderr at startup saying
+whether the hook is active or ignored, and the quiescence rows fail unless gc
+reports it active. `test/acceptance/BUILD.bazel` sets both variables
+(`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
+
 ### Merge queue
 
 The required-check workflows are merge-queue ready but the queue is off: it
@@ -385,6 +416,35 @@ rules above), and `rbe` fails the push. Rebase onto main to execute
 remotely again; a change that moves the pin runs its remote suite in CI
 after it merges, as `bazel.yml`'s own preflight does.
 
+### Remote repo contents cache (CI lanes)
+
+A cold lane client spends 15-38 s re-running repository rules (go_deps,
+npm, debs) before its first action. Bazel's remote repo contents cache
+serves those extracted trees from rbe-west's `oss` action cache instead
+(`engdocs/design/bazel-remote-repo-contents-cache.md`). The repository
+variable `RBE_REPO_CONTENTS_CACHE` rolls it out in mode `remote` only:
+
+| value | effect |
+|---|---|
+| unset / `off` | nothing (default) |
+| `seed` | each push to main runs `bazel.yml`'s `rrc-seed` job: every lane's command with `--nobuild`, uploading repository trees with a 30-minute `rbe-rrc-writer` certificate rbe-west's mint signs only for that job (GitHub OIDC; `.github/scripts/rrc-writer-credential.sh`). rbe-west's `rrc-gate` admits only repo-contents entries from it |
+| `canary` | `seed`, and the `unit` lane reads the cache |
+| `on` | `seed`, and every lane reads the cache |
+
+Readers add `startup --experimental_remote_repo_contents_cache` and
+`common --loading_phase_threads=64` to `.bazelrc.local` (key neutral,
+`scripts/bazel_key_parity_test.go`) and still upload nothing. Developer
+machines, fork runs and macOS/Windows jobs never read it. Rollback: set the
+variable to `off`; lanes fetch as before.
+
+Nothing on a reader checks a cached tree against what its repository rule
+produces, so `bazel.yml`'s `rrc-verify` job (from `bazel-nightly.yml`, or a
+dispatch, whenever the variable is not `off`) fetches every lane's
+repositories cold and compares each tree and marker file with the entry a
+lane would read (`tools/bazel/rrc_verify.py`). A mismatch, a poisoned entry
+or a rule falsely marked reproducible, fails the job and opens an issue
+labeled `rrc-verify`: set the variable to `off` first, then investigate.
+
 ### Re-pinning the RBE worker host
 
 Every action's key carries `worker-env`, the sha256 of
@@ -446,9 +506,9 @@ change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
   hours, so drift usually opens the issue before CI meets it.
 - A change to the worker host (`tools/rbe/worker-env*`,
   `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
-  Blacksmith image in bazel.yml's `bazel / unit` lane, which the required
+  Blacksmith image in bazel.yml's `worker-host` job, which the required
   `bazel test (side-by-side)` gate fans in. If the PR's manifest is not
-  what that image measures, the lane fails.
+  what that image measures, the job fails.
 
 To re-pin, anyone with write access:
 
@@ -463,9 +523,9 @@ To re-pin, anyone with write access:
    the old pin don't schedule.
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
-   bazel.yml lane skips the remote suite. The unit lane measures its own
-   Blacksmith host against the new manifest instead, and fails if they
-   differ.
+   bazel.yml lane skips the remote suite. The worker-host job measures
+   its own Blacksmith host against the new manifest instead, and fails
+   if they differ.
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
@@ -481,7 +541,29 @@ re-pin.
 If an issue stays open for the current pin while hosts match again,
 close it by hand.
 
-## The outcome: protected PR feedback in under five minutes
+### Bumping the rbe-worker pin
+
+`.github/actions/rbe-worker/pin` names the `gastownhall/rbe-worker` commit
+the worker code pins (not to be confused with the worker-env manifest pin
+above). Bumping it is a one-line PR: change the 40-hex sha in `pin` to the
+new commit, open it, merge it.
+
+`bazel.yml`'s `worker-host` job measures the bump before it lands: it
+fetches the PR's pinned commit anonymously (no secret, `refs/heads/main`
+only), checks the fetched tree against this checkout's `tools/rbe` (S3-S5
+parity), and, because the pin moved, measures this Blacksmith host against
+it. H5 then walks every commit between the default branch's pin and the
+PR's: each one must be a GitHub-verified, signed commit, authored by
+`web-flow` (GitHub's merge-button identity), with an associated pull
+request merged into `rbe-worker`'s main. A direct push to `rbe-worker`
+main, however it's signed, fails this check: only a squash-merged PR
+reaches it. A rollback (a new pin that is not a descendant of the old one)
+warns instead of failing, so reverting a bad rbe-worker commit isn't
+blocked on rewriting its own history.
+
+The range check is dormant on a PR that doesn't move the pin: H5 has
+nothing to walk, and the parity/measure steps run anyway (every
+`worker-host` run fetches and diffs during S3-S5, pin-moved or not).
 
 The developer-visible service-level objective is p95 **under five minutes**
 from GitHub Actions PR-workflow creation until the required automated `CI`
@@ -963,14 +1045,15 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 498 calls / 184 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | fixed_sleep: 497 calls / 184 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 745 calls / 221 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 747 calls / 223 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-cp3hwi | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestPassthroughEnvWithholdsControllerTokenFromChildProcess: subprocess | ga-cp3hwi | the controller-token withholding proof is a checked Medium subprocess owner; the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map | P0.4b | 2026-10-31 |
+| Medium owner | `cmd/gc` package `main` | TestRuntimeLeaseCLIVsLegacyStart: subprocess | ga-cp3hwi | the CLI-vs-legacy runtime lease harness is a checked Medium subprocess owner; the CLI process is confined to TestRuntimeLeaseCLIVsLegacyStart, which re-execs the test binary as a gc session CLI starting a row through its Manager: the lease's flock and record must exclude a second process, so only a real one proves the controller's legacy start defers to it | P0.4b | 2026-10-31 |
 | Medium owner | `internal/api/apierr` package `apierr` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-cp3hwi | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint: subprocess | ga-cp3hwi | doctor custom-types configured-store targeting regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair | P0.4b | 2026-10-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-cp3hwi | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-10-31 |
@@ -978,6 +1061,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-10-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-10-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-31 |
+| Medium owner | `internal/session` package `session` | TestRuntimeLeaseCrossProcess: subprocess | ga-cp3hwi | the runtime lease cross-process harness is a checked Medium subprocess owner; the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store | P0.4b | 2026-10-31 |
 | Medium owner | `internal/workrecord` package `workrecord` | TestCommitReachableOnBranch: subprocess | ga-cp3hwi | the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner; the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestCacheZstdProbe: http_test_server | ga-cp3hwi | the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd | P0.4b | 2026-10-31 |
@@ -991,7 +1075,7 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 284 / 43) | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | environment: 119 calls / 16 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 60 calls / 25 files (historical regex census: 75 / 25) | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 320 calls / 123 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 319 calls / 123 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
 | Small debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 300 / 66) | ga-cp3hwi | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
 | Small debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
@@ -1003,13 +1087,13 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | environment: 124 calls / 16 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 61 calls / 25 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 320 calls / 123 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 319 calls / 123 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
-| Source debt ratchet | all untagged test source | subprocess: 497 calls / 147 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | subprocess: 499 calls / 149 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | tmux: 9 calls / 4 files (historical regex census: 7 / 3) | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-31 |
 

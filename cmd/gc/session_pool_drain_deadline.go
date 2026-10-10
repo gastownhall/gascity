@@ -87,15 +87,14 @@ func swapWorktreePruneForTest(fn func(sessionpkg.Info, string, *config.City, io.
 //
 // state=draining is deliberately NOT matched, and the premise for that is
 // narrower than it first looks. BeginDrainPatch is the sole writer of both
-// state=draining and drain_at, but it has TWO callers, not one:
-// DrainAckStopPendingPatch, whose rows reconcileDrainAckStopPending intercepts
-// and continues before this gate, and the exported session.Manager.BeginDrain,
-// which has no production caller today (only tests). So the real premise is
-// "drain_at is stamped on the controller's drain-ack path", and it holds by
-// call-graph accident rather than by invariant: wiring an operator-facing drain
-// to Manager.BeginDrain would widen this bound's population with nothing
-// failing. That is why gate 1 (poolSlotRetireOwnsSeat) enforces the identity
-// and state exclusions instead of arguing them from reachability.
+// state=draining and drain_at, and its one caller is DrainAckStopPendingPatch,
+// whose rows reconcileDrainAckStopPending intercepts and continues before this
+// gate. So the real premise is "drain_at is stamped on the controller's
+// drain-ack path", and it holds by call-graph accident rather than by
+// invariant: a new caller of BeginDrainPatch (an operator-facing drain, say)
+// would widen this bound's population with nothing failing. That is why gate 1
+// (poolSlotRetireOwnsSeat) enforces the identity and state exclusions instead
+// of arguing them from reachability.
 //
 // The drain-ack population converges through its own machinery when its runtime
 // is killable (measured: 3 ticks); when the runtime is NOT killable it stays
@@ -550,7 +549,7 @@ func poolSlotRuntimeStoppedForRetire(
 	if claimed {
 		return false, false
 	}
-	if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
 		return false, false
 	}

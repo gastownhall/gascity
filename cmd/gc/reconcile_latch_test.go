@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"io"
+	"maps"
 	"regexp"
 	"strings"
 	"testing"
@@ -9,6 +12,12 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/acp"
+	"github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/herdr"
+	"github.com/gastownhall/gascity/internal/runtime/k8s"
+	"github.com/gastownhall/gascity/internal/runtime/subprocess"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 // v2RefusalCases is one config per deferred feature, each hitting exactly one
@@ -57,7 +66,7 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 	for _, tc := range v2RefusalCases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := v2City(tc.cfg)
-			got := v2LatchRefusals(cfg)
+			got := v2LatchRefusals(cfg, nil)
 			if len(got) != 1 || got[0].Config != tc.config || got[0].ParityPR != tc.pr {
 				t.Fatalf("v2LatchRefusals = %+v, want one refusal of %q by %s", got, tc.config, tc.pr)
 			}
@@ -74,14 +83,14 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 		c.ChatSessions.IdleTimeout = "30m"
 		c.Session.Provider = "k8s"
 	})
-	if got := len(v2LatchRefusals(all)); got != 8 {
-		t.Errorf("v2LatchRefusals(every feature) = %d refusals, want 8", got)
+	if got := len(v2LatchRefusals(all, nil)); got != 8 {
+		t.Errorf("v2LatchRefusals(every feature, nil) = %d refusals, want 8", got)
 	}
 	_, err := latchReconcilerMode(all, overrideEnv("1"))
 	if err == nil {
 		t.Fatal("latch(every feature) admitted v2")
 	}
-	for _, r := range v2LatchRefusals(all) {
+	for _, r := range v2LatchRefusals(all, nil) {
 		if !strings.Contains(err.Error(), r.String()) {
 			t.Errorf("latch(every feature) error lacks %q: %v", r, err)
 		}
@@ -107,7 +116,7 @@ func TestV2LatchAdmitsInScopeFeatures(t *testing.T) {
 	})
 	for _, provider := range []string{"", "tmux", "acp", "subprocess", "fake", "fail"} {
 		cfg.Session.Provider = provider
-		if got := v2LatchRefusals(cfg); len(got) != 0 {
+		if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
 			t.Errorf("provider %q: v2LatchRefusals = %+v, want none", provider, got)
 		}
 		if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerV2 {
@@ -127,7 +136,7 @@ func TestV2LatchRuntimeAllowlist(t *testing.T) {
 	if runtimeRegistry.Resolves("undeclared-name") {
 		t.Fatal("the builtin registry resolves undeclared-name; pick another name")
 	}
-	if got := v2LatchRefusals(cfg); len(got) != 0 {
+	if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
 		t.Errorf("undeclared provider (tmux fallback): v2LatchRefusals = %+v, want none", got)
 	}
 	future := runtimeRegistry.Clone()
@@ -142,14 +151,14 @@ func TestV2LatchRuntimeAllowlist(t *testing.T) {
 	}
 	for _, provider := range []string{"nomad", "fly:app"} {
 		cfg.Session.Provider = provider
-		r, ok := v2SessionRuntimeRefusal(cfg, future)
+		r, ok := v2SessionRuntimeRefusal(cfg, future, v2SessionRuntimeName(cfg, nil))
 		want := `[session] provider = "` + provider + `" (unsupported session runtime) is not available under v2`
 		if !ok || r.String() != want {
 			t.Errorf("future provider %q: refusal = %q, %v; want %q", provider, r, ok, want)
 		}
 	}
 	cfg.Session.Provider = "tmux"
-	if _, ok := v2SessionRuntimeRefusal(cfg, future); ok {
+	if _, ok := v2SessionRuntimeRefusal(cfg, future, v2SessionRuntimeName(cfg, nil)); ok {
 		t.Error("tmux refused by a registry that resolves it, want admitted")
 	}
 }
@@ -187,7 +196,7 @@ func TestDoctorListsLatchRefusalsUnderLegacy(t *testing.T) {
 func TestLatchRefusalNamesParityPR(t *testing.T) {
 	parityPR := regexp.MustCompile(`^PAR-[A-Z0-9]+(-[0-9])?$`)
 	for _, tc := range v2RefusalCases {
-		for _, r := range v2LatchRefusals(v2City(tc.cfg)) {
+		for _, r := range v2LatchRefusals(v2City(tc.cfg), nil) {
 			if !parityPR.MatchString(r.ParityPR) || r.Feature == "" {
 				t.Errorf("%s: refusal %+v lacks a feature or a PAR- parity PR", tc.name, r)
 			}
@@ -195,5 +204,58 @@ func TestLatchRefusalNamesParityPR(t *testing.T) {
 				t.Errorf("%s: message %q does not name %q and %s", tc.name, s, r.Config, r.ParityPR)
 			}
 		}
+	}
+}
+
+// Pins ruling (c) safe by construction, not by accident: v2 runs only on
+// tmux, acp and subprocess (and the test doubles), each of which reads
+// liveness fresh with errors, so the plain row writes that stay on the
+// pass's cached liveness never run where no fresh read could be made;
+// herdr, k8s and exec, which cannot read fresh, refuse at the latch. A
+// runtime added to the allowlist must read fresh, or this fails.
+func TestV2RunsOnlyOnRuntimesThatReadFresh(t *testing.T) {
+	want := map[string]bool{"": true, "tmux": true, "acp": true, "subprocess": true, "fake": true, "fail": true}
+	if !maps.Equal(v2SessionRuntimesAdmitted, want) {
+		t.Fatalf("v2SessionRuntimesAdmitted = %v, want %v; a new runtime must read fresh (ruling (c))", v2SessionRuntimesAdmitted, want)
+	}
+	for name, p := range map[string]runtime.Provider{"tmux": (*tmux.Provider)(nil), "acp": (*acp.Provider)(nil), "subprocess": (*subprocess.Provider)(nil)} {
+		if !freshReadable(p) {
+			t.Errorf("admitted runtime %s cannot read fresh", name)
+		}
+	}
+	for name, p := range map[string]runtime.Provider{"herdr": (*herdr.Provider)(nil), "k8s": (*k8s.Provider)(nil), "exec": (*exec.Provider)(nil)} {
+		if v2SessionRuntimesAdmitted[name] || freshReadable(p) {
+			t.Errorf("%s: admitted %t, reads fresh %t; want refused, and not fresh (else revisit ruling (c))", name, v2SessionRuntimesAdmitted[name], freshReadable(p))
+		}
+	}
+}
+
+// Kills a latch that reads only the config's provider, and a v2 reload that
+// swaps onto a runtime the latch refuses (review item 1): GC_SESSION, the
+// provider the city runs, is what the latch judges, and a v2 controller's
+// provider swap to a refused runtime is itself refused before it pauses
+// anything. Not parallel: it replaces reconcilerModeLookupEnv.
+func TestV2LatchJudgesTheEffectiveProvider(t *testing.T) {
+	env := map[string]string{"GC_SESSION": "herdr"}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	cfg := v2City(func(c *config.City) { c.Session.Provider = "tmux" })
+	if got := v2LatchRefusals(cfg, lookup); len(got) != 1 || !strings.Contains(got[0].String(), "herdr") {
+		t.Fatalf("GC_SESSION=herdr over tmux: refusals %v, want herdr's", got)
+	}
+	if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
+		t.Fatalf("tmux, no override: refusals %v, want none", got)
+	}
+	saved := reconcilerModeLookupEnv
+	reconcilerModeLookupEnv = lookup
+	t.Cleanup(func() { reconcilerModeLookupEnv = saved })
+	cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
+	if _, err := cr.beforeProviderSwap(context.Background(), cfg); err == nil || cr.v2.planner.paused.Load() {
+		t.Fatalf("swap onto herdr under v2: err %v, paused %t; want refused before any pause", err, cr.v2.planner.paused.Load())
+	}
+	env = map[string]string{}
+	if resume, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+		t.Fatalf("swap onto tmux under v2: %v, want it held and applied", err)
+	} else {
+		resume()
 	}
 }

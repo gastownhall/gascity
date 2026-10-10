@@ -14,9 +14,12 @@ import (
 // Panics on failure — intended for TestMain.
 func BuildGC(dir string) string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_GC_BIN")); override != "" {
-		bin, err := filepath.Abs(override)
-		if err != nil {
-			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + err.Error())
+		// A BUILD target may name its gc with $(rootpath ...) (the
+		// testhooks-stamped gc of the quiescence rows), which is relative to
+		// the runfiles root, not to the package directory the test runs in.
+		bin := resolveToolOverride(override)
+		if bin == "" {
+			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + override)
 		}
 		info, err := os.Stat(bin)
 		if err != nil {

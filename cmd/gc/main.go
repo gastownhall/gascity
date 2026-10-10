@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -44,6 +45,9 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// Also before dispatch: every MySQL connection config copies the driver
 	// logger when it is built (mysql_driver_log.go).
 	installMySQLDriverLogger()
+	// A test-only cadence hook (internal/clock.BackstopSpeedupEnv) announces
+	// itself before anything else runs, active or ignored.
+	clock.AnnounceBackstopSpeedup(stderr)
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}

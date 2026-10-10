@@ -104,32 +104,45 @@ func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) ([]
 	return strings.Split(strings.TrimSuffix(string(rc), "\n"), "\n"), strings.Count(string(probes), "probe\n")
 }
 
-// bazelCacheZstdLaneStep returns bazel.yml's lane step that writes
-// .bazelrc.local, after checking it is the only step anywhere in bazel.yml
-// that does.
-func bazelCacheZstdLaneStep(t *testing.T) multiLaneStep {
+// bazelRCLocalLaneSteps are the only steps anywhere in bazel.yml that may
+// write .bazelrc.local, all in the lane job: the fork cache's zstd line and
+// the remote repo contents cache reader (bazel_rrc_test.go).
+var bazelRCLocalLaneSteps = []string{bazelCacheZstdStep, bazelRRCReadStep}
+
+// bazelRCLocalLaneStep returns bazel.yml's lane step name (one of
+// bazelRCLocalLaneSteps), after checking that no step outside
+// bazelRCLocalLaneSteps touches .bazelrc.local.
+func bazelRCLocalLaneStep(t *testing.T, name string) multiLaneStep {
 	t.Helper()
 	wf := readMultiLaneWorkflow(t)
 	var found *multiLaneStep
 	for id, job := range wf.Jobs {
 		for i, s := range job.Steps {
-			writes := strings.Contains(s.Run, ".bazelrc.local")
-			if id == "lane" && s.Name == bazelCacheZstdStep {
-				if found != nil {
-					t.Fatalf("%s: two %q steps", bazelMultiLaneWorkflow, bazelCacheZstdStep)
+			if id == "lane" && slices.Contains(bazelRCLocalLaneSteps, s.Name) {
+				if s.Name == name {
+					if found != nil {
+						t.Fatalf("%s: two %q steps", bazelMultiLaneWorkflow, name)
+					}
+					found = &job.Steps[i]
 				}
-				found = &job.Steps[i]
 				continue
 			}
-			if writes {
-				t.Errorf("%s job %s step %q touches .bazelrc.local; only the lane's %q may", bazelMultiLaneWorkflow, id, s.Name, bazelCacheZstdStep)
+			if strings.Contains(s.Run, ".bazelrc.local") {
+				t.Errorf("%s job %s step %q touches .bazelrc.local; only the lane's %q may", bazelMultiLaneWorkflow, id, s.Name, bazelRCLocalLaneSteps)
 			}
 		}
 	}
 	if found == nil {
-		t.Fatalf("%s: the lane job has no %q step", bazelMultiLaneWorkflow, bazelCacheZstdStep)
+		t.Fatalf("%s: the lane job has no %q step", bazelMultiLaneWorkflow, name)
 	}
 	return *found
+}
+
+// bazelCacheZstdLaneStep returns bazel.yml's lane step that writes the fork
+// cache's zstd line to .bazelrc.local.
+func bazelCacheZstdLaneStep(t *testing.T) multiLaneStep {
+	t.Helper()
+	return bazelRCLocalLaneStep(t, bazelCacheZstdStep)
 }
 
 // TestBazelForkCacheZstdStep: the lane step that may ask rbe-cache for zstd

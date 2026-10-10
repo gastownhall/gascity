@@ -651,6 +651,7 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	return s.create(b, false)
 }
 
@@ -1171,6 +1172,7 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
 // and unfenced paths cannot drift.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	noteSessionKeys(b, opts.Metadata) // every SQLite update applies its opts here
 	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
@@ -1823,6 +1825,7 @@ type sqliteStoreTx struct {
 // the exemption runs through CreateWithForeignID on the store, not inside a
 // caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}

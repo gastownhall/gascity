@@ -286,11 +286,10 @@ func newWaitClearOracle(t *testing.T) (*waitWriteLog, []string) {
 	return s, ids
 }
 
-// Kills: the v2 seam changing legacy (C8 ruling A). Legacy's entry point
-// keeps clearSessionWaitHoldIfIdle on every clear path: one blind batch of
-// exactly wait_hold, sleep_intent and sleep_reason per session, as before
-// the seam, even on a store that could fence. The v2 hooks write the same
-// keys by CAS and nothing blind.
+// Kills: the legacy and v2 wait-hold clears diverging. Since CONTRACT v5.9
+// D8 (an operator's hold outlives the wait) legacy's
+// clearSessionWaitHoldIfIdle decides as the v2 hook does and, on a store
+// that can fence, writes the same keys by the same CAS.
 func TestPrepareWaitWakeStateLegacyClearOracle(t *testing.T) {
 	deps := func(s beads.Store) waitDependencyReader {
 		return waitDependencyReaderFunc(func(id string) (beads.Bead, error) { return loadWaitDependencyBead("", s, id) })
@@ -301,7 +300,7 @@ func TestPrepareWaitWakeStateLegacyClearOracle(t *testing.T) {
 	}
 	var want []string
 	for _, id := range ids {
-		want = append(want, "batch "+id+" sleep_intent=,sleep_reason=,wait_hold=")
+		want = append(want, "cas "+id+" sleep_intent=,sleep_reason=,wait_hold=")
 	}
 	sort.Strings(legacy.log)
 	if !slices.Equal(legacy.log, want) {

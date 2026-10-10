@@ -97,17 +97,20 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
-	// LegStores are the census legs' stores by ref, which effects reach
-	// only as fenced writers (newEffectPass).
+	// LegStores holds the sessions leg's store by its ref, which effects
+	// reach only as a fenced writer (newEffectPass). No other leg's store is
+	// here: a census-only row has no writer (AL1, armCensusOnly).
 	LegStores map[string]beads.Store
 	// InputAges are the inputs' ages at Now, for the pass record.
 	InputAges map[string]time.Duration
 	// SessionsStore and RigStores are the stores the census was planned
-	// over, which only creates reach (newCreatePass); SessionsLeg is the
-	// sessions leg's ref, which an ambiguous create's alert names.
+	// over, which only creates reach (newCreatePass). The sessions leg's
+	// ref is Census.sessionsLeg().
 	SessionsStore beads.Store
 	RigStores     map[string]beads.Store
-	SessionsLeg   string
+	// fresh is one row's fresh runtime read, which the fresh accessors read
+	// in its pass's stead (withRuntime): set only inside an effect.
+	fresh *freshRow
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -153,12 +156,13 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
 	}
-	w.SessionsStore, w.RigStores, w.SessionsLeg = store, rigs, legs[0].ref
-	w.LegStores = make(map[string]beads.Store, len(legs))
+	w.SessionsStore, w.RigStores = store, rigs
+	w.LegStores = map[string]beads.Store{legs[0].ref: legs[0].store}
+	all := make(map[string]beads.Store, len(legs))
 	for _, l := range legs {
-		w.LegStores[l.ref] = l.store
+		all[l.ref] = l.store
 	}
-	w.InputAges = inputAges(now, w.LegStores, w.Obs, rec)
+	w.InputAges = inputAges(now, all, w.Obs, rec)
 	rows := w.Census.Canonical()
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {

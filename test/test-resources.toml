@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 745
-baseline_files = 221
+baseline_calls = 747
+baseline_files = 223
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,7 +23,7 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 498
+baseline_calls = 497
 baseline_files = 184
 reported_calls = 447
 reported_files = 157
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 497
-baseline_files = 147
+baseline_calls = 499
+baseline_files = 149
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,7 +64,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 320
+baseline_calls = 319
 baseline_files = 123
 reported_calls = 295
 reported_files = 114
@@ -244,6 +244,17 @@ expires = "2026-10-31"
 [[medium]]
 package_dir = "cmd/gc"
 package_name = "main"
+owner = "TestRuntimeLeaseCLIVsLegacyStart"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CLI-vs-legacy runtime lease harness is a checked Medium subprocess owner"
+resource_owner = "the CLI process is confined to TestRuntimeLeaseCLIVsLegacyStart, which re-execs the test binary as a gc session CLI starting a row through its Manager: the lease's flock and record must exclude a second process, so only a real one proves the controller's legacy start defers to it"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
 owner = "TestPassthroughEnvWithholdsControllerTokenFromChildProcess"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
@@ -316,6 +327,17 @@ owner_bead = "ga-cp3hwi"
 invariant = "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup"
 resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
 migration_target = "P0.4c-tmux"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/session"
+package_name = "session"
+owner = "TestRuntimeLeaseCrossProcess"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the runtime lease cross-process harness is a checked Medium subprocess owner"
+resource_owner = "the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store"
+migration_target = "P0.4b"
 expires = "2026-10-31"
 
 [[medium]]
@@ -500,7 +522,7 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 320
+baseline_calls = 319
 baseline_files = 123
 reported_calls = 287
 reported_files = 113

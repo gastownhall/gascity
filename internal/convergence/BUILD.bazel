@@ -47,6 +47,7 @@ go_test(
         "childstats_test.go",
         "condition_credentials_test.go",
         "condition_test.go",
+        "condition_unlaunchable_test.go",
         "create_test.go",
         "depfilter_test.go",
         "evaluate_test.go",

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -156,7 +155,6 @@ type decidePass struct {
 	snap *selectionSnapshot
 	obs  map[rowKey]rowObservation
 
-	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
 	// C2.11, C2.13).
 	none map[rowKey]string
@@ -248,7 +246,6 @@ func newDecidePass(in allocInputs) *decidePass {
 		selected: make(map[rowKey]*selection),
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
-		p.sessionsLeg = c.Legs[0].Ref
 		p.obs = observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)
 	}
 	return p
@@ -292,7 +289,6 @@ func (p *decidePass) classifyRows() {
 	if p.in.Cfg != nil {
 		startupTimeout = p.cfg.Session.StartupTimeoutDuration()
 	}
-	clk := &clock.Fake{Time: p.in.Now}
 	keys := make([]rowKey, 0, len(c.Rows))
 	for k := range c.Rows {
 		keys = append(keys, k)
@@ -327,13 +323,13 @@ func (p *decidePass) classifyRows() {
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
 		switch {
-		case k.Leg != p.sessionsLeg:
+		case k.Leg != c.sessionsLeg():
 			p.none[k] = reasonCensusOnly
 		case row.UnknownState:
 			p.none[k] = reasonUnknownState
 		case isFailedCreateSessionInfo(info):
 			p.none[k] = reasonFailedCreate
-		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
+		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackAt(info, p.in.Now, startupTimeout) &&
 			!endpointHolds:
 			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
@@ -481,7 +477,7 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
 		return ""
-	case pendingCreateSessionStillLeasedInfo(info, p.cfg, &clock.Fake{Time: p.in.Now}):
+	case pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
@@ -559,7 +555,7 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 			ref.DetachedAt = obs.LastActivity.UTC().Format(time.RFC3339Nano)
 		}
 	}
-	if !configWakeSuppressedInfo(ref, policy, nil, &clock.Fake{Time: p.in.Now}) {
+	if suppressed, _ := configWakeSuppressedAt(ref, policy, nil, p.in.Now); !suppressed {
 		return false
 	}
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},

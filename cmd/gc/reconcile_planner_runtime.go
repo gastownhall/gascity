@@ -121,6 +121,9 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		fmt.Fprintf(h.stderr, "v2 planner: creates disabled: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rt.planner.creates = creates
+	if stagingSeam != nil {
+		rt.planner.seam = stagingSeam(h.gather.CityPath)
+	}
 }
 
 // publishEnv publishes the host's config as the next generation unless the

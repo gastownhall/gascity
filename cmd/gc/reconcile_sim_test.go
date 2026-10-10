@@ -32,8 +32,10 @@ import (
 // each step, and the invariants are checked after it against ground truth
 // (the backing stores and the fake runtime). A failing seed prints its
 // schedule; GC_V2_SIM_SEED replays it. Hooks for later PRs: whatever
-// effectRegistry holds runs here unchanged, files add invariants through the
-// sim*Checks hooks, and scenarios drive sim's steps directly.
+// effectSpecs holds runs here unchanged, files add invariants through the
+// sim*Checks hooks, and scenarios drive sim's steps directly. A release may
+// run an outside writer inside the effect, at one of runTx's seams, and
+// every seam checks the transaction's lock scope.
 
 const (
 	simPatrol  = 10 * time.Second
@@ -86,9 +88,11 @@ var errSimListing = errors.New("sim: list-sessions failed")
 
 // simProvider is a fake tmux backend over runtime.Fake, whose other knobs
 // (peek, pending) it keeps: it lists corpses, keeps identity env per runtime,
-// answers every read fresh (so runtime.ObserveLivenessSince needs no method)
-// with LL2's Present bit and object ids, and records every Start and
-// destructive call.
+// and records every Start and destructive call. Once listed it caches as tmux
+// does: a plain liveness read (ObserveLivenessWithError, so
+// ObserveLivenessBounded) answers from the last listing, and only
+// ObserveLivenessSince reads fresh, each with LL2's Present bit and object
+// ids.
 type simProvider struct {
 	*runtime.Fake
 	mu          sync.Mutex
@@ -104,6 +108,7 @@ type simProvider struct {
 	nextStart   error // the next Start's scripted outcome
 	starts      []simStart
 	kills       []simKill
+	cached      map[string]simRuntime // the runtimes at the last listing
 }
 
 // put places a runtime under name; drop removes it. Both run under mu.
@@ -142,6 +147,16 @@ func (p *simProvider) ListRunning(string) ([]string, error) {
 
 func (p *simProvider) ListRunningComplete() bool { return true }
 
+// listed caches the runtimes as a listing sees them.
+func (p *simProvider) listed() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cached = make(map[string]simRuntime, len(p.rts))
+	for name, rt := range p.rts {
+		p.cached[name] = *rt
+	}
+}
+
 func (p *simProvider) ServerConfirmedDead() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -169,19 +184,37 @@ func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) 
 	return map[string]string{"GC_SESSION_ID": rt.id, "GC_RUNTIME_EPOCH": rt.epoch, "GC_INSTANCE_TOKEN": rt.token, "GT_PROCESS_NAMES": "agent"}, nil
 }
 
+// ObserveLivenessWithError answers from the last listing, once one ran.
 func (p *simProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if rt := p.rts[name]; rt != nil && rt.probeErr && !rt.corpse {
-		l := p.livenessLocked(name)
+	rt := p.rts[name]
+	if p.cached != nil {
+		rt = nil
+		if c, ok := p.cached[name]; ok {
+			rt = &c
+		}
+	}
+	return livenessOf(name, rt)
+}
+
+// ObserveLivenessSince reads the runtime as it is now.
+func (p *simProvider) ObserveLivenessSince(name string, _ []string, _ time.Time) (runtime.Liveness, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return livenessOf(name, p.rts[name])
+}
+
+func livenessOf(name string, rt *simRuntime) (runtime.Liveness, error) {
+	if rt != nil && rt.probeErr && !rt.corpse {
+		l := runtimeLiveness(rt)
 		l.Alive = false
 		return l, fmt.Errorf("sim: probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
 	}
-	return p.livenessLocked(name), nil
+	return runtimeLiveness(rt), nil
 }
 
-func (p *simProvider) livenessLocked(name string) runtime.Liveness {
-	rt := p.rts[name]
+func runtimeLiveness(rt *simRuntime) runtime.Liveness {
 	if rt == nil {
 		return runtime.Liveness{}
 	}
@@ -254,6 +287,12 @@ type simEffect struct {
 	release chan struct{}
 	done    chan settlement
 	settled bool // its settlement was posted: it ran, or its deadline passed
+	// seam and outside are an outside writer the release runs inside the
+	// effect, at that seam of runTx, on the effect's row; seams are the
+	// seams it reached.
+	seam    txSeam
+	outside func()
+	seams   []txSeam
 }
 
 // simWrite is one row change between two steps, by its actor.
@@ -299,7 +338,14 @@ type sim struct {
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
 	writes   []simWrite
 	admitted []time.Time // admitted starts (I9)
+	// stable is, by row ID, whether the pass that last admitted an effect
+	// for the row read it committed, its own runtime alive, and 30s past its
+	// wake: I15's view of A6's stability clear.
+	stable   map[string]bool
 	failures []string
+	locks    *lockObserver // the sections holding each row's mutation lock
+	runMu    sync.Mutex
+	running  map[effectKey]*simEffect // released, by key, for their seams
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -307,14 +353,17 @@ type sim struct {
 type simOpts struct {
 	rows     func(s *sim) (city, rig []beads.Bead)
 	inflight func(*inflightMap) plannerInflight
-	registry func(map[string]effectBuilder) map[string]effectBuilder
-	arms     func([]rowArm) []rowArm
+	specs    func(map[string]effectSpec)
+	// rowLock replaces runTx's session mutation lock, unobserved.
+	rowLock func(id string, fn func() error) error
+	arms    func([]rowArm) []rowArm
 }
 
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s := &sim{
 		t: t, seed: seed, rng: rand.New(rand.NewPCG(seed, 0x51d1a)), clk: newFakePlannerClock(plannerT0), obsClk: &clock.Fake{Time: plannerT0},
-		parkCh: make(chan *simEffect, 256), postCh: make(chan settlement, 256),
+		parkCh: make(chan *simEffect, 256), postCh: make(chan settlement, 256), stable: map[string]bool{},
+		running: make(map[effectKey]*simEffect),
 	}
 	s.lag = s.rng.IntN(2) == 0
 	s.sp = &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: s.clk.Now}
@@ -377,11 +426,19 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
 	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
 	s.p.effects = s.x
-	reg := effectRegistry
-	if o.registry != nil {
-		reg = o.registry(reg)
+	withSpecs(t, func(specs map[string]effectSpec) {
+		if o.specs != nil {
+			o.specs(specs)
+		}
+		s.gate(specs)
+	})
+	s.p.seam = s.atSeam
+	s.locks = observeRowLocks(t)
+	if o.rowLock != nil {
+		saved := withRowMutationLock
+		withRowMutationLock = o.rowLock
+		t.Cleanup(func() { withRowMutationLock = saved })
 	}
-	withRegistry(t, s.gated(reg))
 	if o.arms != nil {
 		saved := rowArms
 		rowArms = o.arms(slices.Clone(saved))
@@ -399,7 +456,7 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 		gen := 1 + s.rng.IntN(3)
 		token := fmt.Sprintf("tok-%s-%d", id, gen)
 		state := []string{"asleep", "active", "awake", "creating", "asleep"}[s.rng.IntN(5)]
-		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token}
+		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token, "last_woke_at", s.rel(-time.Duration(s.rng.IntN(90)) * time.Second)}
 		switch at := s.rel(time.Duration(s.rng.IntN(240)-120) * time.Second); s.rng.IntN(6) {
 		case 0:
 			meta = append(meta, "held_until", at, "sleep_reason", "user-hold")
@@ -425,23 +482,68 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 
 func (s *sim) rel(d time.Duration) string { return s.clk.Now().Add(d).UTC().Format(time.RFC3339) }
 
-// gated wraps every effect so it parks until a step releases it.
-func (s *sim) gated(reg map[string]effectBuilder) map[string]effectBuilder {
-	out := make(map[string]effectBuilder, len(reg))
-	for kind, build := range reg {
-		out[kind] = func(p *effectPass, it intent) func(context.Context) settlement {
-			run := build(p, it)
-			return func(ctx context.Context) settlement {
-				e := &simEffect{it: it, release: make(chan struct{}), done: make(chan settlement, 1)}
-				s.parkCh <- e
-				<-e.release
-				res := run(ctx)
-				e.done <- res
-				return res
+// gate wraps every effect in specs (around, outside the spec's own) so it
+// parks until a step releases it.
+func (s *sim) gate(specs map[string]effectSpec) {
+	for kind, spec := range specs {
+		if !spec.runs() {
+			continue
+		}
+		inner := spec.around
+		spec.around = func(ctx context.Context, c aroundCaps, run func() settlement) settlement {
+			e := &simEffect{it: c.it, release: make(chan struct{}), done: make(chan settlement, 1)}
+			s.parkCh <- e
+			<-e.release
+			key := effectKey{row: c.it.Key, token: c.it.CreatePlan.Token}
+			s.runMu.Lock()
+			s.running[key] = e
+			s.runMu.Unlock()
+			res := run
+			if inner != nil {
+				res = func() settlement { return inner(ctx, c, run) }
 			}
+			out := res()
+			s.runMu.Lock()
+			delete(s.running, key)
+			s.runMu.Unlock()
+			e.done <- out
+			return out
+		}
+		specs[kind] = spec
+	}
+}
+
+// atSeam runs on an effect's goroutine at runTx's seam at, the sim's
+// goroutine waiting on it: it checks the transaction's lock scope, then runs
+// the effect's outside writer if this is its seam. Inside a section the
+// row's session mutation lock is held, so no in-process writer lands
+// between the fresh read and the CAS; after a Call it is free while the
+// name lock holds, so a reaper skips the name. A spec that needs the name
+// lock holds it at every seam.
+func (s *sim) atSeam(_ context.Context, at txSeam, it intent, _, _ int) error {
+	s.runMu.Lock()
+	e := s.running[effectKey{row: it.Key, token: it.CreatePlan.Token}]
+	s.runMu.Unlock()
+	if e == nil {
+		return nil
+	}
+	e.seams = append(e.seams, at)
+	if k := it.Key; k.ID != "" {
+		needs := effectSpecs[it.Kind].needs // a kind's per-intent needs only add to these
+		row := s.prev[s.legOf(k.Leg).name+"/"+k.ID]
+		switch named := nameLocked(s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
+		case s.locks.holds(k.ID) != (at != seamBeforeCall && at != seamAfterCall):
+			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: row mutation lock held %t", it.Kind, k.ID, at, s.locks.holds(k.ID))
+		case (needs.NameLock || needs.Runtime || needs.Legs != 0 || needs.Idle || at == seamBeforeCall || at == seamAfterCall) && !named:
+			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: runtime name not locked", it.Kind, k.ID, at)
 		}
 	}
-	return out
+	if e.outside != nil && e.seam == at {
+		op := e.outside
+		e.outside = nil
+		op()
+	}
+	return nil
 }
 
 func (s *sim) logf(format string, args ...any) {
@@ -456,9 +558,15 @@ func (s *sim) pass() {
 	s.p.runPass(now)
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
+	census, obs := s.observed()
 	for _, it := range rec.Admitted {
 		if it.Kind == intentStart {
 			s.admitted = append(s.admitted, now)
+		}
+		if census != nil {
+			info := census.Rows[it.Key].Info
+			woke, err := time.Parse(time.RFC3339, info.LastWokeAt)
+			s.stable[it.Key.ID] = committed(info) && obs[it.Key].Liveness == livenessAlive && err == nil && now.Sub(woke) >= stabilityThreshold
 		}
 	}
 	for _, e := range s.inflight.view().Entries {
@@ -484,7 +592,7 @@ func (s *sim) pass() {
 }
 
 // release runs parked effect i to its end and waits for its settlement, or,
-// when its deadline already settled it, for its late event.
+// when its deadline already settled it, for its late post.
 func (s *sim) release(i int) {
 	e := s.parked[i]
 	s.parked = slices.Delete(s.parked, i, i+1)
@@ -503,12 +611,26 @@ func (s *sim) release(i int) {
 	for _, c := range after {
 		c(res)
 	}
-	switch {
-	case !e.settled:
-		s.awaitPost(func(st settlement) bool { return st.Key == e.it.Key && st.Kind == e.it.Kind })
-	case res.Event != nil:
-		s.awaitPost(func(st settlement) bool { return st.Key == (rowKey{}) && st.Event != nil })
+	if !e.settled || !res.Facts.empty() { // a late return posts only its facts
+		s.awaitPost(func(st settlement) bool {
+			return st.Key == e.it.Key && st.Kind == e.it.Kind && st.Token == e.it.CreatePlan.Token && st.Late == e.settled
+		})
 	}
+}
+
+// releaseInside releases parked effect i with an outside writer, picked at
+// random, run on its row at a random seam inside its section.
+func (s *sim) releaseInside(i int) {
+	e := s.parked[i]
+	e.seam = []txSeam{seamAfterRowRead, seamBeforeCAS}[s.rng.IntN(2)]
+	op := externalOps[s.rng.IntN(len(externalOps))]
+	e.outside = func() {
+		l := s.legOf(e.it.Key.Leg)
+		if b, err := l.backing.Get(e.it.Key.ID); err == nil {
+			s.outside(op.name+" inside "+e.it.Kind, l, b, func(l *simLeg, b beads.Bead) { op.fn(s, l, b) })
+		}
+	}
+	s.release(i)
 }
 
 // awaitPost waits for the executor's post that match picks.
@@ -552,6 +674,7 @@ func (s *sim) inventory() {
 		l.lastProvider, l.providerGen = s.sp, l.providerGen+1
 	}
 	listing, _ := l.listBounded(context.Background(), s.sp) // the fake answers at once
+	s.sp.listed()
 	h := heldListing{listing: listing, started: s.clk.Now(), version: s.sp.version}
 	if s.lag && s.rng.IntN(2) == 0 {
 		h.passes = s.rng.IntN(4)
@@ -578,8 +701,12 @@ func (s *sim) external(name string, fn func(l *simLeg, b beads.Bead)) {
 	if len(rows) == 0 {
 		return
 	}
-	b := rows[s.rng.IntN(len(rows))]
-	s.sp.external = true // no effect runs while the sim steps
+	s.outside(name, l, rows[s.rng.IntN(len(rows))], fn)
+}
+
+// outside runs fn on row b of leg l as an outside writer, and audits it.
+func (s *sim) outside(name string, l *simLeg, b beads.Bead, fn func(l *simLeg, b beads.Bead)) {
+	s.sp.external = true // no effect calls the provider while it runs
 	fn(l, b)
 	s.sp.external = false
 	s.logf("external %s on %s/%s", name, l.name, b.ID)
@@ -719,8 +846,12 @@ func (s *sim) step() {
 	case r < 22:
 		s.pass()
 	case r < 36:
-		if len(s.parked) > 0 {
-			s.release(s.rng.IntN(len(s.parked)))
+		switch i := s.rng.IntN(max(len(s.parked), 1)); {
+		case len(s.parked) == 0:
+		case s.parked[i].it.Key.ID != "" && s.rng.IntN(3) == 0:
+			s.releaseInside(i)
+		default:
+			s.release(i)
 		}
 	case r < 46:
 		s.advance(time.Duration(1+s.rng.IntN(int(simPatrol/time.Second))) * time.Second)
@@ -1051,13 +1182,12 @@ var simMutants = []struct {
 	opts      simOpts
 }{
 	{"the in-flight map loses a settlement", "I8 ", simOpts{inflight: func(m *inflightMap) plannerInflight { return droppingInflight{m} }}},
-	{"an effect reports a landing it never wrote", "I10 ", simOpts{registry: func(reg map[string]effectBuilder) map[string]effectBuilder {
-		out := maps.Clone(reg)
-		out[intentRowHeal] = func(*effectPass, intent) func(context.Context) settlement {
-			return func(context.Context) settlement { return settlement{Outcome: settledLanded} }
-		}
-		return out
+	{"an effect reports a landing it never wrote", "I10 ", simOpts{specs: func(specs map[string]effectSpec) {
+		heal := specs[intentRowHeal]
+		heal.sections, heal.body = nil, func(context.Context, txCaps) settlement { return settlement{Outcome: settledLanded} }
+		specs[intentRowHeal] = heal
 	}}},
+	{"an effect section runs outside the row's mutation lock", "LOCK ", simOpts{rowLock: func(_ string, fn func() error) error { return fn() }}},
 }
 
 // Kills invariant checks that check nothing: the corpus catches each mutant

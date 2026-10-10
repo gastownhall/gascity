@@ -1162,8 +1162,9 @@ func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testi
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start(second): %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach(second): %v", err)
 	}
 
 	secondStart := lastCall(sp.Calls, "Start")
@@ -1235,8 +1236,9 @@ func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCach
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start(second): %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach(second): %v", err)
 	}
 
 	secondStart := lastCall(sp.Calls, "Start")
@@ -2415,8 +2417,9 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	if err := handle.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start(second): %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach(second): %v", err)
 	}
 	if len(sp.Calls) < 3 {
 		t.Fatalf("runtime calls = %#v, want second Start after Stop", sp.Calls)
@@ -2467,8 +2470,9 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 	}
 
 	sp.Calls = nil
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
 	start := firstCall(sp.Calls, "Start")
 	if start == nil {

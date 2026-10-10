@@ -53,7 +53,8 @@ var canonicalProviderAliasBindings = map[string]int{
 var canonicalProviderCalls = map[string]int{
 	"cmd_citystatus.go:cmdCityStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                   1,
 	"cmd_citystatus.go:cmdCityStatusLocalFallback:newStatusSessionProviderForCityWithSnapshot:bind-error":                                      1,
-	"cmd_convoy_dispatch.go:runControlDispatcherWithStoreAndConfig:dispatchControlSessionProvider:bind-error":                                  2,
+	"cmd_convoy_dispatch.go:recycleDispatchSubjectSession:dispatchControlSessionProvider:bind-error":                                           1,
+	"cmd_convoy_dispatch.go:validateDispatchSessionProviderConfig:newSessionProviderFromContext:bind-error":                                    1,
 	"cmd_doctor.go:buildDoctorChecks:newSessionProvider:bind-error":                                                                            1,
 	"cmd_handoff.go:cmdHandoffRemoteWithForce:newSessionProvider:bind-error":                                                                   1,
 	"cmd_handoff.go:cmdHandoffWithForce:newSessionProvider:bind-error":                                                                         1,
@@ -79,6 +80,7 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_session.go:doSessionListFallback:withSessionProviderConstructionContext:bind-error":                                                   1,
 	"cmd_session.go:doSessionPeekFallback:newSessionProvider:bind-error":                                                                       1,
 	"cmd_session_reset.go:cmdSessionReset:newSessionProvider:bind-error":                                                                       1,
+	"cmd_session_wake.go:wakeVerdictProvider:newSessionProvider:bind-error":                                                                    1,
 	"cmd_sling.go:cmdSlingWithJSON:newSessionProvider:bind-error":                                                                              1,
 	"cmd_start.go:doStartStandalone:newSessionProviderForCity:bind-error":                                                                      1,
 	"cmd_status.go:cmdRigStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                        1,

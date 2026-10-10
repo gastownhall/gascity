@@ -1338,11 +1338,11 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
 
-	// Drain the session directly via the manager (the API surface for drain
-	// lives elsewhere; this test isolates the transition check).
+	// Drain the session the way the controller's drain-ack path does, the
+	// only writer of state=draining (this test isolates the transition check).
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
+	if err := mgr.PersistedStore().ApplyPatch(info.ID, session.DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
 
 	w := httptest.NewRecorder()
@@ -1840,83 +1840,64 @@ func TestHandleSessionWake(t *testing.T) {
 	}
 }
 
-func TestHandleSessionWakeStartsSuspendedRuntime(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
+// TestHandleSessionWakeRecordsWakeOnly is D8 rule 6 (CONTRACT v5.9): POST
+// /wake records the wake and hands the session to the controller; it never
+// starts a runtime in the controller process. A controller that will not
+// start the session says why, with the wake still recorded; it judges the
+// row after the wake. Kills the API wake's own start, a refusal that drops
+// the wake, and a refusal read from the pre-wake row.
+func TestHandleSessionWakeRecordsWakeOnly(t *testing.T) {
+	for name, refusal := range map[string]string{"starts": "", "will not start": "rig \"r\" is suspended"} {
+		t.Run(name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			if err := mgr.Suspend(info.ID); err != nil {
+				t.Fatalf("Suspend: %v", err)
+			}
+			state := &wakeRefusingState{fakeState: fs, refusal: refusal}
+			h := newTestCityHandlerWith(t, state, New(state))
+			startsBefore := fs.sp.CountCalls("Start", info.SessionName)
 
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-	if fs.sp.IsRunning(info.SessionName) {
-		t.Fatalf("session %q running after suspend", info.SessionName)
-	}
+			w := httptest.NewRecorder()
+			synctest.Test(t, func(*testing.T) {
+				h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil))
+				synctest.Wait()
+			})
 
-	w := httptest.NewRecorder()
-	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
-	h.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	deadline := time.Now().Add(testEventTimeout)
-	for !fs.sp.IsRunning(info.SessionName) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatalf("session %q should be running after async POST /wake start", info.SessionName)
+			if refusal == "" && w.Code != http.StatusOK || refusal != "" && (w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "will not start")) {
+				t.Fatalf("status %d, body %s; want refusal %q", w.Code, w.Body.String(), refusal)
+			}
+			if n := fs.sp.CountCalls("Start", info.SessionName); n != startsBefore {
+				t.Fatalf("Start calls = %d, want the controller to start the session", n-startsBefore)
+			}
+			if got := fs.enqueuedKeys(); !slices.Contains(got, reconcilekey.Session(info.ID)) {
+				t.Fatalf("enqueued keys = %v, want the session handed to the controller", got)
+			}
+			b, err := fs.cityBeadStore.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Metadata["wake_request"] == "" {
+				t.Fatalf("metadata = %v, want the wake recorded", b.Metadata)
+			}
+			if state.seen.WakeRequest == "" || state.seen.MetadataState == "suspended" {
+				t.Fatalf("refuser read %+v, want the row after the wake", state.seen)
+			}
+		})
 	}
 }
 
-// onDeathGatedState holds one session name in the on_death start interlock.
-type onDeathGatedState struct {
+// wakeRefusingState is a controller that names why it will not start.
+type wakeRefusingState struct {
 	*fakeState
-	pending string
+	refusal string
+	seen    session.Info
 }
 
-func (s *onDeathGatedState) OnDeathHookPending(name string) bool { return name == s.pending }
-
-// Kills: an API wake starting a runtime while the name's on_death hook is
-// queued or running. The wake is recorded and handed to the reconciler,
-// whose start path waits for the hook.
-func TestHandleSessionWakeDefersStartWhileOnDeathHookPending(t *testing.T) {
-	fs := newSessionFakeState(t)
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Gated Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-	gated := &onDeathGatedState{fakeState: fs, pending: info.SessionName}
-	h := newTestCityHandlerWith(t, gated, New(gated))
-	startsBefore := fs.sp.CountCalls("Start", info.SessionName)
-
-	// The bubble makes the "no Start" check exact: synctest.Wait returns only
-	// once every goroutine the request started (an async start included) has
-	// finished or blocked.
-	w := httptest.NewRecorder()
-	synctest.Test(t, func(*testing.T) {
-		h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil))
-		synctest.Wait()
-	})
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	if n := fs.sp.CountCalls("Start", info.SessionName); n != startsBefore {
-		t.Fatalf("Start calls = %d, want none while the on_death hook is pending", n-startsBefore)
-	}
-	if got := fs.enqueuedKeys(); !slices.Contains(got, reconcilekey.Session(info.ID)) {
-		t.Fatalf("enqueued keys = %v, want the session handed to the reconciler", got)
-	}
-	b, err := fs.cityBeadStore.Get(info.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Metadata["wake_request"] == "" {
-		t.Fatalf("metadata = %v, want the wake recorded for the reconciler", b.Metadata)
-	}
+func (s *wakeRefusingState) WakeStartRefusal(info session.Info) (string, bool) {
+	s.seen = info
+	return s.refusal, true
 }
 
 func TestHandleSessionWakeClosed(t *testing.T) {
@@ -4869,7 +4850,7 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello","resume":true}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
 	done := make(chan struct{})

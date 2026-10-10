@@ -4,6 +4,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -13,7 +15,8 @@ import (
 // pass saw, instance_token included. The heals that move state on what the
 // runtime reads are the fresh kind: their effect re-proves the read under the
 // runtime name lock before it writes (reconcile_effect_heal.go). No arm here
-// runs for a row with an effect in flight: the pass skips it (R5).
+// runs for a row with an effect in flight: the pass skips it (R5), nor for a
+// census-only row, which legacy never reconciles (armCensusOnly).
 //
 // The asleep heals act only on a runtime the inventory reads gone. A dead
 // one (a corpse, or a live pane whose agent reads dead, which a booting agent
@@ -23,19 +26,61 @@ import (
 
 // A6's other reasons.
 const (
-	decideClaimClear    = "claim-clear"
-	decideCreatingHeal  = "creating-heal"
-	decideDeadNamedHeal = "dead-named-heal"
-	decideCrashHeal     = "crash-heal"
-	decideAwakeHeal     = "awake-heal"
-	decideStrandedClear = "stranded-clear"
-	decideCurrentBead   = "current-bead"
+	decideClaimClear      = "claim-clear"
+	decideCreatingHeal    = "creating-heal"
+	decideDeadRuntimeHeal = "dead-runtime-heal"
+	decideAwakeHeal       = "awake-heal"
+	decideStabilityClear  = "stability-clear"
+	decideDetachedAt      = "detached-at"
+	decideStrandedClear   = "stranded-clear"
+	decideCurrentBead     = "current-bead"
 )
 
 // heal is the row write of patch as kind, at the incarnation the pass saw.
 func (r *rowFacts) heal(kind, reason string, patch session.MetadataPatch) (intent, bool) {
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch}, true
+}
+
+// freshGone is gone for a fresh kind's arm: it rests the decision on the
+// runtime, and on the effect's fresh read it is that read's absence.
+func (r *rowFacts) freshGone() bool {
+	r.rests |= restRuntime
+	if r.fresh != nil {
+		return r.fresh.Class == rtAbsent
+	}
+	return r.gone()
+}
+
+// freshIdentity is the row's runtime identity for a fresh kind's arm (A3's
+// rekey): the inventory's read on the pass's facts; on the effect's fresh
+// read, the identity read on one object across its brackets, else unknown.
+func (r *rowFacts) freshIdentity() runtimeIdentity {
+	r.rests |= restRuntime
+	if r.fresh == nil {
+		return r.w.Observed[r.k].Identity
+	}
+	if !r.fresh.Same {
+		return runtimeIdentity{}
+	}
+	return r.fresh.Identity
+}
+
+// freshOwnAlive reports the row's own runtime alive, its identity Current
+// (O2), for a fresh kind's arm: on the pass's facts, alive with no failed
+// process probe and the inventory's identity read; on the effect's fresh
+// read, alive across its identity read and that identity.
+func (r *rowFacts) freshOwnAlive() bool {
+	r.rests |= restRuntime
+	info := r.row.Info
+	if r.fresh != nil {
+		return r.fresh.Alive() && compareIdentity(info, r.fresh.Identity) == identityCurrent
+	}
+	if !r.aliveProbed() || r.w.Obs == nil {
+		return false
+	}
+	obs, ok := r.w.Obs.Observation(strings.TrimSpace(info.SessionName), r.w.Now, r.w.ObsMaxAge)
+	return ok && compareIdentity(info, obs.Identity) == identityCurrent
 }
 
 // gone reports that the row's runtime reads gone; wake that the row is Wake.
@@ -46,11 +91,13 @@ func (r *rowFacts) wake() bool { return r.entry != nil && r.entry.Desired == des
 // legacy defers a row's whole lifecycle when its liveness probe errs (the
 // probe-error defer, SESS-056), so no alive-gated heal or marker runs then.
 func (r *rowFacts) aliveProbed() bool {
-	if r.entry == nil || !r.entry.Liveness.alive() {
-		return false
-	}
+	return r.entry != nil && r.entry.Liveness.alive() && !r.probeFailed()
+}
+
+// probeFailed reports that the row's last process probe failed.
+func (r *rowFacts) probeFailed() bool {
 	name := strings.TrimSpace(r.row.Info.SessionName)
-	return r.w.Obs.Fact(name, FactProcessAlive, r.w.Now, r.w.ObsMaxAge).Reason != obsReasonProbeIncomplete
+	return r.w.Obs.Fact(name, FactProcessAlive, r.w.Now, r.w.ObsMaxAge).Reason == obsReasonProbeIncomplete
 }
 
 // committed reports state active or awake, which S2's commit writes.
@@ -78,33 +125,36 @@ func armClaimClear(r *rowFacts) (intent, bool) {
 // running, or one that just settled deferred with its runtime up.
 func armCreatingHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || !r.gone() || r.wake() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGone() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideCreatingHeal, asleepHealPatch(info))
 }
 
-// armDeadNamedHeal is legacy's heal of a committed row whose runtime is
-// gone, kept for a named row that is not Wake (v5.2 A6): no close arm takes a
-// named row, so it would otherwise read active forever. A row still holding a
-// claim is armClaimClear's first, as legacy projects it start-pending.
-func armDeadNamedHeal(r *rowFacts) (intent, bool) {
+// armDeadRuntimeHeal is SESS-531, legacy's heal of a committed row whose
+// runtime is gone (v5.8e A6 item 4), for every sessions-leg row AL1 does not
+// Drain (a census-only rig-leg row is armCensusOnly's). A gone row AL1
+// Drains is undesired, and A21's orphan close takes it (C5c1b). The
+// heal resets a continuation no deliberate sleep ended, so the relaunch A18
+// proposes for a Wake row does not resume the crashed conversation, and it
+// leaves a pool row AL1 wants asleep (quarantined, held, idle-suppressed)
+// asleep with runtime-missing, which A21's pool-slot close can free; a named
+// row no close arm takes would otherwise read active forever. A row still
+// holding a claim is armClaimClear's first, as legacy projects it
+// start-pending. A heartbeat-held row waits for A17 (C5b): healed, A21 would
+// close the seat legacy respawns through its hold (SESS-602).
+func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if !committed(info) || !isNamedSessionInfo(info) || !r.gone() || r.wake() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || heartbeatHeld(info, r.w.Now) || !r.freshGone() {
 		return intent{}, false
 	}
-	return r.heal(intentRowHealFresh, decideDeadNamedHeal, asleepHealPatch(info))
+	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, asleepHealPatch(info))
 }
 
-// armCrashHeal is SESS-531, legacy's heal on its desired path: a committed
-// Wake row whose runtime is gone goes asleep with legacy's patch, which
-// resets a continuation no deliberate sleep ended, so the relaunch A18
-// proposes next does not resume the crashed conversation.
-func armCrashHeal(r *rowFacts) (intent, bool) {
-	if !committed(r.row.Info) || !r.gone() || !r.wake() {
-		return intent{}, false
-	}
-	return r.heal(intentRowHealFresh, decideCrashHeal, asleepHealPatch(r.row.Info))
+// heartbeatHeld reports a live hold no sleep intent explains: SESS-602's
+// heartbeat hold. The timer is trimmed, as operatorDormant's.
+func heartbeatHeld(info session.Info, now time.Time) bool {
+	return metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) && strings.TrimSpace(info.SleepIntent) == ""
 }
 
 // armAwakeHeal is legacy's heal of an asleep row whose own runtime is alive
@@ -119,12 +169,7 @@ func armCrashHeal(r *rowFacts) (intent, bool) {
 // before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || !r.aliveProbed() || r.w.Obs == nil ||
-		operatorDormant(info, r.w.Now) {
-		return intent{}, false
-	}
-	obs, ok := r.w.Obs.Observation(strings.TrimSpace(info.SessionName), r.w.Now, r.w.ObsMaxAge)
-	if !ok || compareIdentity(info, obs.Identity) != identityCurrent {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || operatorDormant(info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
@@ -143,6 +188,64 @@ func operatorDormant(info session.Info, now time.Time) bool {
 	return session.IsKillPendingInfo(info, now) || strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) ||
 		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) ||
 		metadataTimeInFuture(strings.TrimSpace(info.QuarantinedUntil), now)
+}
+
+// armStabilityClear is SESS-539/540 (clearWakeFailures, clearChurn; v5.8
+// A6 item 6): a committed row alive 30s past last_woke_at clears its wake
+// failures, and at 5 minutes its churn count, with legacy's patches. Its
+// premise, last_woke_at unchanged, is the effect's re-decide: a wake since the
+// pass stamps last_woke_at after the pass time, which proposes nothing.
+func armStabilityClear(r *rowFacts) (intent, bool) {
+	info := r.row.Info
+	woke, err := time.Parse(time.RFC3339, info.LastWokeAt)
+	if !committed(info) || !r.aliveProbed() || err != nil || r.w.Now.Sub(woke) < stabilityThreshold {
+		return intent{}, false
+	}
+	patch := session.MetadataPatch{}
+	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
+		patch["wake_attempts"] = "0"
+	}
+	if info.QuarantinedUntil != "" {
+		patch["quarantined_until"] = ""
+	}
+	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
+		patch["churn_count"] = "0"
+	}
+	if len(patch) == 0 {
+		return intent{}, false
+	}
+	return r.heal(intentRowHeal, decideStabilityClear, patch)
+}
+
+// armDetachedAt is SESS-533/535/536 (reconcileDetachedAtInfo; v5.8 A6 item
+// 7): on a committed, alive row whose resolved sleep policy is interactive,
+// enabled and Full, the inventory's attach fact clears detached_at while
+// attached and stamps the pass time once detached; on any other row a set
+// detached_at clears. An uncertain attach on an alive row under such a
+// policy, committed or not, writes nothing (SESS-534), nor does a row whose
+// liveness is unknown or whose process probe failed, which legacy defers
+// (SESS-056). Its premise, detached_at unchanged, is the re-decide.
+func armDetachedAt(r *rowFacts) (intent, bool) {
+	info, e := r.row.Info, r.entry
+	if e == nil || e.Liveness == livenessUnknown || r.probeFailed() {
+		return intent{}, false
+	}
+	set := info.DetachedAt != ""
+	policy := r.w.SleepPolicies[info.ID]
+	tracked := policy.Class != config.SessionSleepNonInteractive && policy.enabled() && policy.Capability == runtime.SessionSleepCapabilityFull
+	obs, stamp := r.w.Observed[r.k], ""
+	switch {
+	case tracked && e.Liveness.alive() && obs.Uncertain:
+		return intent{}, false
+	case tracked && committed(info) && e.Liveness.alive() && !obs.Attached:
+		if set {
+			return intent{}, false
+		}
+		stamp = r.w.Now.UTC().Format(time.RFC3339)
+	case !set:
+		return intent{}, false
+	}
+	return r.heal(intentRowHeal, decideDetachedAt, session.MetadataPatch{"detached_at": stamp})
 }
 
 // armStrandedClear is SESS-603 (clearStrandedEventMarker): an alive row ends

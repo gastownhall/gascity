@@ -53,6 +53,13 @@ type SessionObjectKiller interface {
 	KillZombieObject(name, objectID, created, panePID string) (SessionObjectKillResult, error)
 }
 
+// FreshByConstruction is implemented by providers whose
+// ObserveLivenessWithError reads the runtime on every call (acp and
+// subprocess probe their control socket), so that read is already fresh.
+type FreshByConstruction interface {
+	LivenessReadsFresh() bool
+}
+
 // FreshLivenessObserver is the optional capability for a liveness read that
 // reflects the runtime at or after since (v5 O1 "fresh for the effect").
 type FreshLivenessObserver interface {

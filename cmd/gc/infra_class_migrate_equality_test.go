@@ -365,7 +365,7 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 		Ref:         "step-3",
 		NoHistory:   true,
 		DeferUntil:  &deferred,
-		Metadata:    beads.StringMap{"gc.session_name": "worker-1"},
+		Metadata:    beads.StringMap{"test_session_name": "worker-1"},
 		// The source row carries the status-based deferral marker the work
 		// store produces for a bd-`deferred` row. The destination cannot hold
 		// it — it is json:"-" and SQLiteStore persists through bead_json — so
