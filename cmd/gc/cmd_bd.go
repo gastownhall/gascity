@@ -794,7 +794,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// The flag sets are the complete value-consuming and boolean (no-value)
 	// flags for this subcommand, in both long and short form, sourced from
-	// `bd <sub> --help` (bd 1.3.2-rc.1, 2026-10-05). Unknown flags not in either set
+	// `bd <sub> --help` (bd 1.3.2-rc.2, 2026-10-10). Unknown flags not in either set
 	// make the scan ambiguous.
 	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
 	if ambiguous {

@@ -1181,8 +1181,8 @@ github.com/steveyegge/beads v1.3.1-rc.2 h1:zW5nPr/5aEnsj1R9txIVB/S5kZm4b33xlOw2E
 github.com/steveyegge/beads v1.3.1-rc.2/go.mod h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=
 github.com/steveyegge/beads v1.3.1 h1:Ec9DhMDHo/prSd8PDYts+4VF5TY9hI0PrZ46bYnxj1Y=
 github.com/steveyegge/beads v1.3.1/go.mod h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=
-github.com/steveyegge/beads v1.3.2-rc.1 h1:4Q6wTP77puIXf1RqtXupIqNWFLDO314Kb0J+iUIm8eE=
-github.com/steveyegge/beads v1.3.2-rc.1/go.mod h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=
+github.com/steveyegge/beads v1.3.2-rc.2 h1:o/M+4R19MY7/Hhh2HeUPdcAjIQVlLs2CZDeGuxEiFnM=
+github.com/steveyegge/beads v1.3.2-rc.2/go.mod h1:z7FHqG/z403/Sjr6j36QaeWdFWFpEDwQVhWZt9C3Mug=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.1.1/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.2.0/go.mod h1:qt09Ya8vawLte6SNmTgCsAVtYtaKzEcn8ATUoHMkEqE=
