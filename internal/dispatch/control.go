@@ -304,6 +304,22 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph direct-check-infra-blind bead=%s attempt=%d reason=%s", bead.ID, iterationNum, reason)
+		checkResult.Outcome = convergence.GateError
+	}
+	// Direct ralph controls run their check here rather than through
+	// processRalphCheck. Apply the same bounded infrastructure budget: a check
+	// that produced no verdict must not consume a substantive iteration.
+	if checkResult.Outcome == convergence.GateError || checkResult.Outcome == convergence.GateTimeout {
+		infraRetries, _ := strconv.Atoi(reloaded.Metadata[beadmeta.CheckInfraRetryMetadataKey])
+		if infraRetries < maxCheckInfraRetries {
+			if err := store.SetMetadata(bead.ID, beadmeta.CheckInfraRetryMetadataKey, strconv.Itoa(infraRetries+1)); err != nil {
+				return attemptEvaluation{}, fmt.Errorf("%s: recording direct check infra-retry: %w", bead.ID, err)
+			}
+			return attemptEvaluation{}, ErrControlPending
+		}
+	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
 	if checkResult.Outcome == convergence.GatePass {
 		eval.disposition = attemptPass

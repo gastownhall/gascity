@@ -6,7 +6,79 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 )
+
+func newDirectRalphControl(t *testing.T, checkPath string) (*beads.MemStore, beads.Bead) {
+	t.Helper()
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{Title: "workflow", Metadata: map[string]string{beadmeta.KindMetadataKey: "workflow"}})
+	control := mustCreate(t, store, beads.Bead{Title: "ralph", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: "ralph", beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepRefMetadataKey: "mol-test.ralph", beadmeta.MaxAttemptsMetadataKey: "1",
+		beadmeta.CheckModeMetadataKey: beadmeta.CheckModeExec, beadmeta.CheckPathMetadataKey: checkPath,
+		beadmeta.CheckTimeoutMetadataKey: "50ms",
+	}})
+	iteration := mustCreate(t, store, beads.Bead{Title: "iteration", Metadata: map[string]string{
+		beadmeta.KindMetadataKey: "scope", beadmeta.RootBeadIDMetadataKey: root.ID,
+		beadmeta.StepRefMetadataKey: "mol-test.ralph.iteration.1", beadmeta.AttemptMetadataKey: "1",
+	}})
+	mustClose(t, store, iteration.ID)
+	mustDep(t, store, control.ID, iteration.ID, "blocks")
+	return store, control
+}
+
+func TestProcessDirectRalphControlInfraTimeoutDoesNotBurnIteration(t *testing.T) {
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "slow-direct.sh", "#!/bin/bash\nsleep 30\n")
+	store, control := newDirectRalphControl(t, checkPath)
+
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRalphControl error = %v, want ErrControlPending", err)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Status == "closed" || got.Metadata[beadmeta.CheckInfraRetryMetadataKey] != "1" {
+		t.Fatalf("control = status %q infra_retry %q, want open/1", got.Status, got.Metadata[beadmeta.CheckInfraRetryMetadataKey])
+	}
+	if got.Metadata[beadmeta.AttemptLogMetadataKey] != "" || got.Metadata[beadmeta.FailedAttemptMetadataKey] != "" {
+		t.Fatalf("infra timeout consumed iteration metadata: %v", got.Metadata)
+	}
+}
+
+func TestProcessDirectRalphControlCompletedFailureStillExhausts(t *testing.T) {
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "fail-direct.sh", "#!/bin/bash\necho 'tests failed' >&2\nexit 1\n")
+	store, control := newDirectRalphControl(t, checkPath)
+	if err := store.SetMetadata(control.ID, beadmeta.CheckTimeoutMetadataKey, "2s"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	if err != nil || result.Action != "fail" {
+		t.Fatalf("result=%+v err=%v, want fail", result, err)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Metadata[beadmeta.FailedAttemptMetadataKey] != "1" || got.Metadata[beadmeta.CheckInfraRetryMetadataKey] != "" {
+		t.Fatalf("completed failure metadata = %v", got.Metadata)
+	}
+}
+
+func TestProcessDirectRalphControlInfraBudgetExhausts(t *testing.T) {
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "slow-exhausted.sh", "#!/bin/bash\nsleep 30\n")
+	store, control := newDirectRalphControl(t, checkPath)
+	if err := store.SetMetadata(control.ID, beadmeta.CheckInfraRetryMetadataKey, strconv.Itoa(maxCheckInfraRetries)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	if err != nil || result.Action != "fail" {
+		t.Fatalf("result=%+v err=%v, want bounded fail", result, err)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Metadata[beadmeta.AttemptLogMetadataKey] == "" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("exhausted control metadata = %v", got.Metadata)
+	}
+}
 
 // TestProcessRalphCheckInfraTimeoutDoesNotBurnAttempt is the regression for the
 // maintainer-city "zero-merge day" incident: a transport/store outage made the
