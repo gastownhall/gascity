@@ -5169,11 +5169,12 @@ type StatusWorkCounts struct {
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
 type StorageBindingOutcomePayload struct {
-	Binding     string `json:"binding"`
-	Database    string `json:"database"`
-	Invariant   string `json:"invariant"`
-	Outcome     string `json:"outcome"`
-	ProvenBeads int64  `json:"proven_beads"`
+	Binding        string    `json:"binding"`
+	Database       string    `json:"database"`
+	Invariant      string    `json:"invariant"`
+	LostCrossEdges *[]string `json:"lost_cross_edges,omitempty"`
+	Outcome        string    `json:"outcome"`
+	ProvenBeads    int64     `json:"proven_beads"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.

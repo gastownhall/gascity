@@ -5050,6 +5050,7 @@ export type StorageBindingOutcomePayload = {
     binding: string;
     database: string;
     invariant: string;
+    lost_cross_edges?: Array<string> | null;
     outcome: string;
     proven_beads: number;
 };

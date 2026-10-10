@@ -83,7 +83,7 @@ const (
 	// `scripts/check-embedded-pins --skip-bundled`. No new job, trigger or
 	// permission. Then [release-only, temporary] Beads v1.3.1 -> v1.3.2-rc.1:
 	// BD_VERSION env values only.
-	expectedNightlyExecutionHash = "198422eabd20e027d1009e5c2cf2da0f6342c3f40d8be0e73a670d3f392768aa"
+	expectedNightlyExecutionHash = "ad03af0a2035cf52141d6e4dfc9d99b1eae98147cc4f786171a1874fa0f452cc"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
