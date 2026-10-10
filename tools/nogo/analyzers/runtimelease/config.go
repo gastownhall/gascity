@@ -19,7 +19,6 @@ var Analyzer = New(Config{
 	CityHelpers: map[string]int{
 		"workerKillSessionTargetWithConfig":                 0,
 		"controllerKillSessionRow":                          0,
-		"controllerKillSessionRowIf":                        0,
 		"workerKillSessionTargetCtx":                        1,
 		"workerHandleForSessionWithConfig":                  0,
 		"workerHandleForSessionWithStaleKeyDetectionWaiter": 0,

@@ -64,13 +64,35 @@ const (
 	FactsAfterStart FactsSite = "v2.tx.after-start"
 	// FactsCommit is a v2 transaction's commit after its own write (v5 S2).
 	FactsCommit FactsSite = "v2.tx.commit"
+	// FactsLegacyKill is a legacy controller kill decided on a tick's row.
+	FactsLegacyKill FactsSite = "legacy.kill"
+	// FactsLegacyStopPending is a legacy drain's basis, read at the drain's
+	// begin: its stop-pending mark and its timeout kill.
+	FactsLegacyStopPending FactsSite = "legacy.stop-pending"
+	// FactsLegacyDrainStop is the kill of a row marked stop-pending.
+	FactsLegacyDrainStop FactsSite = "legacy.drain-stop"
+	// FactsLegacyResetEvict is the eviction of a runtime a stalled
+	// continuation reset is waiting on.
+	FactsLegacyResetEvict FactsSite = "legacy.reset-evict"
 )
 
 // factsSite is how a site compares Facts: without Drop's keys, or only
-// Only's, with the fresh row's state among States when set; and why.
+// Only's, with the fresh row's state among States when set, and, with
+// NoWake, not live when the decided row was not (a Decided site's rule); and
+// why.
 type factsSite struct {
 	Drop, Only, States []string
+	NoWake             bool
 	Reason             string
+}
+
+// The keys of a legacy drain's basis: the incarnation, the operator's intent
+// and the operator's requests. Not the drain's own lifecycle writes, nor the
+// counters and markers the controller keeps while it drains.
+var drainBasisKeys = []string{
+	"generation", "instance_token",
+	"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at", "sleep_reason",
+	"wake_request", "restart_requested",
 }
 
 // factsSites are the premise sites that do not compare every key.
@@ -83,6 +105,25 @@ var factsSites = map[FactsSite]factsSite{
 		Only:   []string{"instance_token"},
 		States: []string{string(StateCreating), string(StateActive), string(StateAwake)},
 		Reason: "S2's commit: the row still carries the token the effect wrote and is creating, active or awake; holds do not veto it, so an agent's heartbeat held_until during startup cannot orphan the runtime it started, while a suspend or a kill moves state and refuses",
+	},
+	// TODO(R8 ratchet, mc-z9o37): widen to the whole disposition class
+	// (drainBasisKeys' intent keys), caller by caller, with a test each.
+	FactsLegacyKill: {
+		Only:   []string{"generation", "instance_token", "sleep_intent", "held_until"},
+		NoWake: true,
+		Reason: "what an operator moves under the lease: the incarnation, the hold an attach consumes or a suspend sets, and dormancy (a row decided dormant that an attach woke is live now); the controller's own tick heals the rest",
+	},
+	FactsLegacyStopPending: {
+		Only:   drainBasisKeys,
+		Reason: "a drain stops the incarnation it began on, for the operator intent and requests it began under: a resume that consumed the hold, a suspend, a wake or restart request, or a new incarnation voids it (SR3-1, SR2-1); the drain's own state, drain_at and the controller's counters and markers move while it runs and do not",
+	},
+	FactsLegacyDrainStop: {
+		Only:   append([]string{"state", "state_reason"}, drainBasisKeys...),
+		Reason: "the async stop and the escalation kill a row still stop-pending on the basis its mark landed on",
+	},
+	FactsLegacyResetEvict: {
+		Only:   []string{"continuation_reset_pending", "reset_committed_at"},
+		Reason: "the eviction rests on the same continuation reset still pending; a row that moved on is not stalled",
 	},
 }
 

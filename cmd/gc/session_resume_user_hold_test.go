@@ -115,7 +115,7 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 			t.Fatal(err)
 		}
 		dt := newDrainTracker()
-		dt.set(b.ID, &drainState{startedAt: now.Add(-time.Hour), deadline: now.Add(-time.Minute), reason: "user-hold", generation: 1, ackSet: true})
+		beginDrainForTest(t, store, dt, b.ID, "user-hold", now.Add(-time.Hour), now.Add(-time.Minute)).ackSet = true
 		advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got

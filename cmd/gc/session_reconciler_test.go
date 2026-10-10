@@ -1214,7 +1214,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1257,14 +1257,14 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	secondTracker := &asyncStartTracker{}
 	// Two trackers are two cities' controllers: their runtime names are
 	// locked per city.
-	queueDrainAckAsyncStop("city-a", store, first, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, firstTracker, nil, &stderr)
+	queueDrainAckAsyncStop("city-a", store, first, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, firstTracker, nil, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("city-b", store, second, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, secondTracker, nil, &stderr)
+	queueDrainAckAsyncStop("city-b", store, second, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, secondTracker, nil, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1290,7 +1290,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1335,7 +1335,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1375,7 +1375,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1419,7 +1419,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "stale-token"), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", "stale-token"), "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1452,7 +1452,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "live-token"), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", "live-token"), "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1493,7 +1493,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), []string{"claude"}, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", []string{"claude"}, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1524,7 +1524,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, &cr.asyncStops, nil, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, &cr.asyncStops, nil, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -1769,7 +1769,7 @@ func TestAsyncDrainAckStopSkipsOnUnverifiableToken(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, sessionpkg.Decide(sessionpkg.Info{ID: "gc-worker", InstanceToken: "live-token"}, sessionpkg.FactsLegacyDrainStop), "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1799,7 +1799,7 @@ func TestAsyncDrainAckStopUnverifiableTokenLogsOncePerEpisode(t *testing.T) {
 	var stderr synchronizedBuffer
 	for range 3 {
 		tracker := &asyncStartTracker{}
-		queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, dt, &stderr)
+		queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, sessionpkg.Decide(sessionpkg.Info{ID: "gc-worker", InstanceToken: "live-token"}, sessionpkg.FactsLegacyDrainStop), "worker", nil, tracker, dt, &stderr)
 		if !tracker.wait(time.Second) {
 			t.Fatal("async drain-ack stop did not complete")
 		}
@@ -7297,13 +7297,7 @@ func TestReconcileSessionBeads_ReconcilerNoWakeDrainAckCanceledForAssignedWork(t
 	}); err != nil {
 		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
 	}
-	env.dt.set(session.ID, &drainState{
-		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
-		deadline:   env.clk.Now().Add(-time.Second),
-		reason:     "no-wake-reason",
-		generation: 1,
-		ackSet:     true,
-	})
+	beginDrainForTest(t, env.store, env.dt, session.ID, "no-wake-reason", env.clk.Now().Add(-defaultDrainTimeout), env.clk.Now().Add(-time.Second)).ackSet = true
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),
@@ -7435,13 +7429,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithReadyOpenAssignedWorkCancelsDra
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
-	env.dt.set(session.ID, &drainState{
-		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
-		deadline:   env.clk.Now().Add(-time.Second),
-		reason:     "no-wake-reason",
-		generation: 1,
-		ackSet:     true,
-	})
+	beginDrainForTest(t, env.store, env.dt, session.ID, "no-wake-reason", env.clk.Now().Add(-defaultDrainTimeout), env.clk.Now().Add(-time.Second)).ackSet = true
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),
@@ -7520,13 +7508,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
-	env.dt.set(session.ID, &drainState{
-		startedAt:  env.clk.Now().Add(-defaultDrainTimeout),
-		deadline:   env.clk.Now().Add(-time.Second),
-		reason:     "no-wake-reason",
-		generation: 1,
-		ackSet:     true,
-	})
+	beginDrainForTest(t, env.store, env.dt, session.ID, "no-wake-reason", env.clk.Now().Add(-defaultDrainTimeout), env.clk.Now().Add(-time.Second)).ackSet = true
 
 	reconcileSessionBeadsAtPath(
 		context.Background(),

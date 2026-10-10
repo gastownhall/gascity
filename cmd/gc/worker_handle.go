@@ -502,21 +502,12 @@ func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp ru
 }
 
 // controllerKillSessionRow is the controller's kill of the row it decided
-// on: it never waits for the runtime lease, and once it holds the lease it
-// reads the row fresh and stops only while the row still carries the facts
-// of decided (session.SameKillFacts); otherwise it returns
+// on (legacyAct.Stop): it never waits for the runtime lease, and once it
+// holds the lease it reads the row fresh and stops only while the row still
+// carries decided's facts (sessionpkg.FactsLegacyKill); otherwise it returns
 // session.ErrKillPremiseMoved, which the caller defers like a busy lease.
 func controllerKillSessionRow(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, decided session.Info) error {
-	return controllerKillSessionRowIf(cityPath, store, sp, cfg, decided, func(fresh session.Info) bool {
-		return session.SameKillFacts(decided, fresh)
-	})
-}
-
-// controllerKillSessionRowIf is controllerKillSessionRow with the kill's
-// own premise, for a site whose decision rests on other facts.
-func controllerKillSessionRowIf(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, decided session.Info, premise func(session.Info) bool) error {
-	ctx := session.WithKillPremise(session.WithoutLeaseWait(context.Background()), premise)
-	return controllerKillRowCtx(ctx, cityPath, store, sp, cfg, decided.ID)
+	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(session.Decide(decided, session.FactsLegacyKill))
 }
 
 // controllerKillRowCtx is a controller kill under ctx, resolved strictly by

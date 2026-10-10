@@ -1,0 +1,29 @@
+# TestLegacyRawSessionWrites baseline (R8): raw writes of premise keys per production file.
+# The counts may only fall; lower a file's count when it falls.
+cmd/gc/autoclose_fence.go 1
+cmd/gc/cmd_handoff.go 1
+cmd/gc/cmd_prime.go 1
+cmd/gc/cmd_runtime_heartbeat.go 1
+cmd/gc/cmd_session.go 1
+cmd/gc/cmd_session_pin.go 1
+cmd/gc/cmd_session_wake.go 1
+cmd/gc/cmd_stop.go 1
+cmd/gc/cmd_wait.go 2
+cmd/gc/convergence_store.go 1
+cmd/gc/molecule_autoclose.go 1
+cmd/gc/reconcile_tick.go 2
+cmd/gc/session_bead_cycle.go 1
+cmd/gc/session_beads.go 2
+cmd/gc/session_circuit_breaker.go 3
+cmd/gc/session_lifecycle_parallel.go 4
+cmd/gc/session_pool_drain_deadline.go 2
+cmd/gc/session_reconcile.go 13
+cmd/gc/session_reconciler.go 13
+cmd/gc/session_sleep.go 6
+cmd/gc/session_wake.go 2
+cmd/gc/soft_reload.go 1
+internal/session/chat.go 7
+internal/session/manager.go 2
+internal/session/runtime_lease.go 2
+internal/session/store.go 9
+internal/session/wait_store.go 1
