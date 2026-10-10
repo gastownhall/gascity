@@ -92,6 +92,19 @@ func (m managerLeaseFixture) start(ctx context.Context) error {
 	return m.mgr.Start(ctx, m.info.ID, BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, ResumeOperator)
 }
 
+// releaseWithinTheWait releases l in 200ms and, for the rest of the test, has
+// an operator wait for a lease up to the package's hang budget: a release
+// ends the wait at once, so here the bound is only a hang detector. The
+// fixture's 600ms bound left a release about 200ms of slack (the wait's last
+// attempt comes a 200ms poll before its bound), and on a loaded disk the
+// record-clear commit a release makes before it drops the flock overran it
+// (ga-0wsm18).
+func releaseWithinTheWait(t *testing.T, l *RuntimeLease) {
+	t.Helper()
+	t.Cleanup(SetOperatorLeaseWaitForTest(goroutineHangBudget))
+	time.AfterFunc(200*time.Millisecond, l.Release)
+}
+
 // TestManagerStartRunsUnderTheRuntimeLease: the provider Start runs while the
 // row records the Manager's lease, which the start releases.
 func TestManagerStartRunsUnderTheRuntimeLease(t *testing.T) {
@@ -136,7 +149,7 @@ func TestManagerStartWaitsForTheRuntimeLease(t *testing.T) {
 	if len(m.sp.starts) != 0 {
 		t.Fatalf("provider Start ran under another holder's lease: %q", m.sp.starts)
 	}
-	time.AfterFunc(200*time.Millisecond, held.Release)
+	releaseWithinTheWait(t, held)
 	if err := m.start(context.Background()); err != nil {
 		t.Fatalf("Start over a lease released within the wait: %v", err)
 	}
@@ -181,7 +194,7 @@ func TestManagerKillTakesTheRuntimeLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	waited := m.hold(t)
-	time.AfterFunc(200*time.Millisecond, waited.Release)
+	releaseWithinTheWait(t, waited)
 	if err := m.mgr.Kill(m.info.ID); err != nil {
 		t.Fatalf("Kill over a lease released within the wait: %v", err)
 	}
@@ -477,39 +490,5 @@ func TestControllerStartNeverWaits(t *testing.T) {
 	err := m.start(WithoutLeaseWait(context.Background()))
 	if !errors.Is(err, ErrRuntimeLeaseBusy) || errors.Is(err, ErrSessionStarting) || time.Since(began) > 300*time.Millisecond {
 		t.Fatalf("controller start under a held lease = %v after %v, want busy at once", err, time.Since(began))
-	}
-}
-
-// TestSameKillFacts: a controller kill's premise holds only while the row
-// keeps its incarnation, its hold, and, when it was decided dormant, its
-// dormancy.
-func TestSameKillFacts(t *testing.T) {
-	base := Info{Generation: "2", InstanceToken: "tok", MetadataState: string(StateAsleep)}
-	for _, c := range []struct {
-		name  string
-		move  func(*Info)
-		holds bool
-	}{
-		{"unmoved", func(*Info) {}, true},
-		{"closed", func(i *Info) { i.Closed = true }, false},
-		{"new generation", func(i *Info) { i.Generation = "3" }, false},
-		{"new token", func(i *Info) { i.InstanceToken = "tok-2" }, false},
-		{"hold set", func(i *Info) { i.HeldUntil = "2099-01-01T00:00:00Z" }, false},
-		{"sleep intent", func(i *Info) { i.SleepIntent = "operator-hold" }, false},
-		{"dormant woken", func(i *Info) { i.MetadataState = string(StateActive) }, false},
-		{"dormant to dormant", func(i *Info) { i.MetadataState = string(StateSuspended) }, true},
-	} {
-		fresh := base
-		c.move(&fresh)
-		if got := SameKillFacts(base, fresh); got != c.holds {
-			t.Errorf("%s: SameKillFacts = %v, want %v", c.name, got, c.holds)
-		}
-	}
-	live := base
-	live.MetadataState = string(StateActive)
-	draining := live
-	draining.MetadataState = string(StateDraining)
-	if !SameKillFacts(live, draining) {
-		t.Error("a live row the controller moved to draining must keep its premise")
 	}
 }

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // defaultOutputBufferLines is the default circular buffer size for Peek output.
@@ -29,7 +31,11 @@ type sessionConn struct {
 
 	mu             sync.Mutex
 	sessionID      string
-	activePromptID int64 // non-zero when a prompt response is pending
+	activePromptID int64       // non-zero when a prompt response is pending
+	currentTurn    *turnRecord // the running turn; nil when idle
+	lastTurn       *turnRecord // the most recently finished turn
+	drained        bool        // stdout reader exited; no turn can finish again
+	usageWarned    bool        // an undecodable usage object was logged
 	outputBuf      []string
 	outputBufMax   int
 	lastActivity   time.Time
@@ -39,6 +45,15 @@ type sessionConn struct {
 	// before session metadata is removed.
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
+
+	// events publishes this connection's session events; nil until Start
+	// commits the connection to the Provider that owns it.
+	events *sessionEventSource
+	// exited is set once the agent process has exited.
+	exited bool
+	// exitReported closes after the exit has been published (or found no
+	// attached source), so closed can follow exited.
+	exitReported chan struct{}
 
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
@@ -71,6 +86,7 @@ func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSi
 		outputBufMax: bufSize,
 		pending:      make(map[int64]chan JSONRPCMessage),
 		idleCh:       make(chan struct{}),
+		exitReported: make(chan struct{}),
 	}
 	close(sc.idleCh)
 	return sc
@@ -102,10 +118,11 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 	// readLoop exited (EOF, scanner error, or oversized frame). Log the
 	// scanner error if present, then clear busy state and drain pending
 	// channels so callers don't hang.
-	if err := scanner.Err(); err != nil {
+	err := scanner.Err()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "acp: readLoop exit: %v\n", err)
 	}
-	sc.drainPending()
+	sc.drainPending(err)
 }
 
 // dispatch routes a decoded JSON-RPC message.
@@ -123,11 +140,21 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		if ok {
 			delete(sc.pending, *msg.ID)
 		}
-		// Clear busy state if this is the active prompt response.
+		// Settle the turn if this is the active prompt response.
+		var usageErr error
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
+			outcome := promptOutcome(msg)
+			if outcome.usageErr != nil && !sc.usageWarned {
+				sc.usageWarned = true
+				usageErr = outcome.usageErr
+			}
+			sc.endTurnLocked(outcome, time.Now())
 			sc.markIdleLocked()
 		}
 		sc.mu.Unlock()
+		if usageErr != nil {
+			fmt.Fprintf(os.Stderr, "acp: dropping undecodable prompt usage (logged once per session): %v\n", usageErr)
+		}
 		if ok {
 			ch <- msg
 		}
@@ -264,17 +291,27 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 	return err
 }
 
-// setActivePrompt marks the given request ID as the active prompt.
-func (sc *sessionConn) setActivePrompt(id int64) {
+// setActivePrompt marks the given request ID as the active prompt and opens
+// its turn. It returns false, marking nothing, when the connection has
+// drained: no response could ever settle that turn.
+func (sc *sessionConn) setActivePrompt(id int64) bool {
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.drained {
+		return false
+	}
 	sc.markBusyLocked(id)
-	sc.mu.Unlock()
+	return true
 }
 
-// drainPending clears busy state and closes all pending response channels.
-// Safe to call multiple times — closed channels are deleted from the map.
-func (sc *sessionConn) drainPending() {
+// drainPending fails the running turn, clears busy state, and closes all
+// pending response channels. cause is the stdout read error, or nil for EOF
+// and for the process-exit path. Safe to call multiple times — the first
+// call settles the turn and closed channels are deleted from the map.
+func (sc *sessionConn) drainPending(cause error) {
 	sc.mu.Lock()
+	sc.drained = true
+	sc.endTurnLocked(turnOutcome{state: turnFailed, err: drainFailure(cause)}, time.Now())
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
 		close(ch)
@@ -283,9 +320,12 @@ func (sc *sessionConn) drainPending() {
 	sc.mu.Unlock()
 }
 
-func (sc *sessionConn) clearActivePrompt(id int64) {
+// abandonPrompt fails the turn for prompt id, which was never delivered to
+// the agent, and clears busy state.
+func (sc *sessionConn) abandonPrompt(id int64, cause error) {
 	sc.mu.Lock()
-	if id == 0 || sc.activePromptID == id {
+	if sc.activePromptID == id {
+		sc.endTurnLocked(turnOutcome{state: turnFailed, err: fmt.Sprintf("sending prompt: %v", cause)}, time.Now())
 		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
@@ -313,10 +353,17 @@ func (sc *sessionConn) markBusyLocked(id int64) {
 		sc.idleCh = make(chan struct{})
 	}
 	sc.activePromptID = id
+	sc.startTurnLocked(id, time.Now())
+	sc.emitLocked(runtime.SessionEventAgentStateChanged)
 }
 
 func (sc *sessionConn) markIdleLocked() {
 	sc.ensureIdleChannelLocked()
+	// A drained connection can never take another turn, so its failed turn
+	// is not reported as an idle agent.
+	if sc.activePromptID != 0 && !sc.drained {
+		sc.emitLocked(runtime.SessionEventAgentIdle)
+	}
 	sc.activePromptID = 0
 	select {
 	case <-sc.idleCh:

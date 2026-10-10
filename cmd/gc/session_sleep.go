@@ -473,26 +473,27 @@ func markIdleSleepPendingInfo(info sessionpkg.Info, sessFront *sessionpkg.Store)
 // recoverPendingIdleSleepInfo reads the idle-stop-pending intent and the
 // preserved fingerprint off Info (SleepIntent, SleepPolicyFingerprint), the
 // handle off Info.ID, and persists SleepPatch(now, "idle") via
-// sessFront.ApplyPatch. It returns only the bool: the caller reconstructs the
-// time-independent SleepPatch fold onto infoByID (slept_at / fingerprint are
-// non-Info), exactly as with the raw form. No raw-bead mirror.
+// sessFront.ApplyKeepingUserHold, so an operator's suspend that landed since
+// the snapshot keeps its intent. It returns the patch it wrote, the caller's
+// fold onto infoByID, or nil when it wrote nothing. No raw-bead mirror.
 func recoverPendingIdleSleepInfo(
 	info sessionpkg.Info,
 	sessFront *sessionpkg.Store,
 	running bool,
 	clk clock.Clock,
-) bool {
+) sessionpkg.MetadataPatch {
 	if sessFront == nil || running || info.SleepIntent != "idle-stop-pending" {
-		return false
+		return nil
 	}
 	batch := sessionpkg.SleepPatch(clk.Now(), string(sessionpkg.SleepReasonIdle))
 	if fingerprint := info.SleepPolicyFingerprint; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
-		return false
+	written, err := sessFront.ApplyKeepingUserHold(info.ID, batch)
+	if err != nil {
+		return nil
 	}
-	return true
+	return written
 }
 
 func boolMetadata(v bool) string {

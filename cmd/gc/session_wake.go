@@ -246,7 +246,7 @@ func validateWorkDir(dir string) error {
 // due to a transient store failure) before any signal reaches the process.
 // Without this, a single bad tick can interrupt a working agent mid-tool-call.
 //
-// It reads only session_name, generation, and id — all carried verbatim on Info.
+// info is the row the drain decides on: it becomes the drain's basis.
 func beginSessionDrainInfo(
 	info sessions.Info,
 	_ runtime.Provider, // kept for caller compatibility; interrupt deferred to advanceSessionDrainsWithSessionsTraced
@@ -269,6 +269,7 @@ func beginSessionDrainInfo(
 		deadline:   clk.Now().Add(timeout),
 		reason:     reason,
 		generation: gen,
+		basis:      sessions.Decide(info, sessions.FactsLegacyStopPending),
 	})
 
 	if os.Getenv("GC_TMUX_TRACE") == "1" {
@@ -514,6 +515,38 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 		return "", false
 	}
 	return reason, true
+}
+
+// drainAckOwner is whose decision a runtime's drain ack is, as its source
+// metadata says.
+type drainAckOwner uint8
+
+const (
+	// drainAckOwnerUnknown: the source could not be read. Defer: neither
+	// void the drain nor clear its ack.
+	drainAckOwnerUnknown drainAckOwner = iota
+	// drainAckOwnerAgent: any source but the controller's (the agent's own
+	// `gc runtime drain-ack`, or a bare ack). Decided on the row as it is.
+	drainAckOwnerAgent
+	// drainAckOwnerController: the controller's own ack, which its drain's
+	// basis decides.
+	drainAckOwnerController
+)
+
+// drainAckOwnerOf reads name's drain-ack source. Without a provider there is
+// no controller ack.
+func drainAckOwnerOf(sp runtime.Provider, name string) drainAckOwner {
+	if sp == nil || name == "" {
+		return drainAckOwnerAgent
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	switch {
+	case err != nil:
+		return drainAckOwnerUnknown
+	case source == reconcilerDrainAckSourceValue:
+		return drainAckOwnerController
+	}
+	return drainAckOwnerAgent
 }
 
 // reconcilerDrainAckMatchesSessionInfo is the session.Info sibling of
@@ -847,12 +880,20 @@ func advanceSessionDrainsWithSessionsTraced(
 		// Pending-interaction guards and wake-based cancellation run before this
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
-			// Drain timed out — force stop.
-			if err := verifiedStop(cityPath, info, store, sp, cfg); err != nil {
-				if errors.Is(err, errTokenMismatch) {
-					// Session was re-woken by a different incarnation.
-					// This drain is stale — cancel it.
+			// Drain timed out — force stop, on the drain's basis.
+			if err := verifiedStop(cityPath, ds.basis, store, sp, cfg); err != nil {
+				if owner := drainAckOwnerOf(sp, name); owner != drainAckOwnerUnknown &&
+					(errors.Is(err, errTokenMismatch) || errors.Is(err, sessions.ErrKillPremiseMoved)) {
+					// Session was re-woken by a different incarnation, or the
+					// row left the basis the drain began on (a resume, a
+					// suspend, a request). This drain is stale — cancel it.
+					// Only the controller's own ack goes with it; an agent's
+					// ack is the agent's decision. An ack whose source cannot
+					// be read keeps the drain for the next tick.
 					dt.clearIdleProbe(id)
+					if ds.ackSet && owner == drainAckOwnerController {
+						_ = clearReconcilerDrainAckMetadata(sp, name)
+					}
 					dt.remove(id)
 				}
 				// Other errors (transient stop failure, unverifiable token): keep drain
@@ -904,19 +945,22 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 		return
 	}
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
-	_ = sessFront.ApplyPatch(info.ID, batch)
+	_, _ = sessFront.ApplyKeepingUserHold(info.ID, batch)
 }
 
-// verifiedStop stops a session after verifying the instance_token matches.
+// verifiedStop stops the session d decided on after verifying the
+// instance_token matches, while the row still carries d's facts.
 // Prevents stale drain operations from targeting a re-woken session.
-// Returns errTokenMismatch if the running process has a different token, and
-// errTokenUnverifiable if its token cannot be read.
+// Returns errTokenMismatch if the running process has a different token,
+// errTokenUnverifiable if its token cannot be read, and
+// sessions.ErrKillPremiseMoved if the row moved.
 //
 // NOTE: On composite providers (auto/hybrid), GetMeta and Stop may route
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(cityPath string, info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedStop(cityPath string, d sessions.Decided, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	info := d.Info()
 	name := info.SessionNameMetadata
 	expectedToken := info.InstanceToken
 	if expectedToken != "" {
@@ -927,6 +971,5 @@ func verifiedStop(cityPath string, info sessions.Info, store beads.Store, sp run
 			return &tokenUnverifiableError{sessionID: info.ID, cause: err}
 		}
 	}
-	// Decided again under the lease, on a fresh read (controllerKillSessionRow).
-	return controllerKillSessionRow(cityPath, store, sp, cfg, info)
+	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(d)
 }

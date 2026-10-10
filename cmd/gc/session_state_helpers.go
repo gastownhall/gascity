@@ -81,7 +81,13 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 // looks like once re-projected to asleep by the wake path --
 // ClearWakeBlockersPatch clears the recognized reason and stamps none -- and
 // it is a genuine ordinary sleep, not a legacy/regression/write-race record.
+//
+// A row an operator holds (HoldUser, `gc session suspend`) is never freeable,
+// whatever its reason: its slot and its work stay with it.
 func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
+	if sessionpkg.Holds(session.Metadata, now).In&sessionpkg.HoldUser != 0 {
+		return false
+	}
 	if isDrainedSessionBead(session) {
 		return true
 	}
@@ -112,6 +118,9 @@ func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
 
 // isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
 func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
+	if sessionpkg.HoldsInfo(i, now).In&sessionpkg.HoldUser != 0 {
+		return false
+	}
 	if isDrainedSessionInfo(i) {
 		return true
 	}

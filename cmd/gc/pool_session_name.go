@@ -121,18 +121,18 @@ func boundSessionNameLength(name string) string {
 // typed session.Info projection (WI-5 W4); the close is a session-class op
 // routed through the session front door. Returns the IDs of session beads
 // that were closed.
-func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
-	return gcSweepSessionBeadsAt(cityPath, store, rigStores, sessionInfos, time.Now())
+func GCSweepSessionBeads(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+	return gcSweepSessionBeadsAt(cityPath, cfg, store, rigStores, sessionInfos, time.Now())
 }
 
 // gcSweepSessionBeadsAt is GCSweepSessionBeads stamping its closes at now.
-func gcSweepSessionBeadsAt(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info, now time.Time) []string {
+func gcSweepSessionBeadsAt(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info, now time.Time) []string {
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", now.UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, cfg, info, "gc_swept", now.UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)
@@ -671,6 +671,13 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //
 // Release order:
 //
+// First, when conditional_writes resolves a writer and wb carries a revision,
+// release assignment and metadata in one UpdateIfMatch guarded by that
+// revision. Conflicts are left for a later tick's fresh snapshot.
+// Required-but-unavailable capability refuses the release. Otherwise,
+// including for snapshots listed from the native store (or a CachingStore over
+// it), which carry no revision, the legacy paths below apply:
+//
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee
 //     — the verb's contract) AND the bead carries no active continuation-group
@@ -690,7 +697,21 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
+	update := beads.UpdateOpts{
+		Assignee: stringPtr(""),
+		Status:   stringPtr("open"),
+		Metadata: clearedSessionAffinityMetadata(),
+	}
+	if clearDetached {
+		update.Metadata[detachedProbeMetadataKey] = ""
+	}
+	if released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, wb, update); handled {
+		if err != nil {
+			log.Printf("releaseOrphanedPoolAssignments: %v", err)
+		}
+		return released
+	}
+	// On the legacy path, continuation-group beads bypass ReleaseIfCurrent: it swaps
 	// only status/assignee, so clearing the group would need a second write, and
 	// that gap would expose the routing vector on a claimable bead. The fenced
 	// fallback clears status, assignee, and affinity metadata in one write.

@@ -29,7 +29,7 @@ func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps)
 	env.markSessionActive(&b)
 	env.clk.Time = env.clk.Time.Add(30 * time.Minute)
 	front := sessionFrontDoor(env.store)
-	if err := front.ApplyPatch(b.ID, managedSuspendPatch(env.clk.Now())); err != nil {
+	if err := front.ApplyPatch(b.ID, session.OperatorSuspendPatch(env.clk.Now())); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.sp.Stop("worker"); err != nil {
@@ -115,7 +115,7 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 			t.Fatal(err)
 		}
 		dt := newDrainTracker()
-		dt.set(b.ID, &drainState{startedAt: now.Add(-time.Hour), deadline: now.Add(-time.Minute), reason: "user-hold", generation: 1, ackSet: true})
+		beginDrainForTest(t, store, dt, b.ID, "user-hold", now.Add(-time.Hour), now.Add(-time.Minute)).ackSet = true
 		advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got

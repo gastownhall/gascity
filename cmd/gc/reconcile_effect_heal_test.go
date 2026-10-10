@@ -20,11 +20,9 @@ import (
 // nameFree fails the test unless city's lock on name is free.
 func nameFree(t *testing.T, city, name string) {
 	t.Helper()
-	unlock := runtimeNames.tryLock(city, name)
-	if unlock == nil {
+	if nameHeld(t, city, name) {
 		t.Fatalf("the runtime name lock on %q is still held", name)
 	}
-	unlock()
 }
 
 // Kills the heal orphaning a live runtime: the inventory reads the name
@@ -54,9 +52,9 @@ func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireNone, "state", "creating")
 			if tc.locked {
-				unlock := runtimeNames.tryLock(c.w.CityPath, "s-heal")
+				unlock := holdName(t, c.w.CityPath, "s-heal")
 				defer func() {
-					if runtimeNames.tryLock(c.w.CityPath, "s-heal") != nil {
+					if !nameHeld(t, c.w.CityPath, "s-heal") {
 						t.Error("the refused heal released a lock it does not hold")
 					}
 					unlock()
@@ -66,11 +64,7 @@ func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 			}
 			lockedAtCAS := false
 			adversary := &interleavedStore{Store: c.store, id: c.k.ID, between: func() {
-				if unlock := runtimeNames.tryLock(c.w.CityPath, "s-heal"); unlock != nil {
-					unlock()
-				} else {
-					lockedAtCAS = true
-				}
+				lockedAtCAS = nameHeld(t, c.w.CityPath, "s-heal")
 			}}
 			_, s := c.run(t, tc.sp, adversary)
 			if tc.cause != "" {
@@ -178,8 +172,7 @@ func TestFreshHealReadIsFreshForTheEffect(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireNone, "state", "creating")
 			p, it := c.pass(t, &sinceObserver{Fake: runtime.NewFake(), notBefore: tc.notBefore}, nil)
 			p.Clock = checkedClock{newFakePlannerClock(t0), func() {
-				if unlock := runtimeNames.tryLock(c.w.CityPath, "s-heal"); unlock != nil {
-					unlock()
+				if !nameHeld(t, c.w.CityPath, "s-heal") {
 					t.Error("the fresh read's time was taken before the name lock")
 				}
 			}}

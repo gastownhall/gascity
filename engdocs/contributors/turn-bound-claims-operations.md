@@ -99,3 +99,38 @@ is never coming.
 - **`gc bd update --claim`.** Worker-pull, and no shipped prompt uses it to
   acquire work; a test pins that so it cannot silently become load-bearing
   while unfenced.
+
+## Releasing retired and orphaned assignments
+
+The retired-session and orphaned-pool release paths honor
+`[beads].conditional_writes` (not `[beads].guarded_release`). With `auto` or
+`require` on a capable store, and a release snapshot that carries a revision,
+assignment release and affinity cleanup use one update guarded by that
+revision. Fallback routing and detached-probe cleanup, when applicable, are
+part of that same write. Such a snapshot cannot release a newer claim, even if
+the assignee name has been reused. A city already running `auto` adopts this
+release on upgrade. Setting `off` returns these paths to the legacy release,
+along with every other conditional write.
+
+A revision conflict leaves the assignment unchanged and is reported to the
+caller. It must not count as a completed release: the same session may still
+hold the work. The next tick must make a new liveness decision; the old decision
+is not retried with a fresh revision. Backend failures are reported without an
+unconditional retry. `require` also refuses an unsupported store. `auto`
+degrades to the legacy release on an unsupported store and emits
+`beads.conditional_writes.degraded` once per store, and `off` keeps the legacy
+release.
+
+The legacy paths fence on the snapshot's status and assignee, not its
+revision, so they cannot tell a newer claim under a reused assignee name from
+the old one. Under `auto` and `require` they also release every snapshot that
+carries no revision. Release snapshots come from a `List`, and list rows from
+the native store (and from a CachingStore over it) carry none: only `Get`
+publishes a revision. On those stores the reused-assignee guarantee does not
+hold yet. Reassigning a retired session's work to its successor always uses
+the legacy fence.
+
+This guards the write, not the decision that an owner is dead. A session absent
+from one city's local session store may still be alive in another city. Shared
+work stores need authoritative cross-city liveness before orphan release is
+safe.

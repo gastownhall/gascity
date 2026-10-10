@@ -30,12 +30,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// indefiniteHoldDuration is the canonical "suspended indefinitely" sentinel
-// used when setting held_until on a session bead. The reconciler treats any
-// held_until in the future as "do not wake." 100 years is effectively forever
-// without risking time arithmetic overflow.
-const indefiniteHoldDuration = 100 * 365 * 24 * time.Hour
-
 func newSessionCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "session",
@@ -1709,17 +1703,6 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
-// managedSuspendPatch is the metadata-only suspend `gc session suspend` writes
-// when a controller owns the stop: a hold far in the future, which also
-// supersedes any pending wake request (CONTRACT v5.7 D7).
-func managedSuspendPatch(now time.Time) session.MetadataPatch {
-	patch := session.ClearWakeRequestPatch()
-	patch["held_until"] = now.Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
-	patch["sleep_intent"] = "user-hold"
-	patch["state"] = "suspended"
-	return patch
-}
-
 // The managed `gc session suspend` path's controller calls, as mutable
 // global test seams.
 var (
@@ -1760,9 +1743,9 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
 	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
 		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
-			// Controller is running — metadata-only suspend.
-			// Set held_until far in the future so the reconciler drains/stops the session.
-			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, managedSuspendPatch(time.Now())); err != nil {
+			// Controller is running — metadata-only suspend: the operator
+			// hold (session.OperatorSuspendPatch), which the reconciler drains.
+			if err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -1814,7 +1797,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 

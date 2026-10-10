@@ -314,10 +314,7 @@ func poolSlotRetireHasAssignedWork(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
-	identifiers := poolSlotRetireAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, poolSlotRetireAssigneeIdentities(info, cfg))
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
@@ -456,7 +453,7 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBead(store, info, "drained", now, stderr) {
+	if !closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, info, "drained", now, stderr, notOwnDrainStep) {
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}

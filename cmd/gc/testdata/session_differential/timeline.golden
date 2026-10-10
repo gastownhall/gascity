@@ -62,3 +62,750 @@ runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
 row:gc-1:state=awake
 @ +1m9s
 row:gc-1:wake_attempts=0
+=== a crash 31s after wake
+## 0 seed (+20s)
+@ +0s
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:labels=agent:worker,gc:session
+row:gc-1:pool_slot=
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+work:gw-1:gc.session_name=s-gc-1
+## 1 crash (+1m21s)
+@ +30s
+row:gc-1:wake_attempts=0
+~ op
+@ +31s
+row:gc-1:churn_count=3
+row:gc-1:last_woke_at=
+row:gc-1:quarantined_until=T+5m31s
+row:gc-1:sleep_reason=context-churn
+row:gc-1:state=asleep
+=== a crash 5m0s after wake
+## 0 seed (+20s)
+@ +0s
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:labels=agent:worker,gc:session
+row:gc-1:pool_slot=
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+work:gw-1:gc.session_name=s-gc-1
+## 1 crash (+5m50s)
+@ +30s
+row:gc-1:wake_attempts=0
+@ +5m0s
+row:gc-1:churn_count=0
+~ op
+@ +5m0s
+event:session.woke worker null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+5m0s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=730fa5bc1a6062f2
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+5m0s
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+5m0s
+row:gc-1:live_hash=<changed>
+row:gc-1:primed_at=T+5m0s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +5m10s
+row:gc-1:state=awake
+=== a live quarantined row 29s after wake
+## 0 seed (+0s)
+@ +0s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:labels=agent:worker,gc:session
+row:gc-1:pool_slot=
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+work:gw-1:gc.session_name=s-gc-1
+## 1 alive (+29s)
+@ +10s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+@ +20s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+@ +29s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+## 2 settled (+1m19s)
+@ +29s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+@ +39s
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:quarantined_until=
+row:gc-1:wake_attempts=0
+=== a live quarantined row 31s after wake
+## 0 seed (+0s)
+@ +0s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:labels=agent:worker,gc:session
+row:gc-1:pool_slot=
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+work:gw-1:gc.session_name=s-gc-1
+## 1 alive (+31s)
+@ +10s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+@ +20s
+provider:RemoveMeta s-gc-1=11
+provider:SetMeta s-gc-1=4
+@ +30s
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:quarantined_until=
+row:gc-1:wake_attempts=0
+## 2 settled (+1m21s)
+=== a managed suspend drains, then wake
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+work:gw-1:gc.session_name=s-gc-1
+## 1 suspend (+40s)
+~ op
+@ +20s
+event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
+provider:RemoveMeta s-gc-1=6
+provider:SetMeta s-gc-1=4
+provider:Stop s-gc-1=1
+row:gc-1:drain_at=T+20s
+row:gc-1:last_woke_at=
+row:gc-1:sleep_reason=idle
+row:gc-1:slept_at=T+20s
+row:gc-1:state=asleep
+row:gc-1:suspended_at=
+runtime:s-gc-1=
+## 2 past the drain timeout (+7m10s)
+## 3 wake (+8m30s)
+~ op
+@ +8m10s
+event:session.woke worker-1 null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+8m10s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=86c07f15f30c8738
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+8m10s
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+8m10s
+row:gc-1:live_hash=<changed>
+row:gc-1:primed_at=T+8m10s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:sleep_reason=
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+row:gc-1:wake_request=
+row:gc-1:wake_requested_at=
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +8m20s
+row:gc-1:state=awake
+## 4 the next pass (+10m0s)
+=== a provider swap stops the runtime
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+work:gw-1:gc.session_name=s-gc-1
+## 1 swap (+1m10s)
+~ op
+@ +20s
+row:gc-1:churn_count=1
+row:gc-1:last_woke_at=
+row:gc-1:state=asleep
+@ +30s
+event:session.woke worker-1 null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+30s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=86c07f15f30c8738
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+30s
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+30s
+row:gc-1:live_hash=<changed>
+row:gc-1:primed_at=T+30s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +40s
+row:gc-1:state=awake
+## 2 the next pass (+2m40s)
+=== a quarantine, then a kill fence, expires
+## 0 seed (+20s)
+@ +0s
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:session_origin=ephemeral
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+work:gw-1:gc.session_name=s-gc-1
+## 1 the quarantine expires (+3m30s)
+@ +2m10s
+row:gc-1:churn_count=0
+row:gc-1:quarantined_until=
+row:gc-1:wake_attempts=0
+## 2 the kill fence expires (+6m30s)
+@ +5m0s
+event:session.woke worker-1 null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+5m0s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=86c07f15f30c8738
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+5m0s
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+5m0s
+row:gc-1:live_hash=<changed>
+row:gc-1:primed_at=T+5m0s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:sleep_reason=
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +5m10s
+row:gc-1:state=awake
+=== a reload turns idle sleep on for a detached row
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.trigger_bead_store_ref=city
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+## 1 the reload (+1m40s)
+~ op
+@ +1m20s
+row:gc-1:detached_at=T+1m20s
+row:gc-1:effective_sleep_after_idle=5m
+row:gc-1:requested_sleep_after_idle=5m
+row:gc-1:sleep_policy_fingerprint=value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=agent
+=== an idle on-demand named session sleeps
+## 0 seed (+20s)
+@ +0s
+row:gc-c:agent_name=chat
+row:gc-c:command=true
+row:gc-c:continuation_epoch=1
+row:gc-c:detached_at=T+0s
+row:gc-c:effective_sleep_after_idle=5m
+row:gc-c:requested_sleep_after_idle=5m
+row:gc-c:session_origin=named
+row:gc-c:sleep_capability=full
+row:gc-c:sleep_policy_fingerprint=value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat
+row:gc-c:sleep_policy_source=agent
+row:gc-c:synced_at=T+0s
+row:gc-c:work_dir=<city>
+## 1 idle past sleep_after_idle (+6m30s)
+@ +5m0s
+row:gc-c:config_wake_suppressed=true
+@ +5m10s
+event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"}=1
+provider:RemoveMeta test-city--chat=6
+provider:SetMeta test-city--chat=4
+provider:Stop test-city--chat=1
+row:gc-c:config_wake_suppressed=
+row:gc-c:detached_at=
+row:gc-c:drain_at=T+5m10s
+row:gc-c:last_woke_at=
+row:gc-c:sleep_reason=idle
+row:gc-c:slept_at=T+5m10s
+row:gc-c:state=asleep
+runtime:test-city--chat=
+=== an unwanted row inside, then past, the wake grace
+## 0 seed (+20s)
+## 1 inside the grace (+2m30s)
+## 2 past the grace (+5m30s)
+@ +4m0s
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
+provider:RemoveMeta s-gc-1=6
+provider:SetMeta s-gc-1=4
+provider:Stop s-gc-1=1
+row:gc-1:close_reason=session drained: pool slot retired by reconciler
+row:gc-1:closed_at=T+4m0s
+row:gc-1:drain_at=T+4m0s
+row:gc-1:state=drained
+row:gc-1:state_reason=drain-ack-stop-pending
+row:gc-1:status=closed
+row:gc-1:synced_at=T+4m0s
+runtime:s-gc-1=
+## 3 past the drain timeout (+12m0s)
+=== an unwanted row of a suspended agent
+## 0 seed (+20s)
+@ +0s
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
+provider:RemoveMeta s-gc-1=6
+provider:SetMeta s-gc-1=4
+provider:Stop s-gc-1=1
+row:gc-1:close_reason=session drained: pool slot retired by reconciler
+row:gc-1:closed_at=T+0s
+row:gc-1:drain_at=T+0s
+row:gc-1:state=drained
+row:gc-1:state_reason=drain-ack-stop-pending
+row:gc-1:status=closed
+row:gc-1:synced_at=T+0s
+runtime:s-gc-1=
+## 1 a minute on (+1m50s)
+=== an unwanted row woken by a clock ten minutes ahead
+## 0 seed (+20s)
+@ +0s
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
+provider:RemoveMeta s-gc-1=6
+provider:SetMeta s-gc-1=4
+provider:Stop s-gc-1=1
+row:gc-1:close_reason=session drained: pool slot retired by reconciler
+row:gc-1:closed_at=T+0s
+row:gc-1:drain_at=T+0s
+row:gc-1:state=drained
+row:gc-1:state_reason=drain-ack-stop-pending
+row:gc-1:status=closed
+row:gc-1:synced_at=T+0s
+runtime:s-gc-1=
+## 1 past the skewed wake's grace (+16m30s)
+=== an unwanted row woken by a clock two minutes ahead
+## 0 seed (+20s)
+## 1 past the skewed wake's grace (+8m30s)
+@ +7m0s
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
+provider:RemoveMeta s-gc-1=6
+provider:SetMeta s-gc-1=4
+provider:Stop s-gc-1=1
+row:gc-1:close_reason=session drained: pool slot retired by reconciler
+row:gc-1:closed_at=T+7m0s
+row:gc-1:drain_at=T+7m0s
+row:gc-1:state=drained
+row:gc-1:state_reason=drain-ack-stop-pending
+row:gc-1:status=closed
+row:gc-1:synced_at=T+7m0s
+runtime:s-gc-1=
+=== attach, then detach, then idle
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:effective_sleep_after_idle=5m
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.trigger_bead_store_ref=city
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=5m
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=agent
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+## 1 detach (+1m40s)
+~ op
+@ +1m20s
+row:gc-1:detached_at=T+1m20s
+## 2 idle past sleep_after_idle (+8m10s)
+@ +6m20s
+row:gc-1:config_wake_suppressed=true
+=== idle, then sleep, then the next pass
+## 0 seed (+20s)
+@ +0s
+row:gc-c:agent_name=chat
+row:gc-c:command=true
+row:gc-c:continuation_epoch=1
+row:gc-c:detached_at=T+0s
+row:gc-c:effective_sleep_after_idle=5m
+row:gc-c:requested_sleep_after_idle=5m
+row:gc-c:session_origin=named
+row:gc-c:sleep_capability=full
+row:gc-c:sleep_policy_fingerprint=value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat
+row:gc-c:sleep_policy_source=agent
+row:gc-c:synced_at=T+0s
+row:gc-c:work_dir=<city>
+## 1 idle past sleep_after_idle (+6m30s)
+@ +5m0s
+row:gc-c:config_wake_suppressed=true
+@ +5m10s
+event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"}=1
+provider:RemoveMeta test-city--chat=6
+provider:SetMeta test-city--chat=4
+provider:Stop test-city--chat=1
+row:gc-c:detached_at=
+row:gc-c:drain_at=T+5m10s
+row:gc-c:last_woke_at=
+row:gc-c:sleep_reason=idle
+row:gc-c:slept_at=T+5m10s
+row:gc-c:state=asleep
+runtime:test-city--chat=
+## 2 the next pass (+8m0s)
+## 3 the sleep policy changes (+9m20s)
+~ op
+@ +9m0s
+event:session.woke chat null=1
+provider:RemoveMeta test-city--chat=5
+provider:Start test-city--chat=1
+row:gc-c:awake_started_at=T+9m0s
+row:gc-c:config_wake_suppressed=
+row:gc-c:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-c:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.Env=<changed>
+row:gc-c:core_hash_breakdown.FPExtra=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-c:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.version=v6
+row:gc-c:creation_complete_at=T+9m0s
+row:gc-c:effective_sleep_after_idle=10m
+row:gc-c:generation=2
+row:gc-c:last_woke_at=T+9m0s
+row:gc-c:live_hash=<changed>
+row:gc-c:primed_at=T+9m0s
+row:gc-c:prompt_hash=<changed>
+row:gc-c:requested_sleep_after_idle=10m
+row:gc-c:sleep_reason=
+row:gc-c:started_config_hash=<changed>
+row:gc-c:started_launch_hash=<changed>
+row:gc-c:started_live_hash=<changed>
+row:gc-c:started_provision_hash=<changed>
+row:gc-c:state=active
+row:gc-c:state_reason=creation_complete
+runtime:test-city--chat=id=gc-c epoch=2 token=<set> alive attached=false
+@ +9m10s
+row:gc-c:detached_at=T+9m10s
+row:gc-c:sleep_policy_fingerprint=value=10m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat
+row:gc-c:state=awake
+=== kill a seat holding a dep-blocked claim
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+## 1 kill (+40s)
+~ op
+## 2 past the kill grace (+7m10s)
+@ +5m20s
+row:gc-1:close_reason=session terminated: killed
+row:gc-1:closed_at=T+5m20s
+row:gc-1:state=killed
+row:gc-1:status=closed
+row:gc-1:synced_at=T+5m20s
+work:gw-1:assignee=
+=== kill a seat holding a ready claim
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+## 1 kill (+40s)
+~ op
+## 2 past the kill grace (+7m10s)
+@ +5m20s
+event:session.woke worker-1 null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+5m20s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=86c07f15f30c8738
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+5m20s
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+5m20s
+row:gc-1:live_hash=<changed>
+row:gc-1:primed_at=T+5m20s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:sleep_reason=
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +5m30s
+row:gc-1:state=awake
+=== suspend, then wake
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+work:gw-1:gc.session_name=s-gc-1
+## 1 suspend (+40s)
+~ op
+@ +20s
+row:gc-1:state=asleep
+## 2 wake (+1m20s)
+~ op
+@ +1m0s
+event:session.woke worker-1 null=1
+provider:RemoveMeta s-gc-1=5
+provider:Start s-gc-1=1
+row:gc-1:awake_started_at=T+1m0s
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-1:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.Env=<changed>
+row:gc-1:core_hash_breakdown.FPExtra=86c07f15f30c8738
+row:gc-1:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-1:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-1:core_hash_breakdown.version=v6
+row:gc-1:creation_complete_at=T+1m0s
+row:gc-1:generation=2
+row:gc-1:last_woke_at=T+1m0s
+row:gc-1:live_hash=<changed>
+row:gc-1:primed_at=T+1m0s
+row:gc-1:prompt_hash=<changed>
+row:gc-1:started_config_hash=<changed>
+row:gc-1:started_launch_hash=<changed>
+row:gc-1:started_live_hash=<changed>
+row:gc-1:started_provision_hash=<changed>
+row:gc-1:state=active
+row:gc-1:state_reason=creation_complete
+row:gc-1:wake_request=
+row:gc-1:wake_requested_at=
+runtime:s-gc-1=id=gc-1 epoch=2 token=<set> alive attached=false
+@ +1m10s
+row:gc-1:state=awake
+## 3 the next pass (+2m50s)

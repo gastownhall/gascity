@@ -531,10 +531,10 @@ func (s *sim) atSeam(_ context.Context, at txSeam, it intent, _, _ int) error {
 	if k := it.Key; k.ID != "" {
 		needs := effectSpecs[it.Kind].needs // a kind's per-intent needs only add to these
 		row := s.prev[s.legOf(k.Leg).name+"/"+k.ID]
-		switch named := nameLocked(s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
+		switch named := nameHeld(s.t, s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
 		case s.locks.holds(k.ID) != (at != seamBeforeCall && at != seamAfterCall):
 			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: row mutation lock held %t", it.Kind, k.ID, at, s.locks.holds(k.ID))
-		case (needs.NameLock || needs.Runtime || needs.Legs != 0 || needs.Idle || at == seamBeforeCall || at == seamAfterCall) && !named:
+		case (needs.locksName(effectSpecs[it.Kind]) || at == seamBeforeCall || at == seamAfterCall) && !named:
 			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: runtime name not locked", it.Kind, k.ID, at)
 		}
 	}

@@ -168,6 +168,12 @@ func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
 	return h.Stop(sessionpkg.CitySweepContext(ctx))
 }
 
+// StopIdle is Stop for the chat idle auto-suspend; like StopForShutdown it
+// adds nothing to a handle with no session bead.
+func (h *RuntimeHandle) StopIdle(ctx context.Context) error {
+	return h.Stop(ctx)
+}
+
 // Kill asks the provider to stop the live runtime session immediately. A
 // session that is already gone satisfies the request, so it reports success —
 // see [runtime.StopForCleanup].

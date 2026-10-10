@@ -1324,7 +1324,7 @@ func (p *midStartWriter) Start(ctx context.Context, name string, cfg runtime.Con
 // suspendPatch is what `gc session suspend` writes on a managed city.
 func suspendPatch(now time.Time) map[string]string {
 	return map[string]string{
-		"held_until":   now.Add(indefiniteHoldDuration).UTC().Format(time.RFC3339),
+		"held_until":   now.Add(sessionpkg.IndefiniteHoldDuration).UTC().Format(time.RFC3339),
 		"sleep_intent": "user-hold",
 		"state":        "suspended",
 	}

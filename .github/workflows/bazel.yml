@@ -188,9 +188,10 @@ jobs:
       #   seed       main pushes seed the cache (rrc-seed); no lane reads it;
       #   canary     seed, and the unit lane reads;
       #   on         seed, and every lane reads.
-      # Mode remote only: fork pull_request runs see no vars, and only
-      # rbe-west's trusted edge serves the entries. Any other value is off,
-      # with a warning, so a typo never fails the required gate.
+      # Mode remote only: fork pull_request runs see no vars (fork-cache
+      # lanes read through their own probe-gated step, "Fork cache remote
+      # repo contents cache (read)"). Any other value is off, with a
+      # warning, so a typo never fails the required gate.
       - name: Remote repo contents cache
         id: rrc
         env:
@@ -222,9 +223,9 @@ jobs:
           case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
           # The nightly fresh-test-results run (bazel-nightly.yml) appends
           # --config=fresh (.bazelrc: --nocache_test_results) to every
-          # lane's cmd: worker-env (tools/rbe/worker-env) keys git and yq
-          # at major version only, so a minor upgrade on the rbe-west
-          # workers moves no action key, and a regression it causes can
+          # lane's cmd: worker-env (rbe-worker's worker/worker-env) keys
+          # git and yq at major version only, so a minor upgrade on the
+          # rbe-west workers moves no action key, and a regression it causes can
           # hide behind every push's cached PASS forever otherwise
           # (2026-10-07 worker-env outage review). FRESH is empty outside
           # workflow_dispatch/workflow_call, which never ask for it.
@@ -434,7 +435,7 @@ jobs:
           fi
 
       # Integration tests drive tmux, lsof and ssh from the host, as
-      # on the remote workers (tools/rbe/worker-env pins their versions).
+      # on the remote workers (the worker-env manifest pins their versions).
       # Where this lane executes here instead, install them, or those tests
       # would skip ("tmux not installed") rather than run.
       - name: Host tools for locally run integration tests
@@ -474,6 +475,37 @@ jobs:
           if bash tools/rbe/cache-zstd-probe.sh; then
             echo 'build:fork-cache --remote_cache_compression' >> .bazelrc.local
           fi
+
+      # The remote repo contents cache, read-only, for the lanes that use
+      # fork-cache (engdocs/design/bazel-remote-repo-contents-cache.md):
+      # external repositories come from the trees rrc-seed wrote on main
+      # pushes, served by rbe-cache's anonymous AC and CAS reads, instead of
+      # every fork lane re-running ~600 repository rules. The same two lines
+      # as the trusted reader above, key neutral
+      # (scripts/bazel_key_parity_test.go); fork-cache uploads nothing, and
+      # rbe-cache refuses every write. Only while cache-rrc-probe.sh gets an
+      # answer from rbe-cache and its committed kill switch (fork_rrc_read)
+      # is on: with the startup flag set and the cache unreachable, Bazel
+      # retries every repository against it before fetching it (R6), so a
+      # closed or down rbe-cache writes no lines here. That holds at probe
+      # time only: once loading is done Bazel fetches the files lazily, and
+      # losing rbe-cache mid-run fails the command (R4, bazel#30218). The
+      # step summary records the verdict and rbe-cache's TCP connect time.
+      - name: Fork cache remote repo contents cache (read)
+        if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
+        run: |
+          if why=$(bash tools/rbe/cache-rrc-probe.sh 2>&1); then
+            {
+              echo 'startup --experimental_remote_repo_contents_cache'
+              echo 'common --loading_phase_threads=64'
+            } >> .bazelrc.local
+            echo "$why"
+            read=on
+          else
+            echo "::notice title=No remote repo contents cache::$why"
+            read=off
+          fi
+          echo "Fork cache remote repo contents cache read: **$read** (${why#rbe-cache rrc probe: })" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create Bazel test tmpdir
         run: |
@@ -833,7 +865,7 @@ jobs:
           title="rrc-verify: remote repo contents cache differs from a cold fetch"
           body="The nightly rrc-verify run found cached repository trees that differ from a cold fetch, or could not check them: $RUN_URL (summary and the rrc-verify report artifact).
 
-          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Stop readers first: set the repository variable RBE_REPO_CONTENTS_CACHE to off. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
+          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Contain the fork-cache readers first: they see no repository variables, so (1) commit fork_rrc_read=off in both probe scripts, gascity tools/rbe/cache-rrc-probe.sh and beads .github/actions/setup-bazel/cache-rrc-probe.sh (beads has no fresh-merge: an open fork PR keeps the old switch until it is pushed again); (2) for immediate server-side containment, an operator runs rbe-cache-gate close on core, which stops all fork-cache, and fails fork-cache lanes already reading (while RBE_WEST_WORKERS is not true, that includes the required lanes on main and in the merge queue); (3) on a mismatch, set RBE_REPO_CONTENTS_CACHE to seed: the trusted readers read the same entries (rbe-cache serves the oss action cache), and seed stops every one of them while rrc-seed and this check keep running; set it to off only to stop seeding too, which also stops rrc-verify; if this run only says it could not check, leave the variable as it is. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
           gh label create rrc-verify -R "$GITHUB_REPOSITORY" --color B60205 \
             --description "Remote repo contents cache verification failures" 2>/dev/null || true
           n=$(gh issue list -R "$GITHUB_REPOSITORY" --label rrc-verify --state open --json number --jq '.[0].number // empty')
@@ -1110,9 +1142,9 @@ jobs:
 
   # rbe-worker S3a (rbe-worker-repo-design.md §5.4): a secret-free job that
   # measures a PR's effect on the worker host and, once a pin moves, checks
-  # that every commit in the bump range is signed (H5). Source is pinned
-  # unconditionally here: unlike the pool shims (S3b), this job never runs
-  # with farm secrets, so there is no in-tree fallback to cut over from.
+  # that every commit in the bump range is signed (H5). The worker code lives
+  # in gastownhall/rbe-worker (S5 deleted gascity's in-tree copy); this job
+  # never runs with farm secrets.
   worker-host:
     name: rbe worker host
     needs: rbe
@@ -1120,7 +1152,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift preflight)
     outputs:
       measure: ${{ steps.host.outputs.measure }}
       pin-changed: ${{ steps.pins.outputs.pin-changed }}
@@ -1189,18 +1221,14 @@ jobs:
           echo "old=$old" >> "$GITHUB_OUTPUT"
           echo "rbe-worker: pin $([ "$changed" = true ] && echo moved || echo unchanged) (default branch $old, this checkout $new)"
 
-      # S3-S5 only: every worker-host run fetches and checks parity, pin
-      # moved or not, so the host this job measures (below) is always the
-      # host the pool would serve once source flips to pinned, and so H5
-      # (below) always has the fetched tree's git history to walk the bump
-      # range when the pin did move. No secret reaches this step: the fetch
-      # is anonymous and verifies the pin before any checkout
+      # Every worker-host run fetches, pin moved or not, so H5 (below)
+      # always has the fetched tree's git history to walk the bump range
+      # when the pin did move. No secret reaches this step: the fetch is
+      # anonymous and verifies the pin before any checkout
       # (.github/actions/rbe-worker/fetch.sh).
       - name: Fetch the PR's pinned rbe-worker
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: pinned
 
       # H5 (D12): every commit between the default branch's pin and this
       # PR's pin must be a verified, signed, web-flow (GitHub merge-button)
@@ -1216,31 +1244,36 @@ jobs:
           NEW_SHA: ${{ steps.rbe-worker.outputs.sha }}
         run: .github/actions/rbe-worker/h5.sh "$WORKER_REPO_DIR/.." "$OLD_SHA" "$NEW_SHA"
 
-      # S3-S5 only: this checkout's tools/rbe and the fetched pin must agree,
-      # so the host this job measures is the host the pool would serve once
-      # source flips to pinned. git ls-tree mode+blob comparison: a rename or
-      # mode change shows up the same as content drift. Runs on every
-      # worker-host run (S3-S5), not just measure or pin-moved runs.
-      - name: In-tree and pinned trees are identical (S3-S5 only)
-        env:
-          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
-        run: |
-          set -euo pipefail
-          diff <(git ls-tree -r HEAD tools/rbe | awk -F'\t' '{sub("^tools/rbe/", "", $2)} $2 != "worker-env.txt" && $2 != "cache-zstd-probe.sh" {print $1 "\t" $2}') \
-               <(git -C "$RBE_WORKER_DIR/.." ls-tree -r HEAD worker | awk -F'\t' '{sub("^worker/", "", $2); print $1 "\t" $2}') \
-            || { echo "::error title=rbe-worker drift::in-tree tools/rbe and the pinned rbe-worker differ; S1/S2 parity broke"; exit 1; }
-
-      # §5.6, run against the PR's pinned rbe-worker once rbe-worker ships
-      # cmd/product-check (S2). Until then this step has nothing to run
-      # against and is intentionally absent; adding it is part of landing S2.
-
       - name: Measure this Blacksmith host against the PR's manifest
+        id: measure
         if: steps.host.outputs.measure == 'true' || steps.pins.outputs.pin-changed == 'true'
         env:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+
+      # §5.6: the pinned rbe-worker's cmd/product-check, worker items only,
+      # against this checkout (its manifest's package set is worker-env's
+      # measured list, its dolt line the worker's DOLT_VERSION, the
+      # .bazelrc test PATH the one worker-env measures, the platform pin the
+      # manifest's sha256). Stdlib-only and quick, so it runs on every run,
+      # whether or not the host moved: a .bazelrc or manifest change that
+      # breaks the contract fails here. It runs after H5 and the fetch
+      # succeeded (a non-empty dir is fetch.sh's last output, written only
+      # after every refusal check and the checkout), and also when the
+      # measurement itself failed, so a drifted host still reports the
+      # contract. No secret reaches these steps.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: ${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Product contract against the pinned rbe-worker
+        if: ${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}
+        env:
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: cd "$RBE_WORKER_DIR/.." && go run ./cmd/product-check -product-root "$GITHUB_WORKSPACE" -skip-client
 
   # The required check "bazel test (side-by-side)" (main ruleset, branch
   # protection): the one job of that name. It passes only when the rbe job,

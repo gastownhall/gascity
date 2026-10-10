@@ -109,7 +109,8 @@ env var the test reads with `bazeltest.DataPath` instead of `go build`.
 `bazel-nightly.yml` passes `fresh-test-results: true` to every `bazel.yml`
 lane it runs, which appends `--config=fresh` (`.bazelrc`:
 `--nocache_test_results`) to each lane's `bazel test`. This exists because
-`tools/rbe/worker-env` keys `git` and `yq` at major version only: a minor
+the worker-env measurement (`worker/worker-env` in `gastownhall/rbe-worker`)
+keys `git` and `yq` at major version only: a minor
 upgrade of either tool on the rbe-west workers moves no action key, so a PR
 or push run reuses its cached `PASS` forever and a regression that upgrade
 introduced never shows up (the 2026-10-07 worker-env outage review). The
@@ -141,7 +142,7 @@ inventory does not scan.
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides the controller backstop cadences that go through `internal/clock.Backstop` (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. Other cadences (the supervisor patrol, the proxied guard tick, the Dolt scope watchdog, the lanes' intervals and retries) keep their real periods, so they come round fewer times in the shortened window; the nightly real-timer rows cover them. |
+| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N, clamped to 30, divides every controller duration that goes through `internal/clock.Backstop`, directly or by deriving from the city's patrol interval (which `DaemonConfig.PatrolIntervalDuration` returns divided). The `BackstopSpeedupEnv` doc in `internal/clock/backstop.go` is the inventory of what is divided and what keeps its real period. The rows divide their 3-minute window by the same N. A cadence that keeps its real period comes round fewer times in the shortened window; the nightly real-timer rows cover it. |
 | `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures: 20 s when unset; a value that is not a duration of at least 5 s fails the row. |
 
 `GC_TEST_BACKSTOP_SPEEDUP` cannot be turned on in a binary users run: gc
@@ -152,7 +153,9 @@ only the testonly `//cmd/gc:gc_testhooks` target does
 `.goreleaser.yml` and the Makefile). Any gc run with the variable set prints a
 `gc: WARNING: GC_TEST_BACKSTOP_SPEEDUP=...` line on stderr at startup saying
 whether the hook is active or ignored, and the quiescence rows fail unless gc
-reports it active. `test/acceptance/BUILD.bazel` sets both variables
+reports it active. They also fail unless the `gc` on their PATH, the one exec
+orders and pack scripts run, is the binary under test, and whenever an order
+they run fails. `test/acceptance/BUILD.bazel` sets both variables
 (`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
 
 ### Merge queue
@@ -434,8 +437,56 @@ variable `RBE_REPO_CONTENTS_CACHE` rolls it out in mode `remote` only:
 Readers add `startup --experimental_remote_repo_contents_cache` and
 `common --loading_phase_threads=64` to `.bazelrc.local` (key neutral,
 `scripts/bazel_key_parity_test.go`) and still upload nothing. Developer
-machines, fork runs and macOS/Windows jobs never read it. Rollback: set the
-variable to `off`; lanes fetch as before.
+machines and macOS/Windows jobs never read it. Rollback for these lanes:
+set the variable to `off`; their next runs fetch as before. The variable
+does not reach the fork-cache lanes below.
+
+Lanes on the read-only fork cache (mode `cache`) see no repository
+variables. Mode `cache` covers fork PRs without an rbe-fork certificate,
+`rbe=cache` dispatches, and, while `RBE_WEST_WORKERS` is not `true`, every
+PR, push and merge group (`bazel.yml`'s rbe job). They read the same
+entries through rbe-cache's anonymous AC and CAS reads, with the same two
+lines, whenever `tools/rbe/cache-rrc-probe.sh` gets a GetCapabilities
+answer from rbe-cache, then NOT_FOUND for a GetActionResult key no action
+has and for a ByteStream Read of a blob the CAS does not hold. Each such
+lane's step summary records whether it reads, and rbe-cache's TCP connect
+time (DNS lookup excluded). rbe-cache refuses every write, and fork-cache
+uploads nothing.
+
+An unreachable cache with the startup flag set costs every repository a
+retry, so a cache that is closed or down when the probe runs writes no
+lines, and the lane fetches as before. That holds at probe time only.
+After loading, Bazel fetches a cached repository's files lazily from
+rbe-cache (:8443). If the cache goes away mid-run (rbe-cache-gate closes,
+the runner's IP is banned, or the breaker opens), the command fails, and
+Bazel does not re-fetch the repository (bazel#30218, design R4).
+
+To stop fork-cache lanes reading:
+
+1. Commit `fork_rrc_read=off` in both probe scripts: gascity's
+   `tools/rbe/cache-rrc-probe.sh` and beads'
+   `.github/actions/setup-bazel/cache-rrc-probe.sh`. This is the preferred
+   way: lanes that already read finish, and later runs fetch for
+   themselves. gascity's fresh-merge gives every new run main's switch.
+   beads has no fresh-merge, so an open fork PR keeps its old switch until
+   it is pushed again.
+2. For immediate server-side containment, an operator runs
+   `rbe-cache-gate close` on core. That stops all fork-cache, cache hits
+   included, and fails the lanes that are reading at that moment. While
+   `RBE_WEST_WORKERS` is not `true`, every PR, push and merge group runs in
+   mode `cache`, so closing the gate also fails in-flight required lanes on
+   main and in the merge queue.
+3. The trusted lanes read the same entries: rbe-cache serves the same `oss`
+   action cache. On an `rrc-verify` mismatch, set `RBE_REPO_CONTENTS_CACHE`
+   to `seed`. That stops every mode `remote` reader, while `rrc-seed` and
+   `rrc-verify` keep running. Set it to `off` only to stop seeding too;
+   that also stops `rrc-verify`. If the run only says it could not check
+   the cache, leave the variable as it is.
+
+Known limit (design R4): rbe-cache's anonymous CAS is a size partition
+whose upper store, for blobs of 512 MiB or more, is a noop. A cached
+repository with a file that large is a hit whose download always fails.
+rrc-gate does not refuse such entries today.
 
 Nothing on a reader checks a cached tree against what its repository rule
 produces, so `bazel.yml`'s `rrc-verify` job (from `bazel-nightly.yml`, or a
@@ -443,7 +494,8 @@ dispatch, whenever the variable is not `off`) fetches every lane's
 repositories cold and compares each tree and marker file with the entry a
 lane would read (`tools/bazel/rrc_verify.py`). A mismatch, a poisoned entry
 or a rule falsely marked reproducible, fails the job and opens an issue
-labeled `rrc-verify`: set the variable to `off` first, then investigate.
+labeled `rrc-verify`: contain the readers with the steps above (the
+issue lists them), then investigate.
 
 ### Re-pinning the RBE worker host
 
@@ -452,9 +504,10 @@ Every action's key carries `worker-env`, the sha256 of
 toolchain manifest of the Blacksmith host the pool workers run on. rbe-west's
 oss and oss-fork schedulers match `worker-env` exactly. The default instance
 ignores it. Each worker advertises the hash of the host it measures
-(`tools/rbe/worker-env`). An action runs only on a worker whose toolchain
-is the pinned one. gastownhall/beads shares the pools and carries a
-byte-identical copy of the manifest and the same pin.
+(`worker/worker-env` in `gastownhall/rbe-worker`, "Bumping the rbe-worker
+pin" below). An action runs only on a worker whose toolchain is the pinned
+one. gastownhall/beads shares the pools and carries a byte-identical copy of
+the manifest and the same pin.
 
 The manifest records what can change an action's result, and nothing else.
 We don't control the Blacksmith image, and it takes Ubuntu security updates
@@ -463,7 +516,7 @@ on its own schedule:
 - **Kept in full:** the arch, the OS release (`ubuntu 24.04`), and the Go
   and dolt the worker installs by checksum.
 - **Kept as the upstream release:** each measured package
-  (`tools/rbe/worker-env`'s `measured` list). The Debian epoch and the
+  (rbe-worker `worker/worker-env`'s `measured` list). The Debian epoch and the
   Ubuntu revision are dropped, so `9.4-3ubuntu6.1` and `9.4-3ubuntu6.2`
   both measure `9.4`.
   - The libraries the hermetic toolchain and test binaries load (glibc,
@@ -483,9 +536,12 @@ So a glibc minor, another arch or OS release, a library or archive tool
 minor, a git or yq major, or a Go or dolt bump is a new manifest. A
 security patch of the same releases is not. The measurement changes with
 an image refresh only when the refresh changes one of those.
-`tools/rbe/worker-env --raw` prints dpkg's versions as installed. That
-listing is for diagnosis and is never hashed. When the measurement does
-change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
+rbe-worker's `worker/worker-env --raw` prints dpkg's versions as installed.
+That listing is for diagnosis and is never hashed. When the measurement does
+change, that is drift, and it is loud (`worker/worker-env-drift` in
+rbe-worker for the pools and the canary; gascity's own
+`tools/rbe/worker-env-drift` keeps only its client half, `pin` and
+`preflight`, for `bazel.yml` and the pre-push hook):
 
 - A drifted worker still registers, advertising the hash it measured.
   Actions that send no `worker-env` still run on it. Actions that carry
@@ -504,11 +560,12 @@ change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
   their preflight instead of queueing.
 - `rbe-worker-env-canary.yml` measures a Blacksmith runner every six
   hours, so drift usually opens the issue before CI meets it.
-- A change to the worker host (`tools/rbe/worker-env*`,
-  `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
-  Blacksmith image in bazel.yml's `worker-host` job, which the required
-  `bazel test (side-by-side)` gate fans in. If the PR's manifest is not
-  what that image measures, the job fails.
+- A change to the worker host (`tools/rbe/worker-env.txt`,
+  `platforms/BUILD.bazel`, or the rbe-worker `pin`, `action.yml`,
+  `fetch.sh` or `isolation-probe.sh` under `.github/actions/rbe-worker/`)
+  is measured on the Blacksmith image in bazel.yml's `worker-host` job,
+  which the required `bazel test (side-by-side)` gate fans in. If the PR's
+  manifest is not what that image measures, the job fails.
 
 To re-pin, anyone with write access:
 
@@ -516,7 +573,13 @@ To re-pin, anyone with write access:
    failed run's step summary.
 2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
    `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
-   checks that they agree with each other, `go.mod` and the toolset.
+   checks that they agree with each other and with `go.mod`. The PR's
+   `worker-host` job runs the pinned rbe-worker's `cmd/product-check`
+   (worker items) against this checkout on every PR, and fails if the
+   manifest does not match the worker: its measured package list, its
+   dolt, the test `PATH`, the pin.
+   rbe-worker's own CI runs the same check against gascity's main, but
+   only as information, and it gates nothing here.
    Make the same change in gastownhall/beads (its
    `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
    together: once the pool workers serve the new pin, beads' actions on
@@ -543,27 +606,59 @@ close it by hand.
 
 ### Bumping the rbe-worker pin
 
-`.github/actions/rbe-worker/pin` names the `gastownhall/rbe-worker` commit
-the worker code pins (not to be confused with the worker-env manifest pin
-above). Bumping it is a one-line PR: change the 40-hex sha in `pin` to the
-new commit, open it, merge it.
+The worker code the pools run (`blacksmith-worker.sh`, `worker-env`, the
+farm half of `worker-env-drift` and the `rbe-action-*` launcher) lives in
+[`gastownhall/rbe-worker`](https://github.com/gastownhall/rbe-worker)
+under `worker/`, with its own tests. gascity keeps no copy. Its pool and
+canary workflows (`rbe-worker-pool.yml`, `rbe-fork-pool.yml`,
+`rbe-worker-env-canary.yml`) are shims: each job fetches the commit named in
+`.github/actions/rbe-worker/pin` anonymously, from `refs/heads/main` only,
+verifies that the commit is in main's history, and runs `worker/` from it.
+gascity keeps only the product side of the contract: `go.mod`,
+`platforms/BUILD.bazel`'s pin, the manifest `tools/rbe/worker-env.txt`, the
+client half of `tools/rbe/worker-env-drift` (`pin` and `preflight`, run by
+`bazel.yml`, `review-formulas.yml` and `.githooks/lib/push-suite.sh`), and
+`tools/rbe/cache-zstd-probe.sh`. A change to the worker lands in
+rbe-worker first and reaches gascity's pools only through a pin bump.
 
-`bazel.yml`'s `worker-host` job measures the bump before it lands: it
-fetches the PR's pinned commit anonymously (no secret, `refs/heads/main`
-only), checks the fetched tree against this checkout's `tools/rbe` (S3-S5
-parity), and, because the pin moved, measures this Blacksmith host against
-it. H5 then walks every commit between the default branch's pin and the
-PR's: each one must be a GitHub-verified, signed commit, authored by
-`web-flow` (GitHub's merge-button identity), with an associated pull
-request merged into `rbe-worker`'s main. A direct push to `rbe-worker`
+`pin` names the rbe-worker commit (not to be confused with the worker-env
+manifest pin above). Bumping it is a one-line PR titled
+`chore(rbe): bump rbe-worker to <sha8> (<subject>)`:
+
+1. Merge the change into rbe-worker's main.
+2. Change the 40-hex sha in `.github/actions/rbe-worker/pin` to the new
+   commit. Use rbe-worker's `bin/bump-summary OLD NEW` output as the PR
+   body: the compare URL, the commit list, and whether the bump touches the
+   measurement, isolation or microVM files.
+3. If the bump changes what the worker measures, re-pin the worker host in
+   the same PR ("Re-pinning the RBE worker host" above), and merge the
+   matching beads re-pin right after.
+4. Open the PR and merge it once `worker-host` is green. The canary runs
+   on the merge, and new pool runs pick the pin up at their next dispatch.
+   Workers already running keep their revision until they retire.
+
+`bazel.yml`'s `worker-host` job checks the bump before it lands, in this
+order. It fetches the PR's pinned commit anonymously (no secret,
+`refs/heads/main` only). H5 then walks every commit between the default
+branch's pin and the PR's: each one must be a GitHub-verified, signed
+commit, authored by `web-flow` (GitHub's merge-button identity), with an
+associated pull request merged into `rbe-worker`'s main. Because the pin
+moved, the job then measures this Blacksmith host against the PR's
+manifest. Last, it runs the new commit's `cmd/product-check` against this
+checkout. A direct push to `rbe-worker`
 main, however it's signed, fails this check: only a squash-merged PR
 reaches it. A rollback (a new pin that is not a descendant of the old one)
 warns instead of failing, so reverting a bad rbe-worker commit isn't
-blocked on rewriting its own history.
+blocked on rewriting its own history. To roll the pools back, revert the
+bump PR.
 
 The range check is dormant on a PR that doesn't move the pin: H5 has
-nothing to walk, and the parity/measure steps run anyway (every
-`worker-host` run fetches and diffs during S3-S5, pin-moved or not).
+nothing to walk. Every `worker-host` run still fetches the pin and runs
+its `cmd/product-check`, which is stdlib-only and quick. It measures only
+when the change touches the worker host. product-check is skipped if H5 or
+the fetch failed, and still runs if the measurement failed.
+
+## The outcome: protected PR feedback in under five minutes
 
 The developer-visible service-level objective is p95 **under five minutes**
 from GitHub Actions PR-workflow creation until the required automated `CI`
@@ -1047,7 +1142,7 @@ all-source audit while staying outside untagged and Small debt.
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 497 calls / 184 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 747 calls / 223 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 744 calls / 222 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |
@@ -1064,14 +1159,12 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/session` package `session` | TestRuntimeLeaseCrossProcess: subprocess | ga-cp3hwi | the runtime lease cross-process harness is a checked Medium subprocess owner; the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store | P0.4b | 2026-10-31 |
 | Medium owner | `internal/workrecord` package `workrecord` | TestCommitReachableOnBranch: subprocess | ga-cp3hwi | the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner; the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-10-31 |
-| Medium owner | `scripts` package `scripts_test` | TestCacheZstdProbe: http_test_server | ga-cp3hwi | the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd | P0.4b | 2026-10-31 |
+| Medium owner | `scripts` package `scripts_test` | TestCacheProbes: http_test_server | ga-cp3hwi | the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestDockerSessionProtocol: subprocess | ga-cp3hwi | Docker session adapter protocol proof is a checked Medium owner; the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake | W6 | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestFreshMergeActionBehaviour: subprocess | ga-cp3hwi | the fresh-merge composite action's behavior proof is a checked Medium subprocess owner; the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModDownloadRetryScriptRetriesTransientFailures: subprocess | ga-cp3hwi | the CI go mod download retry proof is a checked Medium subprocess owner; the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModVerifyCacheDetectsTamperedModules: subprocess | ga-cp3hwi | the CI Go module cache verification proof is a checked Medium subprocess owner; the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-cp3hwi | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-31 |
-| Medium owner | `scripts` package `scripts_test` | TestRBEWorkerJSONIsolationOffMatchesPreO1: subprocess | ga-cp3hwi | the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner; the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing | P0.4b | 2026-10-31 |
-| Medium owner | `scripts` package `scripts_test` | TestRBEWorkerScrubCAS: subprocess | ga-cp3hwi | the sticky-disk CAS scrub proof is a checked Medium subprocess owner; the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker | P0.4b | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 284 / 43) | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | environment: 119 calls / 16 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 60 calls / 25 files (historical regex census: 75 / 25) | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
@@ -1081,7 +1174,7 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
-| Small debt ratchet | all untagged test source | subprocess: 472 calls / 138 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | subprocess: 471 calls / 137 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
 | Small debt ratchet | all untagged test source | tmux: 3 calls / 2 files (historical regex census: 1 / 1) | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-31 |
@@ -1093,7 +1186,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
-| Source debt ratchet | all untagged test source | subprocess: 499 calls / 149 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | subprocess: 496 calls / 148 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | tmux: 9 calls / 4 files (historical regex census: 7 / 3) | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-31 |
 

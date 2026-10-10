@@ -112,6 +112,15 @@ var (
 	ErrRuntimeLeaseRowClosed = errors.New("runtime lease: the session row is closed")
 	// ErrRuntimeLeaseAfterRelease refuses a write under a released lease.
 	ErrRuntimeLeaseAfterRelease = errors.New("runtime lease: written after release")
+	// ErrRuntimeLeaseRenamed refuses a record on a row whose session_name is
+	// not the runtime name asked for.
+	ErrRuntimeLeaseRenamed = errors.New("runtime lease: the row's runtime name moved")
+	// ErrRuntimeLeaseContention reports a record write that lost its
+	// revision fence on every attempt.
+	ErrRuntimeLeaseContention = errors.New("runtime lease: contended")
+	// ErrRuntimeLeaseLocalFS reports the name's lock file or its directory
+	// failing on the local filesystem.
+	ErrRuntimeLeaseLocalFS = errors.New("runtime lease: local lock file")
 )
 
 // RuntimeLeaseBusyError names who holds a busy lease. Local means the holder
@@ -292,7 +301,7 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 			return fmt.Errorf("%w: session %q", ErrRuntimeLeaseRowClosed, l.id)
 		}
 		if name := infoFromPersistedBead(bead).SessionName; name != l.name {
-			return fmt.Errorf("runtime lease: runtime %q is not session %q's runtime %q", l.name, l.id, name)
+			return fmt.Errorf("%w: runtime %q is not session %q's runtime %q", ErrRuntimeLeaseRenamed, l.name, l.id, name)
 		}
 		now := l.now()
 		rec := parseRuntimeLease(bead.Metadata)
@@ -326,7 +335,7 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 			return fmt.Errorf("runtime lease: session %q: %w", l.id, err)
 		}
 	}
-	return fmt.Errorf("runtime lease: session %q: lost the revision fence %d times", l.id, runtimeLeaseAttempts)
+	return fmt.Errorf("%w: session %q: lost the revision fence %d times", ErrRuntimeLeaseContention, l.id, runtimeLeaseAttempts)
 }
 
 func warnRuntimeLeaseNoCAS(city string, diag *beads.BeadsDiagnostic) {
@@ -580,11 +589,11 @@ func lockRuntimeNameFile(city, name string, now time.Time) (f *os.File, token, p
 	sum := sha256.Sum256([]byte(name))
 	path := filepath.Join(citylayout.SessionNameLocksDir(city), "runtime-"+hex.EncodeToString(sum[:])+".lock")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, "", "", fmt.Errorf("runtime lease: creating lock dir: %w", err)
+		return nil, "", "", fmt.Errorf("%w: creating lock dir: %w", ErrRuntimeLeaseLocalFS, err)
 	}
 	f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("runtime lease: opening lock: %w", err)
+		return nil, "", "", fmt.Errorf("%w: opening lock: %w", ErrRuntimeLeaseLocalFS, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close() //nolint:errcheck // closing after a refused lock
@@ -593,7 +602,7 @@ func lockRuntimeNameFile(city, name string, now time.Time) (f *os.File, token, p
 			_, holder, _ := strings.Cut(string(body), "\n")
 			return nil, "", "", &RuntimeLeaseBusyError{Name: name, Holder: strings.TrimSpace(holder), Local: true}
 		}
-		return nil, "", "", fmt.Errorf("runtime lease: locking %q: %w", name, err)
+		return nil, "", "", fmt.Errorf("%w: locking %q: %w", ErrRuntimeLeaseLocalFS, name, err)
 	}
 	old := make([]byte, 128)
 	n, _ := f.ReadAt(old, 0)

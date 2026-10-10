@@ -216,8 +216,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator fresh restart", "continuation_reset_pending restart_requested", []string{"internal/session/manager.go:Manager.RequestFreshRestart"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.RequestFreshRestart(id)) }},
-		{"operator suspend", "sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.suspend"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.Suspend(id)) }},
-		{"operator kill fence", "last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator suspend", "held_until sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.suspend"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.Suspend(id)) }},
+		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "cmd/gc/cmd_session_kill_fence.go:writeSessionKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			_, err := writeSessionKillFence(rec, id, now)
 			must(t, err)
 		}},
@@ -334,6 +334,21 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, store, closed.ID).Metadata
 			},
 		},
+		"cmd/gc/reconcile_fenced_store.go:fencedWriter.closeRow": {
+			[]string{session.RuntimeLeaseHolderKey, "host/1/n", session.RuntimeLeaseExpiresKey, ago(-time.Minute), session.RuntimeLeaseTTLKey, "60", session.RuntimeLeaseFlockKey, "f"},
+			func(t *testing.T, meta []string) map[string]string {
+				m := beads.NewAtomicCloseMemStore()
+				stampedMemStore(t, m)
+				id := fieldRow(t, m, meta...)
+				closed, err := fencedWriter{store: m}.closeRow(id, func(session.Info, session.PersistedResponse) (session.MetadataPatch, bool) {
+					return session.MetadataPatch{"close_reason": "test"}, true
+				})
+				if err != nil || !closed {
+					t.Fatalf("closeRow = %t, %v", closed, err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/lifecycle_transition.go:ConfigDriftResetPatch": {
 			[]string{"restart_requested", "true"},
 			patchSite(func(session.Info) session.MetadataPatch {
@@ -350,6 +365,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				if err := session.NewManagerWithOptions(m, runtime.NewFake()).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"cmd/gc/cmd_session_kill_fence.go:writeSessionKillFence": {
+			[]string{"state", "active", "sleep_intent", "user-hold", "held_until", ago(-time.Hour)},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if _, err := writeSessionKillFence(m, id, now); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata

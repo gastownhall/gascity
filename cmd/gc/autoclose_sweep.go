@@ -70,6 +70,12 @@ type autocloseSweep struct {
 	// last arrived in a census.
 	ran map[string]struct{}
 
+	// interval and grace are autocloseSweepInterval and autocloseSweepGrace
+	// through clock.Backstop. The ticker and every deferral read them, so
+	// under the test speedup a deferred id still comes due on the pass it
+	// is owed.
+	interval, grace time.Duration
+
 	batch, pendingCap, ranCap int
 	dropped                   int
 }
@@ -79,6 +85,8 @@ func newAutocloseSweep() *autocloseSweep {
 		census:     map[*beads.CachingStore]map[string]struct{}{},
 		pending:    map[string]time.Time{},
 		ran:        map[string]struct{}{},
+		interval:   clock.Backstop(autocloseSweepInterval),
+		grace:      clock.Backstop(autocloseSweepGrace),
 		batch:      autocloseSweepBatch,
 		pendingCap: autocloseSweepPendingCap,
 		ranCap:     autocloseSweepRanCap,
@@ -145,7 +153,7 @@ func (s *autocloseSweep) observe(cache *beads.CachingStore, active map[string]st
 	}
 	for id := range prev {
 		if _, still := active[id]; !still {
-			s.deferLocked(id, now.Add(autocloseSweepGrace))
+			s.deferLocked(id, now.Add(s.grace))
 		}
 	}
 	for id := range active {
@@ -210,11 +218,11 @@ func (cs *controllerState) autocloseSweepOf() *autocloseSweep {
 	return cs.autocloseSweep
 }
 
-// startAutocloseSweep runs the sweep every autocloseSweepInterval until ctx
-// ends.
+// startAutocloseSweep runs a sweep pass every pass interval until ctx ends.
 func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
+	interval := cs.autocloseSweepOf().interval
 	go func() {
-		ticker := time.NewTicker(clock.Backstop(autocloseSweepInterval))
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -231,6 +239,7 @@ func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
 // lanes do, so one bad row cannot end the backstop for the controller's life.
 // The ids that pass had already popped are lost; the log names the bug.
 func (cs *controllerState) safeAutocloseSweepPass(now time.Time) (panicked bool) {
+	defer cs.beginStoreWork()()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -297,7 +306,7 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 			// A suspended rig's store is not read: a read restarts its
 			// retired proxy. The close is confirmed after the rig resumes.
 			res.Retried++
-			sweep.deferID(id, now.Add(autocloseSweepInterval))
+			sweep.deferID(id, now.Add(sweep.interval))
 			continue
 		}
 		store, live, err := liveReadOwner(stores, id)
@@ -308,13 +317,13 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 				res.Ran++
 			} else {
 				res.Retried++
-				sweep.deferID(id, now.Add(autocloseSweepInterval))
+				sweep.deferID(id, now.Add(sweep.interval))
 			}
 		case closeRefuted:
 			res.Refuted++
 		default:
 			res.Retried++
-			sweep.deferID(id, now.Add(autocloseSweepInterval))
+			sweep.deferID(id, now.Add(sweep.interval))
 		}
 	}
 	sweep.mu.Lock()

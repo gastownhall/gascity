@@ -169,6 +169,13 @@ package main
 // exactly once per process. A city that relocates nothing pays none of it:
 // the front door short-circuits on the config before any registry is built.
 //
+// Even an argv that addresses ids enters only when the answer can depend on
+// the verdict. The per-id twin census (by_id_relic_proof.go) runs first, and
+// when every subject is non-reserved and the binding answered that it holds no
+// copy, every verdict falls through, so the funnel — and its census of the
+// whole work store — is skipped. A plain `gc bd show <work-id>` on a split
+// city pays one binding Get, not a work-store listing.
+//
 // The subject arms are the widening, and the id shape is why they cannot be
 // narrower. A class store mints from its binding workspace's own prefix and
 // `gc storage migrate` preserves ids, so "gc-123" says nothing about which
@@ -1084,6 +1091,14 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// only the spellings whose answers were wrong.
 		return 0, false
 	}
+	// The funnel is the boot gate, and on a split city its verdict costs a
+	// census of the whole work store. When every subject is non-reserved and
+	// the per-id twin census says the binding holds no copy of it, every
+	// verdict falls through to the passthrough, so the verdict is not taken.
+	// See by_id_relic_proof.go, "The same census answers before the funnel".
+	if len(classIDs) == 0 && bdByIDAnswerIsThePassthroughForEveryVerdict(cityPath, bdByIDDoorSubjects(op, served, subjectIDs)) {
+		return 0, false
+	}
 	door, routed, err := openBdByIDClassFrontDoor(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1096,6 +1111,17 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return refuseUnservedClassTarget(door, bdArgs, classIDs, subjectIDs, stderr)
 	}
 	return serveBdByIDResolved(door, op, bdArgs, rigName, classDoorRepoDirs(cityPath), stdout, stderr)
+}
+
+// bdByIDDoorSubjects is the id set the door resolves for one invocation: the
+// served op's one id, or every subject the scanners reduced an unserved argv
+// to. It is the funnel skip's input, and it has to be exactly what the door
+// would probe — a skip decided on fewer ids would let an unprobed one through.
+func bdByIDDoorSubjects(op bdByIDOp, served bool, subjectIDs []string) []string {
+	if served {
+		return []string{op.ID}
+	}
+	return subjectIDs
 }
 
 // classDoorRepoDirs is the checkout table this door hands its close gate. A
