@@ -445,6 +445,15 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 		standardAssignedReadyWorkQueryScript(topo)
 }
 
+func distinctAssignedIdentityLoopScript() string {
+	return `gc_seen_id_1_set=""; gc_seen_id_2_set=""; for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`[ -n "$gc_seen_id_1_set" ] && [ "$id" = "$gc_seen_id_1" ] && continue; ` +
+		`[ -n "$gc_seen_id_2_set" ] && [ "$id" = "$gc_seen_id_2" ] && continue; ` +
+		`if [ -z "$gc_seen_id_1_set" ]; then gc_seen_id_1="$id"; gc_seen_id_1_set=1; ` +
+		`else gc_seen_id_2="$id"; gc_seen_id_2_set=1; fi; `
+}
+
 // standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor is the
 // combined work query's crash-recovery tier. An assigned graph.v2 workflow
 // root is the session's launch/continuation anchor, so remember it while the
@@ -456,8 +465,7 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 // tier alone still receive the anchor.
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+		distinctAssignedIdentityLoopScript() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
@@ -520,8 +528,7 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
 func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return distinctAssignedIdentityLoopScript() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
@@ -692,8 +699,7 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 }
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return distinctAssignedIdentityLoopScript() +
 		assignedReadyTierCommand("id", topo) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		ephemeralAssignedReadyProbeScript("id", topo) +
@@ -707,8 +713,7 @@ func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
 
 func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+		distinctAssignedIdentityLoopScript() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -728,8 +733,7 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return distinctAssignedIdentityLoopScript() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
@@ -743,8 +747,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
-		`[ -z "$id" ] && continue; ` +
+	return distinctAssignedIdentityLoopScript() +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +

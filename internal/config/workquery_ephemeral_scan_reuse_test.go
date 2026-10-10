@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -163,5 +165,75 @@ func TestEphemeralSnapshotStillMatchesLaterIdentities(t *testing.T) {
 				t.Fatalf("bead assigned to the third identity was not served from the shared snapshot; got %q", out)
 			}
 		})
+	}
+}
+
+type assignedIdentityQueryTest struct {
+	name   string
+	script string
+	verbs  []string
+}
+
+func assertAssignedIdentityProbes(t *testing.T, query assignedIdentityQueryTest, env map[string]string, identities []string) {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "identities")
+	env["GC_TEST_IDENTITY_LOG"] = logPath
+	bdScript := `#!/bin/sh
+case "$1" in
+  list|ready)
+    printf '%s\n' "$*" >> "$GC_TEST_IDENTITY_LOG"
+    printf '[]'
+    ;;
+  *) printf '[]' ;;
+esac
+`
+	out := runShellWithFakeBd(t, query.script+`printf "[]"`, env, bdScript)
+	if out != "[]" {
+		t.Fatalf("output = %q, want unchanged empty JSON", out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read identity log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var want []string
+	for _, verb := range query.verbs {
+		for _, identity := range identities {
+			args := " --assignee=" + identity + " --json --limit=1"
+			if verb == "list" {
+				args = " --status in_progress" + args
+			}
+			want = append(want, verb+args)
+		}
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("identity probes = %q, want %q", lines, want)
+	}
+}
+
+func TestAssignedWorkQueriesProbeDistinctIdentitiesInOrder(t *testing.T) {
+	queries := []assignedIdentityQueryTest{
+		{"standard combined", standardAssignedWorkQueryScript(QueryTopology{}), []string{"list", "ready"}},
+		{"standard in progress", standardAssignedInProgressWorkQueryScript(QueryTopology{}), []string{"list"}},
+		{"standard ready", standardAssignedReadyWorkQueryScript(QueryTopology{}), []string{"ready"}},
+		{"legacy combined", legacyControlAssignedWorkQueryScript(QueryTopology{}), []string{"list", "ready"}},
+		{"legacy in progress", legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}), []string{"list"}},
+		{"legacy ready", legacyControlAssignedReadyWorkQueryScript(QueryTopology{}), []string{"ready"}},
+	}
+	cases := []struct {
+		name       string
+		env        map[string]string
+		identities []string
+	}{
+		{"collapsed name and alias", map[string]string{"GC_SESSION_ID": "session-id", "GC_SESSION_NAME": "named-seat", "GC_ALIAS": "named-seat"}, []string{"session-id", "named-seat"}},
+		{"three distinct identities", map[string]string{"GC_SESSION_ID": "session-id", "GC_SESSION_NAME": "session-name", "GC_ALIAS": "session-alias"}, []string{"session-id", "session-name", "session-alias"}},
+		{"identity contained as a word", map[string]string{"GC_SESSION_NAME": "worker extra", "GC_ALIAS": "worker"}, []string{"worker extra", "worker"}},
+	}
+	for _, query := range queries {
+		for _, tc := range cases {
+			t.Run(query.name+"/"+tc.name, func(t *testing.T) {
+				assertAssignedIdentityProbes(t, query, maps.Clone(tc.env), tc.identities)
+			})
+		}
 	}
 }
