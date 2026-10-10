@@ -1586,6 +1586,7 @@ go_test(
         "runtime_lease_optout_test.go",
         "runtime_lease_reopen_test.go",
         "runtime_observation_cache_test.go",
+        "runtime_profiles_matrix_test.go",
         "runtime_registry_test.go",
         "runtime_token_fence_test.go",
         "scale_from_zero_named_no_scalecheck_test.go",
