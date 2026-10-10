@@ -3228,6 +3228,9 @@ func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
 }
 
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
+	if workflowTopologyIsNonExecutable(candidate.Metadata[beadmeta.KindMetadataKey], candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) {
+		return false
+	}
 	if len(routeTargets) == 0 {
 		return false
 	}
@@ -3246,6 +3249,18 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		}
 	}
 	return false
+}
+
+// workflowTopologyIsNonExecutable excludes structural latches while preserving
+// the legacy root-only workflow whose root is itself the executable work.
+// Apply the same gate to demand: refusing a claim alone would leave a permanent
+// reason to spawn replacement workers, each of which immediately drains.
+func workflowTopologyIsNonExecutable(kind, expanded string) bool {
+	kind = strings.TrimSpace(kind)
+	if kind == beadmeta.KindWorkflow {
+		return strings.TrimSpace(expanded) == "true"
+	}
+	return slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
 }
 
 // hookCandidateVisible reports whether a work_query candidate should be

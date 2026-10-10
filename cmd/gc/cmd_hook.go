@@ -1272,6 +1272,15 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		if isHeldHookCandidate(obj) {
 			continue
 		}
+		// Keep assigned workflow anchors available for continuation, but never
+		// offer an unassigned structural latch as fresh worker work.
+		assignee, _ := obj["assignee"].(string)
+		metadata, _ := obj["metadata"].(map[string]any)
+		kind, _ := metadata[beadmeta.KindMetadataKey].(string)
+		expanded, _ := metadata[beadmeta.WorkflowExpandedMetadataKey].(string)
+		if strings.TrimSpace(assignee) == "" && workflowTopologyIsNonExecutable(kind, expanded) {
+			continue
+		}
 		filtered = append(filtered, obj)
 	}
 	reencoded, err := json.Marshal(filtered)

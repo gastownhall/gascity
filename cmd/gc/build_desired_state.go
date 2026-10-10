@@ -2635,6 +2635,9 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // that helper for identity, not claimability, and must keep resolving an
 // expanded root's target.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
+	if workflowTopologyIsNonExecutable(b.Metadata[beadmeta.KindMetadataKey], b.Metadata[beadmeta.WorkflowExpandedMetadataKey]) {
+		return nil
+	}
 	candidates := routedToAndLegacyWorkflowCandidates(b)
 	if len(candidates) == 0 {
 		return nil
