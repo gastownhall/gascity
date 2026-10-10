@@ -498,6 +498,27 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 				}
 			}
 		}),
+		// Upstream and OperatorEnv use the same conditional framing as
+		// hashCoreFields. Between two breakdowns written by this binary, an
+		// unset value hashes to the same empty-input digest on both sides
+		// and never reports as drifted on its own. A breakdown stored by a
+		// binary that predates these keys has no entry for them at all, so
+		// on that session's first real drift both keys are listed with
+		// stored-hash=(absent) alongside the field that actually changed,
+		// until the restart re-stamps the breakdown. Parity with
+		// hashCoreFields is pinned by
+		// TestCoreFingerprintBreakdownCoversEveryCoreField; the legacy
+		// rendering by TestLogDriftReportsFieldsAbsentFromStoredBreakdown.
+		"Upstream": fieldHash(func(h hash.Hash) {
+			hashOptionalString(h, "upstream", cfg.Upstream)
+		}),
+		"OperatorEnv": fieldHash(func(h hash.Hash) {
+			if len(cfg.OperatorEnv) > 0 {
+				h.Write([]byte("operator_env"))
+				h.Write([]byte{0})
+				hashSortedMap(h, cfg.OperatorEnv)
+			}
+		}),
 	}
 	var copyEntries []BreakdownCopyEntry
 	if len(cfg.CopyFiles) > 0 {
@@ -565,10 +586,22 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 
 	fmt.Fprintf(w, "  config-drift-diag %s: drifted fields: %s\n", name, strings.Join(diffs, ", ")) //nolint:errcheck // best-effort diag
 	for _, field := range diffs {
-		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedFields[field], currentBd.Fields[field]) //nolint:errcheck // best-effort diag
+		// A key the stored breakdown never carried (written by a binary
+		// that predates the field) is reported as absent rather than as an
+		// empty hash, so the operator can tell "new field" from "changed".
+		storedHash, ok := storedFields[field]
+		if !ok {
+			storedHash = "(absent)"
+		}
+		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedHash, currentBd.Fields[field]) //nolint:errcheck // best-effort diag
 		switch field {
 		case "Command":
 			fmt.Fprintf(w, "    Command: %q\n", current.Command) //nolint:errcheck // best-effort diag
+		case "Upstream":
+			fmt.Fprintf(w, "    Upstream: %q\n", current.Upstream) //nolint:errcheck // best-effort diag
+		case "OperatorEnv":
+			// Keys only: config-authored env may carry credentials.
+			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", sortedKeys(current.OperatorEnv)) //nolint:errcheck // best-effort diag
 		case "Env":
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "MCPServers":
@@ -735,6 +768,17 @@ func renderCopyEntry(e BreakdownCopyEntry) string {
 		return fmt.Sprintf("%s (probed)", hash)
 	}
 	return fmt.Sprintf("src=%s", e.Src)
+}
+
+// sortedKeys returns the map's keys in sorted order for deterministic
+// diagnostic output.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // filteredEnv returns only the allow-listed env keys for diagnostic output.
