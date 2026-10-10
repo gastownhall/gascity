@@ -21,11 +21,83 @@ then add a terminal step (submit, commit, etc).
 | escalation_target | caller / rig `formula_vars` | Mail recipient for help/blocked escalations (default: `human`) |
 
 Steps run in independent shell contexts, so each step that needs the work
-bead re-derives it from the input convoy:
+bead re-derives it from the input convoy when there is one, and from the
+dispatcher's trigger bead when there is not:
 
 ```bash
-CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+CONVOY_ID="{{convoy_id}}"
+# Derive your work bead. A convoy is OPTIONAL: a bead dispatched with plain
+# `gc sling` has no convoy at all and $GC_BEAD_ID is empty in that session, so a
+# convoy-only derivation can never resolve there (gci-mar6).
+# CONVOY_ID lets a FORMULA step pass its rendered convoy-id variable in — the
+# formula hunks prepend a CONVOY_ID= line ahead of this block — while a PROMPT
+# block, which has no template vars, gets the same behaviour from $GC_BEAD_ID. One
+# block, both call shapes, one fixture.
+# The convoy-id variable is deliberately NOT spelled in braces in this comment: the
+# same text is embedded in the polecat PROMPT, whose renderer reads a braced name
+# as a call to a function it does not define, and `gc lint gastown` fails it
+# (`function "convoy_id" not defined`). The formula hunks write the braced form on
+# their own prepended line, outside this block, where it is a real template var.
+CONVOY_ID="${CONVOY_ID:-${GC_BEAD_ID:-}}"
+WORK_BEAD_ID=""
+if [ -n "$CONVOY_ID" ]; then
+  WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null \
+    | jq -r 'if ((.children // []) | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+fi
+# No convoy. OWNERSHIP decides from here, never the dispatcher's trigger record
+# on its own: a session is spawned FOR one bead, but `gc hook --claim` checks
+# assigned work first and only then falls through to the routed pool, so it
+# routinely hands the session a DIFFERENT bead. Measured in gci-utzx's own
+# session: GC_TRIGGER_WORK_BEAD_ID=gci-5ts6 while the claim returned gci-utzx,
+# and gci-5ts6 is a real, open, non-convoy bug bead — so the verify block below
+# passes it. Taking the env var there would branch, push and reassign an
+# unrelated bead: failing OPEN onto somebody else's work, which is strictly
+# worse than the convoy-only abort this replaced.
+ME="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
+# (1) The bead this session actually holds. This is what the claim block
+# established, so it outranks every env var.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  MINE_JSON=$(gc bd list --assignee="$ME" --status=in_progress --json 2>/dev/null)
+  # Exactly one, counting only non-convoy beads: a convoy wrapper is never the work
+  # bead, and a molecule holds both. Exactly one, not the first of several — two
+  # beads in progress means the question has no answer, and picking either is the
+  # wrong-bead write this whole block exists to prevent.
+  WORK_BEAD_ID=$(printf '%s' "$MINE_JSON" | jq -r '
+      if type != "array" then empty
+      else [.[] | select((.issue_type // .type // "") != "convoy")]
+           | if length == 1 then .[0].id else empty end
+      end' 2>/dev/null)
+fi
+# (2) Past the handoff the bead is no longer assigned here, and that is exactly
+# when the "already submitted" short-circuit needs to find it. `polecat_session`
+# is stamped by the claim block and SURVIVES reassignment, so it still names the
+# session that did the work. Each candidate must pass that test; an unowned one
+# is discarded, not used.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  for CAND in "${GC_TRIGGER_WORK_BEAD_ID:-}" "${GC_TRIGGER_BEAD_ID:-}" "${GC_BEAD_ID:-}"; do
+    [ -n "$CAND" ] || continue
+    # Exact id AND ownership. `bd` fuzzy-matches, so without the id test a stale
+    # env var that merely PREFIXES a bead this session owns would be silently
+    # promoted to it — the derive block must not lean on the verify block for
+    # that, because B6 and the prompt hunks ship it without one.
+    # Read, then parse, in two statements. Piping the show straight into `jq` on a
+    # single line reads to gastown lint as a beads command carrying jq's own
+    # `--arg` and `-r` flags, which that command does not have, and the upstream
+    # suite fails it (tests/test_gastown_lint_findings.py). Every other read in
+    # this pack is already written this way.
+    CAND_JSON=$(gc bd show "$CAND" --json 2>/dev/null)
+    OWNED=$(printf '%s' "$CAND_JSON" | jq -r --arg me "$ME" --arg id "$CAND" \
+      '.[0] | select((.id // "") == $id)
+            | select(((.assignee // "") == $me) or ((.metadata.polecat_session // "") == $me))
+            | .id' 2>/dev/null)
+    if [ -n "$OWNED" ]; then WORK_BEAD_ID="$OWNED"; break; fi
+  done
+fi
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "cannot derive the work bead: no single-child convoy, and no bead this session owns" >&2
+  gc runtime drain-ack
+  exit 1
+fi
 ```"""
 formula = "mol-polecat-base"
 
@@ -80,10 +152,88 @@ gc bd prime                    # Load beads context
 
 **2. Derive your work bead and check your hook:**
 ```bash
-CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+CONVOY_ID="{{convoy_id}}"
+# Derive your work bead. A convoy is OPTIONAL: a bead dispatched with plain
+# `gc sling` has no convoy at all and $GC_BEAD_ID is empty in that session, so a
+# convoy-only derivation can never resolve there (gci-mar6).
+# CONVOY_ID lets a FORMULA step pass its rendered convoy-id variable in — the
+# formula hunks prepend a CONVOY_ID= line ahead of this block — while a PROMPT
+# block, which has no template vars, gets the same behaviour from $GC_BEAD_ID. One
+# block, both call shapes, one fixture.
+# The convoy-id variable is deliberately NOT spelled in braces in this comment: the
+# same text is embedded in the polecat PROMPT, whose renderer reads a braced name
+# as a call to a function it does not define, and `gc lint gastown` fails it
+# (`function "convoy_id" not defined`). The formula hunks write the braced form on
+# their own prepended line, outside this block, where it is a real template var.
+CONVOY_ID="${CONVOY_ID:-${GC_BEAD_ID:-}}"
+WORK_BEAD_ID=""
+if [ -n "$CONVOY_ID" ]; then
+  WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null \
+    | jq -r 'if ((.children // []) | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+fi
+# No convoy. OWNERSHIP decides from here, never the dispatcher's trigger record
+# on its own: a session is spawned FOR one bead, but `gc hook --claim` checks
+# assigned work first and only then falls through to the routed pool, so it
+# routinely hands the session a DIFFERENT bead. Measured in gci-utzx's own
+# session: GC_TRIGGER_WORK_BEAD_ID=gci-5ts6 while the claim returned gci-utzx,
+# and gci-5ts6 is a real, open, non-convoy bug bead — so the verify block below
+# passes it. Taking the env var there would branch, push and reassign an
+# unrelated bead: failing OPEN onto somebody else's work, which is strictly
+# worse than the convoy-only abort this replaced.
+ME="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
+# (1) The bead this session actually holds. This is what the claim block
+# established, so it outranks every env var.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  MINE_JSON=$(gc bd list --assignee="$ME" --status=in_progress --json 2>/dev/null)
+  # Exactly one, counting only non-convoy beads: a convoy wrapper is never the work
+  # bead, and a molecule holds both. Exactly one, not the first of several — two
+  # beads in progress means the question has no answer, and picking either is the
+  # wrong-bead write this whole block exists to prevent.
+  WORK_BEAD_ID=$(printf '%s' "$MINE_JSON" | jq -r '
+      if type != "array" then empty
+      else [.[] | select((.issue_type // .type // "") != "convoy")]
+           | if length == 1 then .[0].id else empty end
+      end' 2>/dev/null)
+fi
+# (2) Past the handoff the bead is no longer assigned here, and that is exactly
+# when the "already submitted" short-circuit needs to find it. `polecat_session`
+# is stamped by the claim block and SURVIVES reassignment, so it still names the
+# session that did the work. Each candidate must pass that test; an unowned one
+# is discarded, not used.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  for CAND in "${GC_TRIGGER_WORK_BEAD_ID:-}" "${GC_TRIGGER_BEAD_ID:-}" "${GC_BEAD_ID:-}"; do
+    [ -n "$CAND" ] || continue
+    # Exact id AND ownership. `bd` fuzzy-matches, so without the id test a stale
+    # env var that merely PREFIXES a bead this session owns would be silently
+    # promoted to it — the derive block must not lean on the verify block for
+    # that, because B6 and the prompt hunks ship it without one.
+    # Read, then parse, in two statements. Piping the show straight into `jq` on a
+    # single line reads to gastown lint as a beads command carrying jq's own
+    # `--arg` and `-r` flags, which that command does not have, and the upstream
+    # suite fails it (tests/test_gastown_lint_findings.py). Every other read in
+    # this pack is already written this way.
+    CAND_JSON=$(gc bd show "$CAND" --json 2>/dev/null)
+    OWNED=$(printf '%s' "$CAND_JSON" | jq -r --arg me "$ME" --arg id "$CAND" \
+      '.[0] | select((.id // "") == $id)
+            | select(((.assignee // "") == $me) or ((.metadata.polecat_session // "") == $me))
+            | .id' 2>/dev/null)
+    if [ -n "$OWNED" ]; then WORK_BEAD_ID="$OWNED"; break; fi
+  done
+fi
 if [ -z "$WORK_BEAD_ID" ]; then
-  echo "mol-polecat-base requires an input convoy with exactly one tracked member" >&2
+  echo "cannot derive the work bead: no single-child convoy, and no bead this session owns" >&2
+  gc runtime drain-ack
+  exit 1
+fi
+# Verify before use. `bd` FUZZY-MATCHES an id it cannot resolve exactly, so an id
+# carried in from a stale env var must be proven to name a real, non-convoy bead
+# before anything writes to it — a wrong id here reassigns somebody else's work.
+WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json 2>/dev/null)
+RESOLVED_ID=$(printf '%s' "$WORK_JSON" | jq -r '.[0].id // empty' 2>/dev/null)
+RESOLVED_TYPE=$(printf '%s' "$WORK_JSON" | jq -r '.[0] | (.issue_type // .type // "")' 2>/dev/null)
+if [ "$RESOLVED_ID" != "$WORK_BEAD_ID" ] || [ "$RESOLVED_TYPE" = "convoy" ]; then
+  echo "refusing to use WORK_BEAD_ID=$WORK_BEAD_ID (resolved to '${RESOLVED_ID:-nothing}' type '${RESOLVED_TYPE:-?}')" >&2
+  gc runtime drain-ack
   exit 1
 fi
 gc bd list --assignee=$GC_AGENT --status=in_progress
@@ -104,6 +254,124 @@ and rejected by the refinery. Read the reason carefully:
 
 If `metadata.branch` exists, a branch already exists from the prior attempt.
 You will use it in workspace-setup instead of creating a new one.
+
+**3b. Check for an ALREADY-FINISHED bead (STOP if it is).**
+
+If the bead is already at branch-ready, a prior session finished it and parked it
+for publication. Do NOT redo the implementation and do NOT re-run the test gate —
+confirm, record, and drain.
+
+This block repeats the derivation and does its own `gc bd show` rather than reusing
+step 2's. Formula steps are PROSE: an agent may run each fenced block in a separate
+shell, so a block that depends on a variable another block set is a block that
+sometimes does nothing. `tests/test_work_bead_derivation.sh` scores it both ways.
+
+```bash
+# Derive your work bead. A convoy is OPTIONAL: a bead dispatched with plain
+# `gc sling` has no convoy at all and $GC_BEAD_ID is empty in that session, so a
+# convoy-only derivation can never resolve there (gci-mar6).
+# CONVOY_ID lets a FORMULA step pass its rendered convoy-id variable in — the
+# formula hunks prepend a CONVOY_ID= line ahead of this block — while a PROMPT
+# block, which has no template vars, gets the same behaviour from $GC_BEAD_ID. One
+# block, both call shapes, one fixture.
+# The convoy-id variable is deliberately NOT spelled in braces in this comment: the
+# same text is embedded in the polecat PROMPT, whose renderer reads a braced name
+# as a call to a function it does not define, and `gc lint gastown` fails it
+# (`function "convoy_id" not defined`). The formula hunks write the braced form on
+# their own prepended line, outside this block, where it is a real template var.
+CONVOY_ID="${CONVOY_ID:-${GC_BEAD_ID:-}}"
+WORK_BEAD_ID=""
+if [ -n "$CONVOY_ID" ]; then
+  WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null \
+    | jq -r 'if ((.children // []) | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+fi
+# No convoy. OWNERSHIP decides from here, never the dispatcher's trigger record
+# on its own: a session is spawned FOR one bead, but `gc hook --claim` checks
+# assigned work first and only then falls through to the routed pool, so it
+# routinely hands the session a DIFFERENT bead. Measured in gci-utzx's own
+# session: GC_TRIGGER_WORK_BEAD_ID=gci-5ts6 while the claim returned gci-utzx,
+# and gci-5ts6 is a real, open, non-convoy bug bead — so the verify block below
+# passes it. Taking the env var there would branch, push and reassign an
+# unrelated bead: failing OPEN onto somebody else's work, which is strictly
+# worse than the convoy-only abort this replaced.
+ME="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
+# (1) The bead this session actually holds. This is what the claim block
+# established, so it outranks every env var.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  MINE_JSON=$(gc bd list --assignee="$ME" --status=in_progress --json 2>/dev/null)
+  # Exactly one, counting only non-convoy beads: a convoy wrapper is never the work
+  # bead, and a molecule holds both. Exactly one, not the first of several — two
+  # beads in progress means the question has no answer, and picking either is the
+  # wrong-bead write this whole block exists to prevent.
+  WORK_BEAD_ID=$(printf '%s' "$MINE_JSON" | jq -r '
+      if type != "array" then empty
+      else [.[] | select((.issue_type // .type // "") != "convoy")]
+           | if length == 1 then .[0].id else empty end
+      end' 2>/dev/null)
+fi
+# (2) Past the handoff the bead is no longer assigned here, and that is exactly
+# when the "already submitted" short-circuit needs to find it. `polecat_session`
+# is stamped by the claim block and SURVIVES reassignment, so it still names the
+# session that did the work. Each candidate must pass that test; an unowned one
+# is discarded, not used.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  for CAND in "${GC_TRIGGER_WORK_BEAD_ID:-}" "${GC_TRIGGER_BEAD_ID:-}" "${GC_BEAD_ID:-}"; do
+    [ -n "$CAND" ] || continue
+    # Exact id AND ownership. `bd` fuzzy-matches, so without the id test a stale
+    # env var that merely PREFIXES a bead this session owns would be silently
+    # promoted to it — the derive block must not lean on the verify block for
+    # that, because B6 and the prompt hunks ship it without one.
+    # Read, then parse, in two statements. Piping the show straight into `jq` on a
+    # single line reads to gastown lint as a beads command carrying jq's own
+    # `--arg` and `-r` flags, which that command does not have, and the upstream
+    # suite fails it (tests/test_gastown_lint_findings.py). Every other read in
+    # this pack is already written this way.
+    CAND_JSON=$(gc bd show "$CAND" --json 2>/dev/null)
+    OWNED=$(printf '%s' "$CAND_JSON" | jq -r --arg me "$ME" --arg id "$CAND" \
+      '.[0] | select((.id // "") == $id)
+            | select(((.assignee // "") == $me) or ((.metadata.polecat_session // "") == $me))
+            | .id' 2>/dev/null)
+    if [ -n "$OWNED" ]; then WORK_BEAD_ID="$OWNED"; break; fi
+  done
+fi
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "cannot derive the work bead: no single-child convoy, and no bead this session owns" >&2
+  gc runtime drain-ack
+  exit 1
+fi
+# STOP if a PRIOR session already finished this bead. `branch_ready` is written in
+# the SAME `gc bd update` that sets status=open and clears the assignee, so a bead
+# that arrives on your hook already carrying it was finished by somebody else,
+# earlier — it is parked work awaiting a publish, not an assignment. Re-running
+# the implementation and the test gate on it produces nothing; fph-bcqp8 had that
+# done to it four times and fph-e3i40.9 three (gci-mar6).
+#
+# A `rejection_reason` overrides: the refinery deliberately sent the branch back,
+# and doing more work on it is the whole point.
+# Self-contained: reuse the read the verify block already did when this runs in the
+# same shell, and do its own when it does not. Formula steps are PROSE — an agent
+# may run each fenced block as a separate shell, so nothing here may depend on a
+# variable another block set.
+WORK_JSON="${WORK_JSON:-$(gc bd show "$WORK_BEAD_ID" --json 2>/dev/null)}"
+BR=$(printf '%s' "$WORK_JSON" | jq -r '(.[0].metadata.branch_ready // "") | tostring | ascii_downcase' 2>/dev/null)
+HALT=$(printf '%s' "$WORK_JSON" | jq -r '(.[0].metadata.halt_reason // "")' 2>/dev/null)
+REJECTED=$(printf '%s' "$WORK_JSON" | jq -r '(.[0].metadata.rejection_reason // "")' 2>/dev/null)
+case "$BR" in
+  ""|false|0|no|null) ;;   # not finished — this is ordinary work, carry on
+  *)
+    if [ -z "$REJECTED" ]; then
+      echo "ALREADY_BRANCH_READY $WORK_BEAD_ID halt_reason=${HALT:-<none>} — finished work, not an assignment."
+      # --append-notes, NEVER --notes: the bead is not yours and --notes replaces
+      # the whole field (gci-3f5u).
+      gc bd update "$WORK_BEAD_ID" --status=open --assignee="" \
+        --unset-metadata gc.routed_to \
+        --append-notes "Re-dispatch declined: bead was already branch_ready (halt_reason=${HALT:-<none>}); no work redone, routing cleared. See gci-mar6."
+      gc runtime drain-ack
+      exit 0
+    fi
+    ;;
+esac
+```
 
 **4. Check inbox for additional context:**
 ```bash
@@ -204,8 +472,79 @@ that errors is not an all-clear. Include claimed beads: the existing report
 is usually already `in_progress` with someone fixing it.
 
 ```bash
-CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+CONVOY_ID="{{convoy_id}}"
+# Derive your work bead. A convoy is OPTIONAL: a bead dispatched with plain
+# `gc sling` has no convoy at all and $GC_BEAD_ID is empty in that session, so a
+# convoy-only derivation can never resolve there (gci-mar6).
+# CONVOY_ID lets a FORMULA step pass its rendered convoy-id variable in — the
+# formula hunks prepend a CONVOY_ID= line ahead of this block — while a PROMPT
+# block, which has no template vars, gets the same behaviour from $GC_BEAD_ID. One
+# block, both call shapes, one fixture.
+# The convoy-id variable is deliberately NOT spelled in braces in this comment: the
+# same text is embedded in the polecat PROMPT, whose renderer reads a braced name
+# as a call to a function it does not define, and `gc lint gastown` fails it
+# (`function "convoy_id" not defined`). The formula hunks write the braced form on
+# their own prepended line, outside this block, where it is a real template var.
+CONVOY_ID="${CONVOY_ID:-${GC_BEAD_ID:-}}"
+WORK_BEAD_ID=""
+if [ -n "$CONVOY_ID" ]; then
+  WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null \
+    | jq -r 'if ((.children // []) | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+fi
+# No convoy. OWNERSHIP decides from here, never the dispatcher's trigger record
+# on its own: a session is spawned FOR one bead, but `gc hook --claim` checks
+# assigned work first and only then falls through to the routed pool, so it
+# routinely hands the session a DIFFERENT bead. Measured in gci-utzx's own
+# session: GC_TRIGGER_WORK_BEAD_ID=gci-5ts6 while the claim returned gci-utzx,
+# and gci-5ts6 is a real, open, non-convoy bug bead — so the verify block below
+# passes it. Taking the env var there would branch, push and reassign an
+# unrelated bead: failing OPEN onto somebody else's work, which is strictly
+# worse than the convoy-only abort this replaced.
+ME="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
+# (1) The bead this session actually holds. This is what the claim block
+# established, so it outranks every env var.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  MINE_JSON=$(gc bd list --assignee="$ME" --status=in_progress --json 2>/dev/null)
+  # Exactly one, counting only non-convoy beads: a convoy wrapper is never the work
+  # bead, and a molecule holds both. Exactly one, not the first of several — two
+  # beads in progress means the question has no answer, and picking either is the
+  # wrong-bead write this whole block exists to prevent.
+  WORK_BEAD_ID=$(printf '%s' "$MINE_JSON" | jq -r '
+      if type != "array" then empty
+      else [.[] | select((.issue_type // .type // "") != "convoy")]
+           | if length == 1 then .[0].id else empty end
+      end' 2>/dev/null)
+fi
+# (2) Past the handoff the bead is no longer assigned here, and that is exactly
+# when the "already submitted" short-circuit needs to find it. `polecat_session`
+# is stamped by the claim block and SURVIVES reassignment, so it still names the
+# session that did the work. Each candidate must pass that test; an unowned one
+# is discarded, not used.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  for CAND in "${GC_TRIGGER_WORK_BEAD_ID:-}" "${GC_TRIGGER_BEAD_ID:-}" "${GC_BEAD_ID:-}"; do
+    [ -n "$CAND" ] || continue
+    # Exact id AND ownership. `bd` fuzzy-matches, so without the id test a stale
+    # env var that merely PREFIXES a bead this session owns would be silently
+    # promoted to it — the derive block must not lean on the verify block for
+    # that, because B6 and the prompt hunks ship it without one.
+    # Read, then parse, in two statements. Piping the show straight into `jq` on a
+    # single line reads to gastown lint as a beads command carrying jq's own
+    # `--arg` and `-r` flags, which that command does not have, and the upstream
+    # suite fails it (tests/test_gastown_lint_findings.py). Every other read in
+    # this pack is already written this way.
+    CAND_JSON=$(gc bd show "$CAND" --json 2>/dev/null)
+    OWNED=$(printf '%s' "$CAND_JSON" | jq -r --arg me "$ME" --arg id "$CAND" \
+      '.[0] | select((.id // "") == $id)
+            | select(((.assignee // "") == $me) or ((.metadata.polecat_session // "") == $me))
+            | .id' 2>/dev/null)
+    if [ -n "$OWNED" ]; then WORK_BEAD_ID="$OWNED"; break; fi
+  done
+fi
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "cannot derive the work bead: no single-child convoy, and no bead this session owns" >&2
+  gc runtime drain-ack
+  exit 1
+fi
 EXISTING=""
 MATCHES=$(gc bd list --title-contains "$SYMPTOM_KEY" --status open,in_progress,blocked --json)
 LOOKUP_RC=$?
@@ -309,8 +648,79 @@ rejection — don't redo everything.
 
 Derive your work bead in this shell context:
 ```bash
-CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+CONVOY_ID="{{convoy_id}}"
+# Derive your work bead. A convoy is OPTIONAL: a bead dispatched with plain
+# `gc sling` has no convoy at all and $GC_BEAD_ID is empty in that session, so a
+# convoy-only derivation can never resolve there (gci-mar6).
+# CONVOY_ID lets a FORMULA step pass its rendered convoy-id variable in — the
+# formula hunks prepend a CONVOY_ID= line ahead of this block — while a PROMPT
+# block, which has no template vars, gets the same behaviour from $GC_BEAD_ID. One
+# block, both call shapes, one fixture.
+# The convoy-id variable is deliberately NOT spelled in braces in this comment: the
+# same text is embedded in the polecat PROMPT, whose renderer reads a braced name
+# as a call to a function it does not define, and `gc lint gastown` fails it
+# (`function "convoy_id" not defined`). The formula hunks write the braced form on
+# their own prepended line, outside this block, where it is a real template var.
+CONVOY_ID="${CONVOY_ID:-${GC_BEAD_ID:-}}"
+WORK_BEAD_ID=""
+if [ -n "$CONVOY_ID" ]; then
+  WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null \
+    | jq -r 'if ((.children // []) | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+fi
+# No convoy. OWNERSHIP decides from here, never the dispatcher's trigger record
+# on its own: a session is spawned FOR one bead, but `gc hook --claim` checks
+# assigned work first and only then falls through to the routed pool, so it
+# routinely hands the session a DIFFERENT bead. Measured in gci-utzx's own
+# session: GC_TRIGGER_WORK_BEAD_ID=gci-5ts6 while the claim returned gci-utzx,
+# and gci-5ts6 is a real, open, non-convoy bug bead — so the verify block below
+# passes it. Taking the env var there would branch, push and reassign an
+# unrelated bead: failing OPEN onto somebody else's work, which is strictly
+# worse than the convoy-only abort this replaced.
+ME="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
+# (1) The bead this session actually holds. This is what the claim block
+# established, so it outranks every env var.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  MINE_JSON=$(gc bd list --assignee="$ME" --status=in_progress --json 2>/dev/null)
+  # Exactly one, counting only non-convoy beads: a convoy wrapper is never the work
+  # bead, and a molecule holds both. Exactly one, not the first of several — two
+  # beads in progress means the question has no answer, and picking either is the
+  # wrong-bead write this whole block exists to prevent.
+  WORK_BEAD_ID=$(printf '%s' "$MINE_JSON" | jq -r '
+      if type != "array" then empty
+      else [.[] | select((.issue_type // .type // "") != "convoy")]
+           | if length == 1 then .[0].id else empty end
+      end' 2>/dev/null)
+fi
+# (2) Past the handoff the bead is no longer assigned here, and that is exactly
+# when the "already submitted" short-circuit needs to find it. `polecat_session`
+# is stamped by the claim block and SURVIVES reassignment, so it still names the
+# session that did the work. Each candidate must pass that test; an unowned one
+# is discarded, not used.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  for CAND in "${GC_TRIGGER_WORK_BEAD_ID:-}" "${GC_TRIGGER_BEAD_ID:-}" "${GC_BEAD_ID:-}"; do
+    [ -n "$CAND" ] || continue
+    # Exact id AND ownership. `bd` fuzzy-matches, so without the id test a stale
+    # env var that merely PREFIXES a bead this session owns would be silently
+    # promoted to it — the derive block must not lean on the verify block for
+    # that, because B6 and the prompt hunks ship it without one.
+    # Read, then parse, in two statements. Piping the show straight into `jq` on a
+    # single line reads to gastown lint as a beads command carrying jq's own
+    # `--arg` and `-r` flags, which that command does not have, and the upstream
+    # suite fails it (tests/test_gastown_lint_findings.py). Every other read in
+    # this pack is already written this way.
+    CAND_JSON=$(gc bd show "$CAND" --json 2>/dev/null)
+    OWNED=$(printf '%s' "$CAND_JSON" | jq -r --arg me "$ME" --arg id "$CAND" \
+      '.[0] | select((.id // "") == $id)
+            | select(((.assignee // "") == $me) or ((.metadata.polecat_session // "") == $me))
+            | .id' 2>/dev/null)
+    if [ -n "$OWNED" ]; then WORK_BEAD_ID="$OWNED"; break; fi
+  done
+fi
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "cannot derive the work bead: no single-child convoy, and no bead this session owns" >&2
+  gc runtime drain-ack
+  exit 1
+fi
 ```
 
 **Commit frequently with detailed messages.** Every commit gets a
@@ -431,8 +841,79 @@ If uncommitted changes exist, commit them with a body explaining what
 slipped through the `implement` step (typically a self-review touch-up,
 test addition, or formatter run):
 ```bash
-CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+CONVOY_ID="{{convoy_id}}"
+# Derive your work bead. A convoy is OPTIONAL: a bead dispatched with plain
+# `gc sling` has no convoy at all and $GC_BEAD_ID is empty in that session, so a
+# convoy-only derivation can never resolve there (gci-mar6).
+# CONVOY_ID lets a FORMULA step pass its rendered convoy-id variable in — the
+# formula hunks prepend a CONVOY_ID= line ahead of this block — while a PROMPT
+# block, which has no template vars, gets the same behaviour from $GC_BEAD_ID. One
+# block, both call shapes, one fixture.
+# The convoy-id variable is deliberately NOT spelled in braces in this comment: the
+# same text is embedded in the polecat PROMPT, whose renderer reads a braced name
+# as a call to a function it does not define, and `gc lint gastown` fails it
+# (`function "convoy_id" not defined`). The formula hunks write the braced form on
+# their own prepended line, outside this block, where it is a real template var.
+CONVOY_ID="${CONVOY_ID:-${GC_BEAD_ID:-}}"
+WORK_BEAD_ID=""
+if [ -n "$CONVOY_ID" ]; then
+  WORK_BEAD_ID=$(gc convoy status "$CONVOY_ID" --json 2>/dev/null \
+    | jq -r 'if ((.children // []) | length) == 1 then .children[0].id else empty end' 2>/dev/null)
+fi
+# No convoy. OWNERSHIP decides from here, never the dispatcher's trigger record
+# on its own: a session is spawned FOR one bead, but `gc hook --claim` checks
+# assigned work first and only then falls through to the routed pool, so it
+# routinely hands the session a DIFFERENT bead. Measured in gci-utzx's own
+# session: GC_TRIGGER_WORK_BEAD_ID=gci-5ts6 while the claim returned gci-utzx,
+# and gci-5ts6 is a real, open, non-convoy bug bead — so the verify block below
+# passes it. Taking the env var there would branch, push and reassign an
+# unrelated bead: failing OPEN onto somebody else's work, which is strictly
+# worse than the convoy-only abort this replaced.
+ME="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
+# (1) The bead this session actually holds. This is what the claim block
+# established, so it outranks every env var.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  MINE_JSON=$(gc bd list --assignee="$ME" --status=in_progress --json 2>/dev/null)
+  # Exactly one, counting only non-convoy beads: a convoy wrapper is never the work
+  # bead, and a molecule holds both. Exactly one, not the first of several — two
+  # beads in progress means the question has no answer, and picking either is the
+  # wrong-bead write this whole block exists to prevent.
+  WORK_BEAD_ID=$(printf '%s' "$MINE_JSON" | jq -r '
+      if type != "array" then empty
+      else [.[] | select((.issue_type // .type // "") != "convoy")]
+           | if length == 1 then .[0].id else empty end
+      end' 2>/dev/null)
+fi
+# (2) Past the handoff the bead is no longer assigned here, and that is exactly
+# when the "already submitted" short-circuit needs to find it. `polecat_session`
+# is stamped by the claim block and SURVIVES reassignment, so it still names the
+# session that did the work. Each candidate must pass that test; an unowned one
+# is discarded, not used.
+if [ -z "$WORK_BEAD_ID" ] && [ -n "$ME" ]; then
+  for CAND in "${GC_TRIGGER_WORK_BEAD_ID:-}" "${GC_TRIGGER_BEAD_ID:-}" "${GC_BEAD_ID:-}"; do
+    [ -n "$CAND" ] || continue
+    # Exact id AND ownership. `bd` fuzzy-matches, so without the id test a stale
+    # env var that merely PREFIXES a bead this session owns would be silently
+    # promoted to it — the derive block must not lean on the verify block for
+    # that, because B6 and the prompt hunks ship it without one.
+    # Read, then parse, in two statements. Piping the show straight into `jq` on a
+    # single line reads to gastown lint as a beads command carrying jq's own
+    # `--arg` and `-r` flags, which that command does not have, and the upstream
+    # suite fails it (tests/test_gastown_lint_findings.py). Every other read in
+    # this pack is already written this way.
+    CAND_JSON=$(gc bd show "$CAND" --json 2>/dev/null)
+    OWNED=$(printf '%s' "$CAND_JSON" | jq -r --arg me "$ME" --arg id "$CAND" \
+      '.[0] | select((.id // "") == $id)
+            | select(((.assignee // "") == $me) or ((.metadata.polecat_session // "") == $me))
+            | .id' 2>/dev/null)
+    if [ -n "$OWNED" ]; then WORK_BEAD_ID="$OWNED"; break; fi
+  done
+fi
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "cannot derive the work bead: no single-child convoy, and no bead this session owns" >&2
+  gc runtime drain-ack
+  exit 1
+fi
 git add -A
 git commit -m "<type>: <imperative subject> ($WORK_BEAD_ID)" -m "$(cat <<'BODY'
 <Explain what these residual changes are: a self-review fix,
