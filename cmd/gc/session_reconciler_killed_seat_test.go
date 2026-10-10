@@ -69,6 +69,7 @@ type killedSeatEnv struct {
 	clk   *clock.Fake
 	dt    *drainTracker
 	seat  beads.Bead
+	dops  drainOps // nil: a fresh fake per tick
 }
 
 // persistentWorker is a persistent pool with a floor of one seat.
@@ -158,9 +159,13 @@ func (e *killedSeatEnv) tick(t *testing.T, assigned []beads.Bead, opts ...startE
 func (e *killedSeatEnv) tickWith(t *testing.T, seat beads.Bead, assigned []beads.Bead, opts ...startExecutionOption) {
 	t.Helper()
 	ds := buildDesiredState("kill-town", e.city, e.now, e.cfg, e.sp, e.mem, io.Discard)
+	var dops drainOps = newFakeDrainOps()
+	if e.dops != nil {
+		dops = e.dops
+	}
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{seat}, ds.State, map[string]bool{e.cfg.Agents[0].QualifiedName(): true},
-		e.cfg, e.sp, e.store, newFakeDrainOps(), assigned, nil, e.dt, ds.PoolDesiredCounts, false, nil, "kill-town",
+		e.cfg, e.sp, e.store, dops, assigned, nil, e.dt, ds.PoolDesiredCounts, false, nil, "kill-town",
 		nil, e.clk, events.Discard, 0, 0, io.Discard, io.Discard, opts...,
 	)
 }

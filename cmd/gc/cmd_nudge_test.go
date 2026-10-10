@@ -551,6 +551,8 @@ func sleepUnheld(t *testing.T, store beads.Store, id string) {
 	t.Helper()
 	if err := store.SetMetadataBatch(id, map[string]string{
 		"state": "asleep", "suspended_at": "", "sleep_reason": "", "slept_at": time.Now().UTC().Format(time.RFC3339),
+		// An operator suspend holds the row (mc-esqo7); an unheld sleep drops it.
+		"held_until": "", "sleep_intent": "",
 	}); err != nil {
 		t.Fatalf("SetMetadataBatch: %v", err)
 	}

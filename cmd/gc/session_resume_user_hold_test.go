@@ -29,7 +29,7 @@ func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps)
 	env.markSessionActive(&b)
 	env.clk.Time = env.clk.Time.Add(30 * time.Minute)
 	front := sessionFrontDoor(env.store)
-	if err := front.ApplyPatch(b.ID, managedSuspendPatch(env.clk.Now())); err != nil {
+	if err := front.ApplyPatch(b.ID, session.OperatorSuspendPatch(env.clk.Now())); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.sp.Stop("worker"); err != nil {
