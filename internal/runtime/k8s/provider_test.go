@@ -2259,7 +2259,7 @@ func TestBuildPodServiceAccount(t *testing.T) {
 func TestInitCityInPodSkipsDolt(t *testing.T) {
 	fake := newFakeK8sOps()
 
-	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city")
+	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city", "")
 	if err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
@@ -2345,7 +2345,7 @@ func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
 	uploadErr := errors.New("pod upload failed")
 	ops := &cleanupCaptureOps{fakeK8sOps: newFakeK8sOps(), cancel: cancel, uploadErr: uploadErr}
 
-	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir())
+	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir(), "")
 	if !errors.Is(err, uploadErr) {
 		t.Fatalf("initCityInPod error = %v, want %v", err, uploadErr)
 	}
