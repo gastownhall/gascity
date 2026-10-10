@@ -58,6 +58,7 @@ go_test(
         "bdstore_exact_batch_test.go",
         "bdstore_exec_internal_test.go",
         "bdstore_failure_detail_internal_test.go",
+        "bdstore_http_notfound_internal_test.go",
         "bdstore_inline_deps_internal_test.go",
         "bdstore_internal_test.go",
         "bdstore_ready_projection_capability_internal_test.go",
