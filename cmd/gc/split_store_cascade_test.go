@@ -98,7 +98,8 @@ func TestSplitStoreCascade_DrainFinalizeReleasesTheOwnDrainStep(t *testing.T) {
 
 // The pool-slot close's cascade runs inside the tick and reads the tick's
 // index: on either shape, every store is listed once per status by the index
-// and never again by the cascade, and no list keyed by an assignee is made.
+// and never again by the cascade, and the work store is never listed per
+// identity.
 func TestSplitStoreCascade_PoolSlotCloseReadsOnlyTheTickIndex(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape, func(t *testing.T) {
@@ -120,7 +121,11 @@ func TestSplitStoreCascade_PoolSlotCloseReadsOnlyTheTickIndex(t *testing.T) {
 					defer mu.Unlock()
 					switch {
 					case q.Assignee != "" || len(q.Assignees) > 0:
-						perIdentity = append(perIdentity, q)
+						// The close-time re-read lists the local binding per
+						// identity; the work store never is.
+						if s == work {
+							perIdentity = append(perIdentity, q)
+						}
 					case q.Live && q.TierMode == beads.TierBoth && q.Type == "" && q.Label == "" && len(q.IDs) == 0:
 						legLists[s]++
 					}

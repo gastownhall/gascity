@@ -4198,7 +4198,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if isFailedCreateSessionBead(b) {
 		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(b), now, stderr)
 	}
-	return closeBead(store, workLegs{cityPath, cfg, rigStores}, sessionInfoFromBead(b), closeReason, now, stderr)
+	return closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, sessionInfoFromBead(b), closeReason, now, stderr, nil)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -4470,9 +4470,12 @@ func releaseWorkFromClosedSessionBeadExcept(store beads.Store, legs workLegs, se
 		idx = newSeatWorkIndex(legs.cityPath, legs.cfg, store, legs.rigs)
 	}
 	work, err := idx.snapshot(seatWorkQuery{ids: identities, statuses: seatWorkStatuses}, false)
-	if err != nil {
+	// The close-time re-read adds what was assigned since the index's read.
+	late, lateErr := lateSeatWork(legs, store, identities, seatWorkStatuses, nil)
+	if err = errors.Join(err, lateErr); err != nil {
 		fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
 	}
+	work = appendUniqueSeatWork(work, late)
 	// ga-n2d.2: the owning pool route, recovered from the closing session's own
 	// template metadata, is the run_target fallback. A polecat that pushed its
 	// branch but died before the refinery handoff can leave work whose
