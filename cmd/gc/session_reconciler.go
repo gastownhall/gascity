@@ -190,59 +190,68 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
 }
 
-// markDrainAckStopPending persists the drain-ack stop-pending transition and
-// returns the refreshed Info as a LOCAL fold (write-returns-Info, Step 6d), so
-// the two callers assign it directly. The marker is destructive (the async
-// stop honors it), so, like the kill, it is decided on a fresh read under the
-// runtime lease: taken without waiting (a busy lease defers to a later tick),
-// the row read live, and the marker written by CAS on that read. A
-// reconciler-owned user-hold ack whose live row no longer holds the intent (an
-// operator's resume consumed it after the tick's snapshot) is stale: the ack is
-// cleared and the tracker entry dropped instead. On a deferral, a stale ack or
-// a failed write the input Info is returned unchanged with a false ok, so the
-// caller skips the fold and the stop.
-func markDrainAckStopPending(cityPath string, store beads.Store, info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, dops drainOps, dt *drainTracker, clk clock.Clock, stderr io.Writer) (sessionpkg.Info, bool) {
-	if info.ID == "" || sessFront == nil {
-		return info, false
+// markDrainAckStopPending persists the drain-ack stop-pending transition
+// (legacyAct.MarkStopPending) and returns the refreshed Info as a LOCAL fold
+// (write-returns-Info, Step 6d), so the two callers assign it directly, and
+// the decision the async stop executes against.
+//
+// The mark is decided on the drain's basis when the ack is the controller's
+// own and the controller still tracks its drain (drainState.basis), and on
+// info otherwise (an agent's own ack, or a drain the tracker lost). A tick decides on its snapshot, but the mark lands
+// only while the row still carries the deciding facts, so a stale snapshot's
+// decision never executes: an operator's resume that consumed the hold the
+// drain began under refuses it (SR3-1), on this tick or a later one (SR2-1).
+// A controller drain whose basis moved is void: its reconciler-owned ack
+// and tracker entry are cleared and the runtime left up. An agent's ack is
+// never cleared here. On a deferral or a
+// refusal the input Info is returned unchanged with a false ok, so the caller
+// skips the fold and the stop.
+func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps, dt *drainTracker, clk clock.Clock) (sessionpkg.Info, sessionpkg.Decided, bool) {
+	if info.ID == "" || act.store == nil {
+		return info, sessionpkg.Decided{}, false
 	}
-	if stderr == nil {
-		stderr = io.Discard
+	if act.stderr == nil {
+		act.stderr = io.Discard
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if name == "" {
 		name = info.ID
 	}
-	_, release, err := controllerStopLease(store, cityPath, name, info.ID, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s deferred: %v\n", name, err) //nolint:errcheck
-		return info, false
-	}
-	defer release()
-	patch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
-	stale := false
-	ok, err := sessFront.UpdateMetadataFenced(info.ID, 3, func(fresh sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
-		reason, owned := reconcilerDrainAckMatchesSessionInfo(fresh, sp, name)
-		if stale = owned && userHoldDrainReleased(reason, fresh, clk.Now()); stale || fresh.Closed {
-			return nil
+	// The controller's drain basis decides only the controller's own ack. An
+	// agent's ack is the agent's decision, made on the row as it is now. An
+	// ack whose source cannot be read defers: no mark, no void, no clear.
+	d, tracked := sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), false
+	switch drainAckOwnerOf(act.sp, name) {
+	case drainAckOwnerUnknown:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s deferred: its ack's source is unreadable\n", name) //nolint:errcheck
+		return info, sessionpkg.Decided{}, false
+	case drainAckOwnerController:
+		if dt != nil {
+			if ds := dt.get(info.ID); ds != nil {
+				d, tracked = ds.basis, true
+			}
 		}
-		return patch
-	})
+	}
+	now := clk.Now().UTC()
+	res, stop, err := act.MarkStopPending(d, now)
 	switch {
-	case stale:
-		_ = clearReconcilerDrainAckMetadata(sp, name)
+	case errors.Is(err, errActDeferred):
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s %v\n", name, err) //nolint:errcheck
+	case err != nil:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
+	case res == sessionpkg.CommitLanded:
+		return info.ApplyPatch(sessionpkg.DrainAckStopPendingPatch(now)), stop, true
+	case res == sessionpkg.CommitMoved && tracked:
+		fmt.Fprintf(act.stderr, "session reconciler: drain of %s void: the row moved off the basis the drain began on\n", name) //nolint:errcheck
+		_ = clearReconcilerDrainAckMetadata(act.sp, name)
 		if dops != nil {
 			_ = dops.clearDrain(name)
 		}
 		clearDrainTrackerForStopPending(info.ID, dt)
-		return info, false
-	case err == nil && !ok:
-		err = errors.New("row closed or contended")
+	default:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s refused (%v); deciding again next tick\n", name, res) //nolint:errcheck
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
-		return info, false
-	}
-	return info.ApplyPatch(patch), true
+	return info, sessionpkg.Decided{}, false
 }
 
 func clearDrainTrackerForStopPending(id string, dt *drainTracker) {
@@ -441,11 +450,8 @@ func recordResetStallIfDue(
 	if running && sp != nil {
 		// Decided again under the lease: the same reset is still pending.
 		// A row that moved on is no longer stalled; nothing to evict.
-		stillStalled := func(fresh sessionpkg.Info) bool {
-			raw, _, stillPending := resetPendingCommittedAtInfo(fresh)
-			return stillPending && raw == resetCommittedAt
-		}
-		if err := controllerKillSessionRowIf(cityPath, store, sp, cfg, info, stillStalled); err != nil && !runtime.IsSessionGone(err) && !errors.Is(err, sessionpkg.ErrKillPremiseMoved) {
+		evict := sessionpkg.Decide(info, sessionpkg.FactsLegacyResetEvict)
+		if err := (legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}).Stop(evict); err != nil && !runtime.IsSessionGone(err) && !errors.Is(err, sessionpkg.ErrKillPremiseMoved) {
 			fmt.Fprintf(stderr, "session reconciler: evicting stale reset-pending runtime %s: %v\n", name, err) //nolint:errcheck
 		}
 	}
@@ -506,7 +512,11 @@ var (
 	drainAckStopConfirmDeadPoll    = 250 * time.Millisecond
 )
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name, expectedToken, expectedGeneration string, processNames []string, tracker *asyncStartTracker, dt *drainTracker, stderr io.Writer) {
+// queueDrainAckAsyncStop stops d's stop-pending runtime off-tick. d is the
+// decision the stop executes against (sessionpkg.FactsLegacyDrainStop): the
+// row with its stop-pending mark, on the basis the mark landed on.
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, d sessionpkg.Decided, name string, processNames []string, tracker *asyncStartTracker, dt *drainTracker, stderr io.Writer) {
+	sessionID, expectedToken := d.Info().ID, d.Info().InstanceToken
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
@@ -568,13 +578,13 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		}
 		defer release()
 		// Decide again under the lease, on a fresh read: the row may have left
-		// stop-pending since this stop was queued (a new incarnation, a close).
-		// An operator's resume cannot take it out (ErrSessionStopping), and a
-		// live restart in place writes nothing this read sees; only the kill's
-		// exact-object fence tells that one apart. Every kill below re-checks.
-		ctx = drainAckStopPremise(ctx, store, sessionID, expectedGeneration, expectedToken)
-		if !drainAckStopStillPending(store, sessionID, expectedGeneration, expectedToken) {
-			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: the row is no longer stop-pending at its generation and token\n", name) //nolint:errcheck
+		// d since this stop was queued (a new incarnation, a close, an
+		// operator's intent or request). A live restart in place writes
+		// nothing this read sees; only the kill's exact-object fence tells
+		// that one apart. Every kill below re-checks.
+		ctx = sessionpkg.WithKillDecided(ctx, d)
+		if holds, _ := sessionFrontDoor(store).Holds(d); !holds {
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s skipped: the row moved since its stop was decided\n", name) //nolint:errcheck
 			return
 		}
 		if err := controllerKillRowCtx(ctx, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
@@ -605,29 +615,6 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// patrol tick regardless.
 		_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
 	}()
-}
-
-// drainAckStopStillPending reads sessionID fresh and reports whether it is
-// still drain-ack stop-pending at generation and token. An async stop or
-// escalation decided on an older read kills nothing otherwise.
-func drainAckStopStillPending(store beads.Store, sessionID, generation, token string) bool {
-	if store == nil {
-		return false
-	}
-	b, err := beads.HandlesFor(store).Live.Get(sessionID)
-	if err != nil || b.Status == "closed" {
-		return false
-	}
-	fresh := sessionInfoFromBead(b)
-	return isDrainAckStopPendingInfo(fresh) && fresh.Generation == generation && fresh.InstanceToken == token
-}
-
-// drainAckStopPremise makes every Manager kill under ctx re-check, under the
-// lease, that the row is still stop-pending at generation and token.
-func drainAckStopPremise(ctx context.Context, store beads.Store, sessionID, generation, token string) context.Context {
-	return sessionpkg.WithKillPremise(ctx, func(sessionpkg.Info) bool {
-		return drainAckStopStillPending(store, sessionID, generation, token)
-	})
 }
 
 // confirmDrainAckRuntimeDead re-observes a killed runtime and re-issues the
@@ -1054,7 +1041,7 @@ func reconcileDrainAckStopPending(
 		// the async tracker, so the snapshot stays coherent — a zero result (applyTo
 		// no-op) matches the unmutated session. The token fence reads the typed
 		// instance_token off the Info snapshot (mirrors verifiedStop).
-		queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, info.Generation, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
+		queueDrainAckAsyncStop(cityPath, store, sp, cfg, sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop), name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
@@ -1123,7 +1110,7 @@ func finalizeDrainAckStopPendingSessions(
 			// Observation unavailable, not "still alive". Re-queue the stop and
 			// say nothing to the agent: a reminder is a claim about the row's
 			// state, and this tick has none.
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, info.Generation, processNames, asyncStopTracker, dt, stderr)
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop), name, processNames, asyncStopTracker, dt, stderr)
 			continue
 		}
 		if obs.Running || obs.Alive {
@@ -1142,7 +1129,7 @@ func finalizeDrainAckStopPendingSessions(
 			// that. Every gate fails closed, so a false return leaves the historical
 			// behavior untouched. See drain_ack_escalation.go.
 			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, asyncStopTracker, clk, rec, dt, stderr) {
-				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, info.Generation, processNames, asyncStopTracker, dt, stderr)
+				queueDrainAckAsyncStop(cityPath, store, sp, cfg, sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop), name, processNames, asyncStopTracker, dt, stderr)
 			}
 			continue
 		}
@@ -1846,6 +1833,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// take the unwrapped store. It is the same underlying store value, so
 	// behavior is unchanged.
 	store := sessStore.Store
+	// The tick's seat-work questions (does this seat still hold work?) answer
+	// from one read of every work leg, made on the first question (seat_work.go).
+	defer installSeatWorkIndex(cityPath, cfg, store, rigStores)()
 	// The typed session front door is constructed once at this reconciler root
 	// and threaded to the session-only leaves it calls (heal, drift deferral,
 	// circuit metadata, rate-limit/wake-failure/churn accounting, lease clears,
@@ -2544,17 +2534,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
-							if updated, ok := markDrainAckStopPending(cityPath, store, infoByID[id], sessFront, sp, dops, dt, clk, stderr); ok {
+							if updated, stop, ok := markDrainAckStopPending(legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg, stderr: stderr}, infoByID[id], dops, dt, clk); ok {
 								// markDrainAckStopPending persisted the stop-pending transition and
 								// returned the folded snapshot Info (write-returns-Info, Step 6d) —
 								// assign it directly. Cross-session isDrainAckStopPendingInfo reader.
 								// Pre-pass-masked (STEP6-PREPASS-AUDIT group 3).
 								tick.set(id, updated)
 								clearDrainTrackerForStopPending(id, dt)
-								// Token fence off the typed snapshot: the stop-pending fold
-								// preserves instance_token, so infoByID[id].InstanceToken is the
-								// token we intend to stop (mirrors verifiedStop).
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, infoByID[id].Generation, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
+								// The stop executes against the decision the mark landed on.
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, stop, name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonOrphaned, TraceOutcomeStopPending, template, name, nil)
 								}
@@ -2784,7 +2772,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
 							preserve = append(preserve, rn)
 						}
-						if closeBeadPreservingAssignees(store, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
+						if closeBeadPreservingAssignees(store, workLegs{cityPath, cfg, rigStores}, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
 							tick.markClosed(id)
 							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
 							if trace != nil {
@@ -2807,7 +2795,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						//
 						// Restricted to "orphaned": a "suspended" seat is configured and
 						// merely scaled down, so its work stays put for its return.
-						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
+						if released := releaseConfirmedOrphanSessionWork(cfg, censusWorkLeg(cityPath, store), rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
 						}
@@ -3183,15 +3171,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
-						if updated, ok := markDrainAckStopPending(cityPath, store, infoByID[id], sessFront, sp, dops, dt, clk, stderr); ok {
+						if updated, stop, ok := markDrainAckStopPending(legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg, stderr: stderr}, infoByID[id], dops, dt, clk); ok {
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
 							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
 							tick.set(id, updated)
 							clearDrainTrackerForStopPending(id, dt)
-							// Token fence off the typed snapshot (mirrors verifiedStop); the
-							// stop-pending fold preserves instance_token.
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, id, name, infoByID[id].InstanceToken, infoByID[id].Generation, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
+							// The stop executes against the decision the mark landed on.
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, stop, name, tp.Hints.ProcessNames, asyncStopTracker, dt, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonAcknowledged, TraceOutcomeStopPending, tp.TemplateName, name, nil)
 							}
@@ -4207,6 +4194,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason, outcome := timerTraceCodes(dec)
 					trace.RecordDecision(TraceSiteReconcilerIdleTimeout, reason, outcome, tp.TemplateName, name, nil)
 				}
+				if dec.TraceReason != string(TraceReasonAssignedWorkExhausted) {
+					// A claim made since the tick's read (the gather above read the
+					// index) defers the kill, as a claim the gather saw would have.
+					late, err := lateSeatWork(workLegs{cityPath, cfg, rigStores}, store, sessionAssignmentIdentifiersForConfigInfo(infoByID[id], cfg), []string{"in_progress"}, nil)
+					if err != nil || len(late) > 0 {
+						fmt.Fprintf(stderr, "session reconciler: idle timeout for %s deferred: work claimed since this tick's read (%v)\n", name, err) //nolint:errcheck // best-effort stderr
+						continue
+					}
+				}
 				if err := controllerKillSessionRow(cityPath, store, sp, cfg, infoByID[id]); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
 				} else {
@@ -4758,6 +4754,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if intent != "idle-stop-pending" {
 					if fold := markIdleSleepPendingInfo(info, sessFront); fold != nil {
 						tick.apply(target.info.ID, fold)
+						info = infoByID[target.info.ID] // the drain's basis is the row as stored
 					}
 				}
 			}
@@ -4855,7 +4852,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBead(store, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr) {
+			if closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr, nil) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
@@ -5103,8 +5100,10 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers)
+	return seatHasWork(cityPath, store, seatWorkQuery{ids: identifiers, statuses: seatWorkStatuses}, func() (bool, error) {
+		return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+			return sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers)
+		})
 	})
 }
 
@@ -5194,9 +5193,22 @@ func sessionHasOpenAssignedWorkForReachableStoreForCloseGate(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
+	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, identifiers)
+}
+
+// seatHasWorkForCloseGate is the close-gate existence probe over identifiers:
+// open or in_progress work, the seat's own drain step excluded.
+func seatHasWorkForCloseGate(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info, identifiers []string) (bool, error) {
+	q := seatWorkQuery{ids: identifiers, statuses: seatWorkStatuses, keep: notOwnDrainStep}
+	return seatHasWork(cityPath, store, q, func() (bool, error) {
+		return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+			return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
+		})
 	})
+}
+
+func notOwnDrainStep(store beads.Store, b beads.Bead) (bool, error) {
+	return !isSessionOwnDrainStepBead(store, b), nil
 }
 
 func sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(store beads.Store, identifiers []string) (bool, error) {
@@ -5324,6 +5336,17 @@ func sessionHasAwakeAssignedWorkForReachableStore(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
+		// Readiness is not the index's to answer, so it only picks the legs: a
+		// leg with no open or in_progress row for the seat holds no awake work.
+		legs, unknown := idx.stores(seatWorkQuery{ids: identifiers, statuses: seatWorkStatuses})
+		for _, s := range legs {
+			if has, err := sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, identifiers); err != nil || has {
+				return has, err
+			}
+		}
+		return false, unknown
+	}
 	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
 		return sessionHasAwakeAssignedWorkInStoreByIdentifiers(s, identifiers)
 	})
@@ -5395,8 +5418,20 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(
 	now time.Time,
 ) (beads.Bead, bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
-		return firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(s, identifiers, now)
+	if now.IsZero() {
+		now = time.Now()
+	}
+	q := seatWorkQuery{ids: identifiers, statuses: []string{"open"}, keep: func(s beads.Store, b beads.Bead) (bool, error) {
+		if isSessionOwnDrainStepBead(s, b) {
+			return false, nil
+		}
+		suppress, err := openAssignedRowProvablyNonClaimable(s, b, now)
+		return !suppress, err
+	}}
+	return seatFirstWork(cityPath, store, q, func() (beads.Bead, bool, error) {
+		return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
+			return firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(s, identifiers, now)
+		})
 	})
 }
 
@@ -5532,8 +5567,11 @@ func firstInProgressAssignedWorkBeadForReachableStore(
 	info sessionpkg.Info,
 ) (beads.Bead, bool, error) {
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-	return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
-		return firstInProgressAssignedWorkBeadInStoreByIdentifiers(s, identifiers)
+	q := seatWorkQuery{ids: identifiers, statuses: []string{"in_progress"}, keep: notOwnDrainStep}
+	return seatFirstWork(cityPath, store, q, func() (beads.Bead, bool, error) {
+		return firstAssignedWorkBeadForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (beads.Bead, bool, error) {
+			return firstInProgressAssignedWorkBeadInStoreByIdentifiers(s, identifiers)
+		})
 	})
 }
 
@@ -6029,6 +6067,17 @@ func collectSessionAssignedWorkInfo(cityPath string, cfg *config.City, store bea
 	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	seen := make(map[string]struct{})
 	out := make([]strandedAssignedWork, 0, 4)
+	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
+		hits, err := idx.match(seatWorkQuery{ids: identifiers, statuses: seatWorkStatuses}, false)
+		for _, hit := range hits {
+			// First leg wins, as below.
+			if _, dup := seen[hit.bead.ID]; !dup {
+				seen[hit.bead.ID] = struct{}{}
+				out = append(out, strandedAssignedWork{bead: hit.bead, store: hit.store})
+			}
+		}
+		return out, err
+	}
 	collect := func(s beads.Store) error {
 		if s == nil {
 			return nil
@@ -6105,6 +6154,10 @@ func sessionHasOpenAssignedWorkInStores(cityPath string, cfg *config.City, store
 // first leg that answers. It fails CLOSED on a leg that went dark for the same
 // reason assignedWorkExistsForSession does — the callers are close decisions.
 func sessionHasAssignedWorkInStoresForStatuses(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, statuses []string) (bool, error) {
+	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
+		hits, err := idx.match(seatWorkQuery{ids: identifiers, statuses: statuses}, true)
+		return len(hits) > 0, err
+	}
 	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
 	if err != nil {
 		return false, err
@@ -6902,13 +6955,24 @@ func beginIdleRespawnDrainIfIdle(
 		idleRespawnAttemptsMetadataKey: "1",
 		idleRespawnBeadIDMetadataKey:   strings.TrimSpace(eval.AssignedWorkBeadID),
 	}
+	if info.SleepIntent == "idle-stop-pending" {
+		// The tick clears the idle intent after this (clearIdleStopPending):
+		// clear it here, so the drain's basis is the row the tick leaves.
+		patch["sleep_intent"] = ""
+	}
 	if sessFront == nil {
 		return false, nil, errors.New("session store is unavailable")
 	}
-	if err := sessFront.ApplyPatch(info.ID, patch); err != nil {
+	// Record the attempt on the row the drain decides on, fenced on it, and
+	// fold it in: the drain's basis is then the row as stored.
+	res, err := sessFront.Commit(sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), patch)
+	if err != nil {
 		return false, nil, fmt.Errorf("record idle-respawn attempt: %w", err)
 	}
-	return beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
+	if res != sessionpkg.CommitLanded {
+		return false, nil, nil // the row moved: decided again next tick
+	}
+	return beginSessionDrainInfo(info.ApplyPatch(patch), sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
 }
 
 func selectIdleProbeTargets(
@@ -7263,10 +7327,7 @@ func reconcileDispatchOptionSources(opts startExecutionOptions, cityPath string,
 // cannot be read is an error, not "holds nothing" (assignedWorkExistsForSession).
 func reachableClaimedWorkProbe(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store) claimedWorkProbe {
 	return func(info sessionpkg.Info) (bool, error) {
-		identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
-		return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-			return sessionHasAssignedWorkInStoreByIdentifiersForStatuses(s, identifiers, []string{"in_progress"})
-		})
+		return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
 	}
 }
 

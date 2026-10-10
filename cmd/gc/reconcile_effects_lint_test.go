@@ -39,7 +39,7 @@ var effectBannedMethods = []string{
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CloseWithTerminalPatch",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder", "CloseWithTerminalPatchUnder",
-	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder",
+	"RollbackPendingCreateAtomicallyUnder", "CommitStartedIfCurrentUnder", "Commit",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
 	"WakeSession", "RequestWakeUnlessHeld", "OperatorSuspend", "ApplyKeepingUserHold", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
@@ -251,7 +251,7 @@ var effectLintSessionReads = []string{
 	"ListByMetadataInfos", "ListLabeledSessionInfosUnfiltered", "ListStartupHealthEpisodes", "ListWaits",
 	"LoadStartupHealthEpisode", "LookupConfiguredNamed", "MailboxAddress", "MailboxAddresses", "PersistedMarkers",
 	"ResolveAddress", "ResolveID", "ResolveIDAllowClosed", "ResolveIDByExactID", "ResolveMailboxAddress", "Store",
-	"WaitNudgeIDs", "WaitsForSession",
+	"WaitNudgeIDs", "WaitsForSession", "Holds",
 	"UpdateRowFenced",
 }
 

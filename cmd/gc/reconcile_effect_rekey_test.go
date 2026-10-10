@@ -177,7 +177,7 @@ func TestRekeyRefusesOnTokenChange(t *testing.T) {
 		{"token changed", func(f *rekeyFixture) { _ = f.leaf.SetMeta(f.name, "GC_INSTANCE_TOKEN", "tok-other") }, causeIdentityChanged},
 		{"runtime gone", func(f *rekeyFixture) { _ = f.leaf.Stop(f.name) }, causeNotPresent},
 		{"presence unreadable", func(f *rekeyFixture) { f.leaf.LivenessErrors[f.name] = errors.New("tmux: server busy") }, causeLivenessUnknown},
-		{"name busy", func(f *rekeyFixture) { f.t.Cleanup(runtimeNames.tryLock(f.city, f.name)) }, causeNameBusy},
+		{"name busy", func(f *rekeyFixture) { holdName(f.t, f.city, f.name) }, causeNameBusy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRekeyFixture(t)

@@ -69,45 +69,88 @@ func runWorkflowStepScript(t *testing.T, dir, script string, env map[string]stri
 
 // bazelCacheZstdProbeStub stands in for cache-zstd-probe.sh: it counts its
 // runs and passes only for BAZEL_TEST_PROBE=zstd (rbe-cache advertising
-// zstd). TestCacheZstdProbe runs the real probe.
+// zstd). TestCacheProbes runs the real probe.
 const bazelCacheZstdProbeStub = `#!/usr/bin/env bash
 echo probe >>probe.log
 [ "${BAZEL_TEST_PROBE:-}" = zstd ]
 `
 
-// runBazelRCLocalStep runs a step's script as Actions does (bash -eo
-// pipefail) in a scratch directory with env and a stub zstd probe, and
-// returns the .bazelrc.local lines it writes (none if it writes no file) and
-// how often it ran the probe (no test reaches rbe-cache).
-func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) ([]string, int) {
+// bazelCacheRRCProbeStub stands in for cache-rrc-probe.sh: it counts its
+// runs in rrc-probe.log, says why on stderr as the real probe does, and
+// passes only for BAZEL_TEST_RRC_PROBE=ok (rbe-cache answering, the kill
+// switch on). TestCacheProbes runs the real probe.
+const bazelCacheRRCProbeStub = `#!/usr/bin/env bash
+echo probe >>rrc-probe.log
+if [ "${BAZEL_TEST_RRC_PROBE:-}" = ok ]; then
+	echo "rbe-cache rrc probe: stub answers" >&2
+	exit 0
+fi
+echo "rbe-cache rrc probe: stub refused" >&2
+exit 1
+`
+
+// bazelRCLocalStepRun is what runBazelRCLocalStepProbes saw: the
+// .bazelrc.local lines a step wrote (none if it wrote no file), how often
+// it ran each probe stub, its combined output and its step summary.
+type bazelRCLocalStepRun struct {
+	lines                 []string
+	zstdProbes, rrcProbes int
+	out, summary          string
+}
+
+// runBazelRCLocalStepProbes runs a step's script as Actions does (bash -eo
+// pipefail) in a scratch directory with env and stub zstd and rrc probes
+// (no test reaches rbe-cache).
+func runBazelRCLocalStepProbes(t *testing.T, script string, env map[string]string) bazelRCLocalStepRun {
 	t.Helper()
 	dir := t.TempDir()
-	probe := filepath.Join(dir, bazelCacheZstdProbe)
-	if err := os.MkdirAll(filepath.Dir(probe), 0o755); err != nil {
-		t.Fatal(err)
+	for path, body := range map[string]string{bazelCacheZstdProbe: bazelCacheZstdProbeStub, bazelCacheRRCProbe: bazelCacheRRCProbeStub} {
+		probe := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(probe), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(probe, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(probe, []byte(bazelCacheZstdProbeStub), 0o644); err != nil {
-		t.Fatal(err)
+	withSummary := map[string]string{"GITHUB_STEP_SUMMARY": filepath.Join(dir, "summary.md")}
+	for k, v := range env {
+		withSummary[k] = v
 	}
-	out, err := runWorkflowStepScript(t, dir, script, env)
+	out, err := runWorkflowStepScript(t, dir, script, withSummary)
 	if err != nil {
 		t.Fatalf("step script with %v: %v\n%s", env, err, out)
 	}
+	summary, _ := os.ReadFile(filepath.Join(dir, "summary.md"))
+	run := bazelRCLocalStepRun{out: out, summary: string(summary)}
 	probes, _ := os.ReadFile(filepath.Join(dir, "probe.log"))
+	run.zstdProbes = strings.Count(string(probes), "probe\n")
+	probes, _ = os.ReadFile(filepath.Join(dir, "rrc-probe.log"))
+	run.rrcProbes = strings.Count(string(probes), "probe\n")
 	rc, err := os.ReadFile(filepath.Join(dir, ".bazelrc.local"))
 	if os.IsNotExist(err) {
-		return nil, strings.Count(string(probes), "probe\n")
+		return run
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Split(strings.TrimSuffix(string(rc), "\n"), "\n"), strings.Count(string(probes), "probe\n")
+	run.lines = strings.Split(strings.TrimSuffix(string(rc), "\n"), "\n")
+	return run
+}
+
+// runBazelRCLocalStep is runBazelRCLocalStepProbes for the zstd probe alone:
+// the .bazelrc.local lines and how often the step ran that probe.
+func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) ([]string, int) {
+	t.Helper()
+	run := runBazelRCLocalStepProbes(t, script, env)
+	return run.lines, run.zstdProbes
 }
 
 // bazelRCLocalLaneSteps are the only steps anywhere in bazel.yml that may
 // write .bazelrc.local, all in the lane job: the fork cache's zstd line and
-// the remote repo contents cache reader (bazel_rrc_test.go).
-var bazelRCLocalLaneSteps = []string{bazelCacheZstdStep, bazelRRCReadStep}
+// the remote repo contents cache readers, trusted and fork-cache
+// (bazel_rrc_test.go).
+var bazelRCLocalLaneSteps = []string{bazelCacheZstdStep, bazelRRCReadStep, bazelForkRRCReadStep}
 
 // bazelRCLocalLaneStep returns bazel.yml's lane step name (one of
 // bazelRCLocalLaneSteps), after checking that no step outside
@@ -439,15 +482,39 @@ func grpcMessage(m []byte) []byte {
 	return append(binary.BigEndian.AppendUint32([]byte{0}, uint32(len(m))), m...)
 }
 
-// capsAnswer is how TestCacheZstdProbe's stand-in rbe-cache answers GetCapabilities: HTTP
-// status (0: 200), body, and grpc-status ("": none; with no body, in the
-// headers, as gRPC's trailers-only errors are), after delay.
+// capsAnswer is how TestCacheProbes' stand-in rbe-cache answers
+// GetCapabilities: HTTP status (0: 200), body, and grpc-status ("": none;
+// with no body, in the headers, as gRPC's trailers-only errors are), after
+// delay. ac and bs answer cache-rrc-probe.sh's GetActionResult and
+// ByteStream Read the same way; nil is rbe-cache's answer for a key no
+// action has, or a blob it does not hold: a trailers-only NOT_FOUND.
 type capsAnswer struct {
 	status int
 	grpc   string
 	body   []byte
 	delay  time.Duration
+	ac, bs *capsAnswer
 }
+
+// acNotFound: rbe-cache's answer to a GetActionResult for a key no action
+// has, or a ByteStream Read for a blob it does not hold (capsAnswer.ac's and
+// capsAnswer.bs's default).
+var acNotFound = capsAnswer{grpc: "5"}
+
+// acRequest: cache-rrc-probe.sh's GetActionResultRequest{instance_name:
+// "oss", action_digest: {sha256("cache-rrc-probe: no action has this key"),
+// 1}}, a key no action has.
+var acRequest = grpcMessage(append(pbBytes(1, []byte("oss")),
+	pbBytes(2, append(pbBytes(1, []byte("ad12d7a2f1dec188fc1f2c4f5535a4a65eb630fa2f309eca423695e6ec7abee7")), pbVarint(2, 1)...))...))
+
+// bsRequest: cache-rrc-probe.sh's ReadRequest{resource_name:
+// "oss/blobs/<acRequest's hash>/1"}, a blob the CAS does not hold.
+var bsRequest = grpcMessage(pbBytes(1, []byte("oss/blobs/ad12d7a2f1dec188fc1f2c4f5535a4a65eb630fa2f309eca423695e6ec7abee7/1")))
+
+// capsServer is TestCacheProbes' stand-in rbe-cache: it answers a and
+// returns the probe's RBE_CACHE_PROBE_URL, a CA file for curl's
+// CURL_CA_BUNDLE, and the request count.
+type capsServer func(t *testing.T, a capsAnswer) (url, caFile string, hits *atomic.Int32)
 
 // requireCacheZstdProbeTools skips where the probe cannot run at all (it
 // then leaves the flag off, which the rc-step tests above already cover).
@@ -460,14 +527,86 @@ func requireCacheZstdProbeTools(t *testing.T) {
 	}
 }
 
-// TestCacheZstdProbe runs cache-zstd-probe.sh against a stand-in rbe-cache.
-// Only an answer listing ZSTD in cache_capabilities.supported_compressors
-// (the field Bazel checks) passes; every other answer, error, refusal or
-// timeout fails, and the rc step then writes no flag. The probe never writes
-// stdout (the rc step's stdout is .bazelrc.local) and always says why on
-// stderr.
-func TestCacheZstdProbe(t *testing.T) {
+// TestCacheProbes runs rbe-cache's two probes against stand-in rbe-cache
+// servers, one serve for both: cache-zstd-probe.sh (cacheZstdProbeCases)
+// and cache-rrc-probe.sh (cacheRRCProbeCases).
+func TestCacheProbes(t *testing.T) {
 	requireCacheZstdProbeTools(t)
+
+	// serve answers like rbe-cache's Caddy, over TLS and HTTP/2, after
+	// checking the request is a probe's GetCapabilities, or
+	// cache-rrc-probe.sh's GetActionResult or ByteStream Read, for instance
+	// oss.
+	serve := func(t *testing.T, a capsAnswer) (url, caFile string, hits *atomic.Int32) {
+		t.Helper()
+		hits = new(atomic.Int32)
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			body, _ := io.ReadAll(r.Body)
+			path, want, answer := "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities", capsRequest, a
+			switch r.URL.Path {
+			case "/build.bazel.remote.execution.v2.ActionCache/GetActionResult":
+				path, want, answer = r.URL.Path, acRequest, acNotFound
+				if a.ac != nil {
+					answer = *a.ac
+				}
+			case "/google.bytestream.ByteStream/Read":
+				path, want, answer = r.URL.Path, bsRequest, acNotFound
+				if a.bs != nil {
+					answer = *a.bs
+				}
+			}
+			if r.ProtoMajor != 2 || r.Method != http.MethodPost || r.URL.Path != path ||
+				r.Header.Get("Content-Type") != "application/grpc" || !bytes.Equal(body, want) {
+				t.Errorf("probe sent %s %s %s, content-type %q, body %x; want HTTP/2 POST %s, application/grpc, %x",
+					r.Proto, r.Method, r.URL.Path, r.Header.Get("Content-Type"), body, path, want)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			select {
+			case <-time.After(answer.delay):
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Type", "application/grpc")
+			trailer := answer.grpc != "" && answer.body != nil
+			if trailer {
+				w.Header().Set("Trailer", "Grpc-Status")
+			} else if answer.grpc != "" {
+				w.Header().Set("Grpc-Status", answer.grpc)
+			}
+			status := answer.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write(answer.body)
+			// Streamed, as gRPC servers answer: Go drops the trailer of a
+			// response it can give a content-length.
+			w.(http.Flusher).Flush()
+			if trailer {
+				w.Header().Set("Grpc-Status", answer.grpc)
+			}
+		}))
+		srv.EnableHTTP2 = true
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		caFile = filepath.Join(t.TempDir(), "ca.pem")
+		if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return srv.URL, caFile, hits
+	}
+	t.Run("zstd", func(t *testing.T) { cacheZstdProbeCases(t, serve) })
+	t.Run("rrc", func(t *testing.T) { cacheRRCProbeCases(t, serve) })
+}
+
+// cacheZstdProbeCases runs cache-zstd-probe.sh against serve. Only an answer
+// listing ZSTD in cache_capabilities.supported_compressors (the field Bazel
+// checks) passes; every other answer, error, refusal or timeout fails, and
+// the rc step then writes no flag. The probe never writes stdout (the rc
+// step's stdout is .bazelrc.local) and always says why on stderr.
+func cacheZstdProbeCases(t *testing.T, serve capsServer) {
 	root := repoRoot(t)
 	script := filepath.Join(root, bazelCacheZstdProbe)
 
@@ -491,59 +630,6 @@ func TestCacheZstdProbe(t *testing.T) {
 		if !strings.Contains(bazelrc, want) {
 			t.Errorf(".bazelrc lacks %q, which the probe asks", strings.TrimSpace(want))
 		}
-	}
-
-	// serve answers like rbe-cache's Caddy, over TLS and HTTP/2, after
-	// checking the request is the probe's GetCapabilities for instance oss.
-	// It returns the probe's RBE_CACHE_PROBE_URL, a CA file for curl's
-	// CURL_CA_BUNDLE, and the request count.
-	serve := func(t *testing.T, a capsAnswer) (url, caFile string, hits *atomic.Int32) {
-		t.Helper()
-		hits = new(atomic.Int32)
-		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			hits.Add(1)
-			body, _ := io.ReadAll(r.Body)
-			const path = "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities"
-			if r.ProtoMajor != 2 || r.Method != http.MethodPost || r.URL.Path != path ||
-				r.Header.Get("Content-Type") != "application/grpc" || !bytes.Equal(body, capsRequest) {
-				t.Errorf("probe sent %s %s %s, content-type %q, body %x; want HTTP/2 POST %s, application/grpc, %x",
-					r.Proto, r.Method, r.URL.Path, r.Header.Get("Content-Type"), body, path, capsRequest)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			select {
-			case <-time.After(a.delay):
-			case <-r.Context().Done():
-				return
-			}
-			w.Header().Set("Content-Type", "application/grpc")
-			trailer := a.grpc != "" && a.body != nil
-			if trailer {
-				w.Header().Set("Trailer", "Grpc-Status")
-			} else if a.grpc != "" {
-				w.Header().Set("Grpc-Status", a.grpc)
-			}
-			status := a.status
-			if status == 0 {
-				status = http.StatusOK
-			}
-			w.WriteHeader(status)
-			_, _ = w.Write(a.body)
-			// Streamed, as gRPC servers answer: Go drops the trailer of a
-			// response it can give a content-length.
-			w.(http.Flusher).Flush()
-			if trailer {
-				w.Header().Set("Grpc-Status", a.grpc)
-			}
-		}))
-		srv.EnableHTTP2 = true
-		srv.StartTLS()
-		t.Cleanup(srv.Close)
-		caFile = filepath.Join(t.TempDir(), "ca.pem")
-		if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return srv.URL, caFile, hits
 	}
 
 	zstd := grpcMessage(capsZstd)

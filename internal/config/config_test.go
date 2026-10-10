@@ -5706,6 +5706,55 @@ func TestMailConfigRetentionTTLDurationRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestMailConfigUnreadRetentionTTLDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "empty", raw: "", want: 0},
+		{name: "zero", raw: "0", want: 0},
+		{name: "hours", raw: "168h", want: 168 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (MailConfig{UnreadRetentionTTL: tt.raw}).UnreadRetentionTTLDuration()
+			if err != nil {
+				t.Fatalf("UnreadRetentionTTLDuration() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("UnreadRetentionTTLDuration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMailConfigUnreadRetentionTTLDurationRejectsInvalid(t *testing.T) {
+	for _, raw := range []string{"7d", "-1h"} {
+		_, err := (MailConfig{UnreadRetentionTTL: raw}).UnreadRetentionTTLDuration()
+		if err == nil {
+			t.Fatalf("UnreadRetentionTTLDuration(%q) succeeded, want error", raw)
+		}
+		if !strings.Contains(err.Error(), "[mail] unread_retention_ttl") || !strings.Contains(err.Error(), raw) {
+			t.Fatalf("UnreadRetentionTTLDuration(%q) error = %q, want field context and bad value", raw, err)
+		}
+	}
+}
+
+func TestMailConfigUnreadRetentionTTLParsesFromTOML(t *testing.T) {
+	cfg, err := Parse([]byte("[mail]\nunread_retention_ttl = \"168h\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Mail.UnreadRetentionTTL != "168h" {
+		t.Fatalf("Mail.UnreadRetentionTTL = %q, want 168h", cfg.Mail.UnreadRetentionTTL)
+	}
+	d, err := cfg.Mail.UnreadRetentionTTLDuration()
+	if err != nil || d != 168*time.Hour {
+		t.Fatalf("UnreadRetentionTTLDuration() = %v, %v; want 168h, nil", d, err)
+	}
+}
+
 // --- WispGC config tests ---
 
 func TestDaemonConfig_WispGCDisabledByDefault(t *testing.T) {

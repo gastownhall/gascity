@@ -335,6 +335,21 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, store, closed.ID).Metadata
 			},
 		},
+		"cmd/gc/reconcile_fenced_store.go:fencedWriter.closeRow": {
+			[]string{session.RuntimeLeaseHolderKey, "host/1/n", session.RuntimeLeaseExpiresKey, ago(-time.Minute), session.RuntimeLeaseTTLKey, "60", session.RuntimeLeaseFlockKey, "f"},
+			func(t *testing.T, meta []string) map[string]string {
+				m := beads.NewAtomicCloseMemStore()
+				stampedMemStore(t, m)
+				id := fieldRow(t, m, meta...)
+				closed, err := fencedWriter{store: m}.closeRow(id, func(session.Info, session.PersistedResponse) (session.MetadataPatch, bool) {
+					return session.MetadataPatch{"close_reason": "test"}, true
+				})
+				if err != nil || !closed {
+					t.Fatalf("closeRow = %t, %v", closed, err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/lifecycle_transition.go:ConfigDriftResetPatch": {
 			[]string{"restart_requested", "true"},
 			patchSite(func(session.Info) session.MetadataPatch {

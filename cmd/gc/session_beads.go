@@ -1375,6 +1375,10 @@ func releaseUnexecutedClaimsOnKill(
 		}
 	}
 	identifiers := sessionAssignmentIdentifiersForConfig(sessionBead, cfg)
+	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
+		releaseKilledSeatClaimsFromIndex(idx, cfg, sessionBead, identifiers, executed, stderr)
+		return
+	}
 	// One deadline bounds the started-work gate and the release together.
 	deadline := time.Now().Add(budget)
 	started, err := killedSeatHoldsStartedWork(cityPath, cfg, store, rigStores, identifiers, executed, deadline)
@@ -1394,6 +1398,43 @@ func releaseUnexecutedClaimsOnKill(
 		releasable:    func(b beads.Bead) bool { return claimIsLaneVisible(cfg, b, fallbackRoute) },
 		deadline:      deadline,
 	}, budget, stderr)
+}
+
+// releaseKilledSeatClaimsFromIndex is releaseUnexecutedClaimsOnKill inside a
+// reconcile tick: the started-work gate and the release set come from the
+// tick's seat work index, so the pass costs one fenced release per lane-visible
+// claim, not a scan per identity, status and leg (on bd, `bd update
+// --if-status --if-assignee`: the live check and the write are one call). The
+// gate reads the index's rows as they were read: a stale started row only keeps
+// the seat. An unreadable leg fails the gate, and nothing is released.
+func releaseKilledSeatClaimsFromIndex(idx *seatWorkIndex, cfg *config.City, sessionBead beads.Bead, identifiers []string, executed map[string]bool, stderr io.Writer) {
+	for _, q := range []seatWorkQuery{
+		{ids: identifiers, statuses: []string{"in_progress"}},
+		{ids: identifiers, statuses: []string{"open"}, keep: func(_ beads.Store, b beads.Bead) (bool, error) { return executed[b.ID], nil }},
+	} {
+		started, err := idx.snapshot(q, true)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: checking killed session %s for started work: %v; releasing nothing\n", sessionBead.ID, err) //nolint:errcheck
+			return
+		}
+		if len(started) > 0 {
+			return
+		}
+	}
+	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
+	claims, err := idx.snapshot(seatWorkQuery{ids: identifiers, statuses: []string{"open"}, keep: func(_ beads.Store, b beads.Bead) (bool, error) {
+		return claimIsLaneVisible(cfg, b, fallbackRoute), nil
+	}}, false)
+	if err != nil {
+		// Unreachable after a passing gate (it fails on any unreadable leg); the
+		// listed claims are released below, each fenced on its row.
+		fmt.Fprintf(stderr, "session beads: listing claims held by killed session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
+	}
+	for _, claim := range claims {
+		if err := workAssignmentForStore(beads.WorkStore{Store: claim.store}).ReleaseWorkBead(claim.bead, fallbackRoute); err != nil {
+			fmt.Fprintf(stderr, "session beads: releasing unexecuted claim %s held by killed session %s: %v\n", claim.bead.ID, sessionBead.ID, err) //nolint:errcheck
+		}
+	}
 }
 
 // killedSeatSnapshotHasReleasableClaim reports whether the tick's assigned-work
@@ -1711,6 +1752,24 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", retiredSession.ID, err) //nolint:errcheck
 	}
 	identifiers := sessionAssignmentIdentifiersInfo(retiredSession)
+	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
+		// Inside a tick (the stranded repair): the tick's index names the rows,
+		// one fenced release each, rather than a live list per identity and leg.
+		work, err := idx.snapshot(seatWorkQuery{ids: identifiers, statuses: seatWorkStatuses}, false)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: listing work assigned to retired session %s: %v\n", retiredSession.ID, err) //nolint:errcheck
+			res.Failed++
+		}
+		for _, item := range work {
+			if err := workAssignmentForStore(beads.WorkStore{Store: item.store}).ReleaseWorkBead(item.bead, fallbackRoute); err != nil {
+				fmt.Fprintf(stderr, "session beads: unclaiming work %s assigned to retired session %s: %v\n", item.bead.ID, retiredSession.ID, err) //nolint:errcheck
+				res.Failed++
+				continue
+			}
+			res.Released++
+		}
+		return res
+	}
 	seen := make(map[string]struct{})
 	complete := sweepAssignedWorkLegs(cityPath, cfg, store, rigStores, identifiers, stderr, func(storeIndex int, ownerStore beads.Store) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
@@ -1841,7 +1900,7 @@ func repairStrandedPoolWorkerBead(
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
 		return false
 	}
-	return closeBead(store, info, strandedRepairCloseReason, now, stderr)
+	return closeBead(store, workLegs{cityPath, cfg, rigStores}, info, strandedRepairCloseReason, now, stderr)
 }
 
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
@@ -3305,7 +3364,9 @@ func reapStaleSessionBeads(
 		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
 			continue
 		}
-		if closeBead(store, info, "stale-session", now.UTC(), stderr) {
+		// A stuck-creating row holds no claims (see above), so the cascade's
+		// leg set is the city's without the rigs this reap is never handed.
+		if closeBead(store, workLegs{cityPath: cityPath}, info, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -3384,6 +3445,7 @@ var hostBootTime = hostboot.BootTime
 // misclassified absence cannot cost a live session its bead.
 func reapPreBootSessionBeads(
 	store beads.Store,
+	legs workLegs,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	clk clock.Clock,
@@ -3438,7 +3500,7 @@ func reapPreBootSessionBeads(
 		if store == nil {
 			continue
 		}
-		if closeBead(store, info, "stale-session", clk.Now().UTC(), stderr) {
+		if closeBead(store, legs, info, "stale-session", clk.Now().UTC(), stderr) {
 			fmt.Fprintf(stderr, "session reconciler: reaped pre-boot session bead %s (session %q last started %s, host booted %s) — runtime server absent\n", //nolint:errcheck
 				info.ID, strings.TrimSpace(info.SessionNameMetadata), startedAt.UTC().Format(time.RFC3339), boot.UTC().Format(time.RFC3339))
 			reaped++
@@ -3508,8 +3570,8 @@ func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider
 func cleanupDeadRuntimeSessionCorpses(
 	cityPath string,
 	store beads.Store,
-	_ map[string]beads.Store,
-	_ *config.City,
+	rigStores map[string]beads.Store,
+	cfg *config.City,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
@@ -3552,7 +3614,7 @@ func cleanupDeadRuntimeSessionCorpses(
 		// reboot — so reap those rather than fail-safing forever and leaving
 		// the pool identity claimed by a corpse.
 		if runtime.IsRuntimeServerAbsent(err) {
-			if reaped := reapPreBootSessionBeads(store, sessionBeads, dt, clk, stderr); reaped > 0 {
+			if reaped := reapPreBootSessionBeads(store, workLegs{cityPath, cfg, rigStores}, sessionBeads, dt, clk, stderr); reaped > 0 {
 				return reaped
 			}
 		}
@@ -3603,7 +3665,7 @@ func cleanupDeadRuntimeSessionCorpses(
 			}
 			continue
 		}
-		if cleanDeadRuntimeCorpse(store, info, name, sp, deadChecker, clk, stderr) {
+		if cleanDeadRuntimeCorpse(store, workLegs{cityPath, cfg, rigStores}, info, name, sp, deadChecker, clk, stderr) {
 			cleaned++
 		}
 		release()
@@ -3614,7 +3676,7 @@ func cleanupDeadRuntimeSessionCorpses(
 // cleanDeadRuntimeCorpse stops name's runtime when it is dead, and closes
 // info's row when the row claimed it, under the caller's flock on name. It
 // reports whether it cleaned.
-func cleanDeadRuntimeCorpse(store beads.Store, info session.Info, name string, sp runtime.Provider, deadChecker runtime.DeadRuntimeSessionChecker, clk clock.Clock, stderr io.Writer) bool {
+func cleanDeadRuntimeCorpse(store beads.Store, legs workLegs, info session.Info, name string, sp runtime.Provider, deadChecker runtime.DeadRuntimeSessionChecker, clk clock.Clock, stderr io.Writer) bool {
 	dead, err := deadChecker.IsDeadRuntimeSession(name)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
@@ -3628,6 +3690,13 @@ func cleanDeadRuntimeCorpse(store beads.Store, info session.Info, name string, s
 	// mid-restart, and only that row is closed below.
 	claimsLive := sessionBeadClaimsLiveRuntime(info)
 	if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
+		return false
+	}
+	// The cleanup is decided on info, the tick's row: under the name's flock
+	// it stops only while the row still carries the kill's facts, so a row
+	// decided dormant that a start has since woken keeps its runtime.
+	if holds, err := sessionFrontDoor(store).Holds(session.Decide(info, session.FactsLegacyKill)); !holds {
+		fmt.Fprintf(stderr, "session reconciler: dead runtime session %s skipped: session bead %s moved since the cleanup was decided (%v)\n", name, info.ID, err) //nolint:errcheck
 		return false
 	}
 	if err := sp.Stop(name); err != nil {
@@ -3651,9 +3720,7 @@ func cleanDeadRuntimeCorpse(store beads.Store, info session.Info, name string, s
 	// runtime has been confirmed dead and stopped cannot be resumed,
 	// so releasing its work is the correct action.
 	//
-	// The outer `if store != nil` guard tolerates a nil store so the
-	// runtime-Stop side effect still runs in test contexts that do not
-	// wire a real store; closeBead is idempotent on already-closed beads.
+	// closeBead is idempotent on already-closed beads.
 	//
 	// Only a row that claims the runtime it just lost is closed. A dormant
 	// row (asleep, drained, suspended, quarantined, archived) records no
@@ -3662,9 +3729,9 @@ func cleanDeadRuntimeCorpse(store beads.Store, info session.Info, name string, s
 	// the dead pane is that sleep's leftover. Closing it would make the
 	// session impossible to wake. Reaping the pane above is still right: it
 	// frees the name for that wake.
-	if store != nil && claimsLive {
+	if claimsLive {
 		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
-		closeBead(store, info, "dead-runtime", clk.Now().UTC(), stderr)
+		closeBead(store, legs, info, "dead-runtime", clk.Now().UTC(), stderr)
 	}
 	return true
 }
@@ -3809,7 +3876,7 @@ func reapRuntimesBoundToClosedBeads(
 	return reaped
 }
 
-// stopStillBoundClosedRuntime is the closed-bead reap's Stop. A v2 start can
+// stopStillBoundClosedRuntimeLeased is the closed-bead reap's Stop. A v2 start can
 // put a fresh runtime under name while the reaper's reads run. Under the name
 // lock, which the start holds across its provider Start, it re-reads the
 // binding and stops only a runtime still bound to the closed bead liveID (P4
@@ -3822,12 +3889,8 @@ func reapRuntimesBoundToClosedBeads(
 // missing tmux server included — with runtime.IsSessionGone itself instead of
 // having runtime.StopForCleanup turn it into success. The unlock is deferred,
 // so a provider panic cannot leave the name locked.
-func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provider, listed bool) (bool, error) {
-	return stopStillBoundClosedRuntimeLeased(nil, cityPath, name, "", liveID, sp, listed, io.Discard)
-}
-
-// stopStillBoundClosedRuntimeLeased is stopStillBoundClosedRuntime under the
-// runtime lease (R-a): the in-process lock and the name's flock, plus the
+//
+// It runs under the runtime lease (R-a): the name's flock, plus the
 // record on ownerID, the open row that owns name now, if any, so a start of
 // that row on another host is excluded too. Another host's start with no open
 // row yet is not; the Stop's identity re-read and object kills bound it. A
@@ -4136,7 +4199,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if isFailedCreateSessionBead(b) {
 		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(b), now, stderr)
 	}
-	return closeBead(store, sessionInfoFromBead(b), closeReason, now, stderr)
+	return closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, sessionInfoFromBead(b), closeReason, now, stderr, nil)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -4256,9 +4319,12 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // this session (by bead ID, session_name, or configured named identity)
 // have their assignee cleared and their status reset to "open" so the
 // pool reconciler can re-pick them. Without this, work orphaned by a
-// reap stays orphaned until someone clears the assignee by hand.
-func closeBead(store beads.Store, expected session.Info, reason string, now time.Time, stderr io.Writer) bool {
-	return closeBeadPreservingAssignees(store, expected, reason, nil, now, stderr)
+// reap stays orphaned until someone clears the assignee by hand. That release
+// reads every leg legs names (the city work store, the rigs, the bindings), not
+// only store: on a split city store is the sessions binding, which holds none
+// of the seat's claims (mc-3ixn3.16).
+func closeBead(store beads.Store, legs workLegs, expected session.Info, reason string, now time.Time, stderr io.Writer) bool {
+	return closeBeadPreservingAssignees(store, legs, expected, reason, nil, now, stderr)
 }
 
 // closeBeadPreservingAssignees is closeBead with an opt-in exception list: any
@@ -4275,7 +4341,7 @@ func closeBead(store beads.Store, expected session.Info, reason string, now time
 //
 // With a nil or empty preserve set this behaves exactly like closeBead, which
 // is the contract every other caller relies on.
-func closeBeadPreservingAssignees(store beads.Store, expected session.Info, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
+func closeBeadPreservingAssignees(store beads.Store, legs workLegs, expected session.Info, reason string, preserve []string, now time.Time, stderr io.Writer) bool {
 	id := expected.ID
 	if stderr == nil {
 		stderr = io.Discard
@@ -4335,7 +4401,7 @@ func closeBeadPreservingAssignees(store beads.Store, expected session.Info, reas
 	// slack (#1939).
 	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	if snapshotErr == nil {
-		releaseWorkFromClosedSessionBeadExcept(store, snapshot, preserveSet, stderr)
+		releaseWorkFromClosedSessionBeadExcept(store, legs, snapshot, preserveSet, stderr)
 	}
 	return true
 }
@@ -4359,26 +4425,27 @@ func assigneePreserveSet(preserve []string) map[string]struct{} {
 	return set
 }
 
-// releaseWorkFromClosedSessionBead clears the assignee on every non-closed
-// work bead that was assigned to the given session bead, and resets
-// in_progress work to open. The session's identifiers are those returned by
-// sessionBeadAssigneeIdentities (bead ID, session_name, configured named
-// identity, alias, and alias history) — any one of these may appear as a
-// work bead's assignee.
+// releaseWorkFromClosedSessionBeadExcept is the close cascade: it clears the
+// assignee on every open or in_progress work bead assigned to the closing
+// session and resets in_progress work to open. An identity in preserve is
+// dropped from the release, so work assigned under it keeps its assignee.
+//
+// The identities are the narrow set the close gates read
+// (sessionAssignmentIdentifiersForConfig: bead ID, session_name, configured
+// named identity, stable alias), not the alias history: a gate that judged the
+// seat free on one set must not have its cascade release on another. The legs
+// are the gates' too (mc-3ixn3.16): the seat work index of the tick the close
+// runs in, or, outside a tick, one read of the same legs for this close. The
+// rows are released as the index read them; ReleaseWorkBead fences each write
+// on the row's status and assignee, so a row that moved on is left alone.
+//
+// store is the closing session's own store: the claim back-channel is cleared
+// there.
 //
 // Best-effort: errors are logged to stderr but never fail the caller, since
 // releaseOrphanedPoolAssignments at the top of the next reconcile tick is
 // our idempotent fallback.
-func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead, stderr io.Writer) {
-	releaseWorkFromClosedSessionBeadExcept(store, sessionBead, nil, stderr)
-}
-
-// releaseWorkFromClosedSessionBeadExcept is releaseWorkFromClosedSessionBead
-// with an exception set: an identity present in preserve is dropped from the
-// scan, so work assigned under it keeps its assignee. Every other identity the
-// session bead carries is released as usual. A nil or empty preserve set makes
-// this identical to releaseWorkFromClosedSessionBead.
-func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sessionBead beads.Bead, preserve map[string]struct{}, stderr io.Writer) {
+func releaseWorkFromClosedSessionBeadExcept(store beads.Store, legs workLegs, sessionBead beads.Bead, preserve map[string]struct{}, stderr io.Writer) {
 	if store == nil {
 		return
 	}
@@ -4393,66 +4460,35 @@ func releaseWorkFromClosedSessionBeadExcept(store beads.Store, sessionBead beads
 		fmt.Fprintf(stderr, "session beads: clearing current claim on closing session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
 	}
 
-	// The owning pool/agent route, recovered from the closing session's own
-	// template metadata. ZFC-safe: derived from configuration carried on the
-	// session bead, never a hardcoded role name. Used below to re-route work
-	// that lost its routing mid-handoff so it stays discoverable.
+	var identities []string
+	for _, id := range sessionAssignmentIdentifiersForConfig(sessionBead, legs.cfg) {
+		if _, skip := preserve[strings.TrimSpace(id)]; !skip {
+			identities = append(identities, id)
+		}
+	}
+	idx := seatWorkIndexFor(legs.cityPath, store)
+	if idx == nil {
+		idx = newSeatWorkIndex(legs.cityPath, legs.cfg, store, legs.rigs)
+	}
+	work, err := idx.snapshot(seatWorkQuery{ids: identities, statuses: seatWorkStatuses}, false)
+	// The close-time re-read adds what was assigned since the index's read.
+	late, lateErr := lateSeatWork(legs, store, identities, seatWorkStatuses, nil)
+	if err = errors.Join(err, lateErr); err != nil {
+		fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
+	}
+	work = appendUniqueSeatWork(work, late)
+	// ga-n2d.2: the owning pool route, recovered from the closing session's own
+	// template metadata, is the run_target fallback. A polecat that pushed its
+	// branch but died before the refinery handoff can leave work whose
+	// gc.routed_to was cleared; released with no route it would be invisible
+	// to the pool demand probe and to releaseOrphanedPoolAssignments.
+	// ReleaseWorkBead stamps the fallback only when BOTH routed_to and
+	// run_target are empty, and restoreCarriedWorkRoutes (#3421) then backfills
+	// gc.routed_to from it so the work re-enters pool demand.
 	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
-
-	seenAssignees := make(map[string]struct{}, 3)
-	addAssignee := func(val string) {
-		val = strings.TrimSpace(val)
-		if val == "" {
-			return
-		}
-		seenAssignees[val] = struct{}{}
-	}
-	for _, id := range sessionBeadAssigneeIdentities(sessionBead) {
-		if _, skip := preserve[strings.TrimSpace(id)]; skip {
-			continue
-		}
-		addAssignee(id)
-	}
-
-	seenWork := make(map[string]struct{})
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	for assignee := range seenAssignees {
-		for _, status := range []string{"in_progress", "open"} {
-			work, err := wa.OpenAssignedToBasic(assignee, status)
-			if err != nil {
-				fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s (%s): %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
-				continue
-			}
-			for _, item := range work {
-				if session.IsSessionBeadOrRepairable(item) {
-					continue
-				}
-				if _, dup := seenWork[item.ID]; dup {
-					continue
-				}
-				seenWork[item.ID] = struct{}{}
-				// The session owning this work is closing, so the work is
-				// fully detached (not preserved to a new assignee). The
-				// release primitive clears the assignee (empty-string) and
-				// stale session-affinity metadata and resets in_progress to
-				// open — the same stale-affinity bug fixed on the retry,
-				// reopen, and orphan-pool release paths.
-				//
-				// ga-n2d.2: pass the owning pool route (retiredSessionFallbackRoute,
-				// derived from the closing session's own template metadata) as the
-				// run_target fallback instead of "". A polecat that pushed its branch
-				// but died before completing the refinery handoff can leave work whose
-				// gc.routed_to was cleared; releasing it here with no route would
-				// strand it open+unassigned+unrouted — invisible to both the pool
-				// demand probe (keys on gc.routed_to) and releaseOrphanedPoolAssignments
-				// (skips empty-routed beads). ReleaseWorkBead applies the fallback only
-				// when BOTH routed_to and run_target are empty, and restoreCarriedWorkRoutes
-				// (#3421) then backfills gc.routed_to from that run_target so the work
-				// re-enters pool demand.
-				if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
-					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
-				}
-			}
+	for _, item := range work {
+		if err := workAssignmentForStore(beads.WorkStore{Store: item.store}).ReleaseWorkBead(item.bead, fallbackRoute); err != nil {
+			fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.bead.ID, sessionBead.ID, err) //nolint:errcheck
 		}
 	}
 }

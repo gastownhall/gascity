@@ -111,6 +111,7 @@ go_test(
         "complexity_workflow_test.go",
         "container_scan_fail_fast_test.go",
         "container_tool_security_test.go",
+        "contrib_dependency_pins_test.go",
         "docker_session_protocol_test.go",
         "dolt_version_pin_test.go",
         "gh_expr_test.go",

@@ -197,10 +197,7 @@ func sessionHasOpenAssignedWorkForEscalation(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
-	identifiers := drainAckAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, drainAckAssigneeIdentities(info, cfg))
 }
 
 // drainAckEscalationDue reports whether a wedged row has exceeded its bound, and
@@ -490,6 +487,10 @@ func queueDrainAckForcedTermination(
 ) {
 	sessionID := strings.TrimSpace(info.ID)
 	expectedToken := info.InstanceToken
+	// The escalation is decided on info, a row stop-pending on this tick's
+	// read; every kill below acts only while the row still carries it.
+	d := sessionpkg.Decide(info, sessionpkg.FactsLegacyDrainStop)
+	front := sessionFrontDoor(store)
 	// Bind the mutable package-global seams on the CALLER's goroutine, at queue
 	// time, for the reason documented on queueDrainAckAsyncStop: this goroutine
 	// outlives its reconcile invocation, so re-reading them from inside it races
@@ -523,9 +524,9 @@ func queueDrainAckForcedTermination(
 		defer release()
 		// Decide again under the lease, on a fresh read, before any kill (the
 		// process-table kill included): see queueDrainAckAsyncStop.
-		ctx = drainAckStopPremise(ctx, store, sessionID, info.Generation, expectedToken)
-		if !drainAckStopStillPending(store, sessionID, info.Generation, expectedToken) {
-			fmt.Fprintf(stderr, "%s: %s skipped: the row is no longer stop-pending at its generation and token\n", drainAckEscalationLabel, name) //nolint:errcheck
+		ctx = sessionpkg.WithKillDecided(ctx, d)
+		if holds, _ := front.Holds(d); !holds {
+			fmt.Fprintf(stderr, "%s: %s skipped: the row moved since the escalation was decided\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return
 		}
 		// Try the ordinary provider stop once more first: it is the cheap path and
@@ -549,8 +550,8 @@ func queueDrainAckForcedTermination(
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
-		if !drainAckStopStillPending(store, sessionID, info.Generation, expectedToken) {
-			fmt.Fprintf(stderr, "%s: %s skipped its process kill: the row is no longer stop-pending at its generation and token\n", drainAckEscalationLabel, name) //nolint:errcheck
+		if holds, _ := front.Holds(d); !holds {
+			fmt.Fprintf(stderr, "%s: %s skipped its process kill: the row moved since the escalation was decided\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return
 		}
 		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, now, stderr)

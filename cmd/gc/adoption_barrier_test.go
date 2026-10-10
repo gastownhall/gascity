@@ -613,7 +613,7 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 	// actually stop the still-running pre-restart runtime.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop(city, store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), nil, tracker, nil, &drainStderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), "test-city-worker", nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -669,7 +669,7 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 	// unverifiable mismatch.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop(city, store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), nil, tracker, nil, &drainStderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), "test-city-worker", nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}

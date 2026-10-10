@@ -188,9 +188,10 @@ jobs:
       #   seed       main pushes seed the cache (rrc-seed); no lane reads it;
       #   canary     seed, and the unit lane reads;
       #   on         seed, and every lane reads.
-      # Mode remote only: fork pull_request runs see no vars, and only
-      # rbe-west's trusted edge serves the entries. Any other value is off,
-      # with a warning, so a typo never fails the required gate.
+      # Mode remote only: fork pull_request runs see no vars (fork-cache
+      # lanes read through their own probe-gated step, "Fork cache remote
+      # repo contents cache (read)"). Any other value is off, with a
+      # warning, so a typo never fails the required gate.
       - name: Remote repo contents cache
         id: rrc
         env:
@@ -474,6 +475,37 @@ jobs:
           if bash tools/rbe/cache-zstd-probe.sh; then
             echo 'build:fork-cache --remote_cache_compression' >> .bazelrc.local
           fi
+
+      # The remote repo contents cache, read-only, for the lanes that use
+      # fork-cache (engdocs/design/bazel-remote-repo-contents-cache.md):
+      # external repositories come from the trees rrc-seed wrote on main
+      # pushes, served by rbe-cache's anonymous AC and CAS reads, instead of
+      # every fork lane re-running ~600 repository rules. The same two lines
+      # as the trusted reader above, key neutral
+      # (scripts/bazel_key_parity_test.go); fork-cache uploads nothing, and
+      # rbe-cache refuses every write. Only while cache-rrc-probe.sh gets an
+      # answer from rbe-cache and its committed kill switch (fork_rrc_read)
+      # is on: with the startup flag set and the cache unreachable, Bazel
+      # retries every repository against it before fetching it (R6), so a
+      # closed or down rbe-cache writes no lines here. That holds at probe
+      # time only: once loading is done Bazel fetches the files lazily, and
+      # losing rbe-cache mid-run fails the command (R4, bazel#30218). The
+      # step summary records the verdict and rbe-cache's TCP connect time.
+      - name: Fork cache remote repo contents cache (read)
+        if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
+        run: |
+          if why=$(bash tools/rbe/cache-rrc-probe.sh 2>&1); then
+            {
+              echo 'startup --experimental_remote_repo_contents_cache'
+              echo 'common --loading_phase_threads=64'
+            } >> .bazelrc.local
+            echo "$why"
+            read=on
+          else
+            echo "::notice title=No remote repo contents cache::$why"
+            read=off
+          fi
+          echo "Fork cache remote repo contents cache read: **$read** (${why#rbe-cache rrc probe: })" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create Bazel test tmpdir
         run: |
@@ -833,7 +865,7 @@ jobs:
           title="rrc-verify: remote repo contents cache differs from a cold fetch"
           body="The nightly rrc-verify run found cached repository trees that differ from a cold fetch, or could not check them: $RUN_URL (summary and the rrc-verify report artifact).
 
-          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Stop readers first: set the repository variable RBE_REPO_CONTENTS_CACHE to off. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
+          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Contain the fork-cache readers first: they see no repository variables, so (1) commit fork_rrc_read=off in both probe scripts, gascity tools/rbe/cache-rrc-probe.sh and beads .github/actions/setup-bazel/cache-rrc-probe.sh (beads has no fresh-merge: an open fork PR keeps the old switch until it is pushed again); (2) for immediate server-side containment, an operator runs rbe-cache-gate close on core, which stops all fork-cache, and fails fork-cache lanes already reading (while RBE_WEST_WORKERS is not true, that includes the required lanes on main and in the merge queue); (3) on a mismatch, set RBE_REPO_CONTENTS_CACHE to seed: the trusted readers read the same entries (rbe-cache serves the oss action cache), and seed stops every one of them while rrc-seed and this check keep running; set it to off only to stop seeding too, which also stops rrc-verify; if this run only says it could not check, leave the variable as it is. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
           gh label create rrc-verify -R "$GITHUB_REPOSITORY" --color B60205 \
             --description "Remote repo contents cache verification failures" 2>/dev/null || true
           n=$(gh issue list -R "$GITHUB_REPOSITORY" --label rrc-verify --state open --json number --jq '.[0].number // empty')

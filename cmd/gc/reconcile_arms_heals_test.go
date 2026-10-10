@@ -718,6 +718,25 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 	}
 }
 
+// onlyEpochMoved reports whether after is before but for the runtime lease
+// record a leased effect takes and releases: its epoch may move, and the
+// rest of the record ends cleared. An absent key reads as "".
+func onlyEpochMoved(before, after map[string]string) bool {
+	keys := map[string]bool{}
+	for k := range before {
+		keys[k] = true
+	}
+	for k := range after {
+		keys[k] = true
+	}
+	for k := range keys {
+		if k != session.RuntimeLeaseEpochKey && before[k] != after[k] {
+			return false
+		}
+	}
+	return true
+}
+
 // Kills a census-only rig-leg row acted on (CONTRACT v5 AL1; §4 A6 item 4,
 // held for every arm): legacy reconciles only the sessions store, and a
 // shared rig store holds other cities' rows. Each row below takes its arm on
@@ -803,7 +822,7 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 				w.Env = &reconcileEnv{SP: sp}
 				w.LegStores = map[string]beads.Store{leg: c.store}
 				s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil)
-				if s.Outcome != settledRefused || s.Cause != cause || !maps.Equal(c.meta(t), before) {
+				if s.Outcome != settledRefused || s.Cause != cause || !onlyEpochMoved(before, c.meta(t)) {
 					t.Fatalf("admitted %q on a census-only row, writer on %s: settlement %+v, row %v, want refused %q and the row %v", it.Kind, leg, s, c.meta(t), cause, before)
 				}
 			}

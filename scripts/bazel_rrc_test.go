@@ -2,14 +2,18 @@ package scripts_test
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Bazel's remote repo contents cache on rbe-west (ga-vnycm2.25,
@@ -29,6 +33,20 @@ const (
 	bazelRRCCredential   = ".github/scripts/rrc-writer-credential.sh"
 	bazelRRCVar          = "vars.RBE_REPO_CONTENTS_CACHE"
 	bazelRRCSeedStepName = "Seed the remote repo contents cache"
+)
+
+// The fork-cache reader (mode cache, and a fork lane that fell back to the
+// read-only cache): the same lines as the trusted reader, from rbe-cache's
+// anonymous AC and CAS reads, only while cache-rrc-probe.sh passes (rbe-cache
+// answers and its committed kill switch is on). Fork pull_request runs see
+// no repository variables, so neither the rbe job's rrc output nor
+// bazelRRCVar gates it.
+const (
+	bazelForkRRCReadStep   = "Fork cache remote repo contents cache (read)"
+	bazelForkRRCReadStepIf = bazelCacheZstdStepIf
+	bazelCacheRRCProbe     = "tools/rbe/cache-rrc-probe.sh"
+	bazelCacheRRCProbeGate = "if why=$(bash " + bazelCacheRRCProbe + " 2>&1); then"
+	bazelCacheRRCKillLine  = "fork_rrc_read=on"
 )
 
 // bazelRRCReadLines: the reader's .bazelrc.local lines. Both are key
@@ -95,10 +113,11 @@ func TestBazelRRCModeStep(t *testing.T) {
 	}
 }
 
-// TestBazelRRCReadStep: the reader runs in mode remote only (fork runs and
-// local modes never read: only rbe-west's trusted edge serves the entries),
-// on the unit lane under canary and every lane under on, and writes exactly
-// bazelRRCReadLines. It never enables uploads.
+// TestBazelRRCReadStep: the trusted reader runs in mode remote only (fork
+// modes and local never read through it; fork-cache lanes have their own,
+// probe-gated reader, TestBazelForkRRCReadStep), on the unit lane under
+// canary and every lane under on, and writes exactly bazelRRCReadLines. It
+// never enables uploads.
 func TestBazelRRCReadStep(t *testing.T) {
 	step := bazelRCLocalLaneStep(t, bazelRRCReadStep)
 	if step.If != bazelRRCReadStepIf {
@@ -138,6 +157,220 @@ func TestBazelRRCReadStep(t *testing.T) {
 	if read < 0 || test < 0 || read > test {
 		t.Errorf("lane job: %q at %d, the bazel step at %d; the reader must come first", bazelRRCReadStep, read, test)
 	}
+}
+
+// TestBazelForkRRCReadStep: the fork-cache reader runs exactly where the
+// lane uses fork-cache (mode cache, or a fork lane that fell back to it),
+// never with the trusted reader and never in mode remote, local or a fork
+// mode that kept its rbe-fork certificate. It reads no variable or secret,
+// probes rbe-cache once, writes bazelRRCReadLines only when the probe
+// passes, and otherwise writes nothing and leaves a notice saying why. It
+// never enables uploads, and comes before the lane's bazel command.
+func TestBazelForkRRCReadStep(t *testing.T) {
+	step := bazelRCLocalLaneStep(t, bazelForkRRCReadStep)
+	trusted := bazelRCLocalLaneStep(t, bazelRRCReadStep)
+	if step.If != bazelForkRRCReadStepIf {
+		t.Errorf("%q if %q, want %q (the lanes setup-bazel attaches fork-cache to)", step.Name, step.If, bazelForkRRCReadStepIf)
+	}
+	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "cache", "local"} {
+		for _, fallback := range []string{"success", "failure", "skipped", ""} {
+			if fallback == "success" && !strings.HasPrefix(mode, "fork-") {
+				continue // only a fork mode's lane can fall back
+			}
+			for _, rrc := range []string{"off", "seed", "canary", "on"} {
+				for lane := range multiLaneCommands {
+					ctx := map[string]string{
+						"needs.rbe.outputs.mode": mode, "needs.rbe.outputs.rrc": rrc, "matrix.lane": lane,
+						"steps.bazel-fallback.outcome": fallback,
+					}
+					want := mode == "cache" || fallback == "success"
+					got := evalGHIf(t, step.If, ctx)
+					if got != want {
+						t.Errorf("mode %s fallback %q rrc %s lane %s: fork reader runs %v, want %v", mode, fallback, rrc, lane, got, want)
+					}
+					if got && evalGHIf(t, trusted.If, ctx) {
+						t.Errorf("mode %s fallback %q rrc %s lane %s: both readers run", mode, fallback, rrc, lane)
+					}
+				}
+			}
+		}
+	}
+	for k, v := range step.Env {
+		if strings.Contains(v, "vars.") || strings.Contains(v, "secrets.") {
+			t.Errorf("%q env %s = %q; fork runs see no vars or secrets", step.Name, k, v)
+		}
+	}
+	for _, bad := range []string{"vars.", "secrets.", "upload", "${{"} {
+		if strings.Contains(step.Run, bad) {
+			t.Errorf("%q script contains %q; it reads nothing but the probe and writes only the reader's lines", step.Name, bad)
+		}
+	}
+	if strings.Count(step.Run, bazelCacheRRCProbeGate) != 1 {
+		t.Errorf("%q does not gate the reader's lines on %q once", step.Name, bazelCacheRRCProbeGate)
+	}
+	for probe, want := range map[string][]string{"": nil, "ok": bazelRRCReadLines} {
+		run := runBazelRCLocalStepProbes(t, step.Run, map[string]string{"BAZEL_TEST_RRC_PROBE": probe})
+		if run.rrcProbes != 1 || run.zstdProbes != 0 {
+			t.Errorf("probe %q: the step ran the rrc probe %d and the zstd probe %d times, want once and never", probe, run.rrcProbes, run.zstdProbes)
+		}
+		if !slices.Equal(run.lines, want) {
+			t.Errorf("probe %q: .bazelrc.local %q, want %q", probe, run.lines, want)
+		}
+		notice := "::notice title=No remote repo contents cache::rbe-cache rrc probe: stub refused"
+		if hasNotice := strings.Contains(run.out, notice); hasNotice != (want == nil) {
+			t.Errorf("probe %q: notice %v, want %v (the probe's reason, only when it fails):\n%s", probe, hasNotice, want == nil, run.out)
+		}
+		// The verdict, with the probe's reason (rbe-cache's connect time
+		// when it has one), in the lane's step summary either way.
+		summary := "Fork cache remote repo contents cache read: **off** (stub refused)\n"
+		if want != nil {
+			summary = "Fork cache remote repo contents cache read: **on** (stub answers)\n"
+		}
+		if run.summary != summary {
+			t.Errorf("probe %q: step summary %q, want %q", probe, run.summary, summary)
+		}
+	}
+	wf := readMultiLaneWorkflow(t)
+	read, test := -1, -1
+	for i, s := range wf.Jobs["lane"].Steps {
+		switch {
+		case s.Name == bazelForkRRCReadStep:
+			read = i
+		case s.ID == "test":
+			test = i
+		}
+	}
+	if read < 0 || test < 0 || read > test {
+		t.Errorf("lane job: %q at %d, the bazel step at %d; the reader must come first", bazelForkRRCReadStep, read, test)
+	}
+}
+
+// cacheRRCProbeCases runs cache-rrc-probe.sh against serve (TestCacheProbes):
+// only a gRPC status 0 GetCapabilities answer with cache_capabilities, then
+// NOT_FOUND for the probe's GetActionResult key and ByteStream Read blob,
+// passes; every error, refusal, timeout or unreadable answer fails, and so
+// does a copy with the kill switch off, without asking rbe-cache at all. The probe never writes
+// stdout and always says why on stderr, with the TCP connect time (without
+// the DNS lookup) once it has one.
+func cacheRRCProbeCases(t *testing.T, serve capsServer) {
+	root := repoRoot(t)
+	probeText := readFile(t, root, bazelCacheRRCProbe)
+	for _, want := range []string{
+		"\n" + bazelCacheRRCKillLine + "\n",
+		"url=${RBE_CACHE_PROBE_URL:-https://rbe-cache.ops.gascity.com:8443}\n",
+		`printf '\000\000\000\000\005\012\003oss'`,
+		"--connect-timeout 3 --max-time \"$max_time\"",
+		"max_time=${RBE_CACHE_PROBE_MAX_TIME:-5}\n",
+	} {
+		if strings.Count(probeText, want) != 1 {
+			t.Errorf("%s lacks %q (once)", bazelCacheRRCProbe, want)
+		}
+	}
+	switchedOff := filepath.Join(t.TempDir(), "cache-rrc-probe.sh")
+	if err := os.WriteFile(switchedOff, []byte(strings.Replace(probeText, "\n"+bazelCacheRRCKillLine+"\n", "\nfork_rrc_read=off\n", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(t *testing.T, script string, env map[string]string) (bool, string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		env["RBE_CACHE_PROBE_MAX_TIME"] = "1"
+		out, err := runWorkflowStepScript(t, dir, "bash "+strconv.Quote(script)+" >stdout.out 2>stderr.out\n", env)
+		var exit *exec.ExitError
+		if err != nil && !errors.As(err, &exit) {
+			t.Fatalf("run %s: %v\n%s", script, err, out)
+		}
+		stdout, _ := os.ReadFile(filepath.Join(dir, "stdout.out"))
+		stderr, _ := os.ReadFile(filepath.Join(dir, "stderr.out"))
+		return err == nil, string(stdout), string(stderr)
+	}
+	check := func(t *testing.T, ok bool, stdout, stderr string, want bool) {
+		t.Helper()
+		if ok != want {
+			t.Errorf("probe passed: %v, want %v; stderr:\n%s", ok, want, stderr)
+		}
+		if stdout != "" {
+			t.Errorf("probe wrote stdout %q; the rc step would mistake it for its reason", stdout)
+		}
+		verdict := "; this lane fetches external repositories itself\n"
+		if want {
+			verdict = "; this lane reads the remote repo contents cache\n"
+		}
+		if !strings.HasPrefix(stderr, "rbe-cache rrc probe: ") || !strings.HasSuffix(stderr, verdict) || strings.Count(stderr, "\n") != 1 {
+			t.Errorf("probe stderr %q; want one verdict line ending %q", stderr, verdict)
+		}
+	}
+	live := grpcMessage(capsZstd)
+	acWith := func(a capsAnswer) capsAnswer { return capsAnswer{grpc: "0", body: live, ac: &a} }
+	bsWith := func(a capsAnswer) capsAnswer { return capsAnswer{grpc: "0", body: live, bs: &a} }
+	for _, c := range []struct {
+		name   string
+		answer capsAnswer
+		want   bool
+		asks   int32 // GetCapabilities, GetActionResult, ByteStream Read: each only after a good answer
+	}{
+		{"rbe-cache today", capsAnswer{grpc: "0", body: live}, true, 3},
+		{"rbe-cache before zstd", capsAnswer{grpc: "0", body: grpcMessage(capsLive)}, true, 3},
+		{"no cache_capabilities", capsAnswer{grpc: "0", body: grpcMessage(capsLiveAPIVersions)}, false, 1},
+		{"gRPC error after the answer", capsAnswer{grpc: "13", body: live}, false, 1},
+		{"no grpc-status", capsAnswer{body: live}, false, 1},
+		{"trailers-only PERMISSION_DENIED", capsAnswer{grpc: "7"}, false, 1},
+		{"HTTP 502", capsAnswer{status: http.StatusBadGateway, grpc: "0", body: live}, false, 1},
+		{"compressed message", capsAnswer{grpc: "0", body: append([]byte{1}, live[1:]...)}, false, 1},
+		{"truncated message", capsAnswer{grpc: "0", body: live[:len(live)-1]}, false, 1},
+		{"not gRPC", capsAnswer{grpc: "0", body: []byte("<html>bad gateway</html>")}, false, 1},
+		{"timeout", capsAnswer{grpc: "0", body: live, delay: 10 * time.Second}, false, 1},
+		{"action cache answers the key", acWith(capsAnswer{grpc: "0", body: grpcMessage(nil)}), false, 2},
+		{"action cache PERMISSION_DENIED", acWith(capsAnswer{grpc: "7"}), false, 2},
+		{"action cache UNAVAILABLE", acWith(capsAnswer{grpc: "14"}), false, 2},
+		{"action cache no grpc-status", acWith(capsAnswer{body: []byte{}}), false, 2},
+		{"action cache HTTP 502", acWith(capsAnswer{status: http.StatusBadGateway, grpc: "5"}), false, 2},
+		{"action cache timeout", acWith(capsAnswer{grpc: "5", delay: 10 * time.Second}), false, 2},
+		{"CAS serves the blob", bsWith(capsAnswer{grpc: "0", body: grpcMessage(pbBytes(10, []byte{0}))}), false, 3},
+		{"CAS UNAVAILABLE", bsWith(capsAnswer{grpc: "14"}), false, 3},
+		{"CAS PERMISSION_DENIED", bsWith(capsAnswer{grpc: "7"}), false, 3},
+		{"CAS HTTP 502", bsWith(capsAnswer{status: http.StatusBadGateway, grpc: "5"}), false, 3},
+		{"CAS timeout", bsWith(capsAnswer{grpc: "5", delay: 10 * time.Second}), false, 3},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			url, ca, hits := serve(t, c.answer)
+			start := time.Now()
+			ok, stdout, stderr := run(t, filepath.Join(root, bazelCacheRRCProbe), map[string]string{"RBE_CACHE_PROBE_URL": url, "CURL_CA_BUNDLE": ca})
+			check(t, ok, stdout, stderr, c.want)
+			if hits.Load() != c.asks {
+				t.Errorf("probe asked %d times, want %d", hits.Load(), c.asks)
+			}
+			if c.asks > 1 && !regexp.MustCompile(` \(tcp connect [0-9]+\.[0-9] ms\); `).MatchString(stderr) {
+				t.Errorf("probe stderr %q lacks the GetCapabilities TCP connect time", stderr)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("probe took %v; RBE_CACHE_PROBE_MAX_TIME=1 bounds each call", d)
+			}
+		})
+	}
+	t.Run("refused", func(t *testing.T) {
+		ok, stdout, stderr := run(t, filepath.Join(root, bazelCacheRRCProbe), map[string]string{"RBE_CACHE_PROBE_URL": refusedProbeURL})
+		check(t, ok, stdout, stderr, false)
+	})
+	t.Run("untrusted certificate", func(t *testing.T) {
+		url, _, hits := serve(t, capsAnswer{grpc: "0", body: live})
+		ok, stdout, stderr := run(t, filepath.Join(root, bazelCacheRRCProbe), map[string]string{"RBE_CACHE_PROBE_URL": url})
+		check(t, ok, stdout, stderr, false)
+		if hits.Load() != 0 {
+			t.Errorf("probe completed a request through an untrusted certificate")
+		}
+	})
+	t.Run("kill switch off", func(t *testing.T) {
+		url, ca, hits := serve(t, capsAnswer{grpc: "0", body: live})
+		ok, stdout, stderr := run(t, switchedOff, map[string]string{"RBE_CACHE_PROBE_URL": url, "CURL_CA_BUNDLE": ca})
+		check(t, ok, stdout, stderr, false)
+		if !strings.Contains(stderr, "switched off") {
+			t.Errorf("switched-off probe stderr %q does not say it is switched off", stderr)
+		}
+		if hits.Load() != 0 {
+			t.Errorf("switched-off probe asked rbe-cache %d times, want 0", hits.Load())
+		}
+	})
 }
 
 // TestBazelRRCSeedJob: the only writer runs on push to main in mode remote
@@ -539,6 +772,25 @@ func TestBazelRRCVerifyJob(t *testing.T) {
 	}
 	if strings.Contains(alert.Run, "${{") {
 		t.Errorf("alert step interpolates an expression into its script; pass it through env")
+	}
+	// The issue's containment: fork-cache lanes see no repository variables,
+	// so the committed switches (both repositories) and rbe-cache-gate stop
+	// them. The trusted readers read the same entries, so a mismatch sets
+	// the variable to seed (no reader, rrc-seed and this check keep running);
+	// off stops seeding and this check too.
+	for _, want := range []string{
+		"fork_rrc_read=off in both probe scripts", bazelCacheRRCProbe, ".github/actions/setup-bazel/cache-rrc-probe.sh",
+		"rbe-cache-gate close", "on a mismatch, set RBE_REPO_CONTENTS_CACHE to seed", "set it to off only to stop seeding too",
+		"could not check, leave the variable as it is",
+	} {
+		if !strings.Contains(alert.Run, want) {
+			t.Errorf("alert issue body lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"Stop readers first: set the repository variable", "leave RBE_REPO_CONTENTS_CACHE on"} {
+		if strings.Contains(alert.Run, bad) {
+			t.Errorf("alert issue body still says %q; a mismatch sets the variable to seed", bad)
+		}
 	}
 
 	nightly := readFile(t, repoRoot(t), ".github/workflows/bazel-nightly.yml")
