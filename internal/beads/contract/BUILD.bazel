@@ -1,0 +1,107 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "contract",
+    srcs = [
+        "backend_bundle.go",
+        "backend_registry.go",
+        "connection.go",
+        "files.go",
+        "identity.go",
+        "init_intent.go",
+        "metadata.go",
+        "mode.go",
+        "preflight.go",
+        "preflight_checker.go",
+        "shared_server.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beads/contract",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/fsys",
+        "//internal/pidutil",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_steveyegge_beads//schema",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_mod//module",
+        "@org_golang_x_mod//semver",
+    ],
+)
+
+go_test(
+    name = "contract_test",
+    srcs = [
+        "backend_registry_test.go",
+        "connection_bd_external_binding_test.go",
+        "connection_bd_owned_direct_binding_test.go",
+        "connection_bd_owned_server_test.go",
+        "connection_dolt_mode_precedence_test.go",
+        "connection_test.go",
+        "files_atomic_write_test.go",
+        "files_bd_nested_config_test.go",
+        "files_custom_types_test.go",
+        "files_test.go",
+        "identity_test.go",
+        "init_intent_test.go",
+        "metadata_test.go",
+        "migrate_journal_test.go",
+        "mode_test.go",
+        "preflight_bdcontext_skip_test.go",
+        "preflight_checker_test.go",
+        "preflight_test.go",
+        "shared_server_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
+    embed = [":contract"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/fsys",
+        "//internal/testenv",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+filegroup(
+    name = "bdconfig_fixtures",
+    srcs = glob(["testdata/bdconfig/**"]),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

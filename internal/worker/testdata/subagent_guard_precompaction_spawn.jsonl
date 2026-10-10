@@ -1,0 +1,3 @@
+{"type":"assistant","uuid":"aaaaaaaa-0000-4000-8000-00000000000a","timestamp":"2026-08-02T08:00:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_precompact","name":"Agent","input":{"description":"Long running audit","prompt":"Audit everything"}}]}}
+{"type":"system","subtype":"compact_boundary","uuid":"bbbbbbbb-0000-4000-8000-00000000000b","timestamp":"2026-08-02T08:30:00.000Z"}
+{"type":"assistant","uuid":"cccccccc-0000-4000-8000-00000000000c","parentUuid":"bbbbbbbb-0000-4000-8000-00000000000b","timestamp":"2026-08-02T09:00:00.000Z","message":{"content":[{"type":"text","text":"post-compaction turn"}]}}

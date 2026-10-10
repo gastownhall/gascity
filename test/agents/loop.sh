@@ -9,20 +9,21 @@
 #   PATH     — must include gc binary
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | grep -q "^gc-"; then
-        id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$hooked" | bead_id_rows | grep -q .; then
+        id=$(echo "$hooked" | bead_id_rows | head -1 | awk '{print $1}')
         bd close "$id"
         continue
     fi
 
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | grep -q "^gc-"; then
-        id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$ready" | bead_id_rows | grep -q .; then
+        id=$(echo "$ready" | bead_id_rows | head -1 | awk '{print $1}')
         bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi

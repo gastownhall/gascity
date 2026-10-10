@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,6 +41,16 @@ type CleanupReport struct {
 	Reaped        CleanupReapedReport    `json:"reaped"`
 	Summary       CleanupSummary         `json:"summary"`
 	Errors        []CleanupError         `json:"errors"`
+	// Skipped is set when the command declined to run any cleanup stage at
+	// all — today only for scopes whose Dolt lifecycle belongs to bd.
+	// Additive optional field; gc.dolt.cleanup.v1 is not bumped.
+	Skipped *CleanupSkipped `json:"skipped,omitempty"`
+}
+
+// CleanupSkipped explains a whole-command no-op.
+type CleanupSkipped struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 // CleanupPortReport is the resolved-port section of the JSON envelope.
@@ -141,6 +152,13 @@ type CleanupSummary struct {
 	BytesFreedDisk int64 `json:"bytes_freed_disk"`
 	BytesFreedRSS  int64 `json:"bytes_freed_rss"`
 	ErrorsTotal    int   `json:"errors_total"`
+	// ProtectedTotal and ProtectedByKind roll up Reaped.Protected so a
+	// 100%-protected population (zero reap targets) is surfaced here
+	// instead of collapsing into an indistinguishable orphans:0
+	// (ga-xkc9mo). Additive to gc.dolt.cleanup.v1 — schema version is not
+	// bumped.
+	ProtectedTotal  int            `json:"protected_total"`
+	ProtectedByKind map[string]int `json:"protected_by_kind"`
 }
 
 // CleanupError is a single error entry tagged with the stage that produced
@@ -200,6 +218,9 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	}
 	if r.Errors == nil {
 		r.Errors = []CleanupError{}
+	}
+	if r.Summary.ProtectedByKind == nil {
+		r.Summary.ProtectedByKind = map[string]int{}
 	}
 	return json.Marshal(alias(r))
 }
@@ -427,6 +448,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	if !opts.Force {
 		report.Reaped.Count = len(plan.Reap)
 		report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, nil)
+		rollupProtected(report)
 		return
 	}
 
@@ -505,6 +527,44 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Count = reaped
 	report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, gone)
+	rollupProtected(report)
+}
+
+// rollupProtected recomputes Summary.ProtectedTotal and
+// Summary.ProtectedByKind from the fully-populated Reaped.Protected slice.
+// Called at every runReapStage exit point (after both the bulk assignment
+// from plan.Protected and any additional appends from the force-mode
+// SIGTERM/SIGKILL revalidation chain) so a 100%-protected population (zero
+// reap targets) is still surfaced instead of collapsing into an
+// indistinguishable orphans:0 (ga-xkc9mo).
+func rollupProtected(report *CleanupReport) {
+	report.Summary.ProtectedTotal = len(report.Reaped.Protected)
+	byKind := make(map[string]int, len(report.Reaped.Protected))
+	for _, p := range report.Reaped.Protected {
+		byKind[protectedKind(p)]++
+	}
+	report.Summary.ProtectedByKind = byKind
+}
+
+// protectedKind buckets a protected PID by why it was protected, deriving
+// the key from the existing Reason/ContainerRuntime fields the classifier
+// already set rather than adding a second classification pass.
+// Active rig servers get their own bucket, checked first because the
+// classifier's rig-port match comes first and planOrphanReap copies
+// ContainerRuntime onto every protected PID — a containerized rig server is
+// still the active-rig baseline. Other container-managed servers are keyed
+// by runtime (e.g. "container:podman"); everything else (bd-owned proxies,
+// active test roots, unidentified or non-allowlisted configs,
+// missing-config-but-live-cwd) falls into the catch-all "unreapable-config"
+// bucket.
+func protectedKind(p CleanupProtectedPID) string {
+	if strings.HasPrefix(p.Reason, "active rig dolt server") {
+		return "active-rig"
+	}
+	if p.ContainerRuntime != "" {
+		return "container:" + p.ContainerRuntime
+	}
+	return "unreapable-config"
 }
 
 // protectedDoltPortsForReap builds the reaper's protected port set from live
@@ -878,9 +938,28 @@ func emitErrorsOrSummary(report CleanupReport, opts cleanupOptions, stdout io.Wr
 			purgeStatus = "failed"
 		}
 	}
-	fmt.Fprintf(stdout, "  Purge:         %s\n", purgeStatus)                                                           //nolint:errcheck
-	fmt.Fprintf(stdout, "  Reaped:        %d (protected: %d)\n", report.Reaped.Count, len(report.Reaped.ProtectedPIDs)) //nolint:errcheck
-	fmt.Fprintf(stdout, "  Errors:        %d\n", report.Summary.ErrorsTotal)                                            //nolint:errcheck
+	fmt.Fprintf(stdout, "  Purge:         %s\n", purgeStatus)                                                                                                                    //nolint:errcheck
+	fmt.Fprintf(stdout, "  Reaped:        %d (protected: %d [%s])\n", report.Reaped.Count, report.Summary.ProtectedTotal, formatProtectedByKind(report.Summary.ProtectedByKind)) //nolint:errcheck
+	fmt.Fprintf(stdout, "  Errors:        %d\n", report.Summary.ErrorsTotal)                                                                                                     //nolint:errcheck
+}
+
+// formatProtectedByKind renders Summary.ProtectedByKind as a deterministic,
+// sorted "kind:count, kind:count" fragment so the text summary and the JSON
+// report always agree on the protected breakdown (ga-xkc9mo).
+func formatProtectedByKind(byKind map[string]int) string {
+	if len(byKind) == 0 {
+		return "none"
+	}
+	kinds := make([]string, 0, len(byKind))
+	for k := range byKind {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%s:%d", k, byKind[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatBytes formats a byte count as "N B", "N.N KiB", "N.N MiB", or
@@ -1015,6 +1094,32 @@ can still return successfully after emitting the report.`,
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
 				return errExit
+			}
+			// bd owns the sql-server for a proxied scope: it starts it, keeps
+			// it resident and stops it. There is no managed-Dolt port to probe
+			// and nothing of ours to drop or purge, so those stages are
+			// skipped before anything touches the scope — but the host-wide
+			// orphan reap is not about this city at all and still runs.
+			// Metadata gc cannot parse is a refusal rather than a
+			// fall-through: running the managed-Dolt stages against a scope
+			// whose owner is unknown is how a scope ends up with two owners.
+			bdOwned, err := scopeBindingIsProviderOwnedProxied(cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc dolt-cleanup: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if bdOwned {
+				homeDir, _ := os.UserHomeDir()
+				if code := runProxiedScopeDoltCleanup(cleanupOptions{
+					FS:      fsys.OSFS{},
+					JSON:    jsonOut,
+					Force:   force,
+					HomeDir: homeDir,
+					TempDir: os.TempDir(),
+				}, stdout, stderr); code != 0 {
+					return errExit
+				}
+				return nil
 			}
 			cfg, err := loadCityConfig(cityPath, stderr)
 			if err != nil {

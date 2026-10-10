@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/testenv"
 )
 
@@ -263,6 +264,11 @@ func skipRepoLintDir(path, root, name string) bool {
 	if name == "worktrees" || strings.HasPrefix(name, "worktree-") {
 		return true
 	}
+	// A nested Go module (tools/nogo) does not depend on this module, so its
+	// tests cannot import internal/testenv.
+	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+		return true
+	}
 	return isNestedWorktreeRoot(path)
 }
 
@@ -280,6 +286,9 @@ func isNestedWorktreeRoot(path string) bool {
 // from this file looking for go.mod if git is unavailable.
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
@@ -447,6 +456,23 @@ func TestScaffoldNoiseIsSkipped(t *testing.T) {
 		}
 		if !skipRepoLintDir(nested, root, filepath.Base(nested)) {
 			t.Fatal("skipRepoLintDir must still prune a linked worktree checked out below the root, whatever it is named")
+		}
+	})
+
+	t.Run("a nested Go module below the root is pruned", func(t *testing.T) {
+		root := t.TempDir()
+		nested := filepath.Join(root, "tools", "nogo")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, "go.mod"), []byte("module example.com/nested\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !skipRepoLintDir(nested, root, filepath.Base(nested)) {
+			t.Fatal("skipRepoLintDir must prune a nested Go module: its tests cannot import this module's internal/testenv")
+		}
+		if skipRepoLintDir(filepath.Dir(nested), root, "tools") {
+			t.Fatal("skipRepoLintDir pruned a plain directory above the nested module")
 		}
 	})
 

@@ -41,8 +41,8 @@
 #
 # REQUIRED / BLOCKING as of the Phase-0 promotion (feature-flag ADR Resolved
 # decision 1; operator-authorized 2026-07-05). The baseline was verified clean on
-# origin/main before the flip. It runs as a blocking step in preflight-static — a
-# violation fails the check and blocks the merge.
+# origin/main before the flip. It runs as //scripts:check_core_boundary_test in
+# the required Bazel lane — a violation fails the check and blocks the merge.
 set -uo pipefail # intentionally NOT -e: run every check and aggregate.
 
 # Known commercial module paths that must never appear in the OSS module.
@@ -69,13 +69,39 @@ CORE_GO_LIST=$(mktemp "${TMPDIR:-/tmp}/ccb-gofiles.XXXXXX") || exit 1
 CORE_GO_RAW=$(mktemp "${TMPDIR:-/tmp}/ccb-gofiles-raw.XXXXXX") || exit 1
 trap 'rm -f "$CORE_GO_LIST" "$CORE_GO_RAW"' EXIT
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+#
+# --declared-tree (the Bazel sh_test, //scripts:check_core_boundary_test)
+# scans every .go file under the working directory instead. There Bazel
+# builds that directory from exactly the declared source tree (runfiles
+# symlinks, followed), so the untracked-cache hazard cannot arise and there
+# is no git work tree to ask. An empty tree means the inputs were not wired
+# and fails closed.
+declared_tree=0
+case "${1:-}" in
+"") ;;
+--declared-tree) declared_tree=1 ;;
+*)
+	note "usage: $0 [--declared-tree]"
+	exit 2
+	;;
+esac
+
+if [ "$declared_tree" -eq 1 ]; then
+	if ! find -L . -name '*.go' -type f -print0 >"$CORE_GO_RAW"; then
+		note "BLOCKED — cannot enumerate the declared .go tree (fail-closed)"
+		failed=1
+	elif [ ! -s "$CORE_GO_RAW" ]; then
+		note "BLOCKED — the declared tree holds no .go files; inputs are not wired (fail-closed)"
+		failed=1
+	fi
+elif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 	note "BLOCKED — not a git work tree; cannot enumerate the tracked .go surface (fail-closed)"
 	failed=1
 elif ! git ls-files -z -- '*.go' >"$CORE_GO_RAW" 2>/dev/null; then
 	note "BLOCKED — git ls-files failed; cannot enumerate the tracked .go surface (fail-closed)"
 	failed=1
-else
+fi
+if [ "$failed" -eq 0 ]; then
 	while IFS= read -r -d '' f; do
 		case "$f" in
 		vendor/* | */vendor/* | testdata/* | */testdata/* | *_test.go) continue ;;
@@ -170,7 +196,7 @@ COMMERCIAL_FIELD_RE='json:"[^"]*(trial|billing|credit|plan|invoice|subscription|
 commercial_fields=""
 for p in $COMMERCIAL_SURFACE; do
 	[ -e "$p" ] || continue
-	hits=$(grep -rnE --include='*.go' "$COMMERCIAL_FIELD_RE" "$p" 2>/dev/null \
+	hits=$(grep -RnE --include='*.go' "$COMMERCIAL_FIELD_RE" "$p" 2>/dev/null \
 		| grep -v '_test\.go:' | grep -v 'boundary:allow commercial')
 	if [ -n "$hits" ]; then
 		commercial_fields="${commercial_fields}${hits}"$'\n'

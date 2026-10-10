@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -518,6 +519,9 @@ func TestResidencyRegistrationHappensUnderTheControllerLock(t *testing.T) {
 
 func repoRootForResidency(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("cwd: %v", err)

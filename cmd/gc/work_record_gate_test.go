@@ -172,6 +172,8 @@ func TestWorkRecordCloseTargets(t *testing.T) {
 	}{
 		{"close subcommand", []string{"close", "wr-1"}, []string{"wr-1"}, true},
 		{"close multiple", []string{"close", "wr-1", "wr-2"}, []string{"wr-1", "wr-2"}, true},
+		{"close with reason", []string{"close", "wr-1", "--reason", "Done: x"}, []string{"wr-1"}, true},
+		{"close with -r", []string{"close", "wr-1", "-r", "Done: x"}, []string{"wr-1"}, true},
 		{"update status=closed", []string{"update", "wr-1", "--status=closed"}, []string{"wr-1"}, true},
 		{"update --status closed", []string{"update", "wr-1", "--status", "closed"}, []string{"wr-1"}, true},
 		{"update -s closed", []string{"update", "wr-1", "-s", "closed"}, []string{"wr-1"}, true},
@@ -222,6 +224,9 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
+		// mol-do-work stamps the record with a plain update, then closes with a reason.
+		{"no-op close with reason passes", []string{"close", "wr-noop", "--reason", "No-op: already satisfied"}, true, false, ""},
+		{"close with reason is still gated", []string{"close", "wr-missing", "--reason", "Done: x"}, true, true, "close of wr-missing"},
 		{"update --status=closed is gated", []string{"update", "wr-shipped-nocommit", "--status=closed"}, true, true, "close of wr-shipped-nocommit"},
 		{
 			"atomic update validates submitted metadata",

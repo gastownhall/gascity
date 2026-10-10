@@ -22,7 +22,7 @@ the model without changing the box, and so on.
 | Axis | Question | Where you set it | Example |
 |------|----------|------------------|---------|
 | **Harness** | which agent CLI? | agent `provider` | `provider = "claude"` |
-| **Model** | which model label? | agent `option_defaults.model` | `option_defaults = { model = "sonnet" }` |
+| **Model** | which model label? | agent `option_defaults.model` | `option_defaults = { model = "sonnet", effort = "low" }` |
 | **Upstream** | who serves the model? | agent `upstream` + `[upstreams.<name>]` | `upstream = "bedrock"` |
 | **Transport** | how does gc drive it? | agent `session` | `session = "acp"` |
 | **Runtime** | where does it run? | city `[session] provider` / `GC_SESSION` | `provider = "k8s"` |
@@ -66,6 +66,21 @@ base            = "builtin:claude"
 option_defaults = { model = "haiku" }
 ```
 
+When `command` points to a launcher wrapper, also set `resume_command` to
+invoke that wrapper with the harness's resume arguments and `{{.SessionKey}}`.
+The inherited resume command is a separate setting; changing `command` alone
+can leave resumed sessions launching the original executable.
+
+If a wrapper redirects the harness to a private configuration directory,
+prepare required startup state in that directory too. Verify a fresh interactive
+launch as well as resume: a non-interactive prompt can skip first-run screens
+that would block an interactive agent.
+
+Keep wrapper diagnostics out of the interactive terminal so they cannot overwrite
+startup menu options. Match `process_names` to the executable actually running
+inside the wrapper, and verify that Gas City still reports the agent alive after
+startup and while it claims work.
+
 For copy-paste setup of each built-in harness — the env vars it reads and the
 direct / custom-endpoint / model permutations — see
 [Harness Recipes](/guides/harness-recipes). See
@@ -89,6 +104,40 @@ option_defaults = { model = "sonnet", permission_mode = "plan" }
 (see `ProviderOption` / `OptionChoice` in the [reference](/reference/config)).
 This is why you write `model = "sonnet"` and not a raw `--model` flag: the schema
 keeps the model selection portable and the flags server-side.
+
+### Reasoning effort (`option_defaults.effort`)
+
+`effort` is an options-schema key like `model`. Its tiers are
+`low · medium · high · xhigh · max`, and the harness renders the matching flag
+(for `claude`, `--effort <tier>`). The builtin `claude` harness defaults to
+`effort = "max"`, so set it explicitly when you want cheaper, faster turns.
+
+```toml
+# agents/reviewer/agent.toml — one agent
+provider        = "claude"
+option_defaults = { effort = "low" }
+```
+
+```toml
+# city.toml — every agent on the claude harness
+[providers.claude]
+option_defaults = { effort = "high" }
+```
+
+Agent keys win over provider keys, so the reviewer above runs at `low` while
+other claude agents run at `high`. `gc config explain --provider claude` shows
+the provider-level resolved value and which layer set it; it does not include
+agent-level `option_defaults`, so an agent's own `effort` is read from its
+`agent.toml`.
+
+A single step can override these for the session launched to run it: `opt_effort`
+or `opt_model` metadata on the step's bead applies when that session launches (see
+[per-dispatch provider options](/reference/specs/formula-spec-v2)). The options
+are launch flags, so they stay with the session rather than the step: a warm
+session that runs a later step, or a pool slot that claims a different ready bead
+than the one it launched for, keeps the flags it launched with. Give steps that
+need different options their own agent or pool, or set the same options on every
+step that shares a pool or a `gc.continuation_group`.
 
 ## Axis 3 — Upstream (who serves the model)
 

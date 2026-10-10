@@ -1,0 +1,182 @@
+common --enable_bzlmod
+common --color=no
+# C/C++ (and so cgo and the Go stdlib) builds only with MODULE.bazel's pinned
+# LLVM toolchain: no host-detected local_config_cc to fall back to, which
+# would key actions to the host's gcc and lld (scripts/bazel_hermetic_cc_test.go).
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# Bazel is gascity's build and test system: CI gates on `bazel test`
+# (.github/workflows/bazel.yml), and `make test`/`make check` run the same
+# commands (TESTING.md "Building and testing"). Plain `go build`/`go test`
+# still work as an inner-loop convenience but are not what CI enforces.
+# Where actions run is per machine, never committed here: contributors read
+# the anonymous, read-only cache with --config=fork-cache (defined below);
+# maintainers with an rbe-west client certificate execute remotely with
+# --config=remote-exec. Make either the default with a `build --config=...`
+# line in the gitignored .bazelrc.local. See engdocs/bazel-quickstart.md.
+
+test --test_output=errors
+# G0: a retried pass never stands in for a run. Leaving the flag unset is not
+# one attempt: Bazel's default gives targets marked flaky = True three. Pin it
+# for every invocation; scripts/bazel_no_flaky_retries_test.go requires this
+# line and rejects any other value anywhere.
+test --flaky_test_attempts=1
+
+
+# Bazel sandboxes root t.TempDir() deep under the output tree, blowing past the
+# 104-byte unix-socket sun_path limit for herdr/tmux/k8s socket tests. Root the
+# per-test tmpdir short, like `go test` does with TMPDIR=/tmp. /tmp/bt is
+# creatable by any user (CI runners, remote workers, dev machines alike).
+test --test_tmpdir=/tmp/bt
+test --sandbox_writable_path=/tmp/bt
+
+# GOROOT is resolved hermetically from runfiles (@go_sdk//:srcs) by
+# internal/bazeltest; no client export is required.
+test --test_env=GC_TEST_REPO_ROOT
+
+
+# Action-key parity: pre-push, PR and main runs reuse each other's results
+# only if every phase hashes actions identically, so every flag that can
+# change an action key is set here, unconditionally, and nowhere else. The
+# remote-mode configs below (remote-exec, fork-cache) and .bazelrc.local carry
+# transport only: endpoints, credentials, timeouts, download and parallelism
+# policy (scripts/bazel_key_parity_test.go). Build actions already run with
+# Bazel 9's default --incompatible_strict_action_env.
+#
+# Repo-lint tests exec `go` and other dev binaries. The PATH is pinned rather
+# than forwarded from the client (whose PATH would key every machine apart):
+# Go at /usr/local/go, as on the remote workers. Machines without it symlink
+# their GOROOT there (`sudo ln -s "$(go env GOROOT)" /usr/local/go`).
+test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+
+# The pinned remote-worker host in every action key: //platforms:rbe_worker's
+# worker-env exec property is the sha256 of its manifest, and rbe-west's
+# schedulers run an action only on a worker that measured that host
+# (platforms/BUILD.bazel, scripts/rbe_worker_env_test.go). Key-affecting, so
+# unconditional: local, fork-cache and remote runs hash alike.
+build --extra_execution_platforms=//platforms:rbe_worker
+
+# Remote execution on the NativeLink farm (CI, and maintainers who opt in with
+# a client certificate: TESTING.md "Bazel cache tiers"). The executor endpoint
+# and credentials are environment-specific and deliberately NOT hardcoded here
+# (the public, credential-free fork cache below is the one exception):
+# machines put them in the gitignored .bazelrc.local as build:remote-exec
+# lines, and CI writes them in the RBE step. Command-line flags always win.
+try-import %workspace%/.bazelrc.local
+build:remote-exec --remote_timeout=3600
+# rbe-west accepts action-cache writes from its workers only: upload nothing
+# executed locally (it would be refused, and host-dependent local results must
+# not seed the shared cache anyway).
+build:remote-exec --noremote_upload_local_results
+build:remote-exec --remote_download_minimal
+# Small clients (2vcpu runners, laptops) default --jobs to their core count,
+# serializing even REMOTE actions. Execution happens on the farm; the client
+# can keep many in flight.
+build:remote-exec --jobs=64
+
+# Read-only anonymous cache for fork PRs and contributors: rbe-west's
+# rbe-cache endpoint serves action-cache and CAS reads only (writes and
+# Execute are refused by the farm) and needs no credentials, so it is
+# committed. bazel.yml selects it for runs without an executor (mode cache:
+# fork PRs the rbe-fork mint does not serve, rbe=cache dispatches) through
+# setup-bazel's rc; .githooks/lib/push-suite.sh passes --config=fork-cache when
+# no rc file names a remote executor (scripts/bazel_fork_cache_test.go).
+# It carries transport flags only, so these actions hash like trusted CI's
+# and hit what trusted CI executed.
+build:fork-cache --remote_cache=grpcs://rbe-cache.ops.gascity.com:8443
+build:fork-cache --remote_instance_name=oss
+# No executor, whatever the machine's own rc (~/.bazelrc, /etc/bazel.bazelrc)
+# names: remote execution would upload inputs to this read-only CAS and fail
+# every action (FindMissingBlobs PERMISSION_DENIED).
+build:fork-cache --remote_executor=
+build:fork-cache --remote_accept_cached
+build:fork-cache --noremote_upload_local_results
+build:fork-cache --remote_download_minimal
+# If the farm closes the endpoint (kill switch) GetCapabilities fails, and
+# Bazel 9 then fails every action unless both of these are set.
+build:fork-cache --remote_local_fallback
+build:fork-cache --incompatible_remote_local_fallback_for_remote_cache
+# Lookups are network-bound; local CPU work is still bounded by --local_resources.
+build:fork-cache --jobs=64
+# A slow (not closed) endpoint: each lookup gives up after 15s per attempt,
+# and the failure-rate circuit breaker stops calling the endpoint once too
+# many lookups fail (Bazel's default: 10% within 60s); the rest run locally.
+build:fork-cache --remote_timeout=15
+build:fork-cache --remote_retries=2
+build:fork-cache --experimental_circuit_breaker_strategy=failure
+# A BEP file (bazel.yml's --build_event_json_file) would upload the local
+# files it references (test logs, the profile) to give them bytestream:// URIs.
+# rbe-cache refuses every write, each refusal counts against that breaker, and
+# once it opens every cache call is refused too, minimal-download fetches
+# included: "Lost inputs no longer available remotely". BEP files keep file://.
+build:fork-cache --nobuild_event_json_file_path_conversion
+build:fork-cache --nobuild_event_binary_file_path_conversion
+# The farm admits 16 connections per source IP, and Blacksmith runners share
+# egress IPs, so several concurrent fork jobs split that budget.
+build:fork-cache --remote_max_connections=4
+
+# --config=ci: what bazel.yml's lanes pass. Like remote-exec and fork-cache
+# it may not change an action key (bazel_key_parity_test.go): the pinned test
+# PATH above already applies to every phase, and setup-bazel's
+# --config=remote-exec or --config=fork-cache brings minimal downloads and
+# --jobs=64. What remains is result policy, which Bazel keeps out of action
+# keys and spawns, so lanes and pre-push share cache entries.
+#
+# G0: a retried pass never stands in for a run (CI lanes restate the
+# single-attempt pin above).
+test:ci --flaky_test_attempts=1
+# A remote cache eviction fails the action rather than silently re-running it.
+test:ci --experimental_remote_cache_eviction_retries=0
+# Validation actions (nogo) run through an aspect, in parallel with tests,
+# instead of gating each test's start: a test waits for its link, not for
+# nogo on its package (~250 s on //cmd/gc:gc_test). The build still fails on
+# a nogo finding. A build-request option, not configuration: analysis is not
+# discarded and the compact exec log's spawn digests are unchanged
+# (bazel_key_parity_test.go classifies it non-key).
+test:ci --experimental_use_validation_aspect
+
+# --config=fresh: the nightly fresh-test-results lane (bazel-nightly.yml,
+# beads' precedent) appends this to every lane's cmd so a cached PASS is
+# never reused. worker-env (rbe-worker's worker/worker-env) keys git and yq
+# at major version only, so a minor upgrade on the rbe-west workers moves
+# neither the pin nor any action key, and Bazel's test cache would never re-run a test
+# whose inputs and key are unchanged -- hiding a regression that minor
+# upgrade introduced behind every PR's and push's cached pass. Nightly
+# re-executes everything once a day instead. Like remote-exec, fork-cache and
+# ci, --nocache_test_results is result policy only (bazel_key_parity_test.go
+# classifies it transport-only), so a fresh run still hashes actions like
+# every other phase and still writes the shared cache from the workers that
+# ran it (--noremote_upload_local_results, build:remote-exec above, is
+# unaffected: this flag only stops a read, never a write).
+test:fresh --nocache_test_results
+
+# The tagged suites, as bazel.yml's lanes run them (byte-identical values:
+# --define and --test_timeout are key inputs). --test_timeout stays at or
+# below 1100s: the scheduler caps action timeouts at 1200s.
+test:acceptance --define=gotags=acceptance_a
+test:acceptance --test_timeout=1100
+test:integration --define=gotags=integration
+test:integration --test_timeout=1100
+# The integration tier also runs the process-backed tests the unit lane
+# skips, as scripts/test-integration-shard does.
+test:integration --test_env=GC_FAST_UNIT=0
+# nogo (//tools/nogo) gates the untagged build in the unit lane. The tagged
+# suites' own files were never linted (golangci-lint ran untagged) and have
+# open findings, so their lanes skip validation actions until those are fixed.
+test:acceptance --norun_validations
+test:integration --norun_validations
+# The gating subset of //test/integration (bazel.yml's integration-smoke
+# lane): scripts/test-integration-shard's bdstore_tests and rest_smoke_tests,
+# which scripts/bazel_integration_smoke_test.go keeps this filter equal to.
+test:integration-smoke --config=integration
+test:integration-smoke --test_filter=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$
+# The review-formula tests (review-formulas.yml: pushes to main, PRs
+# labelled needs-review-formulas, dispatches): scripts/test-integration-shard's
+# formula_tests, which scripts/bazel_integration_smoke_test.go keeps this
+# filter equal to.
+test:integration-review-formulas --config=integration
+test:integration-review-formulas --test_filter=^(TestAdoptPRFormulaCompileAndRun|TestPersonalWorkFormulaCompileAndRun|TestAdoptPRFormulaRetriesTransientReviewerStep|TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries|TestReviewLoopApprovesInIterationTwoWithBodyRetry|TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash)$
+
+# No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
+# while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the
+# server decides and rollback needs no change here.

@@ -163,34 +163,57 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 	return out, nil
 }
 
-// RalphBodyChildAttempt answers which attempt of ITSELF a ralph body child is
-// on, which is not the iteration index it sits inside. A body child is a step in
-// its own right, and when it carries a retry control that control's counter
-// starts at 1 and is bounded by the child's own gc.max_attempts. Stamping the
-// outer iteration here makes processRetryEval read N off a child that has run
-// once and spawn attempt N+1, so a step first reached in iteration 3 is born
-// exhausted and hard-fails having never retried. A census of the maintainer-city
-// graph store found 81 of 382 retry beads (21%) at or past their own max,
-// including 10 at attempt 5 against a max of 3 — a value no counter that starts
-// at 1 can reach (ga-v7pu5).
-//
-// Children whose spec already carries an attempt keep it: retry expansion has
-// run by the time a ralph body is namespaced or frozen, so a first attempt bead
-// arrives stamped 1 and its own ref says attempt.1. Fresh nested controls start
-// at 1. Everything else is a plain body step with no counter of its own, where
-// inheriting the iteration is both harmless and long-standing.
+// RalphBodyChildAttempt returns the gc.attempt a ralph body child carries: the
+// iteration it runs in. That is the v1.4.2 contract, and pack gates join the
+// beads of one iteration on it (workflows adopt-pr-review-approved.sh
+// load_verdict matches gc.attempt == the iteration). #5635 briefly stamped a
+// retry child's own counter here instead, which silently wedged those loops
+// from iteration 2 on; the counter now lives in gc.retry_attempt
+// (RalphBodyChildRetryAttempt), so gc.attempt can keep meaning the iteration.
 //
 // Both the compile-time expansion (namespaceRalphBodySteps) and the runtime
 // re-spawn (dispatch.buildAttemptRecipe) route through here so iteration 1 and
-// iterations 2+ cannot disagree about what a child's attempt number means.
-func RalphBodyChildAttempt(child *Step, iterationNum int) string {
-	if spec := strings.TrimSpace(child.Metadata[beadmeta.AttemptMetadataKey]); spec != "" {
-		return spec
-	}
-	if child.Retry != nil || child.Ralph != nil {
-		return "1"
-	}
+// iterations 2+ cannot disagree about what a child's counters mean.
+func RalphBodyChildAttempt(_ *Step, iterationNum int) string {
 	return strconv.Itoa(iterationNum)
+}
+
+// RalphBodyChildRetryAttempt returns the gc.retry_attempt a ralph body child
+// carries, or "" when the child is not a retry attempt root. A frozen body
+// arrives already retry-expanded, so a retry child's first attempt is in the
+// child list as <step>.attempt.1; it restarts at that number in every
+// iteration, which is what keeps a retry first reached in iteration N from
+// being born at attempt N against its own max_attempts (ga-v7pu5).
+//
+// Specs frozen before gc.retry_attempt existed carry the counter only in the
+// ".attempt.<n>" suffix of the child ID (and, for v1.5.0 pre-releases, in
+// gc.attempt), so the ID is the fallback: it is the one place every binary has
+// always written the retry number.
+func RalphBodyChildRetryAttempt(child *Step) string {
+	if v := strings.TrimSpace(child.Metadata[beadmeta.RetryAttemptMetadataKey]); v != "" {
+		return v
+	}
+	// Only an attempt root carries a lineage stamp or a spec attempt; a plain
+	// step whose ID merely ends in ".attempt.<n>" is not one.
+	if strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]) == "" &&
+		strings.TrimSpace(child.Metadata[beadmeta.AttemptMetadataKey]) == "" {
+		return ""
+	}
+	return trailingAttemptOrdinal(child.ID)
+}
+
+// trailingAttemptOrdinal returns n when id ends in ".attempt.<n>", else "".
+func trailingAttemptOrdinal(id string) string {
+	const marker = ".attempt."
+	idx := strings.LastIndex(id, marker)
+	if idx < 0 {
+		return ""
+	}
+	n := id[idx+len(marker):]
+	if _, err := strconv.Atoi(n); err != nil || n == "" {
+		return ""
+	}
+	return n
 }
 
 func collectRalphBodyStepIDs(steps []*Step) map[string]bool {

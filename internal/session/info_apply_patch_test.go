@@ -34,18 +34,18 @@ var allProjectedMetadataKeys = []string{
 	beadmeta.PackMetadataKey, beadmeta.PackWorkspaceMetadataKey, beadmeta.WorkDirMetadataKey,
 	beadmeta.WorkerDirMetadataKey,
 	"pending_create_claim", "pending_create_started_at", "quarantined_until",
-	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "slept_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
+	aliasHistoryMetadataKey, "continuity_eligible", "last_woke_at", "slept_at", "suspended_at", "awake_started_at", "usage_compute_emitted_at", "state_reason",
 	"creation_complete_at", "continuation_reset_pending", SessionCircuitStateMetadataKey,
 	ResetCommittedAtKey,
 	"generation", "started_config_hash", "pin_awake", "held_until", "wait_hold",
-	"churn_count", "wake_mode", "sleep_intent", "instance_token", "detached_at",
-	CurrentBeadIDKey, "core_hash_breakdown", "started_provision_hash",
+	"churn_count", "idle_respawn_attempts", "idle_respawn_bead_id", "wake_mode", "drain_at", "sleep_intent", "instance_token", "detached_at",
+	CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey, "core_hash_breakdown", "started_provision_hash",
 	"started_launch_hash", "started_live_hash", "live_hash", "startup_dialog_verified",
 	"config_drift_deferred_at",
 	"config_drift_deferred_key", "attached_config_drift_deferred_at",
 	"attached_config_drift_deferred_key", "stranded_event_emitted_at",
 	"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at",
-	"session_name_explicit", "wake_request", "restart_requested",
+	"session_name_explicit", "wake_request", "wake_requested_at", "restart_requested",
 	"session_id_flag", "template_overrides", "wake_attempts",
 	"wake_refused_event_at",
 	MetadataLastNudgeDeliveredAt, "provider_kind", "builtin_ancestor",
@@ -86,8 +86,9 @@ func oracleBaseBeads() []beads.Bead {
 		ResetCommittedAtKey: "2026-01-02T02:00:00Z",
 		"generation":        "4", "started_config_hash": "cfg", "pin_awake": "true",
 		"held_until": "2026-01-03T00:00:00Z", "wait_hold": "op", "churn_count": "2",
-		"wake_mode": "fresh", "sleep_intent": "idle-stop-pending", "instance_token": "it",
-		"detached_at": "2026-01-04T00:00:00Z", CurrentBeadIDKey: "bead-9",
+		"wake_mode": "fresh", "drain_at": "2026-01-03T04:00:00Z",
+		"sleep_intent": "idle-stop-pending", "instance_token": "it",
+		"detached_at": "2026-01-04T00:00:00Z", CurrentBeadIDKey: "bead-9", beadmeta.CurrentClaimBeadIDMetadataKey: "bead-8",
 		"core_hash_breakdown": `{"a":1}`, "started_provision_hash": "ph",
 		"started_launch_hash": "lh", "started_live_hash": "lvh",
 		"live_hash": "lvh-current", "startup_dialog_verified": "true",
@@ -180,7 +181,7 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // unprojected key: must not change Info
+		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // projected timestamp: folds through its codec row
 		{"env.GC_FOO": "bar"},                         // unprojected key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}

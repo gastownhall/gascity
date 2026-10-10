@@ -22,8 +22,8 @@ var blindGateCases = []struct {
 		script: "#!/bin/bash\nexit 75\n",
 	},
 	{
-		name:   "native store unavailable",
-		script: "#!/bin/bash\necho 'WARN native_store_unavailable scope=/city' >&2\nexit 1\n",
+		name:   "unresolvable gc home",
+		script: "#!/bin/bash\necho 'no GC_HOME available' >&2\nexit 1\n",
 	},
 	{
 		name:   "uncached pack import",
@@ -32,6 +32,32 @@ var blindGateCases = []struct {
 	{
 		name:   "credential refusal",
 		script: "#!/bin/bash\necho \"Error 1045 (28000): Access denied for user 'root'@'localhost'\" >&2\nexit 1\n",
+	},
+}
+
+// verdictGateCases are gate scripts whose stderr carries a string that looks
+// infrastructural but that the read recovered from, or that is remediation
+// advice rather than an error. They failed for their own reason, so they are
+// verdicts and must keep burning attempts. Reclassifying them would spend the
+// whole infra budget (and ~5 minutes of dead time) on the first genuine gate
+// failure in any city that emits them — the incident shape the budget exists
+// to prevent.
+var verdictGateCases = []struct {
+	name   string
+	script string
+}{
+	{
+		// internal/beads/factory.go logs this and then falls back to bd, so
+		// the read succeeded; in a native-ineligible city it prints on every
+		// store-open.
+		name:   "native store unavailable is a recovered path",
+		script: "#!/bin/bash\necho 'WARN native_store_unavailable scope=/city' >&2\necho 'review verdict is reject' >&2\nexit 1\n",
+	},
+	{
+		// The remediation every pack-cache error carries, and `gc import
+		// install`'s own error prefix.
+		name:   "gc import install is remediation advice",
+		script: "#!/bin/bash\necho 'gc import install: pack \"core\" failed checksum verification' >&2\nexit 1\n",
 	},
 }
 
@@ -68,6 +94,39 @@ func TestProcessRalphCheckBlindReadDoesNotBurnAttempt(t *testing.T) {
 			}
 			if got.Status == "closed" {
 				t.Errorf("check bead should stay open for the re-run, got closed")
+			}
+		})
+	}
+}
+
+// TestProcessRalphCheckVerdictMarkerStillBurnsAttempt is the counterpart
+// control to the table above: a gate whose stderr merely mentions an
+// infrastructure string is still a verdict. It must burn a semantic attempt and
+// must not touch the shared infra-retry budget.
+func TestProcessRalphCheckVerdictMarkerStillBurnsAttempt(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range verdictGateCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cityPath := t.TempDir()
+			checkPath := writeCheckScript(t, cityPath, "verdict-check.sh", tc.script)
+			store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 3)
+			if err := store.Close(run1.ID); err != nil {
+				t.Fatalf("close run1: %v", err)
+			}
+			check1 = mustGetBead(t, store, check1.ID)
+
+			result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if !result.Processed || result.Action != "retry" {
+				t.Fatalf("result = %+v, want processed retry (this gate produced a verdict and must burn an attempt)", result)
+			}
+			if r := mustGetBead(t, store, check1.ID).Metadata[beadmeta.CheckInfraRetryMetadataKey]; r != "" {
+				t.Errorf("gc.check_infra_retry = %q, want empty — a verdict must not spend the infra budget", r)
 			}
 		})
 	}

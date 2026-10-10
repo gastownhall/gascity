@@ -18,6 +18,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const namespaceOverflowUID = uint32(65534)
+
 const (
 	unixDirectoryOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
 	unixFileReadFlags      = unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
@@ -405,7 +407,12 @@ func validateAncestorDirectory(metadata storageMetadata, path string, euid uint3
 	if metadata.nlink == 0 {
 		return fmt.Errorf("productmetrics: directory %q has zero links", path)
 	}
-	if metadata.uid != 0 && metadata.uid != euid {
+	// Linux user namespaces expose an unmapped host root as the overflow UID.
+	// Bazel's sandbox does this for the lexical filesystem root while keeping
+	// the test user mapped normally. Accept that representation only for `/`;
+	// accepting it on any descendant would trust an arbitrary unmapped owner.
+	rootOwned := metadata.uid == 0 || (path == string(filepath.Separator) && metadata.uid == namespaceOverflowUID)
+	if !rootOwned && metadata.uid != euid {
 		return fmt.Errorf("productmetrics: ancestor %q has untrusted owner UID %d", path, metadata.uid)
 	}
 	if metadata.mode&0o022 != 0 && !isRootOwnedStickyWritable(metadata) {
@@ -974,6 +981,11 @@ func (directory *unixStorageDirectory) readFileLeaseWithHooks(name string, maxim
 		requireCleanupSameDevice(parentMetadata, preOpen),
 		validatePrivateRegularFile(preOpen, path, directory.euid, false),
 	); err != nil {
+		if preOpen.nlink == 0 {
+			// The name resolved to an inode that lost its last link before
+			// stat read it: a concurrent replace or unlink, not a hard link.
+			err = errors.Join(errStorageRecordReplaced, err)
+		}
 		return nil, nil, storageMetadata{}, errors.Join(errStorageUnsafeRecordShape, err)
 	}
 	fileFD, err := openFileAtGated(directoryFD, name, unixFileReadFlags, 0, hooks)
@@ -983,6 +995,9 @@ func (directory *unixStorageDirectory) readFileLeaseWithHooks(name string, maxim
 	hooks.openedFile(path)
 	metadata, err := validateOpenedRegularFileGated(directoryFD, name, fileFD, path, directory.euid, false, hooks)
 	if err != nil {
+		if openedRecordReplaced(directoryFD, name, fileFD, path) {
+			err = errors.Join(errStorageRecordReplaced, err)
+		}
 		_ = unix.Close(fileFD)
 		return nil, nil, storageMetadata{}, err
 	}
@@ -994,6 +1009,22 @@ func (directory *unixStorageDirectory) readFileLeaseWithHooks(name string, maxim
 	data, physicalReadBytes, err := readFDWithLimit(fileFD, maximumBytes, path, hooks)
 	metadata.physicalReadBytes = physicalReadBytes
 	return data, lease, metadata, err
+}
+
+// openedRecordReplaced reports whether fileFD, opened as name, is no longer
+// the record name resolves to: its inode has no links left, or name now
+// resolves to a different inode. Either proves a concurrent replace or unlink
+// after the open. It only classifies a read that already failed validation.
+func openedRecordReplaced(directoryFD int, name string, fileFD int, path string) bool {
+	opened, err := metadataForFD(fileFD, path, storageTestHooks{})
+	if err != nil {
+		return false
+	}
+	if opened.nlink == 0 {
+		return true
+	}
+	named, err := metadataAt(directoryFD, name, path, storageTestHooks{})
+	return err == nil && (named.dev != opened.dev || named.ino != opened.ino)
 }
 
 func openFileAtGated(directoryFD int, name string, flags int, mode uint32, hooks storageTestHooks) (int, error) {

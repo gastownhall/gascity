@@ -20,9 +20,11 @@ dolt-topology
 dolt-drift
 config-valid
 legacy-suspended-field
+daemon-session-reconciler
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
 rollout:daemon.formula_v2
+rollout:beads.allow_schema_behind_migrate
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
@@ -41,10 +43,12 @@ order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
+prompt-delivery-budget
 mcp-config
 mcp-shared-target
 builtin-pack-imports
 packv2-import-state
+gascity-pack-binding
 jsonl-archive
 pack-credentials
 tmux-binary
@@ -55,6 +59,7 @@ lsof-binary
 beads-role
 controller
 supervisor-http-api
+supervisor-unit-ownership
 agent-sessions
 zombie-sessions
 orphan-sessions
@@ -67,6 +72,8 @@ run-target-routed-to-backfill
 route-recovery-quarantine
 hold-label-routed-to
 pool-idle-routed-work
+v2-demand-migrations
+v2-session-migration
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
@@ -77,6 +84,7 @@ dolt-server
 fork-rate
 dolt-noms-size
 dolt-journal-size
+dolt-log-size
 dolt-config
 dolt-version
 events-log

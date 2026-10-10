@@ -337,6 +337,12 @@ func TestDrainReminderHoldsAndWritesNothingWhenAckSourceUnreadable(t *testing.T)
 func TestDrainReminderWritesNothingOnceAgentAcked(t *testing.T) {
 	e := newDrainReminderEnv(t)
 	mustSetMeta(t, e.sp, e.name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
+	// Bound to THIS incarnation: the acknowledgement is the row's own, so the
+	// pass owes it nothing. An ack naming a different incarnation would be a
+	// recycled chair's residue and would still be reminded (ga-o6uw0). The pane
+	// carries the digest of the token, never the token — see
+	// drainAckInstanceTokenDigest.
+	mustSetMeta(t, e.sp, e.name, drainAckRequesterInstanceTokenKey, drainAckInstanceTokenDigest("tok-a"))
 	e.setMeta(map[string]string{
 		drainReminderCountKey: "1",
 		drainReminderAtKey:    e.now.Add(-30 * time.Minute).UTC().Format(time.RFC3339),
@@ -527,10 +533,16 @@ func TestDrainReminderRecordsUndeliverableAttemptsSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read session bead: %v", err)
 	}
-	// A budget nobody could receive earns no answer window: waiting one out for
-	// messages that never arrived is waiting for nothing.
-	if !drainRemindersSpent(bead, e.clk.Time) {
-		t.Error("an all-undeliverable budget is not reported spent")
+	// The spend is recorded, but it does NOT skip the answer window. `failed`
+	// counts any Nudge TRANSPORT error (ssh/k8s exec, tmux send-keys), which is
+	// not proof of an input-dead pane, and drainRemindersSpent gates a kill — so
+	// an undelivered reminder must not be treated more harshly than a refused
+	// one. Only the journal phrasing distinguishes them.
+	if drainRemindersSpent(bead, e.clk.Time) {
+		t.Error("an all-undeliverable budget authorized escalation with no answer window")
+	}
+	if !drainRemindersSpent(bead, e.clk.Time.Add(drainReminderInterval)) {
+		t.Error("an all-undeliverable budget never becomes spent even after its answer window")
 	}
 	want := fmt.Sprintf("%d undeliverable reminder attempts (input-dead pane)", drainReminderMaxAttempts)
 	if got := drainReminderSpendPhraseFor(bead); got != want {
@@ -587,15 +599,36 @@ func TestFinalizeDrainAckStopPendingRemindsTheLiveWedgeOnly(t *testing.T) {
 			e.setMeta(map[string]string{"work_dir": t.TempDir(), "provider": "claude"})
 			cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 
+			// The queued async stop takes the runtime lease in the city's
+			// lock dir: let it finish before the dir is removed.
+			tracker := &asyncStartTracker{}
 			finalizeDrainAckStopPendingSessions(
 				t.TempDir(), cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
-				[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), &asyncStartTracker{},
+				[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 				e.clk, nil, e.out,
 			)
+			tracker.wait(5 * time.Second)
 
 			if n := len(e.nudges()); n != tc.wantNudges {
 				t.Errorf("nudge count = %d, want %d", n, tc.wantNudges)
 			}
 		})
+	}
+}
+
+// An attachment probe that cannot tell is not evidence nobody is at the pane,
+// and it records its own reason so an operator can tell it from a real attach.
+func TestDrainReminderQuietHoldHoldsOnAttachProbeError(t *testing.T) {
+	e := newDrainReminderEnv(t)
+	e.sp.AttachedErrors[e.name] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if got := e.remind(); got != drainReminderHeld {
+		t.Fatalf("outcome = %v, want held", got)
+	}
+	if n := len(e.nudges()); n != 0 {
+		t.Errorf("nudge count = %d, want 0", n)
+	}
+	if got := e.meta(drainReminderHoldKey); got != drainReminderHoldAttachUnknown {
+		t.Errorf("%s = %q, want %q", drainReminderHoldKey, got, drainReminderHoldAttachUnknown)
 	}
 }

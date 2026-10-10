@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -23,7 +24,7 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
 	return err
 }
 
@@ -114,6 +115,12 @@ func (h *SessionHandle) Reset(ctx context.Context) (err error) {
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
+//
+// This carries OPERATOR intent: it has targeted, single-session callers (the
+// `gc session suspend` controller-down fallback, idle auto-suspend, the legacy
+// API mux), so a state the machine cannot suspend still returns the illegal
+// transition rather than tearing a runtime down anyway. The city stop/restart
+// sweep uses StopForShutdown instead.
 func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
@@ -122,7 +129,44 @@ func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Suspend(id)
+	err = h.manager.SuspendContext(ctx, id)
+	return err
+}
+
+// StopForShutdown is Stop for the city stop/restart sweep, which issues a stop
+// across every session bead with no state pre-filter. Only that sweep may use
+// it: it additionally tears down a DRAINING seat instead of rejecting it with an
+// illegal transition, because rejecting those made every restart skip them and
+// leave them alive holding their pool slot names (ga-rxhu2).
+//
+// Kept as a separate method rather than a flag on Stop so the latitude cannot
+// reach a targeted operator path by accident — that is exactly how it leaked
+// before: keying the intent on the METHOD Stop handed the same ungated mid-drain
+// teardown to `gc session suspend` whenever the controller was down.
+func (h *SessionHandle) StopForShutdown(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.SuspendForShutdown(id)
+	return err
+}
+
+// StopIdle is Stop for the chat idle auto-suspend ([chat_sessions]
+// idle_timeout): it suspends without the operator's hold, so the session
+// resumes on its next wake reason.
+func (h *SessionHandle) StopIdle(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.SuspendIdle(ctx, id)
 	return err
 }
 
@@ -135,7 +179,7 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Kill(id)
+	err = h.manager.KillContext(ctx, id)
 	return err
 }
 
@@ -282,11 +326,11 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
-	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery), req.Resume)
 	if err != nil {
 		return MessageResult{}, err
 	}
-	result = MessageResult{Queued: outcome.Queued}
+	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred}
 	return result, nil
 }
 
@@ -336,10 +380,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		outcome, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
+		if err != nil {
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = sentNudgeResult(outcome)
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
@@ -350,10 +395,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		outcome, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
+		if err != nil {
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = sentNudgeResult(outcome)
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
@@ -364,7 +410,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
+		if errors.Is(err, sessionpkg.ErrResumeHeld) {
+			// Not queued: the caller queues it and prints the held note.
+			return NudgeResult{Undelivered: NudgeUndeliveredHeld}, nil
+		}
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -374,6 +424,14 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
 	}
+}
+
+// sentNudgeResult: a held session queued the nudge rather than taking it.
+func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
+	if outcome.Queued {
+		return NudgeResult{Undelivered: NudgeQueuedHeld}
+	}
+	return NudgeResult{Delivered: true}
 }
 
 func (h *SessionHandle) ensureSessionID() (string, error) {

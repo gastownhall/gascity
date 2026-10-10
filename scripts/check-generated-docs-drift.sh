@@ -3,9 +3,11 @@
 # fail on drift, leaving the exact regeneration patch for the docs-autofix
 # workflow to apply (see .github/workflows/docs-autofix.yml).
 #
-# The generated set is exactly what cmd/genschema writes; keep GEN_PATHS in
-# sync with cmd/genschema/main.go and with the path allowlist in
-# scripts/docs-autofix-push.sh.
+# CI runs the Bazel twin, //cmd/genschema:genschema_in_sync_test, which
+# leaves the same patch in its test.outputs; this script is the plain-Go
+# local equivalent. The generated set is exactly what cmd/genschema writes;
+# keep GEN_PATHS in sync with cmd/genschema/main.go, that test's paths, and
+# the path allowlist in scripts/docs-autofix-push.sh.
 #
 # Outputs:
 #   generated-docs-freshness.patch (override with PATCH_OUT) - written only

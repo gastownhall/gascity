@@ -1,6 +1,11 @@
 package runtime
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+)
 
 func TestSyncWorkDirEnvSetsGCDir(t *testing.T) {
 	cfg := SyncWorkDirEnv(Config{WorkDir: "/tmp/work"})
@@ -55,4 +60,176 @@ func TestHasManagedStartupHints(t *testing.T) {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+// A typed refusal that reads as "session gone" is taken by
+// MergeBackendStopErrors and every !IsSessionGone(err) Stop caller as an
+// idempotent success, so the sentinels and their wraps must never match.
+func TestTypedRuntimeSentinelsNeverMatchIsSessionGone(t *testing.T) {
+	for _, sentinel := range []error{ErrStopRefused, ErrStopUnsupported, ErrMetaUnsupported, ErrListUnsupported} {
+		wrapped := fmt.Errorf("exec provider script %q op %q: %w", "/packs/box/runtime.sh", "stop", sentinel)
+		for _, err := range []error{sentinel, wrapped} {
+			if IsSessionGone(err) {
+				t.Errorf("IsSessionGone(%q) = true, want false", err)
+			}
+		}
+	}
+	if !errors.Is(ErrStopUnsupported, ErrStopRefused) {
+		t.Error("ErrStopUnsupported does not wrap ErrStopRefused")
+	}
+}
+
+// StopForCleanup is the one teardown absorption rule: a Stop error is success
+// only when every leaf of its tree says the session is gone. Anything else — a
+// typed stop refusal, a terminate failure joined with a gone answer, or free
+// text that merely mentions a missing session — must reach the caller so
+// durable state stays open. tmux reports a missing server as ErrNoServer,
+// whose exact message serverGone carries; this package cannot import tmux, so
+// the session, worker, and tmux Stop tests pin the real sentinel.
+func TestStopForCleanupAbsorbsOnlySessionGone(t *testing.T) {
+	refusal := fmt.Errorf("exec provider script %q op %q: %w", "/packs/box/runtime.sh", "stop", ErrStopRefused)
+	failure := errors.New("permission denied")
+	serverGone := errors.New("no tmux server running")
+	execStderr := errors.New("exec provider /packs/box/runtime.sh stop sky: sh: 1: kubectl: not found")
+	serverGoneText := errors.New("killing session sky: no tmux server running")
+	cases := []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "stopped"},
+		{name: "session gone", stopErr: fmt.Errorf("stopping %q: %w", "sky", ErrSessionNotFound)},
+		{name: "tmux server gone", stopErr: fmt.Errorf("killing session sky: %w", serverGone)},
+		{name: "tmux server gone at capture and kill", stopErr: errors.Join(fmt.Errorf("observing pane before process snapshot: %w", serverGone), serverGone)},
+		{name: "stop refused", stopErr: refusal, wantErr: ErrStopRefused},
+		{name: "stop refused beside a gone session", stopErr: errors.Join(refusal, ErrSessionNotFound), wantErr: ErrStopRefused},
+		{name: "terminate failure", stopErr: failure, wantErr: failure},
+		{name: "terminate failure beside a gone server", stopErr: errors.Join(failure, serverGone), wantErr: failure},
+		{name: "exec stderr saying not found", stopErr: execStderr, wantErr: execStderr},
+		{name: "server-gone text inside a longer message", stopErr: serverGoneText, wantErr: serverGoneText},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := NewFake()
+			if err := sp.Start(context.Background(), "sky", Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if tc.stopErr != nil {
+				sp.StopErrors["sky"] = tc.stopErr
+			}
+
+			err := StopForCleanup(sp, "sky")
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("StopForCleanup = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("StopForCleanup = %v, want %v", err, tc.wantErr)
+			}
+			if last := sp.Calls[len(sp.Calls)-1]; last.Method != "Stop" || last.Name != "sky" {
+				t.Fatalf("calls = %#v, want a trailing Stop for sky", sp.Calls)
+			}
+		})
+	}
+}
+
+// serverDeathFake is a Fake that confirms, or refuses to confirm, that its
+// server is dead, and counts how often it was asked.
+type serverDeathFake struct {
+	*Fake
+	dead  bool
+	asked int
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool {
+	f.asked++
+	return f.dead
+}
+
+// A missing-server answer reads the same for a dead server and for a live
+// tmux server whose socket file was deleted. A provider that can tell them
+// apart (ServerDeathConfirmer) decides: StopForCleanup absorbs the answer
+// only when the server is confirmed dead. A missing session needs no proof.
+func TestStopForCleanupAbsorbsMissingServerOnlyWhenConfirmedDead(t *testing.T) {
+	serverGone := errors.New("no tmux server running")
+	for _, tc := range []struct {
+		name      string
+		stopErr   error
+		dead      bool
+		wantErr   bool
+		wantAsked int
+	}{
+		{name: "server confirmed dead", stopErr: fmt.Errorf("killing session sky: %w", serverGone), dead: true, wantAsked: 1},
+		{name: "server not confirmed dead", stopErr: fmt.Errorf("killing session sky: %w", serverGone), wantErr: true, wantAsked: 1},
+		{name: "missing session beside unconfirmed missing server", stopErr: errors.Join(ErrSessionNotFound, serverGone), wantErr: true, wantAsked: 1},
+		{name: "missing session needs no proof", stopErr: fmt.Errorf("stopping %q: %w", "sky", ErrSessionNotFound)},
+		{name: "stopped needs no proof"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &serverDeathFake{Fake: NewFake(), dead: tc.dead}
+			if err := sp.Start(context.Background(), "sky", Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if tc.stopErr != nil {
+				sp.StopErrors["sky"] = tc.stopErr
+			}
+
+			err := StopForCleanup(sp, "sky")
+			if tc.wantErr && !errors.Is(err, tc.stopErr) {
+				t.Fatalf("StopForCleanup = %v, want %v", err, tc.stopErr)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("StopForCleanup = %v, want nil", err)
+			}
+			if sp.asked != tc.wantAsked {
+				t.Errorf("ServerConfirmedDead asked %d times, want %d", sp.asked, tc.wantAsked)
+			}
+		})
+	}
+}
+
+// A composite answers ServerDeathConfirmer from the backends that implement
+// it: one unconfirmed server is enough to refuse, and with none the composite
+// keeps the rule of a provider without the capability.
+func TestServersConfirmedDeadRefusesOnAnyUnconfirmedBackend(t *testing.T) {
+	dead := &serverDeathFake{Fake: NewFake(), dead: true}
+	live := &serverDeathFake{Fake: NewFake()}
+	for _, tc := range []struct {
+		name     string
+		backends []Provider
+		want     bool
+	}{
+		{name: "no confirming backend", backends: []Provider{NewFake(), NewFake()}, want: true},
+		{name: "confirmed dead beside a plain backend", backends: []Provider{dead, NewFake()}, want: true},
+		{name: "unconfirmed beside a plain backend", backends: []Provider{NewFake(), live}},
+		{name: "confirmed dead beside unconfirmed", backends: []Provider{dead, live}},
+	} {
+		if got := ServersConfirmedDead(tc.backends...); got != tc.want {
+			t.Errorf("%s: ServersConfirmedDead = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestMetaValueFoldsOnlyMetaUnsupported(t *testing.T) {
+	transport := fmt.Errorf("reading GC_K: %w", ErrRuntimeUnavailable)
+	cases := []struct {
+		name    string
+		v       string
+		err     error
+		want    string
+		wantErr error
+	}{
+		{"value", "tok", nil, "tok", nil},
+		{"unset", "", nil, "", nil},
+		{"meta unsupported", "", fmt.Errorf("exec get-meta: %w", ErrMetaUnsupported), "", nil},
+		{"transport", "", transport, "", transport},
+		{"not found", "", ErrSessionNotFound, "", ErrSessionNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := MetaValue(tc.v, tc.err)
+			if got != tc.want || !errors.Is(err, tc.wantErr) {
+				t.Errorf("MetaValue(%q, %v) = (%q, %v), want (%q, %v)", tc.v, tc.err, got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
 }
