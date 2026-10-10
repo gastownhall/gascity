@@ -72,7 +72,18 @@ func seatWorkOn(path, cityPath string, cfg *config.City, leading beads.Store, ri
 	if path == "index" {
 		return newSeatWork(legs)
 	}
-	return seatWorkFor(legs, RefuseScope{ids: append(poolSlotRetireAssigneeIdentities(info, cfg), drainAckAssigneeIdentities(info, cfg)...)}, 0)
+	return seatWorkFor(legs, RefuseScope{ids: append(poolSlotRetireAssigneeIdentities(info, cfg), drainAckAssigneeIdentities(info, cfg)...)})
+}
+
+// cachedWorkStore is store behind a primed CachingStore, as a controller's work
+// store is.
+func cachedWorkStore(t *testing.T, store beads.Store) *beads.CachingStore {
+	t.Helper()
+	cached := beads.NewCachingStore(store, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	return cached
 }
 
 // createWork creates a work bead in store assigned to assignee.
@@ -146,15 +157,21 @@ func TestSplitStoreWork_KilledSeatReleasesItsWorkStoreClaim(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
-			work := e.store
+			work, registered := e.store, beads.Store(e.store)
 			if shape == "split" {
+				// maintainer-city's work store: remote, behind the
+				// controller's event-fed cache.
 				work = &killRaceStore{Store: beads.NewMemStore()}
+				registered = cachedWorkStore(t, work)
 			}
-			registerWorkShapeWith(t, e.city, shape, e.store, work)
-			routed := createWork(t, work, "open", e.seat.ID, routedClaim())
+			registerWorkShapeWith(t, e.city, shape, e.store, registered)
+			routed := createWork(t, registered, "open", e.seat.ID, routedClaim())
 
-			// The tick's gates and B1 read the work store only through the seat
-			// work index: no list keyed by an assignee reaches it.
+			// The tick's gates and B1 read the work store only through the
+			// tick's read, and the close-time re-read takes a controller's
+			// cache: no list keyed by an assignee reaches a split city's work
+			// store. On a single-store city the work store is the local
+			// sessions store, which the re-read reads live.
 			var perIdentity []beads.ListQuery
 			tickAtCityWatching(t, e, claims(routed), func(reconcile func()) {
 				work.afterList = func(q beads.ListQuery, _ []beads.Bead) {
@@ -168,7 +185,7 @@ func TestSplitStoreWork_KilledSeatReleasesItsWorkStoreClaim(t *testing.T) {
 
 			assertWork(t, work, routed.ID, "open", "")
 			assertClosedAsKilled(t, e.reload(t, e.seat.ID))
-			if len(perIdentity) != 0 {
+			if shape == "split" && len(perIdentity) != 0 {
 				t.Fatalf("the tick read the work store per identity %d times (first %+v); want only the index's lists", len(perIdentity), perIdentity[0])
 			}
 		})
@@ -365,10 +382,20 @@ func TestSplitStoreWork_LegSetMatchesTheCensus(t *testing.T) {
 	}
 }
 
-// The index answers every gate it serves exactly as that gate's live probes
-// do. Each case seeds one kind of row for the seat on the city work store of a
-// split city.
+// Every seat-work gate answers each kind of row as its question says, on
+// both reads (the tick's and one seat's). Each case seeds one kind of row for
+// the seat on the city work store of a split city; want is the oracle.
 func TestSeatWorkIndex_AnswersAsTheLiveProbesDo(t *testing.T) {
+	none := "open=false/false close-gate=false/false in-progress=false/false for-config=false/false awake=false/false first-in-progress=false/false first-claimable=false/false stranded=false/false"
+	want := map[string]string{
+		"nothing":        none,
+		"open":           "open=true/false close-gate=true/false in-progress=false/false for-config=true/false awake=true/false first-in-progress=false/false first-claimable=true/false stranded=true/false",
+		"in_progress":    "open=true/false close-gate=true/false in-progress=true/false for-config=true/false awake=true/false first-in-progress=true/false first-claimable=false/false stranded=true/false",
+		"closed":         none,
+		"other seat":     none,
+		"mail":           none,
+		"own drain step": "open=true/false close-gate=false/false in-progress=true/false for-config=true/false awake=true/false first-in-progress=false/false first-claimable=false/false stranded=true/false",
+	}
 	cases := map[string]func(t *testing.T, work beads.Store, seat string){
 		"nothing":     func(*testing.T, beads.Store, string) {},
 		"open":        func(t *testing.T, w beads.Store, seat string) { createWork(t, w, "open", seat, nil) },
@@ -403,8 +430,10 @@ func TestSeatWorkIndex_AnswersAsTheLiveProbesDo(t *testing.T) {
 				seed(t, work, seatBead.ID)
 				answers[path] = seatWorkAnswers(t, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info)
 			}
-			if answers["live"] != answers["index"] {
-				t.Fatalf("index answered\n  %s\nlive answered\n  %s", answers["index"], answers["live"])
+			for _, path := range seatWorkPaths {
+				if answers[path] != want[name] {
+					t.Errorf("%s read answered\n  %s\nwant\n  %s", path, answers[path], want[name])
+				}
 			}
 		})
 	}
@@ -591,8 +620,8 @@ func TestRunTickPhases_SharesOneSeatWorkAcrossSessionPhases(t *testing.T) {
 	}
 }
 
-// A dark work leg fails every gate the index serves closed, exactly as the
-// live probes do: no gate may answer "no work" over a leg it could not read.
+// A dark work leg fails every gate closed on both reads: no gate may answer
+// "no work" over a leg it could not read.
 func TestSeatWorkIndex_DarkLegFailsEveryGateClosed(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "kill-town"}, Agents: []config.Agent{persistentWorker()}}
 	answers := map[string]string{}
@@ -605,11 +634,10 @@ func TestSeatWorkIndex_DarkLegFailsEveryGateClosed(t *testing.T) {
 		info := sessionInfosFromBeads([]beads.Bead{seat})[0]
 		answers[path] = seatWorkAnswers(t, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info)
 	}
-	if answers["live"] != answers["index"] {
-		t.Fatalf("index answered\n  %s\nlive answered\n  %s", answers["index"], answers["live"])
-	}
-	if strings.Contains(answers["index"], "/false") {
-		t.Fatalf("a gate answered without an error over a dark leg: %s", answers["index"])
+	for _, path := range seatWorkPaths {
+		if strings.Contains(answers[path], "/false") {
+			t.Fatalf("on the %s read a gate answered without an error over a dark leg: %s", path, answers[path])
+		}
 	}
 }
 

@@ -10,9 +10,13 @@ package main
 // swapped in whatever the caller passed, and a per-tick index was found by
 // store pointer.
 //
-// Here the leg set is a value. A WorkLegs is minted from the city work store,
-// a type no store converts to, and every seat-work question takes the
-// SeatWork read over it (seat_work.go). The tick mints one per tick, a v2
+// Here the leg set is a value. A WorkLegs is minted only from a cityWorkLeg,
+// and a cityWorkLeg only from a beads.WorkStore: a beads.SessionStore is a
+// different type, and the worklegs analyzer (tools/nogo) refuses a WorkStore
+// built from one, a WorkLegs or cityWorkLeg field set outside this file, any
+// reference to the two mints outside their reviewed sites, and any workScope
+// but the two polarity scopes. Every seat-work question takes the SeatWork
+// read over a WorkLegs (seat_work.go): the tick mints one per pass, a v2
 // effect one per effect, a one-shot command one per call.
 
 import (
@@ -25,28 +29,26 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// cityWorkStore is a city's work store, the one store a WorkLegs takes as its
-// work leg. Its store sits under a named field, so neither a beads.Store nor
-// a class wrapper (beads.SessionStore, beads.WorkStore) converts to it. The
-// places that mint one are pinned (TestWorkLegsSingleConstructor).
-type cityWorkStore struct{ store beads.Store }
+// cityWorkLeg is a city's work store, the one store a WorkLegs takes as its
+// work leg. Its store sits under a named field, so no store type converts to
+// it.
+type cityWorkLeg struct{ store beads.Store }
 
-// cityWorkStoreOf is store as its city's work store, for a caller that holds
-// exactly that: a one-shot command's openCityStore (and its forms), or the
-// controller's CityBeadStore. Only those callers mint one this way.
-func cityWorkStoreOf(store beads.Store) cityWorkStore {
-	return cityWorkStore{store: store}
+// cityWorkLegOf is the city's work store as its work leg. It takes the typed
+// work-class handle, so a sessions store reaches it only through a WorkStore
+// built from one, which the worklegs analyzer refuses.
+func cityWorkLegOf(work beads.WorkStore) cityWorkLeg {
+	return cityWorkLeg{store: work.Store}
 }
 
 // WorkLegs is the leg set every seat-work question reads: the city work
 // store, the serving rigs, then every relocated class binding, in plan order
 // (storeref.AssignedWork). It is minted only by workLegsFromCensus.
 type WorkLegs struct {
-	cityPath string
-	cfg      *config.City
-	work     beads.Store
-	plan     storeref.ResolvedPlan
-	err      error // no leg set: a refused city
+	cfg  *config.City
+	work beads.Store
+	plan storeref.ResolvedPlan
+	err  error // no leg set: a refused city
 }
 
 // errNoWorkStore: a WorkLegs minted without a city work store, which answers
@@ -59,8 +61,8 @@ var errNoWorkStore = errors.New("no city work store to read work from")
 // this process serves for cityPath (residencyTopologyForCity). Every seat
 // reads every leg, whatever its agent's scope: a gate that read fewer legs
 // than the cascade released from decided "no work" on stores it never saw.
-func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkStore, rigs map[string]beads.Store) WorkLegs {
-	l := WorkLegs{cityPath: cityPath, cfg: cfg, work: work.store}
+func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rigs map[string]beads.Store) WorkLegs {
+	l := WorkLegs{cfg: cfg, work: work.store}
 	if work.store == nil {
 		return l
 	}
@@ -72,7 +74,7 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkStore, r
 // workLegs is the controller's leg set for one tick, over the store it
 // registers as the city's work leg (registerResidencyRoutes).
 func (cr *CityRuntime) workLegs() WorkLegs {
-	return workLegsFromCensus(cr.cityPath, cr.cfg, cityWorkStore{store: cr.cityBeadStore()}, cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
+	return workLegsFromCensus(cr.cityPath, cr.cfg, cityWorkLegOf(cr.cityWorkStore()), cr.rigBeadStores()) // residency:allow — the census frame; workLegsFromCensus plans the legs (storeref.Plan)
 }
 
 // unusable is why l answers nothing: no leg set, or the zero WorkLegs,
@@ -110,15 +112,20 @@ func (l WorkLegs) readOnly() WorkLegs {
 	return l
 }
 
-// isWork reports whether store is this leg set's city work store.
+// isWork reports whether store is l's city work store.
 func (l WorkLegs) isWork(store beads.Store) bool {
 	return l.work != nil && unwrapClassStore(store) == unwrapClassStore(l.work)
 }
 
 // workScope is the identity set a seat-work question matches assignees
-// against. Only the two polarity types implement it (pass-1 O4), so a
-// question names which set is safe for what it decides.
-type workScope interface{ scopeIDs() []string }
+// against. Only the two polarity types implement it (pass-1 O4; the
+// worklegs analyzer refuses any other), so a question names which set is
+// safe for what it decides. refuses reports the wide polarity: a question
+// that gates ending a live runtime, which no snapshot may answer.
+type workScope interface {
+	scopeIDs() []string
+	refuses() bool
+}
 
 // ReleaseScope is the narrow set: the bead ID, session_name, the configured
 // named identity and the stable alias (sessionAssignmentIdentifiersForConfig).
@@ -134,6 +141,8 @@ type RefuseScope struct{ ids []string }
 
 func (s ReleaseScope) scopeIDs() []string { return s.ids }
 func (s RefuseScope) scopeIDs() []string  { return s.ids }
+func (ReleaseScope) refuses() bool        { return false }
+func (RefuseScope) refuses() bool         { return true }
 
 // releaseScope is info's ReleaseScope.
 func releaseScope(info sessionpkg.Info, cfg *config.City) ReleaseScope {

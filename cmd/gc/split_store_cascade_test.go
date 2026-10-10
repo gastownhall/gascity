@@ -103,12 +103,13 @@ func TestSplitStoreCascade_PoolSlotCloseReadsOnlyTheTickIndex(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
-			work := e.store
+			work, registered := e.store, beads.Store(e.store)
 			if shape == "split" {
 				work = &killRaceStore{Store: beads.NewMemStore()}
+				registered = cachedWorkStore(t, work) // a controller's cached work store
 			}
-			registerWorkShapeWith(t, e.city, shape, e.store, work)
-			routed := createWork(t, work, "open", e.seat.ID, routedClaim())
+			registerWorkShapeWith(t, e.city, shape, e.store, registered)
+			routed := createWork(t, registered, "open", e.seat.ID, routedClaim())
 
 			// The index reads its legs concurrently.
 			var mu sync.Mutex
@@ -121,8 +122,8 @@ func TestSplitStoreCascade_PoolSlotCloseReadsOnlyTheTickIndex(t *testing.T) {
 					switch {
 					case q.Assignee != "" || len(q.Assignees) > 0:
 						// The close-time re-read lists the local binding per
-						// identity; the work store never is.
-						if s == work {
+						// identity, and a controller's cached work store never.
+						if s == work && shape == "split" {
 							perIdentity = append(perIdentity, q)
 						}
 					case q.Live && q.TierMode == beads.TierBoth && q.Type == "" && q.Label == "" && len(q.IDs) == 0:
@@ -157,7 +158,7 @@ func TestSplitStoreCascade_StrandedRepairReleasesFromTheIndex(t *testing.T) {
 	env, seat, _, _ := strandedRepairReconcileEnv(t)
 	cityPath := t.TempDir()
 	work := &killRaceStore{Store: beads.NewMemStore()}
-	registerWorkShapeWith(t, cityPath, "split", env.store, work)
+	registerWorkShapeWith(t, cityPath, "split", env.store, cachedWorkStore(t, work)) // a controller's cached work store
 	claim := createWork(t, work, "in_progress", seat.ID, nil)
 	var mu sync.Mutex
 	var perIdentity int

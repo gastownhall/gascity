@@ -1,15 +1,16 @@
 package main
 
-// The close-time re-read (mc-3ixn3.16). The tick's seat work index is as fresh
+// The close-time re-read (mc-3ixn3.16). The tick's SeatWork read is as fresh
 // as its read, so a claim assigned to a seat after it was invisible to the
 // tick's gates: the seat closed holding it, and an unrouted open claim was
 // stranded on the closed row for good. Before a close, the closing seat's
 // narrow identities are read again:
 //
-//   - live on the local legs (the SQLite binding, a native rig);
-//   - from the event-fed cache on the work store and on a bd rig, which costs
-//     no I/O. A remote store is never read live here: a cache that cannot
-//     answer leaves the index's answer standing.
+//   - live on the local legs (the SQLite binding, a native rig, the uncached
+//     work store of a standalone controller or a one-shot pass);
+//   - from the event-fed cache on a controller's work store and on a bd rig,
+//     which costs no I/O. A bd-backed store is never read live here: one with
+//     no cache leaves the tick's answer standing (mc-3ixn3.19/.20).
 //
 // A close a gate decided ("this seat holds nothing") is refused on a hit; a
 // close that releases the seat's work anyway (a corpse, a stranded repair)
@@ -63,26 +64,30 @@ func lateSeatWork(legs WorkLegs, scope workScope, statuses []string, keep func(b
 	return hits, errs
 }
 
-// closeTimeLister reads one leg for the re-read: a live list on a local leg,
-// the cache on the work store or a bd rig, and nil when such a leg has no
-// cache to answer from.
+// closeTimeLister reads one leg for the re-read:
+//   - the city work store from its event-fed cache when it has one (a
+//     controller's), which costs no I/O;
+//   - any other local leg live: the SQLite binding, a native rig, and the
+//     uncached work store of a standalone controller or a one-shot pass;
+//   - a bd-backed leg from its cache, or not at all when it has none: the
+//     residual of mc-3ixn3.19/.20, where the tick's read stands alone.
 func closeTimeLister(store beads.Store, isWork bool) func(beads.ListQuery) ([]beads.Bead, error) {
-	if !isWork && !storeBackedBy[*beads.BdStore](store) {
-		return func(q beads.ListQuery) ([]beads.Bead, error) {
-			q.Live = true
-			return store.List(q)
-		}
-	}
 	type cachedLister interface {
 		CachedList(beads.ListQuery) ([]beads.Bead, bool)
 	}
-	cache, ok := storeLayer[cachedLister](store)
-	if !ok {
+	cache, cached := storeLayer[cachedLister](store)
+	switch {
+	case cached && (isWork || storeBackedBy[*beads.BdStore](store)):
+		return func(q beads.ListQuery) ([]beads.Bead, error) {
+			items, _ := cache.CachedList(q)
+			return items, nil
+		}
+	case storeBackedBy[*beads.BdStore](store):
 		return nil
 	}
 	return func(q beads.ListQuery) ([]beads.Bead, error) {
-		items, _ := cache.CachedList(q)
-		return items, nil
+		q.Live = true
+		return store.List(q)
 	}
 }
 

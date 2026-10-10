@@ -952,7 +952,7 @@ func finalizeDrainAckStoppedSession(
 		}
 		// The close refused, maybe over work assigned since sw's read: ask the
 		// seat's legs now, not the snapshot that let the close try.
-		evidence = sw.fresh(releaseScope(info, cfg))
+		evidence = sw.fresh(releaseScope(info, sw.Legs().cfg))
 		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(evidence, info)
 		if closeGateAssignedErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: checking assigned work after failed drain-ack close gate for %s: %v\n", name, closeGateAssignedErr) //nolint:errcheck
@@ -2510,7 +2510,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
-					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(sw, infoByID[id])
+					// The drain ends a live runtime: the wide set, read live (O4).
+					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkInStores(sw, refuseScope(infoByID[id], cfg))
 					if assignedErr != nil {
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
 						continue
@@ -4655,6 +4656,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
 			if reason == "idle" && dt.get(target.info.ID) == nil {
+				// An idle drain ends a live runtime: started work under any of
+				// the seat's identities, read live, keeps it (O4).
+				if started, err := sessionHasAssignedWorkInStoresForStatuses(sw, refuseScope(info, cfg), []string{"in_progress"}); err != nil || started {
+					fmt.Fprintf(stderr, "session reconciler: deferring idle drain for %s: started work held (%v)\n", name, err) //nolint:errcheck
+					continue
+				}
 				if intent != "idle-stop-pending" {
 					shouldBegin, observationErr := shouldBeginIdleDrainInfo(info, eval, dt, sp)
 					if observationErr != nil {

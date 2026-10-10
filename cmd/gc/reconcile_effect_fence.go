@@ -77,7 +77,7 @@ func (p *effectPass) readWork(row session.Info) *txWork {
 	}
 	// One seat's read, live, over the pass's city work legs (NEW2-1: never
 	// the sessions store standing in for the work store).
-	sw := seatWorkFor(p.reads.legs, releaseScope(row, p.World.Env.Cfg), 0)
+	sw := seatWorkFor(p.reads.legs, releaseScope(row, p.World.Env.Cfg))
 	has, err := sessionHasOpenAssignedWorkForReachableStore(sw, row)
 	return &txWork{Free: !has && err == nil, Err: err}
 }

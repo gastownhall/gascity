@@ -1051,3 +1051,28 @@ func TestDrainAckEscalationQuietHoldHoldsOnAttachProbeError(t *testing.T) {
 		t.Error("force-terminated a pane whose attachment could not be read")
 	}
 }
+
+// The escalation's kill gate reads the seat live, never the tick's read: work
+// claimed under a prior alias after the tick's read was loaded still keeps a
+// live agent from being force-terminated.
+func TestEscalationKillGateReadsTheSeatLiveNotTheTickRead(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.setMeta(map[string]string{"alias": "nux", "alias_history": "morsov"})
+	sw := testSeatWork(e.cityPath, e.cfg, beads.SessionStore{Store: e.store}, nil)
+	// An earlier gate loads the tick's read: no work yet.
+	if has, err := sessionHasOpenAssignedWorkForReachableStore(sw, e.info()); has || err != nil {
+		t.Fatalf("tick read before the claim = %v, %v", has, err)
+	}
+	if _, err := e.store.Create(beads.Bead{Title: "claimed after the tick's read", Status: "in_progress", Assignee: "morsov"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := &asyncStartTracker{}
+	finalizeDrainAckStopPendingSessions(e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, sw,
+		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker, e.clk, e.rec, e.out)
+	tracker.wait(10 * time.Second)
+
+	if e.terminateCalls() != 0 || len(e.escalations()) != 0 {
+		t.Fatalf("force-terminated (%d) or escalated (%d) over work claimed since the tick's read", e.terminateCalls(), len(e.escalations()))
+	}
+}

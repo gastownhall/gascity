@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -599,24 +601,26 @@ func TestReleaseUnexecutedClaimsOnKill_ReadsRigLegs(t *testing.T) {
 }
 
 // Concurrency: work assigned to the seat after its release and before the
-// close is found by the close-time re-read of the local binding: the close
-// refuses, with no stranded branch. The next pass releases it (it is not
-// ready) and closes. On a split city the released claim is on the work
-// store; the late one lands on the binding, which the re-read reads live.
+// close is found by the close-time re-read, which reads a local work store
+// live: the close refuses, with no stranded branch. The next pass releases it
+// (it is not ready) and closes. The late claim arrives under the seat's
+// session_name on the re-read's first list (the seat ID's), so the re-read's
+// list for the session_name sees it.
 func TestReconcileSessionBeads_KilledPoolSeatWorkAssignedAfterReleaseRefusesTheClose(t *testing.T) {
-	e, work := splitKilledSeat(t, "split", persistentWorker())
-	unstarted := createWork(t, work, "open", e.seat.ID, routedClaim())
+	e := newKilledSeatEnv(t, persistentWorker())
+	unstarted := e.addWork(t, "open", e.seat.ID, routedClaim())
 	name := e.seat.Metadata["session_name"]
+	var mu sync.Mutex
 	var late beads.Bead
 	e.store.afterList = func(q beads.ListQuery, _ []beads.Bead) {
-		if late.ID == "" && q.Assignee == e.seat.ID {
-			if released, err := work.Get(unstarted.ID); err == nil && released.Assignee == "" {
-				late = e.addWork(t, "open", name, routedClaim())
-			}
+		mu.Lock()
+		defer mu.Unlock()
+		if late.ID == "" && q.Assignee == e.seat.ID && e.reload(t, unstarted.ID).Assignee == "" {
+			late = e.addWork(t, "open", name, routedClaim())
 		}
 	}
 
-	tickAtCity(t, e, claims(unstarted))
+	e.tick(t, claims(unstarted))
 
 	if late.ID == "" {
 		t.Fatal("fixture never assigned the late work")
@@ -625,7 +629,7 @@ func TestReconcileSessionBeads_KilledPoolSeatWorkAssignedAfterReleaseRefusesTheC
 	e.assertAssigned(t, late, "open", name)
 
 	e.store.afterList = nil
-	tickAtCity(t, e, claims(e.reload(t, late.ID)))
+	e.tick(t, claims(e.reload(t, late.ID)))
 	e.assertAssigned(t, late, "open", "")
 	assertClosedAsKilled(t, e.reload(t, e.seat.ID))
 }
@@ -668,10 +672,9 @@ func TestReconcileSessionBeads_KilledPoolSeatRowChangeMidReleaseKeepsTheSeat(t *
 		t.Run(name, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
 			claim := e.addWork(t, "open", e.seat.ID, routedClaim())
-			done := false
+			var done atomic.Bool
 			e.store.afterList = func(q beads.ListQuery, got []beads.Bead) {
-				if !done && q.Status == "open" && q.Assignee == "" && len(got) > 0 {
-					done = true
+				if q.Status == "open" && q.Assignee == "" && len(got) > 0 && done.CompareAndSwap(false, true) {
 					if err := e.mem.SetMetadataBatch(e.seat.ID, patch); err != nil {
 						t.Fatal(err)
 					}
@@ -900,21 +903,5 @@ func TestDrainAckReleaseKeepsItsIdentitySet(t *testing.T) {
 	}
 	if status, assignee := drainAckBeadStatus(t, work, underAlias.ID); status != "in_progress" || assignee != "ada" {
 		t.Fatalf("claim under alias: status=%q assignee=%q, want kept (D5's identity set has no alias)", status, assignee)
-	}
-}
-
-// A leg past its budget fails the started-work gate, and nothing is released.
-func TestReleaseUnexecutedClaimsOnKill_GateFailsClosedOnAnExpiredLeg(t *testing.T) {
-	e := newKilledSeatEnv(t, persistentWorker())
-	claim := e.addWork(t, "open", e.seat.ID, routedClaim())
-	blocked := blockedLegStore{Store: e.store, release: releasedAtCleanup(t)}
-	sw := &SeatWork{legs: workLegsFromCensus("", e.cfg, cityWorkStore{store: blocked}, nil), budget: time.Millisecond}
-	var stderr bytes.Buffer
-
-	releaseUnexecutedClaimsOnKill(sw, e.store, e.now, sessionInfosFromBeads([]beads.Bead{e.seat})[0], &stderr)
-
-	e.assertAssigned(t, claim, "open", e.seat.ID)
-	if !bytes.Contains(stderr.Bytes(), []byte("budget")) {
-		t.Fatalf("stderr = %q, want the expired leg's budget in the diagnostic", stderr.String())
 	}
 }

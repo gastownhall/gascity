@@ -21,7 +21,7 @@ type wakeVerdictDeps struct {
 	sp        runtime.Provider  // the sleep policy's capability
 	// work and rigStores (opened only when needed) read assigned work, which
 	// overrides an idle latch. No work store never refuses on it.
-	work      cityWorkStore
+	work      cityWorkLeg
 	rigStores func() map[string]beads.Store
 }
 
@@ -75,7 +75,7 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 		return "", certain
 	}
 	legs := workLegsFromCensus(d.cityPath, d.cfg, d.work, d.rigStores())
-	if work, err := sessionHasAwakeAssignedWorkForReachableStore(seatWorkFor(legs, releaseScope(info, d.cfg), 0), info); err != nil || work {
+	if work, err := sessionHasAwakeAssignedWorkForReachableStore(seatWorkFor(legs, releaseScope(info, d.cfg)), info); err != nil || work {
 		return "", certain
 	}
 	return "its idle sleep policy holds it asleep until work or demand wakes it; send with `resume: true` (or `gc session attach`) to start it now", true
@@ -85,7 +85,7 @@ func wakeWillNotStart(info sessionpkg.Info, d wakeVerdictDeps, now time.Time) (w
 func (cs *controllerState) WakeStartRefusal(info sessionpkg.Info) (string, bool) {
 	return wakeWillNotStart(info, wakeVerdictDeps{
 		cfg: cs.Config(), cityPath: cs.CityPath(), sessFront: sessionpkg.NewStore(cs.SessionsBeadStore()),
-		sp: cs.SessionProvider(), work: cityWorkStoreOf(cs.CityBeadStore()), rigStores: cs.wakeRigStores,
+		sp: cs.SessionProvider(), work: cityWorkLegOf(cs.cityWorkStore()), rigStores: cs.wakeRigStores,
 	}, time.Now())
 }
 

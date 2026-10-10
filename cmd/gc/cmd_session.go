@@ -1895,7 +1895,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// The session bead lives in the sessions-class store (sessStore), which on a
 	// split city is not the work store the sweep leads with; the claim
 	// back-channel must be cleared where the session bead actually is.
-	legs := workLegsFromCensus(cityPath, cfg, cityWorkStoreOf(store), rigStores)
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
 	unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, "", stderr)
 
 	if asJSON {

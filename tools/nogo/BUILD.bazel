@@ -43,6 +43,7 @@ go_test(
         "//tools/nogo/analyzers/unparam",
         "//tools/nogo/analyzers/unused",
         "//tools/nogo/analyzers/v2purity",
+        "//tools/nogo/analyzers/worklegs",
         "@co_honnef_go_tools//analysis/lint",
         "@co_honnef_go_tools//quickfix",
         "@co_honnef_go_tools//simple",

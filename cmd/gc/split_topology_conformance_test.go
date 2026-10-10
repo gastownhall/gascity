@@ -1130,7 +1130,7 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			legs := workLegsFromCensus(e.cityPath, e.cfg, cityWorkStore{store: e.work}, e.rigStores)
+			legs := workLegsFromCensus(e.cityPath, e.cfg, cityWorkLeg{store: e.work}, e.rigStores)
 			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {

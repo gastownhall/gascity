@@ -137,7 +137,7 @@ func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 		Census: readCensus(t, gatherNow, censusLegs(rowLeg, cache)), Mislabelled: map[rowKey]bool{},
 		LegStores: map[string]beads.Store{rowLeg: cache}, SessionsStore: cache,
 	}
-	w.WorkLegs = workLegsFromCensus(w.CityPath, w.Env.Cfg, cityWorkStore{store: cache}, nil)
+	w.WorkLegs = workLegsFromCensus(w.CityPath, w.Env.Cfg, cityWorkLeg{store: cache}, nil)
 	k.p = newEffectPass(w, &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}})
 	k.p.Clock, k.p.Runtime = newFakePlannerClock(gatherNow), k.leaf
 	k.p.seam = func(_ context.Context, at txSeam, _ intent, section, attempt int) error {
@@ -452,7 +452,7 @@ func TestTxReadsTheFenceLegs(t *testing.T) {
 	if f.Attach != "" || f.Pending != "" || f.Idle || f.Work.Free {
 		t.Fatalf("fence %+v (work %+v), want detached, nothing pending, active since the pass, work found", f, f.Work)
 	}
-	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkStore{store: blindWriteRefusingStore{inner: failingList{k.cache}}}, nil)
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: failingList{k.cache}}}, nil)
 	if k.run(context.Background(), spec); f.Work.Free || f.Work.Err == nil {
 		t.Fatalf("failed work read: %+v, want work assumed, with its error", f.Work)
 	}
@@ -1141,7 +1141,7 @@ func TestTxBoundedReadsFailClosed(t *testing.T) {
 	if s := k.run(context.Background(), effectSpec{sections: []section{sec}}); s.Outcome != settledNoop || probeErr == nil || !bounded {
 		t.Fatalf("settlement %+v, probe error %v, bounded %t; want the panic read as a failed, bounded Probe", s, probeErr, bounded)
 	}
-	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkStore{store: blindWriteRefusingStore{inner: panickingList{k.cache}}}, nil)
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: panickingList{k.cache}}}, nil)
 	var w *txWork
 	k.run(context.Background(), effectSpec{needs: needs{Legs: legWork}, sections: []section{{Decide: func(v txView) txStep { w = v.Fence.Work; return txStep{} }}}})
 	if w == nil || w.Free || w.Err == nil {

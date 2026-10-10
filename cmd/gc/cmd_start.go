@@ -1066,8 +1066,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		registerResidencyRoutes(cityPath, routes, func() beads.Store { return oneShotStore })
 		defer unregisterResidencyRoutes(cityPath, routes)
 	}
-	legs := workLegsFromCensus(cityPath, cfg, cityWorkStoreOf(oneShotStore), rigStores)
-	sw := newSeatWork(legs)
+	// Each pass below reads the work legs afresh, as a controller tick does:
+	// a later pass must not decide on an earlier pass's read.
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: oneShotStore}), rigStores)
 
 	// One-shot bead reconciliation: same code path as the daemon.
 	sessionQueryPartial := false
@@ -1094,7 +1095,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, sw, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
+		cityPath, beads.SessionStore{Store: sessStore}, newSeatWork(legs), ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 	)
 
 	// Same protection as the daemon tick: wake candidates computed before the
@@ -1123,7 +1124,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-			cityPath, beads.SessionStore{Store: sessStore}, sw, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
+			cityPath, beads.SessionStore{Store: sessStore}, newSeatWork(legs), ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 		)
 	}
 
@@ -1144,7 +1145,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.AssignedWorkStores)
 	reconcileSessionBeadsAtPathWithNamedDemand(
-		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore, sw,
+		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore, newSeatWork(legs),
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
 		dsResult.NamedSessionRoutedDemand,

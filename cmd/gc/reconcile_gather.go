@@ -163,7 +163,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.SessionsStore, w.RigStores = store, rigs
 	if e.WorkStore != nil { // without one, the zero WorkLegs answers every work read unknown
-		w.WorkLegs = workLegsFromCensus(e.CityPath, cfg, cityWorkStoreOf(e.WorkStore()), rigs)
+		w.WorkLegs = workLegsFromCensus(e.CityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: e.WorkStore()}), rigs)
 	}
 	w.LegStores = map[string]beads.Store{legs[0].ref: legs[0].store}
 	all := make(map[string]beads.Store, len(legs))

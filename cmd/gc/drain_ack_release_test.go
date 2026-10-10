@@ -93,7 +93,7 @@ func TestDrainAckResolvesRuntimeNameToSessionBeadID(t *testing.T) {
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, &stderr)
 
 	if sessionBead.ID == runtimeName {
 		t.Fatalf("fixture session ID %q unexpectedly equals runtime name", sessionBead.ID)
@@ -128,7 +128,7 @@ func TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName(t *testing.T) {
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, store, held.ID)
 	if status != "open" || assignee != "" {

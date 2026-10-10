@@ -4549,25 +4549,30 @@ func (s *listErrStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
+// assignOnListStore assigns open work to the session when the first list
+// for that session's own identity arrives, before answering it: the close-time
+// re-read's list. The tick's read lists every assignee at once and never
+// triggers it.
 type assignOnListStore struct {
 	beads.Store
 	sessionID string
-	calls     int
-	assigned  bool
+	assigned  sync.Once
 }
 
 func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	s.calls++
-	if !s.assigned && s.calls == 3 {
-		if _, err := s.Create(beads.Bead{
-			Title:    "raced assigned work",
-			Type:     "task",
-			Status:   "open",
-			Assignee: s.sessionID,
-		}); err != nil {
+	if q.Assignee == s.sessionID {
+		var err error
+		s.assigned.Do(func() {
+			_, err = s.Create(beads.Bead{
+				Title:    "raced assigned work",
+				Type:     "task",
+				Status:   "open",
+				Assignee: s.sessionID,
+			})
+		})
+		if err != nil {
 			return nil, err
 		}
-		s.assigned = true
 	}
 	return s.Store.List(q)
 }
@@ -4633,11 +4638,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 	}
 	session.Metadata = patch.Apply(session.Metadata)
 
-	// A split city: the race lands on the sessions binding, the local leg the
-	// close-time re-read reads live; the tick's read already listed it twice.
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
-	cityPath := t.TempDir()
-	registerWorkShapeWith(t, cityPath, "split", racingStore, beads.NewMemStore())
 	finalizeDrainAckStoppedSession(
 		env.cfg, racingStore, testSeatWork(env.city, env.cfg, racingStore, nil), env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,

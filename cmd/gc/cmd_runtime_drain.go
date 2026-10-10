@@ -886,7 +886,7 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		}
 		return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
 	}
-	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
+	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, stderr)
 }
 
 // releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
@@ -905,7 +905,6 @@ func releaseUnexecutedClaimsForSessionStore(
 	store beads.Store,
 	rigStores func() map[string]beads.Store,
 	sessionName string,
-	budget time.Duration,
 	stderr io.Writer,
 ) {
 	sessStore := cliSessionStore(store, cfg, cityPath)
@@ -926,7 +925,7 @@ func releaseUnexecutedClaimsForSessionStore(
 	if rigStores != nil {
 		rigs = rigStores()
 	}
-	releaseUnexecutedClaimsOnDrainAck(workLegsFromCensus(cityPath, cfg, cityWorkStoreOf(store), rigs), sessionBead, budget, stderr)
+	releaseUnexecutedClaimsOnDrainAck(workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigs), sessionBead, drainAckReleaseBudget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.

@@ -294,3 +294,37 @@ func TestEmitDeadAssigneeReopenedEvents_NoOpOnEmpty(t *testing.T) {
 		t.Fatalf("expected no events, got %d", len(rec.events))
 	}
 }
+
+// The stranded repair releases under the seat's ReleaseScope: a claim held
+// under its stable namepool alias is released with the rest.
+func TestRepairStrandedPoolWorkerBead_ReleasesUnderTheStableAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", NamepoolNames: []string{"ada"}, MaxActiveSessions: intPtr(2)}}}
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	seat, err := store.Create(beads.Bead{Title: "worker session", Type: sessionBeadType, Status: "open", Metadata: map[string]string{
+		"session_name": "worker-1", "template": "worker", "alias": "ada", "pool_managed": "true", "pool_slot": "1",
+		strandedEventEmittedKey: now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias := stableAssignmentAliasForConfig(seat, cfg); alias != "ada" {
+		t.Fatalf("fixture alias = %q, want the stable namepool alias ada", alias)
+	}
+	claim, err := store.Create(beads.Bead{Title: "held under the alias", Type: "task", Assignee: "ada", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(claim.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if !repairStrandedPoolWorkerBead(testSeatWork("", cfg, store, nil), store, seedSessionInfo(seat), "worker", &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("repair did not close the seat; stderr=%q", stderr.String())
+	}
+	if got, _ := store.Get(claim.ID); got.Assignee != "" || got.Status != "open" {
+		t.Fatalf("alias claim = %q/%q, want released", got.Status, got.Assignee)
+	}
+}

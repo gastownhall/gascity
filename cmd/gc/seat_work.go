@@ -12,8 +12,10 @@ package main
 //     (match); a question whose answer only keeps a seat may take the row as
 //     read (snapshot);
 //   - a miss on a leg read completely is no work there (as of the read);
-//   - an unreadable leg, or one past its budget, is unknown: with no confirmed
-//     hit elsewhere the question fails closed.
+//   - an unreadable leg is unknown: with no confirmed hit elsewhere the
+//     question fails closed;
+//   - a RefuseScope question (it gates ending a live runtime) is never
+//     answered from the tick's read: it reads the seat live.
 //
 // It is an explicit value over a WorkLegs (work_location.go). The legacy tick
 // reads every assignee once per tick (newSeatWork) and hands it to every phase
@@ -26,7 +28,6 @@ import (
 	"log"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
@@ -43,10 +44,6 @@ type SeatWork struct {
 	// live. A question about any other identity is unknown. Nil reads every
 	// assignee.
 	ids map[string]bool
-	// budget bounds each leg's read; a leg still reading at the budget is
-	// unknown. Every leg starts at once, so one leg's latency never spends
-	// another's (SS-2). Zero waits for every leg.
-	budget time.Duration
 
 	once sync.Once
 	read []seatWorkLeg
@@ -84,9 +81,6 @@ type seatWorkHit struct {
 	bead  beads.Bead
 }
 
-// errSeatWorkBudget: a leg did not answer within its budget.
-var errSeatWorkBudget = errors.New("seat work leg did not answer within its budget")
-
 // newSeatWork is the tick's read: every assignee on every leg, read on the
 // first question.
 func newSeatWork(legs WorkLegs) *SeatWork {
@@ -94,24 +88,21 @@ func newSeatWork(legs WorkLegs) *SeatWork {
 }
 
 // seatWorkFor is one seat's read: scope's identities only, listed live on
-// every leg, each leg within budget (zero: unbounded).
-func seatWorkFor(legs WorkLegs, scope workScope, budget time.Duration) *SeatWork {
+// every leg.
+func seatWorkFor(legs WorkLegs, scope workScope) *SeatWork {
 	ids := make(map[string]bool)
 	for _, id := range scope.scopeIDs() {
 		if id = strings.TrimSpace(id); id != "" {
 			ids[id] = true
 		}
 	}
-	return &SeatWork{legs: legs, ids: ids, budget: budget}
+	return &SeatWork{legs: legs, ids: ids}
 }
 
 // fresh is one seat's read of sw's legs now, for a question a snapshot "no
 // work" must not answer.
 func (sw *SeatWork) fresh(scope workScope) *SeatWork {
-	if sw == nil {
-		return seatWorkFor(WorkLegs{}, scope, 0)
-	}
-	return seatWorkFor(sw.legs, scope, sw.budget)
+	return seatWorkFor(sw.Legs(), scope)
 }
 
 // Legs is the leg set sw reads. A nil SeatWork reads the zero WorkLegs,
@@ -127,12 +118,6 @@ func (sw *SeatWork) Legs() WorkLegs {
 type seatWorkList struct {
 	leg int
 	q   beads.ListQuery
-}
-
-type seatWorkListResult struct {
-	at   int
-	rows []beads.Bead
-	err  error
 }
 
 // load lists every leg once, concurrently: one live list per status (per
@@ -154,62 +139,36 @@ func (sw *SeatWork) load() {
 		}
 	}
 	// Every list runs at once: on a remote store a read costs one list's
-	// latency, not one per status and leg. Results come back on a channel, so
-	// a list past the budget leaves nothing behind when it ends.
-	results := make(chan seatWorkListResult, len(lists))
-	for at, l := range lists {
-		go func(at int, l seatWorkList) {
-			r := seatWorkListResult{at: at}
-			defer func() { results <- r }()
-			defer recoverLeg(&r.err, "seat work leg", log.Writer())
-			r.rows, r.err = sw.read[l.leg].store.List(l.q)
-		}(at, l)
+	// latency, not one per status and leg.
+	rows := make([][]beads.Bead, len(lists))
+	errs := make([]error, len(lists))
+	var wg sync.WaitGroup
+	for i, l := range lists {
+		wg.Add(1)
+		go func(i int, l seatWorkList) {
+			defer wg.Done()
+			defer recoverLeg(&errs[i], "seat work leg", log.Writer())
+			rows[i], errs[i] = sw.read[l.leg].store.List(l.q)
+		}(i, l)
 	}
-	var expired <-chan time.Time
-	if sw.budget > 0 {
-		timer := time.NewTimer(sw.budget)
-		defer timer.Stop()
-		expired = timer.C
-	}
-	answered := make([]bool, len(lists))
-	for range lists {
-		select {
-		case r := <-results:
-			answered[r.at] = true
-			l := lists[r.at]
-			leg := &sw.read[l.leg]
-			if r.err != nil {
-				leg.errs[l.q.Status] = errors.Join(leg.errs[l.q.Status], r.err)
-				continue
+	wg.Wait()
+	for i, l := range lists {
+		leg := &sw.read[l.leg]
+		if errs[i] != nil {
+			leg.errs[l.q.Status] = errors.Join(leg.errs[l.q.Status], errs[i])
+			continue
+		}
+		for _, b := range rows[i] {
+			if assignee := strings.TrimSpace(b.Assignee); assignee != "" {
+				leg.byAssignee[assignee] = append(leg.byAssignee[assignee], b)
 			}
-			for _, b := range r.rows {
-				if assignee := strings.TrimSpace(b.Assignee); assignee != "" {
-					leg.byAssignee[assignee] = append(leg.byAssignee[assignee], b)
-				}
-			}
-		case <-expired:
-			for at, ok := range answered {
-				if !ok {
-					l := lists[at]
-					leg := &sw.read[l.leg]
-					leg.errs[l.q.Status] = errors.Join(leg.errs[l.q.Status], fmt.Errorf("%w (%s)", errSeatWorkBudget, sw.budget))
-				}
-			}
-			return
 		}
 	}
 }
 
 // match answers q: every live-confirmed hit in leg order, or only the first when
 // first is set. Without a first hit, an unreadable leg is the error.
-//
-// A RefuseScope question gates ending a live runtime, which a snapshot "no
-// work" never authorizes: on the tick's read it is answered by a fresh read
-// of the seat's identities instead.
 func (sw *SeatWork) match(q seatWorkQuery, first bool) ([]seatWorkHit, error) {
-	if _, refuse := q.scope.(RefuseScope); refuse && sw != nil && sw.ids == nil {
-		return sw.fresh(q.scope).match(q, first)
-	}
 	return sw.find(q, first, sw != nil && sw.ids == nil)
 }
 
@@ -237,6 +196,12 @@ func (sw *SeatWork) stores(q seatWorkQuery) ([]beads.Store, error) {
 func (sw *SeatWork) find(q seatWorkQuery, first, recheck bool) ([]seatWorkHit, error) {
 	if err := sw.Legs().unusable(); err != nil {
 		return nil, err
+	}
+	// A refusing question gates ending a live runtime, which a snapshot "no
+	// work" never authorizes: on the tick's read every form of it (match,
+	// snapshot, stores) is answered by a live read of the seat.
+	if q.scope.refuses() && sw.ids == nil {
+		return sw.fresh(q.scope).find(q, first, false)
 	}
 	sw.once.Do(sw.load)
 	ids := make(map[string]bool)

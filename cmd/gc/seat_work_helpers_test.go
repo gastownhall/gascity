@@ -22,12 +22,12 @@ func testWorkLegs(cityPath string, cfg *config.City, store beads.Store, rigs map
 	if registered := registeredCityWorkStore(cityPath); registered != nil {
 		work = registered
 	}
-	return workLegsFromCensus(cityPath, cfg, cityWorkStore{store: work}, rigs)
+	return workLegsFromCensus(cityPath, cfg, cityWorkLeg{store: work}, rigs)
 }
 
 // workLegsPlan is the plan and error of the WorkLegs minted over work.
 func workLegsPlan(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store) (storeref.ResolvedPlan, error) {
-	l := workLegsFromCensus(cityPath, cfg, cityWorkStore{store: work}, rigs)
+	l := workLegsFromCensus(cityPath, cfg, cityWorkLeg{store: work}, rigs)
 	return l.plan, l.unusable()
 }
 

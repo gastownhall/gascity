@@ -184,3 +184,43 @@ func TestCmdSessionCloseClearsClaimInTheSessionStoreOnAMigratedCity(t *testing.T
 		t.Errorf("work bead = (assignee %q, status %q), want released to (\"\", open) from the work store", released.Assignee, released.Status)
 	}
 }
+
+// The drain-ack release reads work through the city's work legs over the work
+// store it opened, never the sessions store it resolves the session through:
+// on a migrated city a claim on the work store is released.
+func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
+	cityPath, cfg := migratedOneShotCLICity(t)
+	captureCLIStorageStderr(t)
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening the city work store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	sessions := cliSessionStore(work, cfg, cityPath)
+	sessionBead, err := sessions.Create(beads.Bead{
+		Title: "draining worker", Type: session.BeadType, Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-draining", "state": "active"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := work.Create(beads.Bead{Title: "claimed step", Type: "task", Assignee: sessionBead.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := work.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, work, nil, "worker-draining", &stderr)
+
+	got, err := work.Get(claimed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != "" || got.Status != "open" {
+		t.Fatalf("work bead = (%q, %q), want released from the work store; stderr=%s", got.Assignee, got.Status, stderr.String())
+	}
+}

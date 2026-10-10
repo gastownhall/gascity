@@ -249,3 +249,25 @@ func TestCloseRead_BdRigsAreReadFromTheCacheOnly(t *testing.T) {
 		t.Fatalf("local rig reads = %d, %v; want one live list", local.n(), err)
 	}
 }
+
+// The work store at close: a controller's cached work store answers from its
+// cache, an uncached local one (a standalone controller, a one-shot pass) is
+// read live, and an uncached bd work store is not read at all: the tick's
+// read stands alone there. That is the residual of mc-3ixn3.19/.20.
+func TestCloseRead_WorkStoreRule(t *testing.T) {
+	q := beads.ListQuery{Assignee: "seat", Status: "open", TierMode: beads.TierBoth}
+	local := &workCallCounter{Store: beads.NewMemStore()}
+	if _, err := closeTimeLister(local, true)(q); err != nil || local.n() != 1 {
+		t.Fatalf("uncached local work store reads = %d, %v; want one live list", local.n(), err)
+	}
+	cachedBacking := &workCallCounter{Store: beads.NewMemStore()}
+	cached := cachedWorkStore(t, cachedBacking)
+	before := cachedBacking.n()
+	if _, err := closeTimeLister(cached, true)(q); err != nil || cachedBacking.n() != before {
+		t.Fatalf("cached work store read its backing %d times (%v); want the cache only", cachedBacking.n()-before, err)
+	}
+	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { return []byte("[]"), nil })
+	if list := closeTimeLister(bd, true); list != nil {
+		t.Fatal("an uncached bd work store got a lister: mc-3ixn3.19/.20 is a residual, not a live read")
+	}
+}
