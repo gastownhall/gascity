@@ -578,6 +578,7 @@ func TestAdoptionStampedEpochKeepsStaleIncarnationForeign(t *testing.T) {
 // Stop/IsRunning/GetMeta implementation that fakeAdoptionProvider does not
 // provide.
 func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	ctx := context.Background()
@@ -597,7 +598,7 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 
 	// Supervisor restart: adoption barrier discovers and adopts the
 	// untracked survivor.
-	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &barrierStderr, false)
+	result, passed := runAdoptionBarrier(city, sessionFrontDoor(store), sp, cfg, "test-city", clk, &barrierStderr, false)
 	if !passed || result.Adopted != 1 {
 		t.Fatalf("adoption failed: passed=%v adopted=%d stderr=%s", passed, result.Adopted, barrierStderr.String())
 	}
@@ -612,7 +613,7 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 	// actually stop the still-running pre-restart runtime.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), "test-city-worker", nil, tracker, nil, &drainStderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), "test-city-worker", nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -633,6 +634,7 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 // stamps it on the runtime too (LL5, see TestAdoptionStampsSessionIDAndToken),
 // so the drain-ack fence reads a match rather than a token it can never see.
 func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	ctx := context.Background()
@@ -648,7 +650,7 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 
 	// Supervisor restart: adoption barrier discovers and adopts the
 	// untracked, token-less survivor.
-	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &barrierStderr, false)
+	result, passed := runAdoptionBarrier(city, sessionFrontDoor(store), sp, cfg, "test-city", clk, &barrierStderr, false)
 	if !passed || result.Adopted != 1 {
 		t.Fatalf("adoption failed: passed=%v adopted=%d stderr=%s", passed, result.Adopted, barrierStderr.String())
 	}
@@ -667,7 +669,7 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 	// unverifiable mismatch.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), "test-city-worker", nil, tracker, nil, &drainStderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, drainAckStopPendingForTest(t, store, beadList[0].ID, "test-city-worker", adoptedToken), "test-city-worker", nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}

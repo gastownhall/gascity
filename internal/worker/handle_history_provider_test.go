@@ -236,7 +236,7 @@ func newCustomKindHandle(t *testing.T, searchRoot, workDir, provider, kind strin
 	// tests own; skip it so a keyed (session-id) start does not sleep.
 	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithStaleKeyDetectionWaiter(
 		func(context.Context, string) error { return nil },
-	))
+	), sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchRoot},

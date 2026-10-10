@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 744
-baseline_files = 222
+baseline_calls = 746
+baseline_files = 224
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 496
-baseline_files = 148
+baseline_calls = 498
+baseline_files = 150
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -337,6 +337,28 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the runtime lease cross-process harness is a checked Medium subprocess owner"
 resource_owner = "the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/session"
+package_name = "session"
+owner = "TestNoCityGateFailsTheRun"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the no-city gate's self-test is a checked Medium subprocess owner"
+resource_owner = "the probe processes are confined to TestNoCityGateFailsTheRun, which re-execs the test binary on its own probe: the gate decides the exit code of a whole test binary after its last test, so only a real child run shows an undeclared refusal failing a run whose tests all pass"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/session/sessiontest"
+package_name = "sessiontest_test"
+owner = "TestNoCityRefusalWithoutTheGateExits"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the no-city gate's unarmed self-test is a checked Medium subprocess owner"
+resource_owner = "the probe process is confined to TestNoCityRefusalWithoutTheGateExits, which re-execs the test binary on its own probe: a refusal in a binary that does not run the gate exits that binary, so only a real child run shows it failing before its test can pass"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 

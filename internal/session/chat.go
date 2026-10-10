@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -731,6 +732,11 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	// It runs under its caller's lease and takes none: without one, or a city
+	// to take one in, it refuses rather than start outside the lease.
+	if _, leased := ctx.Value(runtimeLeaseCtxKey{}).(*RuntimeLease); !leased && !filepath.IsAbs(m.cityPath) {
+		return RefuseWithoutCity(m.cityPath, fmt.Sprintf("session %q", id))
+	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {

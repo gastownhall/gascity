@@ -156,6 +156,7 @@ type twin struct {
 	stores []beads.Store
 	rec    events.Recorder
 	now    time.Time
+	city   string // the copy's city path: an outside writer's Manager takes the runtime lease there
 }
 
 // row finds id on either leg.
@@ -194,7 +195,7 @@ func (w *legacyWorld) twin(t *testing.T) twin {
 	for _, rig := range slices.Sorted(maps.Keys(w.rigs)) {
 		stores = append(stores, w.rigs[rig])
 	}
-	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now()}
+	return twin{t: t, cfg: w.cfg, reload: func(c *config.City) { w.cfg = c }, sp: w.sp.simProvider, stores: stores, rec: w.rec, now: w.clk.Now(), city: w.cityPath}
 }
 
 // twin is copy B's view; it writes the backings, and a reload publishes a
@@ -210,7 +211,7 @@ func (w *v2World) twin(t *testing.T) twin {
 		next.Gen, next.Cfg = env.Gen+1, c
 		*env, w.s.cfg = next, c
 	}
-	return twin{t: t, cfg: w.s.cfg, reload: reload, sp: w.s.sp, stores: stores, rec: w.rec, now: w.s.clk.Now()}
+	return twin{t: t, cfg: w.s.cfg, reload: reload, sp: w.s.sp, stores: stores, rec: w.rec, now: w.s.clk.Now(), city: w.s.env.CityPath}
 }
 
 // delivered queues the outside writes' events and delivers each to its
@@ -1126,7 +1127,7 @@ func operatorTimeline() []timelineFixture {
 		[]parityStep{
 			{Name: "suspend", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
-				if err := session.NewManagerWithOptions(st, tw.sp, session.WithClock(&clock.Fake{Time: tw.now})).Suspend("gc-1"); err != nil {
+				if err := session.NewManagerWithOptions(st, tw.sp, session.WithClock(&clock.Fake{Time: tw.now}), session.WithCityPath(tw.city)).Suspend("gc-1"); err != nil {
 					tw.t.Fatal(err)
 				}
 			}},

@@ -691,13 +691,14 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeDrainAck(t *testing.T) {
+	testCity := t.TempDir()
 	old := drainAckPokeController
 	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -710,10 +711,11 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 }
 
 func TestDoRuntimeDrainAckError(t *testing.T) {
+	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -733,13 +735,14 @@ func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) 
 }
 
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
+	testCity := t.TempDir()
 	old := drainAckPokeController
 	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1004,10 +1007,11 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeRequestRestartError(t *testing.T) {
+	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", "", &stdout, &stderr)
+	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", testCity, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -1022,6 +1026,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 // reset is persisted, so persistRestart is mandatory rather than best-effort
 // when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
 func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
+	testCity := t.TempDir()
 	for _, tc := range []struct {
 		name           string
 		persistRestart func() error
@@ -1033,7 +1038,7 @@ func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
 			dops := newFakeDrainOps()
 			rec := events.NewFake()
 			var stdout, stderr bytes.Buffer
-			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", "", &stdout, &stderr)
+			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", testCity, &stdout, &stderr)
 			if code != 1 {
 				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
 			}

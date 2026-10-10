@@ -4993,6 +4993,7 @@ func TestNormalizeNonExpandingPoolSessionBeadReclaimsDeferredAlias(t *testing.T)
 }
 
 func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testing.T) {
+	testCity := t.TempDir()
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	stale, err := store.Create(beads.Bead{
@@ -5068,9 +5069,9 @@ func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testi
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
 	var reconcileStdout, reconcileStderr bytes.Buffer
-	reconcileSessionBeads(
-		context.Background(), sessions, dsResult.State, configuredSessionNames(cfg, "", store), cfg, sp,
-		store, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), testCity, sessions, dsResult.State, configuredSessionNames(cfg, "", store), cfg, sp,
+		store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &reconcileStdout, &reconcileStderr,
 	)
 
@@ -5174,6 +5175,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 }
 
 func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T) {
+	testCity := t.TempDir()
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	stale, err := store.Create(beads.Bead{
@@ -5272,9 +5274,9 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
 	var reconcileStdout, reconcileStderr bytes.Buffer
-	reconcileSessionBeads(
-		context.Background(), open, firstTick.State, configuredSessionNames(cfg, "", store), cfg, sp,
-		store, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), testCity, open, firstTick.State, configuredSessionNames(cfg, "", store), cfg, sp,
+		store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &reconcileStdout, &reconcileStderr,
 	)
 	closedCanonical, err := store.Get(canonical.ID)

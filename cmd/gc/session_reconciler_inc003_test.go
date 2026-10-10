@@ -22,7 +22,7 @@ import (
 // for the env's clock.
 func inc003Env(t *testing.T, configured bool, wokeAt func(now time.Time) string) (*reconcilerTestEnv, beads.Bead) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
 	if configured {
 		env.cfg = &config.City{
@@ -234,7 +234,7 @@ func suspendRigAt(t *testing.T, cityPath, rig string) {
 // managed hold.
 func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerTestEnv, beads.Bead, string, string) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	agentCfg := config.Agent{Name: "orphan"}
 	if configured {
 		agentCfg.Name = "worker"
@@ -322,7 +322,7 @@ func TestReconcileSessionBeads_INC003_RuntimeSuspendDrainsWithoutGrace(t *testin
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.cfg = &config.City{Agents: tc.agents}
 			if tc.cause == "city" {
 				suspendCityAt(t, cityPath)
@@ -345,7 +345,7 @@ func TestReconcileSessionBeads_INC003_RuntimeSuspendDrainsWithoutGrace(t *testin
 func TestReconcileSessionBeads_INC003_OtherScopeSuspendedKeepsGrace(t *testing.T) {
 	cityPath := t.TempDir()
 	suspendRigAt(t, cityPath, "otherrig")
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Rigs: []config.Rig{{Name: "myrig", Path: filepath.Join(cityPath, "myrig")}, {Name: "otherrig", Path: filepath.Join(cityPath, "otherrig")}},
 		Agents: []config.Agent{
@@ -375,7 +375,7 @@ func TestReconcileSessionBeads_INC003_NamedNoSpecSuspendedDrainsOnConfirm(t *tes
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "warlord", Suspended: true}}}
 			if tc.cause == "city" {
 				suspendCityAt(t, cityPath)

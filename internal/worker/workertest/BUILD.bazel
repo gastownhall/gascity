@@ -31,6 +31,7 @@ go_test(
     srcs = [
         "catalog_phase2_data_test.go",
         "hangbudget_test.go",
+        "nocity_guard_test.go",
         "phase1_conformance_test.go",
         "phase2_conformance_test.go",
         "phase2_fake_worker_test.go",
@@ -39,7 +40,6 @@ go_test(
         "phase2_transcript_helpers_test.go",
         "phase3_conformance_test.go",
         "report_test.go",
-        "runtime_lease_optout_test.go",
         "structured_conformance_test.go",
         "structured_corpus_test.go",
         "telemetry_handle_conformance_test.go",

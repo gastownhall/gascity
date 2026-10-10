@@ -17,17 +17,12 @@ import (
 // starter or stopper (I-LEASE): the name's flock, which excludes every
 // holder in this process and on this host, and, when id is set, the record
 // on that open row. It never waits: a busy name is
-// session.ErrRuntimeLeaseBusy, and the caller defers. A relative city path
-// has no runtime dir to lock in, and refuses (session.ErrRuntimeLeaseNoCity). The
-// empty path is legacy's "no city" (as the session Manager reads it): its
-// callers without one, all in tests, lock nothing, and lease is nil.
-// release is idempotent.
+// session.ErrRuntimeLeaseBusy, and the caller defers. A city path that is
+// not absolute, the empty one included, has no runtime dir to lock in, and
+// refuses (session.RefuseWithoutCity). release is idempotent.
 func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Duration) (lease *session.RuntimeLease, release func(), err error) {
-	switch {
-	case cityPath == "":
-		return nil, func() {}, nil
-	case !filepath.IsAbs(cityPath):
-		return nil, nil, fmt.Errorf("%w: %q", session.ErrRuntimeLeaseNoCity, cityPath)
+	if !filepath.IsAbs(cityPath) {
+		return nil, nil, session.RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
 	}
 	var front *session.Store
 	if store != nil && id != "" {
@@ -47,11 +42,12 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 // to each. A lease failure other than busy (the store unreachable, the row
 // closed) is logged, and the sequence runs under the name's flock alone: a
 // store never holds a stop hostage. Busy is session.ErrRuntimeLeaseBusy, which
-// the caller defers to a later tick. Without a city path there is nothing to
-// lock.
+// the caller defers to a later tick. A city path that is not absolute has no
+// runtime dir to lock in: the stop refuses with session.ErrRuntimeLeaseNoCity
+// and kills nothing.
 func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (context.Context, func(), error) {
-	if cityPath == "" {
-		return session.WithoutLeaseWait(context.Background()), func() {}, nil // no city, no names to lock
+	if !filepath.IsAbs(cityPath) {
+		return nil, func() {}, session.RefuseWithoutCity(cityPath, fmt.Sprintf("the controller's stop of runtime %q", name))
 	}
 	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
 	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
@@ -95,7 +91,7 @@ func lockRuntimeName(w *World, row session.Info, front *session.Store, ttl time.
 	case name == "":
 		return "", nil, causeRouteUnknown, nil
 	case !filepath.IsAbs(w.CityPath):
-		return name, nil, causeLeaseNoCity, fmt.Errorf("%w: %q", session.ErrRuntimeLeaseNoCity, w.CityPath)
+		return name, nil, causeLeaseNoCity, session.RefuseWithoutCity(w.CityPath, fmt.Sprintf("runtime %q", name))
 	}
 	req := session.RuntimeLeaseRequest{City: w.CityPath, Name: name}
 	if front != nil {

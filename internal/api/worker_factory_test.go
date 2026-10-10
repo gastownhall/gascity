@@ -1027,7 +1027,7 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	}
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "resolved-worker", Env: nil, Resume: session.ProviderResume{
 			ResumeFlag:    "--old-resume",
@@ -1073,7 +1073,7 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	fs.cfg.Providers["resolved-worker"] = spec
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "/bin/echo --skip-permissions", WorkDir: t.TempDir(), Provider: "resolved-worker", Env: nil, Resume: session.ProviderResume{
 			ResumeCommand: "/bin/echo resume {{.SessionKey}} --skip-permissions",

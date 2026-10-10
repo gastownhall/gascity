@@ -60,10 +60,11 @@ func maxAgeReconcileCount(e *reconcilerTestEnv, sessions []beads.Bead, tr maxSes
 	}
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeadsTraced(
-		context.Background(), "", sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		context.Background(), e.city, sessions, e.desiredState, cfgNames, e.cfg, e.sp,
 		e.store, nil, nil, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
 		withMaxSessionAgeTracker(tr),
+		withAsyncDrainAckStopTracker(e.stops),
 	)
 }
 
@@ -82,7 +83,7 @@ func maxAgeReconcileSnapshot(e *reconcilerTestEnv, sessions []beads.Bead, tr max
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	reconcileSessionBeadsTracedWithNamedDemand(
-		context.Background(), "", snap.OpenForReconcile(), snap, e.desiredState, cfgNames, e.cfg, e.sp,
+		context.Background(), e.city, snap.OpenForReconcile(), snap, e.desiredState, cfgNames, e.cfg, e.sp,
 		beads.SessionStore{Store: e.store}, nil, nil, nil, nil, e.dt, nil, poolDesired, nil, nil, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
 		withMaxSessionAgeTracker(tr),
@@ -108,7 +109,7 @@ func snapshotInfoByID(snap *sessionBeadSnapshot, id string) (sessionpkg.Info, bo
 // write drops the fold, the session still looks awake, and it is respawned this
 // same tick (starts 1->2).
 func TestReconcileSessionBeads_MaxAgeKillSleepWriteFailureDoesNotRespawn(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	mem := beads.NewMemStore()
 	failing := &sleepWriteFailingStore{Store: mem, err: context.DeadlineExceeded, failsLeft: 1}
 	env.store = failing
@@ -155,7 +156,7 @@ func TestReconcileSessionBeads_MaxAgeKillSleepWriteFailureDoesNotRespawn(t *test
 // never received the sleep — which is exactly what the pre-fix applyStore dropped,
 // leaving a stale LastWokeAt that would mis-order fairness against a peer.
 func TestReconcileSessionBeads_MaxAgeKillFoldKeepsWakeFairnessCoherent(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	mem := beads.NewMemStore()
 	failing := &sleepWriteFailingStore{Store: mem, err: context.DeadlineExceeded, failsLeft: 1}
 	env.store = failing

@@ -675,9 +675,9 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 	}
 	done := make(chan int, 1)
 	go func() {
-		done <- reconcileSessionBeads(
-			context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
-			cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"db": 1, "cache": 1, "worker": 1}, false, nil, "",
+		done <- reconcileSessionBeadsAtPath(
+			context.Background(), t.TempDir(), sessions, desired, configuredSessionNames(cfg, "", store),
+			cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"db": 1, "cache": 1, "worker": 1}, false, nil, "",
 			nil, clk, rec, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
 		)
 	}()
@@ -711,7 +711,7 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 }
 
 func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
@@ -1488,7 +1488,7 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 		t.Fatalf("Create(session): %v", err)
 	}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp, order: 0}},
 		cfg,
@@ -1496,11 +1496,13 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 		sp,
 		store,
 		"",
+		t.TempDir(),
 		clk,
 		events.Discard,
 		5*time.Second,
 		ioDiscard{},
 		ioDiscard{},
+		nil,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
@@ -1700,7 +1702,7 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{
 			{Name: "blocked", MaxActiveSessions: intPtr(1), DependsOn: []string{"missing-dep"}},
@@ -1767,7 +1769,7 @@ func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testin
 // budget away from the 5-per-tick default. Cities with slow cold-starts
 // need this to drain the candidate queue.
 func TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	override := 8
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{MaxWakesPerTick: &override},
@@ -1874,7 +1876,7 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sCopy), tp: tp, order: i})
 	}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		candidates,
 		cfg,
@@ -1882,11 +1884,13 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		sp,
 		store,
 		"",
+		t.TempDir(),
 		clk,
 		events.Discard,
 		5*time.Second,
 		ioDiscard{},
 		ioDiscard{},
+		nil,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
@@ -2047,9 +2051,9 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 
 	poolDesired := map[string]int{"app-1": 1, "app-2": 1, "app-3": 1, "app-4": 1}
 	var stderr bytes.Buffer
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), t.TempDir(), sessions, desired, configuredSessionNames(cfg, "", store),
+		cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, &stderr,
 	)
 
@@ -2074,6 +2078,7 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 }
 
 func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t *testing.T) {
+	testCity := t.TempDir()
 	maxWakes := 8
 	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
@@ -2130,7 +2135,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		5*time.Second,
@@ -2164,7 +2169,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		5*time.Second,
@@ -2186,6 +2191,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 }
 
 func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2228,7 +2234,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 			sp,
 			store,
 			"test-city",
-			"",
+			testCity,
 			clk,
 			events.Discard,
 			time.Minute,
@@ -2279,6 +2285,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 0, 0, time.UTC)}
 	sp := newGatedStartProvider()
@@ -2319,7 +2326,7 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2340,6 +2347,10 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) {
+	testCity := t.TempDir()
+	// The async starts finish, once released, before the city is removed.
+	starts := &asyncStartTracker{}
+	t.Cleanup(func() { starts.wait(5 * time.Second) })
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 15, 0, time.UTC)}
 	sp := newGatedStartProvider()
@@ -2382,7 +2393,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2391,6 +2402,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
+		withAsyncStartTracker(starts),
 	); got != 1 {
 		t.Fatalf("first woken = %d, want 1", got)
 	}
@@ -2403,7 +2415,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2412,6 +2424,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
+		withAsyncStartTracker(starts),
 	); got != 0 {
 		t.Fatalf("second woken = %d, want 0 while shared limiter is full", got)
 	}
@@ -2447,7 +2460,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2456,6 +2469,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
+		withAsyncStartTracker(starts),
 	); got != 1 {
 		t.Fatalf("second woken after release = %d, want 1", got)
 	}
@@ -2466,6 +2480,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCancel(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 20, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2504,7 +2519,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2542,6 +2557,7 @@ func TestAsyncStartLimiterNilReceiverMethodsAreNoops(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2577,7 +2593,7 @@ func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		5*time.Second,
@@ -2598,6 +2614,7 @@ func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
 }
 
 func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 1, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2623,7 +2640,7 @@ func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testi
 
 	woken := reconcileSessionBeadsTraced(
 		ctx,
-		"",
+		testCity,
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		map[string]bool{"worker": true},
@@ -2658,6 +2675,7 @@ func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testi
 }
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 25, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2702,7 +2720,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2747,6 +2765,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 }
 
 func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2793,7 +2812,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2819,6 +2838,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *testing.T) {
+	testCity := t.TempDir()
 	store := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 27, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2855,7 +2875,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2877,6 +2897,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 }
 
 func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 28, 0, time.UTC)}
 	const identity = "test-city/worker"
@@ -2936,7 +2957,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2990,6 +3011,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 }
 
 func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3023,7 +3045,7 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -3212,14 +3234,16 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		t.TempDir(),
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		configuredSessionNames(cfg, "test-city", store),
 		cfg,
 		sp,
 		store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -3278,14 +3302,16 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 		SessionName:  "worker",
 		TemplateName: "worker",
 	}
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		t.TempDir(),
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		configuredSessionNames(cfg, "", store),
 		cfg,
 		sp,
 		store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -4922,7 +4948,8 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 }
 
 func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
-	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
+	// Batch 1 is the runtime lease record, 2 PreWake, 3 the post-start commit.
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 3}
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
 	tp := TemplateParams{
@@ -4953,7 +4980,7 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
 	}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		[]startCandidate{{info: sessiontest.SeedBead(t, bead), tp: tp, order: 0}},
 		&config.City{Agents: []config.Agent{{Name: "helper"}}},
@@ -4961,11 +4988,12 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 		sp,
 		store,
 		"",
+		t.TempDir(),
 		clk,
 		events.Discard,
 		5*time.Second,
 		ioDiscard{},
-		ioDiscard{},
+		ioDiscard{}, nil,
 	)
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0 after metadata batch retry", woken)
@@ -4989,6 +5017,7 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 // closed on the next tick if the runtime briefly dies — re-opening the
 // spin loop this PR is meant to close.
 func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
@@ -5010,7 +5039,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	if ok, _ := recoverRunningPendingCreate("", sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+	if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
 
@@ -5035,6 +5064,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 // verifiedStop would skip the incarnation check, and a re-woken runtime the old
 // raw-bead read spared would be killed. The returned batch MUST carry the mint.
 func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
@@ -5055,7 +5085,7 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	ok, batch := recoverRunningPendingCreate("", sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
+	ok, batch := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
 	if !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
@@ -5081,6 +5111,7 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 // promptDelivered mirrors the original launch), and stamps NOTHING for an empty
 // prompt (the P5 gate). Nothing reads the pair in Stage 2 — this pins the write.
 func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T) {
+	testCity := t.TempDir()
 	const prompt = "do the work"
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
@@ -5109,7 +5140,7 @@ func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T
 		store := beads.NewMemStore()
 		bead := newRecoveryBead(store)
 		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: prompt}
-		if ok, _ := recoverRunningPendingCreate("", sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 			t.Fatal("recoverRunningPendingCreate returned false, want true")
 		}
 		got, err := store.Get(bead.ID)
@@ -5128,7 +5159,7 @@ func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T
 		store := beads.NewMemStore()
 		bead := newRecoveryBead(store)
 		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: ""}
-		if ok, _ := recoverRunningPendingCreate("", sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 			t.Fatal("recoverRunningPendingCreate returned false, want true")
 		}
 		got, err := store.Get(bead.ID)
@@ -5386,9 +5417,10 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 	}
 
 	var stderr bytes.Buffer
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(), candidates, cfg, desired, sp, store, "",
-		clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr,
+		t.TempDir(),
+		clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr, nil,
 	)
 
 	if woken != dropAfter {
@@ -6318,15 +6350,19 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
-	results := executePreparedStartWave(
+	city := t.TempDir()
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{info: sessionpkg.Info{SessionName: "worker", SessionNameMetadata: "worker"}},
 			cfg:       runtime.Config{Command: "panic-provider"},
 		}},
+		city,
 		&panicStartProvider{Fake: runtime.NewFake()},
 		nil,
+		nil,
 		time.Second,
+		1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -6732,6 +6768,7 @@ func immediateSessionStaleKeyDetectionWaiter(context.Context, string) error {
 }
 
 func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	newItem := func(id, name string) preparedStart {
 		return preparedStart{
@@ -6761,7 +6798,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 				newItem("gc-first", "first-agent"),
 				newItem("gc-second", "second-agent"),
 			},
-			"",
+			city,
 			sp,
 			nil,
 			nil,
@@ -6813,7 +6850,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp)
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
 		Template: "worker",
@@ -6843,12 +6880,15 @@ func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBounda
 	waiter := newManualStartStabilityWaiter(t)
 	resultsCh := make(chan []startResult, 1)
 	go func() {
-		resultsCh <- executePreparedStartWave(
+		resultsCh <- executePreparedStartWaveForCity(
 			context.Background(),
 			[]preparedStart{item},
+			t.TempDir(),
 			sp,
 			store,
+			nil,
 			10*time.Second,
+			1,
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(func(ctx context.Context, name string) error {
 				if waiter.wait(ctx, name) {
@@ -6878,6 +6918,7 @@ func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBounda
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
+	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6897,12 +6938,15 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		cfg: runtime.Config{Command: "claude --resume stale-key-abc"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6919,6 +6963,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6941,12 +6986,15 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6963,6 +7011,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 }
 
 func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
+	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6981,12 +7030,15 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7023,12 +7075,14 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 		cfg: runtime.Config{Command: "claude --resume still-valid-key"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -7047,6 +7101,7 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 }
 
 func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -7072,12 +7127,15 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -7105,6 +7163,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 }
 
 func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -7132,12 +7191,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7159,6 +7221,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMismatch(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -7194,12 +7257,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMisma
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7246,12 +7312,14 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -7267,6 +7335,7 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 }
 
 func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallback(t *testing.T) {
+	city := t.TempDir()
 	sp := &existingProcessAliveSequenceProvider{
 		Fake: runtime.NewFake(),
 		alive: map[string][]bool{
@@ -7296,12 +7365,15 @@ func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallba
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -7347,12 +7419,14 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateIdentityMism
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -7398,12 +7472,14 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -7422,6 +7498,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 }
 
 func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t *testing.T) {
+	city := t.TempDir()
 	sp := &falseNegativeAfterStartProvider{
 		Fake:            runtime.NewFake(),
 		falseAfterStart: make(map[string]bool),
@@ -7447,12 +7524,15 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -7466,6 +7546,7 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 }
 
 func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFailure(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
@@ -7507,7 +7588,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
-		"",
+		city,
 		sp,
 		nil,
 		&config.City{},
@@ -7560,6 +7641,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 }
 
 func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 30, 0, 0, time.UTC)}
@@ -7600,7 +7682,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
-		"",
+		city,
 		sp,
 		nil,
 		&config.City{},

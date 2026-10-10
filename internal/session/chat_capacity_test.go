@@ -34,7 +34,7 @@ func seedResumableACPSession(t *testing.T, startErr func(sessName string) error)
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := &routeRecordingFake{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
 
 	b, err := store.Create(beads.Bead{
 		Type:   BeadType,

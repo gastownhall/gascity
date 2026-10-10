@@ -93,7 +93,7 @@ func TestHandleSessionResetClosedSessionConflicts(t *testing.T) {
 	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "reset-closed-test")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

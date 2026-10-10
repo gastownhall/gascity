@@ -216,6 +216,7 @@ func (c countingCAS) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) 
 // store that cannot fence, and a store that fails each refuse with their
 // own.
 func TestLockRuntimeNameRefusalCauses(t *testing.T) {
+	session.ExpectNoCityRefusalsForTest(t) // the relative-city case refuses
 	city := t.TempDir()
 	row := func(store beads.Store) session.Info {
 		b, err := store.Create(sessionRow("lease", "template", "worker", "session_name", "s-lease"))

@@ -70,7 +70,7 @@ type ownershipFixture struct {
 
 func newOwnershipFixture(t *testing.T) *ownershipFixture {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: ownershipPoolTemplate, MaxActiveSessions: intPtr(4)}}}
 	backing := beads.NewMemStore()
 	env.store = backing

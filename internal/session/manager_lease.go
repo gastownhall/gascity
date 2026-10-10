@@ -7,7 +7,6 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -79,7 +78,8 @@ func ContextWithRuntimeLease(ctx context.Context, l *RuntimeLease) context.Conte
 
 // CitySweepContext marks ctx as a stop-every-session sweep (`gc stop`, a rig
 // restart): its stops take no runtime lease, by design. It is the only way a
-// Manager stop goes without one besides a city path that is not absolute.
+// Manager stop goes without one: without it, a city path that is not absolute
+// refuses (ErrRuntimeLeaseNoCity).
 func CitySweepContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, citySweepCtxKey{}, true)
 }
@@ -127,33 +127,16 @@ func operatorRuntimeLease(l *RuntimeLease, err error) (*RuntimeLease, error) {
 	return l, err
 }
 
-// ErrRuntimeLeaseNoCity refuses a start or stop by a Manager whose city path
-// is not absolute: it has no runtime dir to take the lease in.
-var ErrRuntimeLeaseNoCity = errors.New("runtime lease: the session manager has no city path")
-
-// leaselessManagersAllowed lets tests run Managers without a city path
-// (AllowManagersWithoutCityForTest).
-var leaselessManagersAllowed atomic.Bool
-
-// AllowManagersWithoutCityForTest lets a test package's Managers without a
-// city path start and stop runtimes without the lease, as before L1. A test
-// package's init calls it; production never does.
-func AllowManagersWithoutCityForTest() { leaselessManagersAllowed.Store(true) }
-
-// RefuseManagersWithoutCityForTest undoes AllowManagersWithoutCityForTest
-// until restore, for a test that proves its paths pass a city. The test must
-// not run in parallel.
-func RefuseManagersWithoutCityForTest() (restore func()) {
-	prev := leaselessManagersAllowed.Swap(false)
-	return func() { leaselessManagersAllowed.Store(prev) }
-}
+// ErrRuntimeLeaseNoCity refuses a start or stop whose city path is not
+// absolute: there is no runtime dir to take the lease in (RefuseWithoutCity).
+var ErrRuntimeLeaseNoCity = errors.New("runtime lease: no absolute city path to take the lease in")
 
 // leaseRuntime takes the lease on session id's runtime sessName, waiting up
 // to wait (zero: not at all, for a caller under the session mutation lock).
 // release ends it. A lease ctx carries is the caller's: it is returned with a
 // no-op release, and must be on this session and runtime. A Manager whose city
 // path is not absolute refuses with ErrRuntimeLeaseNoCity, unless ctx is a
-// stop sweep or a test allowed it; then the lease is nil.
+// stop sweep; then the lease is nil.
 func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait time.Duration) (*RuntimeLease, func(), error) {
 	if borrowed, ok := ctx.Value(runtimeLeaseCtxKey{}).(*RuntimeLease); ok {
 		if borrowed.name != strings.TrimSpace(sessName) || (borrowed.id != "" && borrowed.id != id) {
@@ -165,10 +148,7 @@ func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait ti
 		return nil, func() {}, nil
 	}
 	if !filepath.IsAbs(m.cityPath) {
-		if !leaselessManagersAllowed.Load() {
-			return nil, func() {}, fmt.Errorf("%w (%q): session %q", ErrRuntimeLeaseNoCity, m.cityPath, id)
-		}
-		return nil, func() {}, nil
+		return nil, func() {}, RefuseWithoutCity(m.cityPath, fmt.Sprintf("session %q", id))
 	}
 	ttl := m.leaseTTL
 	if ttl <= 0 {
@@ -195,8 +175,7 @@ func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait ti
 // lease mode: a lease ctx carries or a stop sweep takes none; the controller
 // (WithoutLeaseWait) never waits and gets ErrRuntimeLeaseBusy; an operator
 // waits up to RuntimeLeaseOperatorWait, then gets ErrSessionStarting. A city
-// path that is not absolute refuses with ErrRuntimeLeaseNoCity, unless a test
-// allowed it.
+// path that is not absolute refuses with ErrRuntimeLeaseNoCity.
 func LeaseRuntimeName(ctx context.Context, cityPath, name string) (release func(), err error) {
 	_, borrowed := ctx.Value(runtimeLeaseCtxKey{}).(*RuntimeLease)
 	sweep, _ := ctx.Value(citySweepCtxKey{}).(bool)
@@ -204,10 +183,7 @@ func LeaseRuntimeName(ctx context.Context, cityPath, name string) (release func(
 	case borrowed || sweep:
 		return func() {}, nil
 	case !filepath.IsAbs(cityPath):
-		if leaselessManagersAllowed.Load() {
-			return func() {}, nil
-		}
-		return func() {}, fmt.Errorf("%w (%q): runtime %q", ErrRuntimeLeaseNoCity, cityPath, name)
+		return func() {}, RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
 	}
 	req := RuntimeLeaseRequest{City: cityPath, Name: name}
 	var l *RuntimeLease

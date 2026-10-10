@@ -64,7 +64,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		t.Fatalf("Get bead: %v", err)
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{
@@ -76,9 +76,11 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 				WorkDir: info.WorkDir,
 			},
 		}},
+		t.TempDir(),
 		sp,
 		store,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -107,6 +109,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 }
 
 func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 
 	usedWorker, err := startPreparedStartCandidate(
@@ -121,7 +124,7 @@ func TestStartPreparedStartCandidateUsesWorkerBoundaryForRuntimeOnlyTarget(t *te
 				WorkDir: t.TempDir(),
 			},
 		},
-		"",
+		city,
 		nil,
 		sp,
 		nil,
@@ -215,6 +218,7 @@ func TestStartPreparedStartCandidateDoesNotKillSessionSuspendedDuringSpawn(t *te
 }
 
 func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) {
+	testCity := t.TempDir()
 	sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
 
 	started, err := startPreparedStartCandidate(
@@ -226,7 +230,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"",
+		testCity,
 		nil,
 		sp,
 		nil,
@@ -249,6 +253,7 @@ func TestStartPreparedStartCandidateDefersWhenLivenessUnavailable(t *testing.T) 
 }
 
 func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) {
+	city := t.TempDir()
 	sp := &startConfirmedAbsentProvider{Fake: runtime.NewFake()}
 	started, err := startPreparedStartCandidate(
 		context.Background(),
@@ -259,7 +264,8 @@ func TestStartPreparedStartCandidateConvergesFromConfirmedAbsence(t *testing.T) 
 			},
 			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 		},
-		"", nil, sp, nil, nil, nil, nil,
+		city,
+		nil, sp, nil, nil, nil, nil,
 	)
 	if err != nil || !started {
 		t.Fatalf("startPreparedStartCandidate = (%v, %v), want started without error", started, err)
@@ -299,7 +305,7 @@ func TestExecutePreparedStartWaveDefersUnavailableWithoutRollbackOrWakeFailure(t
 				t.Fatalf("Create session: %v", err)
 			}
 			sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
-			results := executePreparedStartWave(
+			results := executePreparedStartWaveForCity(
 				context.Background(),
 				[]preparedStart{{
 					candidate: startCandidate{
@@ -308,9 +314,11 @@ func TestExecutePreparedStartWaveDefersUnavailableWithoutRollbackOrWakeFailure(t
 					},
 					cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
 				}},
+				t.TempDir(),
 				sp,
 				store,
-				10*time.Second,
+				nil,
+				10*time.Second, 1,
 			)
 			if len(results) != 1 {
 				t.Fatalf("len(results) = %d, want 1", len(results))

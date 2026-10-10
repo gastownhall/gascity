@@ -16,7 +16,7 @@ import (
 // Dolt commit — on every attached session bead with persistent drift. This test
 // fails on parent and passes after the fix.
 func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterval(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	sess := env.createSessionInfo("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
@@ -50,7 +50,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteWithinRefreshInterva
 // guard must only suppress writes for the same drift situation, not for
 // genuinely new drift.
 func TestRecordSessionAttachedConfigDriftDeferral_RewritesWhenKeyChanges(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	sess := env.createSessionInfo("worker", "worker")
 
 	if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, "key-A"); err != nil {
@@ -85,7 +85,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RewritesWhenKeyChanges(t *test
 // 15s), every 30s tick rewrote the stamp. It fails on that version and passes
 // after the fix.
 func TestRecordSessionAttachedConfigDriftDeferral_SkipsWriteAcrossManyTicks(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	sess := env.createSessionInfo("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
@@ -137,7 +137,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_RefreshKeepsWithinValidityWind
 			sessionAttachedConfigDriftRefreshInterval, sessionAttachedConfigDriftFalseNegativeLimit)
 	}
 
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	sess := env.createSessionInfo("worker", "worker")
 	const driftKey = "old-hash:new-hash"
 
@@ -207,7 +207,7 @@ func TestRecordSessionAttachedConfigDriftDeferral_SurvivesSkippedRefreshThenFlic
 		}
 
 		// Behavioral guard: drive the real reader at exactly the worst-case age.
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		sess := env.createSessionInfo("worker", "worker")
 		if err := recordSessionAttachedConfigDriftDeferral(sess, sessionFrontDoor(env.store), env.clk, driftKey); err != nil {
 			t.Fatalf("patrol=%s: record: %v", patrol, err)
