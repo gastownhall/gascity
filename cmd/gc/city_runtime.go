@@ -4153,7 +4153,7 @@ func healthBeadsProviderForPreflight(ctx context.Context, cityPath string) error
 // backgroundManagedDoltHealth adapts a context-aware health hook to the plain
 // signature ensureManagedDoltPublishedForRuntime takes, for the construction-
 // time preflight: no controller context exists yet, so it runs under
-// context.Background() as it always has.
+// context.Background().
 func backgroundManagedDoltHealth(health func(context.Context, string) error) func(string) error {
 	return func(cityPath string) error { return health(context.Background(), cityPath) }
 }
