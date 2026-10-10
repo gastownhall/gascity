@@ -79,7 +79,7 @@ func TestRuntimeLeaseCLIStartRole(t *testing.T) {
 	sp := stdinGatedProvider{runtime.NewFake()}
 	if role == "cli-start" {
 		mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
-		fmt.Printf("started err=%v\n", mgr.Start(context.Background(), id, "worker", runtime.Config{}, sessionpkg.ResumeOperator))
+		fmt.Printf("started err=%v\n", mgr.Start(context.Background(), testActorIn(t, sessionpkg.ActorOperator, city), id, "worker", runtime.Config{}))
 		return
 	}
 	bead, err := store.Get(id)
@@ -177,7 +177,7 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 		expect, proceed := spawn(t, f, storeDir, "legacy-start")
 		expect("starting")
 		mgr := sessionpkg.NewManagerWithOptions(f.store, runtime.NewFake(), sessionpkg.WithCityPath(f.city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
-		if err := mgr.Start(context.Background(), f.cand.info.ID, "worker", runtime.Config{}, sessionpkg.ResumeOperator); !errors.Is(err, sessionpkg.ErrSessionStarting) {
+		if err := mgr.Start(context.Background(), testActorIn(t, sessionpkg.ActorOperator, f.city), f.cand.info.ID, "worker", runtime.Config{}); !errors.Is(err, sessionpkg.ErrSessionStarting) {
 			t.Fatalf("CLI start while the controller starts = %v, want ErrSessionStarting", err)
 		}
 		if meta := mustGetBead(t, f.store, f.cand.info.ID).Metadata; meta[sessionpkg.RuntimeLeaseEpochKey] != "1" || meta["generation"] != "2" {

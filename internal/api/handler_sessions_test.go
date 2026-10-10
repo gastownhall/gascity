@@ -5164,7 +5164,7 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	if err != nil {
 		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperator, info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -5641,7 +5641,7 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperator, info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6581,7 +6581,7 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperator, info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6677,7 +6677,7 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperator, info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6701,7 +6701,7 @@ func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperator, info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6724,7 +6724,7 @@ func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperator, info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6760,7 +6760,7 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperator, info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6811,7 +6811,7 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperator, info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6865,7 +6865,7 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperator, info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

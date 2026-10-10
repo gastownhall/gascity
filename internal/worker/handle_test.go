@@ -38,7 +38,7 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		t.Fatalf("State(before start) = %s, want %s", state.Phase, PhaseStopped)
 	}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if handle.sessionID == "" {
@@ -87,7 +87,7 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		t.Fatalf("State.SessionName = %q, want %q", state.SessionName, info.SessionName)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), testOperator); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	callCount := len(sp.Calls)
@@ -126,7 +126,7 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := manager.Get(handle.sessionID)
@@ -205,7 +205,7 @@ func TestSessionHandleStateReusesDerivedActivityAcrossPolls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory.Session: %v", err)
 	}
-	if err := seat.Start(context.Background()); err != nil {
+	if err := seat.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := seat.manager.Get(seat.sessionID)
@@ -287,7 +287,7 @@ func TestSessionHandleAttachUsesWorkerBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(deferred): %v", err)
 	}
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testOperator); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -507,7 +507,7 @@ func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -516,7 +516,7 @@ func TestSessionHandleKillUsesWorkerBoundary(t *testing.T) {
 	}
 
 	sp.Calls = nil
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testOperator); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	stop := firstCall(sp.Calls, "Stop")
@@ -542,7 +542,7 @@ func TestSessionHandleCloseUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -551,7 +551,7 @@ func TestSessionHandleCloseUsesWorkerBoundary(t *testing.T) {
 	}
 
 	sp.Calls = nil
-	if err := handle.Close(context.Background()); err != nil {
+	if err := handle.Close(context.Background(), testOperator); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	stop := firstCall(sp.Calls, "Stop")
@@ -602,7 +602,7 @@ func TestSessionHandlePeekUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -734,7 +734,7 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -744,7 +744,7 @@ func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	sp.WaitForIdleErrors[info.SessionName] = nil
 
 	startCalls := len(sp.Calls)
-	if _, err := handle.Message(context.Background(), MessageRequest{
+	if _, err := handle.Message(context.Background(), testAgent, MessageRequest{
 		Text:     "replacement task",
 		Delivery: DeliveryIntentInterruptNow,
 	}); err != nil {
@@ -775,7 +775,7 @@ func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -784,7 +784,7 @@ func TestSessionHandleNudgeImmediateUsesWorkerBoundary(t *testing.T) {
 	}
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryImmediate,
 	})
@@ -820,7 +820,7 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -830,7 +830,7 @@ func TestSessionHandleNudgeWaitIdleUsesWorkerBoundary(t *testing.T) {
 	sp.WaitForIdleErrors[info.SessionName] = nil
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -872,12 +872,12 @@ func TestSessionHandleNudgeWaitIdleReturnsUndeliveredForUnsupportedProvider(t *t
 		Provider: "codex",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 	})
@@ -905,7 +905,7 @@ func TestSessionHandleLiveObservationUsesProviderRuntimeState(t *testing.T) {
 		Provider: "claude",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -941,7 +941,7 @@ func TestSessionHandleLiveObservationTracksProcessLiveness(t *testing.T) {
 		},
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -977,7 +977,7 @@ func TestSessionHandleNudgeWaitIdleLiveOnlyDoesNotResumeStoppedSession(t *testin
 	}
 
 	startCalls := len(sp.Calls)
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "queued reminder",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1006,7 +1006,7 @@ func TestSessionHandlePendingRespondAndBlockedState(t *testing.T) {
 		Provider: "codex",
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -1082,7 +1082,7 @@ func TestSessionHandleHistoryLoadsNormalizedTranscript(t *testing.T) {
 		filepath.Join("workertest", "testdata", "fixtures", "claude", "fresh"),
 	}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1137,7 +1137,7 @@ func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testi
 	})
 	handle.adapter.SearchPaths = []string{base}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start(first): %v", err)
 	}
 
@@ -1160,11 +1160,11 @@ func TestSessionHandleHistoryDoesNotPersistCodexResumeKeyFromTranscript(t *testi
 		t.Fatalf("session_key = %q, want empty; Codex resume keys come from SessionStart hook stdin", got)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), testOperator); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testOperator); err != nil {
 		t.Fatalf("Attach(second): %v", err)
 	}
 
@@ -1211,7 +1211,7 @@ func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCach
 	})
 	handle.adapter.SearchPaths = []string{base}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start(first): %v", err)
 	}
 
@@ -1234,11 +1234,11 @@ func TestSessionHandleStateDoesNotPersistCodexResumeKeyWithoutPrimingHistoryCach
 		t.Fatalf("session_key = %q, want empty; Codex resume keys come from SessionStart hook stdin", got)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), testOperator); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testOperator); err != nil {
 		t.Fatalf("Attach(second): %v", err)
 	}
 
@@ -1265,7 +1265,7 @@ func TestSessionHandleAgentMappingsAndTranscriptUseWorkerBoundary(t *testing.T) 
 	})
 	handle.adapter.SearchPaths = []string{base}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -1356,7 +1356,7 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	if err := handle.Interrupt(context.Background(), InterruptRequest{}); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testOperator); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if sp.IsRunning("legacy-worker") {
@@ -1384,10 +1384,10 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testOperator); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if err := handle.StartResolved(context.Background(), "/bin/echo", runtime.Config{}); err != nil {
+	if err := handle.StartResolved(context.Background(), testController, "/bin/echo", runtime.Config{}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	pending, supported, err := handle.PendingStatus(context.Background())
@@ -1429,7 +1429,7 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.CloseDetailed(context.Background())
+	result, err := handle.CloseDetailed(context.Background(), testOperator)
 	if err != nil {
 		t.Fatalf("CloseDetailed: %v", err)
 	}
@@ -1453,7 +1453,7 @@ func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
 	realFailure := errors.New("permission denied")
 	ops := []struct {
 		name string
-		run  func(*RuntimeHandle, context.Context) error
+		run  func(*RuntimeHandle, context.Context, sessionpkg.Actor) error
 	}{
 		{name: "Stop", run: (*RuntimeHandle).Stop},
 		{name: "Kill", run: (*RuntimeHandle).Kill},
@@ -1487,7 +1487,7 @@ func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
 					t.Fatalf("NewRuntimeHandle: %v", err)
 				}
 
-				err = op.run(handle, context.Background())
+				err = op.run(handle, context.Background(), testOperator)
 				if stop.wantErr == nil && err != nil {
 					t.Fatalf("%s against %s: %v, want nil", op.name, stop.name, err)
 				}
@@ -1767,7 +1767,7 @@ func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	if err := handle.StartResolved(context.Background(), "legacy --resume seeded", runtime.Config{
+	if err := handle.StartResolved(context.Background(), testController, "legacy --resume seeded", runtime.Config{
 		WorkDir: "/tmp/runtime-worker",
 	}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
@@ -1802,7 +1802,7 @@ func TestRuntimeHandleNudgeImmediateUsesImmediateProvider(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryImmediate,
 	})
@@ -1846,7 +1846,7 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1910,7 +1910,7 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 		cancel()
 	}()
 
-	result, err := handle.Nudge(ctx, NudgeRequest{
+	result, err := handle.Nudge(ctx, testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1944,7 +1944,7 @@ func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -1977,7 +1977,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testAgent, NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 	})
@@ -2097,7 +2097,7 @@ func TestSessionHandleHistoryStitchesGeminiRotatedTranscriptAcrossRestart(t *tes
 	})
 	handle.adapter.SearchPaths = []string{searchRoot}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -2187,7 +2187,7 @@ func TestSessionHandleHistoryRetainsStitchedHistoryAcrossPostRotationRewrite(t *
 	})
 	handle.adapter.SearchPaths = []string{searchRoot}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -2286,7 +2286,7 @@ func TestSessionHandleHistoryTreatsSameGeminiTranscriptRewriteAsReplacement(t *t
 		Provider: "gemini",
 	})
 	handle.adapter.SearchPaths = []string{searchRoot}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -2338,7 +2338,7 @@ func TestSessionHandleStartPassesSessionEnv(t *testing.T) {
 		},
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	var start *runtime.Call
@@ -2373,7 +2373,7 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 			"GC_WORKER_BOUNDARY": "start_resolved",
 		},
 	}
-	if err := handle.StartResolved(context.Background(), resolved.Command, resolved); err != nil {
+	if err := handle.StartResolved(context.Background(), testController, resolved.Command, resolved); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 
@@ -2404,7 +2404,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 		},
 	})
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start(first): %v", err)
 	}
 	firstStart := firstCall(sp.Calls, "Start")
@@ -2419,11 +2419,11 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 		t.Fatalf("first start command = %q, want no --resume", firstCommand)
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), testOperator); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testOperator); err != nil {
 		t.Fatalf("Attach(second): %v", err)
 	}
 	if len(sp.Calls) < 3 {
@@ -2452,7 +2452,7 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := manager.Suspend(info.ID); err != nil {
+	if err := manager.Suspend(context.Background(), testOperator, info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -2476,7 +2476,7 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 
 	sp.Calls = nil
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testOperator); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	start := firstCall(sp.Calls, "Start")
@@ -2648,7 +2648,7 @@ func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	})
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)

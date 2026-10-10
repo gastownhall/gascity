@@ -2483,6 +2483,10 @@ func startPreparedStartCandidate(
 			return false, fmt.Errorf("rig %q is suspended", rigName)
 		}
 	}
+	// The start runs under the candidate's lease (the controller's), which
+	// the runtime-only handle borrows instead of taking the name's flock.
+	by := sessionActor(sessionpkg.ActorController, cityPath)
+	by.Lease = item.candidate.lease
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
@@ -2497,13 +2501,13 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, err
 		}
-		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+		return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
 	}
 	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
-	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+	return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {
@@ -4631,7 +4635,7 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 	// A stop sweep (`gc stop`, a rig restart) stops every session, and takes
 	// no runtime lease by design (the allowlist).
 	if cityStopSessionMarked(store, target.sessionID) {
-		if err := workerKillSessionTargetCtx(sessionpkg.CitySweepContext(context.Background()), "", store, sp, cfg, targetID); err != nil {
+		if err := workerKillSessionTargetCtx(context.Background(), sessionpkg.Actor{Kind: sessionpkg.ActorSweep}, "", store, sp, cfg, targetID); err != nil {
 			return err
 		}
 		markCityStopSessionAsAsleep(sessionFrontDoor(store), target.sessionID, nil)

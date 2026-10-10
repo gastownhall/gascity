@@ -391,7 +391,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return 1
 			}
 			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-			if err := handle.Attach(context.Background()); err != nil {
+			if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -500,7 +500,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 
 	fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1556,7 +1556,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1779,7 +1779,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		return 1
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1867,7 +1867,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		closedSessionBead = beads.Bead{ID: sessionID}
 	}
 
-	closeResult, err := handle.CloseDetailed(context.Background())
+	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2465,7 +2465,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// --force also overrides a hung holder of the flock whose record expired.
 	// A lease failure other than busy never holds the kill hostage: it stops
 	// under the name's flock alone. The lease ends before the controller poke.
-	killCtx := context.Background()
+	killCtx, killBy := context.Background(), sessionActor(session.ActorOperator, cityPath)
 	releaseLease, leaseOverridden := func() {}, false
 	if infoErr == nil && !info.Closed {
 		req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
@@ -2476,7 +2476,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 		releaseLease, leaseOverridden = lease.Release, overridden
 		defer releaseLease()
-		killCtx = session.ContextWithRuntimeLease(killCtx, lease)
+		killBy.Lease = lease
 	}
 	var fence *sessionKillFence
 	if infoErr == nil && !info.Closed && !runtimeAlreadyInactive {
@@ -2490,7 +2490,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	}
 
-	killErr := handle.Kill(killCtx)
+	killErr := handle.Kill(killCtx, killBy)
 	if killErr != nil && fence != nil && sessionKillRuntimeGone(info, sp) {
 		// With the fence in place Manager.Kill sees an asleep row and falls
 		// through to the provider liveness check, which reports "not active"
@@ -2749,10 +2749,9 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
+	outcome, err := handle.Message(context.Background(), sessionActor(session.ActorOperator, cityPath), worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
-		Resume:   session.ResumeOperator,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr

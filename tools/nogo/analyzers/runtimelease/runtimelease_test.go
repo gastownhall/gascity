@@ -57,10 +57,17 @@ func (tmux) Start(Context, string, Config) error { return nil }
 func (tmux) Stop(string) error                            { return nil }
 func (tmux) TerminateRuntime(string) error                { return nil }
 
-func CitySweepContext(ctx Context) Context { return ctx }
+type ActorKind int
+
+const (
+	ActorOperator ActorKind = 1
+	ActorSweep    ActorKind = 5
+)
+
+type Actor struct{ Kind ActorKind }
 
 func killTarget(city, name string) error { return nil }
-func killCtx(ctx Context, city, name string) error { return nil }
+func killCtx(ctx Context, by Actor, city, name string) error { return nil }
 
 func unleased(sp Provider) { _ = sp.Stop("a") } // L26
 func unleasedConcrete(t tmux) { _ = t.Start(background(), "a", Config{}) } // L27
@@ -88,8 +95,8 @@ func helpers(ctx Context, city string) {
 	empty := ""
 	_ = killTarget(empty, "a") // L42
 	_ = killTarget(city, "a")
-	_ = killCtx(CitySweepContext(ctx), "", "a")
-	_ = killCtx(ctx, "", "a") // L45
+	_ = killCtx(ctx, Actor{Kind: ActorSweep}, "", "a")
+	_ = killCtx(ctx, Actor{Kind: ActorOperator}, "", "a") // L45
 }
 `
 
@@ -97,8 +104,8 @@ func analyzer(allowed map[string]runtimelease.Allowance) *runtimelease.Config {
 	return &runtimelease.Config{
 		Packages:    []string{pkg},
 		RuntimePkg:  pkg,
-		CityHelpers: map[string]int{"killTarget": 0, "killCtx": 1},
-		SweepCtx:    "CitySweepContext",
+		CityHelpers: map[string]int{"killTarget": 0, "killCtx": 2},
+		Sweep:       pkg + ".ActorSweep",
 		Allowed:     allowed,
 	}
 }

@@ -21,9 +21,6 @@ var ErrOperationUnsupported = errors.New("worker operation is unsupported")
 // RuntimeHandleConfig configures a worker handle for a legacy runtime-only
 // session target that has no bead-backed session identity.
 type RuntimeHandleConfig struct {
-	// CityPath is the city whose runtime dir holds the name's flock, which
-	// the handle's starts and stops take (session.LeaseRuntimeName).
-	CityPath     string
 	Provider     runtime.Provider
 	SessionName  string
 	ProviderName string
@@ -36,7 +33,6 @@ type RuntimeHandleConfig struct {
 // interface so higher layers do not bypass internal/worker for lifecycle or
 // pending interaction operations.
 type RuntimeHandle struct {
-	cityPath     string
 	provider     runtime.Provider
 	sessionName  string
 	providerName string
@@ -60,7 +56,6 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 		recorder = events.Discard
 	}
 	return &RuntimeHandle{
-		cityPath:     strings.TrimSpace(cfg.CityPath),
 		provider:     cfg.Provider,
 		sessionName:  strings.TrimSpace(cfg.SessionName),
 		providerName: strings.TrimSpace(cfg.ProviderName),
@@ -71,7 +66,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 }
 
 // Start reports unsupported for runtime-only handles that lack bead-backed state.
-func (h *RuntimeHandle) Start(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Start(ctx context.Context, _ sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStart)
 	defer func() { event.finish(err) }()
 
@@ -83,7 +78,7 @@ func (h *RuntimeHandle) Start(ctx context.Context) (err error) {
 }
 
 // StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) (err error) {
+func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, cfg runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -98,7 +93,7 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
 		return err
 	}
-	release, err := sessionpkg.LeaseRuntimeName(ctx, h.cityPath, h.sessionName)
+	release, err := sessionpkg.LeaseRuntimeName(ctx, by, h.sessionName)
 	if err != nil {
 		return err
 	}
@@ -107,9 +102,9 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 	return err
 }
 
-// stopUnderLease stops the runtime under the name's flock (ctx's lease mode).
-func (h *RuntimeHandle) stopUnderLease(ctx context.Context) error {
-	release, err := sessionpkg.LeaseRuntimeName(ctx, h.cityPath, h.sessionName)
+// stopUnderLease stops the runtime under the name's flock (by's lease mode).
+func (h *RuntimeHandle) stopUnderLease(ctx context.Context, by sessionpkg.Actor) error {
+	release, err := sessionpkg.LeaseRuntimeName(ctx, by, h.sessionName)
 	if err != nil {
 		return err
 	}
@@ -118,7 +113,7 @@ func (h *RuntimeHandle) stopUnderLease(ctx context.Context) error {
 }
 
 // Attach attaches to the live runtime session if it is currently running.
-func (h *RuntimeHandle) Attach(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Attach(ctx context.Context, _ sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationAttach)
 	defer func() { event.finish(err) }()
 
@@ -151,11 +146,11 @@ func (h *RuntimeHandle) Reset(ctx context.Context) (err error) {
 // Stop asks the provider to stop the live runtime session. A session that is
 // already gone satisfies the request, so it reports success — see
 // [runtime.StopForCleanup].
-func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Stop(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
 
-	err = h.stopUnderLease(ctx)
+	err = h.stopUnderLease(ctx, by)
 	return err
 }
 
@@ -165,41 +160,41 @@ func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
 // so the sweep can express its intent through one interface regardless of which
 // handle kind it holds.
 func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
-	return h.Stop(sessionpkg.CitySweepContext(ctx))
+	return h.Stop(ctx, sessionpkg.Actor{Kind: sessionpkg.ActorSweep})
 }
 
 // StopIdle is Stop for the chat idle auto-suspend; like StopForShutdown it
 // adds nothing to a handle with no session bead.
-func (h *RuntimeHandle) StopIdle(ctx context.Context) error {
-	return h.Stop(ctx)
+func (h *RuntimeHandle) StopIdle(ctx context.Context, by sessionpkg.Actor) error {
+	return h.Stop(ctx, by)
 }
 
 // Kill asks the provider to stop the live runtime session immediately. A
 // session that is already gone satisfies the request, so it reports success —
 // see [runtime.StopForCleanup].
-func (h *RuntimeHandle) Kill(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Kill(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationKill)
 	defer func() { event.finish(err) }()
 
-	err = h.stopUnderLease(ctx)
+	err = h.stopUnderLease(ctx, by)
 	return err
 }
 
 // Close asks the provider to close the live runtime session. A session that is
 // already gone satisfies the request, so it reports success — see
 // [runtime.StopForCleanup].
-func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
+func (h *RuntimeHandle) Close(ctx context.Context, by sessionpkg.Actor) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
-	err = h.stopUnderLease(ctx)
+	err = h.stopUnderLease(ctx, by)
 	return err
 }
 
 // CloseDetailed asks the provider to close the live runtime session and
 // returns no bead cleanup artifacts for runtime-only handles.
-func (h *RuntimeHandle) CloseDetailed(ctx context.Context) (sessionpkg.CloseResult, error) {
-	if err := h.Close(ctx); err != nil {
+func (h *RuntimeHandle) CloseDetailed(ctx context.Context, by sessionpkg.Actor) (sessionpkg.CloseResult, error) {
+	if err := h.Close(ctx, by); err != nil {
 		return sessionpkg.CloseResult{}, err
 	}
 	return sessionpkg.CloseResult{}, nil
@@ -249,7 +244,7 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 // Runtime-only sessions are permanently excluded from invocation
 // telemetry (gc.agent.tokens.*, gc.agent.invocation.cost_usd); see
 // SessionHandle.recordInvocationTelemetry. Do not add a telemetry hook here.
-func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
+func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req MessageRequest) (result MessageResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationMessage)
 	defer func() {
 		event.payload.Queued = boolPointer(result.Queued)
@@ -283,7 +278,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Nudge submits a best-effort reminder to the live runtime session.
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
-func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)

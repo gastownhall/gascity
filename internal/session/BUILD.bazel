@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "session",
     srcs = [
+        "actor.go",
         "address_directory.go",
         "alias.go",
         "assignee_identities.go",
@@ -92,6 +93,7 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "actor_test.go",
         "address_directory_test.go",
         "assignee_identities_test.go",
         "canonical_identity_test.go",

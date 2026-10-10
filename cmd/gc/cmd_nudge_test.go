@@ -524,7 +524,7 @@ func TestSendMailNotifyToHeldSessionQueuesWithoutPoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
@@ -581,7 +581,7 @@ func TestDeliverSessionNudgeToHeldSessionQueuesWithoutWake(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
-			if err := mgr.Suspend(info.ID); err != nil {
+			if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 				t.Fatalf("Suspend: %v", err)
 			}
 			prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
@@ -634,7 +634,7 @@ func TestDeliverSessionNudgeWithWorkerImmediateResumesUnheldSession(t *testing.T
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -687,7 +687,7 @@ func TestDeliverSessionNudgeWithWorkerAcksDeliveredUnobservedInsteadOfFailing(t 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -724,7 +724,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleResumesUnheldClaudeSession(t *test
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -782,7 +782,7 @@ func TestDeliverSessionNudgeWithWorkerManagedNonRunningQueuesWakeForController(t
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -871,7 +871,7 @@ func TestDeliverSessionNudgeWithWorkerManagedQueueFailureDoesNotWake(t *testing.
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	wait := createTestWaitBeadForSession(t, store, info.ID, waitStatePending)
@@ -947,7 +947,7 @@ func TestDeliverSessionNudgeWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "state", "closing"); err != nil {
@@ -1029,7 +1029,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1103,7 +1103,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -1586,7 +1586,7 @@ func TestSendMailNotifyWithWorkerManagedNonRunningQueuesWakeForController(t *tes
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -1680,7 +1680,7 @@ func TestSendMailNotifyWithWorkerCarriesMessageIDAsReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1724,7 +1724,7 @@ func TestSendMailNotifyWithWorkerManagedQueueFailureDoesNotWake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	wait := createTestWaitBeadForSession(t, store, info.ID, waitStatePending)
@@ -1804,7 +1804,7 @@ func TestSendMailNotifyQueuesIndependentRemindersForEachMail(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	// Recipient is not live, so notify falls back to a queued reminder.
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1851,7 +1851,7 @@ func TestSendMailNotifyWithWorkerManagedWakeFailureRollsBackQueuedNudge(t *testi
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "state", "closing"); err != nil {
@@ -1929,7 +1929,7 @@ func TestSendMailNotifyWithWorkerManagedWakePokeFailureIsNonFatal(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, dir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sleepUnheld(t, store, info.ID)
@@ -2085,7 +2085,7 @@ func TestSendMailNotifyWithWorkerStartsPollerBySessionIDForAliasedTarget(t *test
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "alias", "mayor"); err != nil {
@@ -2197,7 +2197,7 @@ func TestSendMailNotifyWithWorkerWaitIdlePreservesMailSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.WaitForIdleErrors[info.SessionName] = nil
@@ -2243,7 +2243,7 @@ func TestSendMailNotifyWithWorkerAcksDeliveredUnobservedInsteadOfDuplicating(t *
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.WaitForIdleErrors[info.SessionName] = nil
@@ -2292,7 +2292,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenRuntimeIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := fake.Stop(info.SessionName); err != nil {
@@ -2341,7 +2341,7 @@ func TestSendMailNotifyWithWorkerQueuesWhenDirectProviderMisses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "transport", "acp"); err != nil {
@@ -2546,7 +2546,7 @@ func TestTryDeliverQueuedNudgesByPollerSkipsHeldSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": "suspended", "sleep_intent": "user-hold"}); err != nil {
@@ -2578,7 +2578,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -2654,7 +2654,7 @@ func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -2723,7 +2723,7 @@ func TestTryDeliverQueuedNudgesByPollerDropsStaleMailReminder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -2809,7 +2809,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsFreshMailReminder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -2893,7 +2893,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsMailReminderWhenMailStoreRelocated(t
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -2955,7 +2955,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversActivitylessTimedOnlySession(t *t
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.WaitForIdleErrors[info.SessionName] = errors.New("idle wait should not be required")
@@ -3234,7 +3234,7 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -3296,7 +3296,7 @@ func TestTryDeliverQueuedNudgesByPollerCoalescesStaleFenceOntoLiveIncarnation(t 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	idleSince := time.Now().Add(-10 * time.Second)
@@ -3829,7 +3829,7 @@ func TestDeliverSlingNudgeWaitIdleWrapsInSystemReminder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testOperator, info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.WaitForIdleErrors[info.SessionName] = nil

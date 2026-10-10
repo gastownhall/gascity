@@ -583,7 +583,7 @@ func seedSuspendedResumeTarget(t *testing.T) (*Manager, *orphanScanProvider, Inf
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	sp.events = nil
@@ -627,7 +627,7 @@ func TestStartRefusesResumeWhenOrphanNotConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator)
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 	if err == nil {
 		t.Fatal("Start succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -677,7 +677,7 @@ func TestStartProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator); err != nil {
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
@@ -740,7 +740,7 @@ func TestStartUnwindsACPRouteWhenOrphanNotConfirmedDead(t *testing.T) {
 	}
 	sp.events = nil
 
-	err = mgr.Start(context.Background(), b.ID, "claude", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	err = mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{WorkDir: "/tmp"})
 	if err == nil {
 		t.Fatal("Start succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -871,7 +871,7 @@ func TestUpdateTemplateOverridesAllowsSuspendedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -900,7 +900,7 @@ func TestUpdateTemplateOverridesRejectsRecentWakeInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "last_woke_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -922,7 +922,7 @@ func TestUpdateTemplateOverridesRejectsPendingCreateClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "pending_create_claim", "true"); err != nil {
@@ -945,7 +945,7 @@ func TestUpdateTemplateOverridesWakeInFlightGraceBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -980,7 +980,7 @@ func TestUpdateTemplateOverridesAllowsOldWakeTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	oldWake := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339)
@@ -1007,7 +1007,7 @@ func TestUpdateTemplateOverridesUsesManagerClockForWakeWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	oldForManagerClock := mgr.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
@@ -1034,7 +1034,7 @@ func TestUpdateTemplateOverridesAllowsFailedCreateWithRecentWake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadataBatch(info.ID, map[string]string{
@@ -1062,7 +1062,7 @@ func TestUpdateTemplateOverridesRepairsMalformedMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "template_overrides", "{not-json"); err != nil {
@@ -1345,7 +1345,7 @@ func TestCreateSessionNamedWithTransport_ClosedSessionStillReservesName(t *testi
 	if err != nil {
 		t.Fatalf("first CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1535,7 +1535,7 @@ func TestSuspendAndResume(t *testing.T) {
 	}
 
 	// Suspend.
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1554,12 +1554,12 @@ func TestSuspendAndResume(t *testing.T) {
 	}
 
 	// Suspend again is idempotent.
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend (idempotent): %v", err)
 	}
 
 	// Resume via Attach.
-	err = mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	err = mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume", runtime.Config{})
 	if err != nil {
 		t.Fatalf("Attach (resume): %v", err)
 	}
@@ -1591,7 +1591,7 @@ func TestClose(t *testing.T) {
 	wait := createTestWait(t, store, info.ID)
 
 	// Close active session.
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1617,7 +1617,7 @@ func TestClose(t *testing.T) {
 	}
 
 	// Close again is idempotent.
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close (idempotent): %v", err)
 	}
 }
@@ -1643,7 +1643,7 @@ func TestCloseRemovesRuntimeMCPSnapshot(t *testing.T) {
 		t.Fatalf("Stat(runtime snapshot): %v", err)
 	}
 
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); !os.IsNotExist(err) {
@@ -1665,7 +1665,7 @@ func TestClose_ConfiguredNamedSessionRetiresIdentifiers(t *testing.T) {
 		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1709,7 +1709,7 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 		t.Fatalf("CreateSessionAliasedNamedWithTransportAndMetadata: %v", err)
 	}
 
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1845,7 +1845,7 @@ func TestAttachUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
 		t.Fatalf("creating session bead: %v", err)
 	}
 
-	if err := mgr.Attach(context.Background(), b.ID, "claude --resume abc", runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume abc", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -1907,12 +1907,12 @@ func TestCloseSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	// Close suspended session.
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1935,7 +1935,7 @@ func TestClose_IgnoresWaitCancellationFailure(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close should succeed despite wait cancellation failure: %v", err)
 	}
 
@@ -1964,7 +1964,7 @@ func TestList(t *testing.T) {
 	}
 
 	// Suspend the second one.
-	if err := mgr.Suspend(info2.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info2.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -2136,7 +2136,7 @@ func TestPeekSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -2155,11 +2155,11 @@ func TestAttachClosedErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	err = mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	err = mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume", runtime.Config{})
 	if err == nil {
 		t.Error("Attach to closed session should error")
 	}
@@ -2190,7 +2190,7 @@ func TestListExcludesClosedFromActiveFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -2215,7 +2215,7 @@ func TestAttachActiveReattach(t *testing.T) {
 	}
 
 	// Attach to an active session — should reattach without restarting.
-	err = mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{})
+	err = mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume", runtime.Config{})
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -2244,7 +2244,7 @@ func TestSuspendCrashedSession(t *testing.T) {
 	_ = sp.Stop(info.SessionName)
 
 	// Suspend should succeed even though runtime is dead.
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend crashed session: %v", err)
 	}
 
@@ -2267,7 +2267,7 @@ func TestSuspendCleansDeadRuntimeArtifact(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -2286,7 +2286,7 @@ func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if sp.stopCalls != 1 {
@@ -2325,8 +2325,8 @@ func TestSuspend_DownedServerSucceeds(t *testing.T) {
 			name    string
 			suspend func(*Manager, string) error
 		}{
-			{name: "Suspend", suspend: (*Manager).Suspend},
-			{name: "SuspendForShutdown", suspend: (*Manager).SuspendForShutdown},
+			{name: "Suspend", suspend: operatorSuspend},
+			{name: "SuspendForShutdown", suspend: sweepSuspend},
 		} {
 			t.Run(tc.name+"/"+entry.name, func(t *testing.T) {
 				store := beads.NewMemStore()
@@ -2938,10 +2938,10 @@ func TestPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := mgr.Suspend(s1.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), s1.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Suspend(s2.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), s2.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	wait1 := createTestWait(t, store, s1.ID)
@@ -2993,7 +2993,7 @@ func TestPruneDetailedReportsWaitNudges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	wait := createTestWait(t, store, info.ID)
@@ -3130,7 +3130,7 @@ func TestPruneDetailedContinuesAfterWaitLookupLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < SessionWaitLookupLimit+1; i++ {
@@ -3206,10 +3206,10 @@ func TestPruneUsesSuspendedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := mgr.Suspend(old.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), old.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Suspend(recent.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), recent.ID, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3258,7 +3258,7 @@ func TestSuspendSetsSuspendedAt(t *testing.T) {
 	}
 
 	before := time.Now().Add(-time.Second)
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3371,7 +3371,7 @@ func TestPruneDetailedAsleepOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Suspend(suspended.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), suspended.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetMetadata(suspended.ID, "suspended_at", tenDaysAgo); err != nil {
@@ -3607,11 +3607,11 @@ func TestSendResumesSuspendedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3646,11 +3646,11 @@ func TestSendImmediateUsesImmediateNudge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if _, err := mgr.SendImmediate(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("SendImmediate: %v", err)
 	}
 
@@ -3679,7 +3679,7 @@ func TestSendImmediateFallsBackToDefaultNudge(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := mgr.SendImmediate(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator); err != nil {
+	if _, err := mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{}); err != nil {
 		t.Fatalf("SendImmediate: %v", err)
 	}
 
@@ -3706,13 +3706,13 @@ func TestSendResumesSuspendedSession_SyncsGCDirFromBeadWorkDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{
 		Env: map[string]string{"GC_DIR": "/stale/worktree"},
-	}, ResumeOperator)
+	})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -3745,14 +3745,14 @@ func TestSendResumesSuspendedSession_PersistsBackfilledInstanceToken(t *testing.
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := store.SetMetadata(info.ID, "instance_token", ""); err != nil {
 		t.Fatalf("clear instance_token: %v", err)
 	}
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3775,11 +3775,11 @@ func TestSendResumesSuspendedACPSessionOnACPBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3815,7 +3815,7 @@ func TestSendReRoutesActiveACPSessionBeforeNudge(t *testing.T) {
 
 	autoSP.Unroute(info.SessionName)
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello again", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello again", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -3873,7 +3873,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 		return ""
 	}))
 
-	if _, err := mgr.Send(context.Background(), legacy.ID, "hello from legacy", "", runtime.Config{}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), legacy.ID, "hello from legacy", "", runtime.Config{}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -4195,14 +4195,14 @@ func TestSendConvergesWhenSessionAlreadyResumed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := sp.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -4234,11 +4234,11 @@ func TestSendRequiresResumeCommandForSuspendedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
 	if !errors.Is(err, ErrResumeRequired) {
 		t.Fatalf("Send error = %v, want ErrResumeRequired", err)
 	}
@@ -4253,11 +4253,11 @@ func TestSendClosedSessionReturnsErrSessionClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
 	if !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("Send error = %v, want ErrSessionClosed", err)
 	}
@@ -4273,7 +4273,7 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := sp.Fake.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
@@ -4281,7 +4281,7 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	}
 	sp.startErr = errors.New("out of memory")
 
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
 	if err == nil || !strings.Contains(err.Error(), "out of memory") {
 		t.Fatalf("Send error = %v, want underlying non-duplicate start failure", err)
 	}
@@ -4589,7 +4589,7 @@ func TestSendRejectsPendingInteraction(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
 	if !errors.Is(err, ErrPendingInteraction) {
 		t.Fatalf("Send error = %v, want %v", err, ErrPendingInteraction)
 	}
@@ -4616,7 +4616,7 @@ func TestSendImmediateRejectsPendingInteraction(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	_, err = mgr.SendImmediate(context.Background(), info.ID, "hello", "", runtime.Config{}, ResumeOperator)
+	_, err = mgr.SendImmediate(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
 	if !errors.Is(err, ErrPendingInteraction) {
 		t.Fatalf("SendImmediate error = %v, want %v", err, ErrPendingInteraction)
 	}
@@ -4681,7 +4681,7 @@ func TestTranscriptPathAllowsClosedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -4799,7 +4799,7 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 		workDir := t.TempDir()
 		searchBase := t.TempDir()
 		mgr, infos := newManagerWithSession(t, workDir, "one")
-		if err := mgr.Kill(infos[0].ID); err != nil {
+		if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), infos[0].ID); err != nil {
 			t.Fatalf("Kill(one): %v", err)
 		}
 		two, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -4884,10 +4884,10 @@ func TestTranscriptPathClosedSessionSkipsAmbiguousHistoricalWorkDirFallback(t *t
 	if err != nil {
 		t.Fatalf("Create two: %v", err)
 	}
-	if err := mgr.Close(info1.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info1.ID); err != nil {
 		t.Fatalf("Close one: %v", err)
 	}
-	if err := mgr.Close(info2.ID); err != nil {
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info2.ID); err != nil {
 		t.Fatalf("Close two: %v", err)
 	}
 
@@ -4954,7 +4954,7 @@ func TestKill_ActiveState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Kill(info.ID); err != nil {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Kill active session: %v", err)
 	}
 }
@@ -4971,7 +4971,7 @@ func TestKill_AwakeState(t *testing.T) {
 	if err := store.SetMetadata(info.ID, "state", string(StateAwake)); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
 	}
-	if err := mgr.Kill(info.ID); err != nil {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Kill awake session: %v", err)
 	}
 }
@@ -4990,7 +4990,7 @@ func TestKill_StoppedState_NotRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Kill(b.ID); err == nil {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), b.ID); err == nil {
 		t.Fatal("expected Kill to fail for stopped non-running session")
 	}
 }
@@ -5010,7 +5010,7 @@ func TestKill_UnknownState_ButRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Kill(b.ID); err != nil {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), b.ID); err != nil {
 		t.Fatalf("Kill running session with unknown state: %v", err)
 	}
 }
@@ -5032,7 +5032,7 @@ func TestKill_DownedServerReportsSuccess(t *testing.T) {
 	}
 	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
 
-	if err := mgr.Kill(info.ID); err != nil {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("Kill against a downed server: %v", err)
 	}
 	if !providerSawStop(sp, info.SessionName) {
@@ -5056,7 +5056,7 @@ func TestKill_StopFailurePropagates(t *testing.T) {
 	stopErr := errors.New("permission denied")
 	sp.StopErrors[info.SessionName] = stopErr
 
-	if err := mgr.Kill(info.ID); !errors.Is(err, stopErr) {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), info.ID); !errors.Is(err, stopErr) {
 		t.Fatalf("Kill with a real stop failure = %v, want %v", err, stopErr)
 	}
 }
@@ -5098,14 +5098,14 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.armed = true
 
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should retry without stale resume flag but failed: %v", err)
 	}
@@ -5145,13 +5145,13 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 		t.Fatal("expected session_key in bead metadata")
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.callCount = 0
 	resumeCmd := "claude --dangerously --resume " + b.Metadata["session_key"]
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	if err == nil {
 		t.Fatal("Send should fail when both stale-key resume and fresh retry fail")
@@ -5182,14 +5182,14 @@ func TestEnsureRunning_StaleKeyDetectionWaitHonorsContextCancellation(t *testing
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, err := mgr.Send(ctx, info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+		_, err := mgr.Send(ctx, testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"})
 		result <- err
 	}()
 	awaitStaleKeyWaiterEntry(t, waiter, info.SessionName)
@@ -5236,7 +5236,7 @@ func TestManagersUseIndependentStaleKeyDetectionWaiters(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSession(%s): %v", label, err)
 		}
-		if err := mgr.Suspend(info.ID); err != nil {
+		if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 			t.Fatalf("Suspend(%s): %v", label, err)
 		}
 		return resumable{mgr: mgr, sp: sp, info: info, waiter: waiter}
@@ -5247,7 +5247,7 @@ func TestManagersUseIndependentStaleKeyDetectionWaiters(t *testing.T) {
 	resume := func(r resumable) <-chan error {
 		result := make(chan error, 1)
 		go func() {
-			_, err := r.mgr.Send(context.Background(), r.info.ID, "hello", "claude --resume "+r.info.SessionKey, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			_, err := r.mgr.Send(context.Background(), testActor(r.mgr, ActorOperator), r.info.ID, "hello", "claude --resume "+r.info.SessionKey, runtime.Config{WorkDir: "/tmp"})
 			result <- err
 		}()
 		return result
@@ -5306,14 +5306,14 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 		t.Fatalf("SetMetadata started_config_hash: %v", err)
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.armed = true
 
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should retry after startup-death error but failed: %v", err)
 	}
@@ -5367,7 +5367,7 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -5375,7 +5375,7 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 
 	// The resume command carries no --resume token, so it is already a valid
 	// fresh-start command. Recovery must succeed rather than wedge.
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --dangerously", runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when resume command has no key to strip, got: %v", err)
 	}
@@ -5422,7 +5422,7 @@ func TestEnsureRunning_RetriesWhenResumeKeyDiverged(t *testing.T) {
 	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
 		t.Fatalf("SetMetadata session_key: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -5432,7 +5432,7 @@ func TestEnsureRunning_RetriesWhenResumeKeyDiverged(t *testing.T) {
 	// keyed strip ("--resume key-B-current") is a no-op against this command;
 	// only the value-agnostic fallback can produce a clean fresh start.
 	resumeCommand := "claude --dangerously --resume key-A-diverged"
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when resume key diverged, got: %v", err)
 	}
@@ -5469,14 +5469,14 @@ func TestEnsureRunning_RetriesWhenResumeKeyDivergedKeepsEarlierResumeText(t *tes
 	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
 		t.Fatalf("SetMetadata session_key: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.armed = true
 
 	resumeCommand := `claude --label "--resume keep-me" --resume key-A-diverged`
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when resume key diverged, got: %v", err)
 	}
@@ -5515,14 +5515,14 @@ func TestEnsureRunning_RetriesExplicitResumeCommandWhenResumeKeyDiverged(t *test
 	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
 		t.Fatalf("SetMetadata session_key: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.armed = true
 
 	resumeCommand := "claude --resume key-A-diverged --dangerously-skip-permissions"
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when explicit resume_command key diverged, got: %v", err)
 	}
@@ -5568,7 +5568,7 @@ func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
 	if err := store.SetMetadata(info.ID, "session_key", "key-B-current"); err != nil {
 		t.Fatalf("SetMetadata session_key: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -5579,7 +5579,7 @@ func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
 	// strip ("--session-id key-B-current") cannot match it; only the
 	// value-agnostic fallback produces a clean fresh start.
 	resumeCommand := "claude --dangerously-skip-permissions --session-id key-A-diverged"
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCommand, runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should recover via fresh start when session id key diverged, got: %v", err)
 	}
@@ -5641,7 +5641,7 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 		t.Fatalf("SetMetadata started_config_hash: %v", err)
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -5650,7 +5650,7 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 	// For a session without resume capability the "resume command"
 	// passed to Send is just the original start command — there is no
 	// --resume flag to add or strip.
-	_, err = mgr.Send(context.Background(), info.ID, "hello", "fakecmd --follow worker", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "fakecmd --follow worker", runtime.Config{WorkDir: "/tmp"})
 	if err != nil {
 		t.Fatalf("Send should retry fresh when resume_flag is empty but failed: %v", err)
 	}
@@ -5694,13 +5694,13 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.armed = true
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	_, err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
 	if err == nil {
 		t.Fatal("Send should fail when stale resume metadata cannot be cleared")
 	}
@@ -5735,7 +5735,7 @@ func TestCloseDetailed_StopErrorLeavesBeadOpen(t *testing.T) {
 	// Arm a non-idempotent terminate failure (not "session gone").
 	sp.StopErrors[info.SessionName] = errors.New("kill failed")
 
-	if _, err := mgr.CloseDetailed(info.ID); err == nil {
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), info.ID); err == nil {
 		t.Fatal("CloseDetailed: expected error when runtime Stop fails, got nil")
 	}
 
@@ -5766,7 +5766,7 @@ func TestCloseDetailed_DownedServerClosesBead(t *testing.T) {
 
 	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
 
-	if _, err := mgr.CloseDetailed(info.ID); err != nil {
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("CloseDetailed against a downed server: %v", err)
 	}
 	if !providerSawStop(sp, info.SessionName) {
@@ -5794,7 +5794,7 @@ func TestCloseDetailed_StopSuccessClosesBead(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := mgr.CloseDetailed(info.ID); err != nil {
+	if _, err := mgr.CloseDetailed(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
 		t.Fatalf("CloseDetailed: %v", err)
 	}
 
@@ -5946,4 +5946,21 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// testActor is an Actor of kind on m's city, the city its Manager leased in
+// before R10; a city path that names no directory gives no City.
+func testActor(m *Manager, kind ActorKind) Actor {
+	city, _ := NewCityDir(m.cityPath)
+	return Actor{Kind: kind, City: city}
+}
+
+// operatorSuspend is an operator's Suspend of id, as a method value.
+func operatorSuspend(m *Manager, id string) error {
+	return m.Suspend(context.Background(), testActor(m, ActorOperator), id, false)
+}
+
+// sweepSuspend is the city stop sweep's Suspend of id, as a method value.
+func sweepSuspend(m *Manager, id string) error {
+	return m.Suspend(context.Background(), testActor(m, ActorSweep), id, false)
 }

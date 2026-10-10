@@ -191,7 +191,7 @@ func TestAttachSurvivesATickAndItsFollowUpDuringStart(t *testing.T) {
 		}
 	}
 	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(city))
-	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	if sp.tick != nil {
@@ -242,7 +242,7 @@ func TestAttachSurvivesAStaleSnapshotDrainAck(t *testing.T) {
 				}
 			}
 			mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(city))
-			if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
+			if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 				t.Fatalf("Attach: %v", err)
 			}
 			if acked, _ := dops.isDrainAcked("worker"); !acked || before.Metadata["sleep_intent"] != "user-hold" {

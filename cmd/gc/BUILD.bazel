@@ -825,6 +825,7 @@ go_test(
     size = "large",
     srcs = [
         "acp_route_seed_test.go",
+        "actor_helpers_test.go",
         "adoption_barrier_test.go",
         "agent_home_worktree_cleanup_test.go",
         "allocator_backoff_test.go",

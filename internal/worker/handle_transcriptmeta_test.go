@@ -43,7 +43,7 @@ func claudeKeyedFixture(t *testing.T) (*SessionHandle, string, string) {
 		Provider: "claude",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -231,7 +231,7 @@ func TestSessionHandleWritesCodexSidecarByID(t *testing.T) {
 		Provider: "codex",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -307,7 +307,7 @@ func TestSessionHandleCodexSidecarIgnoresOutOfWindowDuplicate(t *testing.T) {
 		Provider: "codex",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()
@@ -362,7 +362,7 @@ func TestSessionHandleSkipsSidecarForWorkdirOnlyProvider(t *testing.T) {
 		Provider: "gemini",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testAgent); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := handle.currentSessionID()

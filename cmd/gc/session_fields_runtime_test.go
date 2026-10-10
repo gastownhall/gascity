@@ -382,7 +382,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, m, id).Metadata
 			},
 		},
-		"internal/session/manager.go:Manager.suspend": {
+		"internal/session/manager.go:Manager.Suspend": {
 			[]string{"state", "asleep", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)

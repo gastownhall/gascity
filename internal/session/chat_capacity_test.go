@@ -128,7 +128,7 @@ func TestEnsureRunningRuntimeOnly_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *t
 func TestEnsureRunning_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *testing.T) {
 	mgr, sp, store, id, sessName := seedResumableACPSession(t, capacityRefusal)
 
-	err := mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	assertCapacityRefusalKeptConversation(t, err, sp, store, id, sessName)
 }
