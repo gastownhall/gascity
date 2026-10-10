@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -242,6 +243,51 @@ func TestCityAllowSchemaBehindMigrateWithoutConfigInHand(t *testing.T) {
 			}
 			if got := strings.Count(warnings.String(), line); got != wantLines {
 				t.Errorf("warning %q printed %d times, want %d; output:\n%s", line, got, wantLines, warnings.String())
+			}
+		})
+	}
+}
+
+// TestPreflightIdentityProbeSkipNarrowerThanDeferral locks the split between
+// the two identity gates (gastownhall/gascity#5965). Both a loopback and a
+// remote external endpoint defer an unconfirmed probe to native-open
+// verification, but only the remote one — a hosted beads-gateway or hub the
+// root/plaintext probe cannot authenticate — skips the probe outright. A
+// loopback external endpoint speaks plaintext, so its probe still runs and a
+// genuine project_id mismatch still blocks native activation.
+func TestPreflightIdentityProbeSkipNarrowerThanDeferral(t *testing.T) {
+	cases := []struct {
+		name      string
+		host      string
+		wantDefer bool
+		wantSkip  bool
+	}{
+		{name: "loopback external", host: "127.0.0.1", wantDefer: true, wantSkip: false},
+		{name: "remote external", host: "gw.beads.example", wantDefer: true, wantSkip: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeCanonicalScopeConfig(t, cityPath, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginCityCanonical,
+				EndpointStatus: contract.EndpointStatusVerified,
+				DoltHost:       tc.host,
+				DoltPort:       "3307",
+			})
+			target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath)
+			if err != nil || !ok {
+				t.Fatalf("canonicalScopeDoltTarget() = ok %v, err %v; want an authoritative target", ok, err)
+			}
+			if !target.External {
+				t.Fatalf("target.External = false for %s; fixture must resolve an external endpoint", tc.host)
+			}
+
+			if got := preflightIdentityDeferredReader(cityPath)(cityPath); got != tc.wantDefer {
+				t.Errorf("preflightIdentityDeferredReader(%s) = %v, want %v", tc.host, got, tc.wantDefer)
+			}
+			if got := preflightIdentityProbeSkipReader(cityPath)(cityPath); got != tc.wantSkip {
+				t.Errorf("preflightIdentityProbeSkipReader(%s) = %v, want %v", tc.host, got, tc.wantSkip)
 			}
 		})
 	}
