@@ -195,6 +195,8 @@ func bdReadMemoClassify(name string, args []string) bdMemoClass {
 		return bdMemoInvalidating
 	}
 	// Mode flags that only narrow what bd may do come before the verb.
+	// Both are bd global flags (internal/bdflags registers the full set);
+	// a list, query, ready or show led by any other flag is not cached.
 	for len(args) > 0 && (args[0] == "--readonly" || args[0] == "--sandbox") {
 		args = args[1:]
 	}
