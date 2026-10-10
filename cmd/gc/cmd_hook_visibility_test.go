@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -238,6 +239,71 @@ func TestHookCandidateVisibleWorkflowRunTargetFallback(t *testing.T) {
 	}
 	if hookCandidateVisible(candidate, nil, []string{"gascity/reviewer"}) {
 		t.Fatal("workflow run_target for a different agent must not be visible")
+	}
+}
+
+// TestHookCandidateVisibleExpandedWorkflowRootAdmission pins fresh
+// workflow-root admission on the display path (#6461): an unassigned expanded
+// root is not shown, the same root owned by this session stays visible as its
+// anchor, and a root-only root stays visible as the unit of work.
+func TestHookCandidateVisibleExpandedWorkflowRootAdmission(t *testing.T) {
+	expanded := func(assignee string) beads.Bead {
+		return beads.Bead{
+			ID: "wf-expanded", Status: "open", Assignee: assignee,
+			Metadata: beads.StringMap{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:  beadmeta.FormulaContractGraphV2,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+				beadmeta.RoutedToMetadataKey:         "gascity/builder",
+			},
+		}
+	}
+	identities := []string{"gascity/builder"}
+	routeTargets := []string{"gascity/builder"}
+
+	if hookCandidateVisible(expanded(""), identities, routeTargets) {
+		t.Fatal("an unassigned expanded workflow root must not be visible as fresh work")
+	}
+	if !hookCandidateVisible(expanded("gascity/builder"), identities, routeTargets) {
+		t.Fatal("an expanded workflow root this session owns must stay visible")
+	}
+	rootOnly := expanded("")
+	delete(rootOnly.Metadata, beadmeta.WorkflowExpandedMetadataKey)
+	rootOnly.Metadata[beadmeta.NativeStepDependenciesMetadataKey] = "[]"
+	if !hookCandidateVisible(rootOnly, identities, routeTargets) {
+		t.Fatal("a root-only workflow root must stay visible")
+	}
+}
+
+// TestFilterUnreadyHookCandidatesDropsUnassignedExpandedWorkflowRoot pins the
+// admission rule in the Go seam every hook path shares, so a custom work query
+// that still returns an unassigned expanded root cannot hand it to a worker.
+// Owned roots and root-only roots pass through.
+func TestFilterUnreadyHookCandidatesDropsUnassignedExpandedWorkflowRoot(t *testing.T) {
+	raw := `[
+		{"id":"fresh-expanded-root","status":"open","assignee":"","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true","gc.routed_to":"gascity/builder"}},
+		{"id":"boolean-expanded-root","status":"open","metadata":{"gc.kind":"workflow","gc.workflow_expanded":true}},
+		{"id":"whitespace-expanded-root","status":"open","metadata":{"gc.kind":" workflow ","gc.workflow_expanded":" true "}},
+		{"id":"owned-expanded-root","status":"in_progress","assignee":"gascity/builder","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true","gc.routed_to":"gascity/builder"}},
+		{"id":"root-only-root","status":"open","metadata":{"gc.kind":"workflow","gc.routed_to":"gascity/builder"}},
+		{"id":"ready-step","status":"open","metadata":{"gc.kind":"task","gc.root_bead_id":"fresh-expanded-root","gc.routed_to":"gascity/builder"}}
+	]`
+	var kept []beads.Bead
+	if err := json.Unmarshal([]byte(filterUnreadyHookCandidates(raw, time.Now())), &kept); err != nil {
+		t.Fatalf("unmarshal filtered output: %v", err)
+	}
+	var ids []string
+	for _, b := range kept {
+		ids = append(ids, b.ID)
+	}
+	want := []string{"owned-expanded-root", "root-only-root", "ready-step"}
+	if len(ids) != len(want) {
+		t.Fatalf("kept ids = %v, want %v", ids, want)
+	}
+	for i, id := range want {
+		if ids[i] != id {
+			t.Errorf("kept[%d] = %q, want %q (full: %v)", i, ids[i], id, ids)
+		}
 	}
 }
 

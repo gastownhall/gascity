@@ -79,7 +79,7 @@ The execution model is the structural difference from v1:
 | Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, drain, scope checks, workflow-finalize |
 | Who advances work | Agents working hooked beads, inside their own sessions | The orchestrator drives orchestration outside any agent session; agents only run plain work beads |
 | Agent fan-out | The molecule is typically worked by the one agent it is slung to; spreading steps across agents is manual routing | Step beads are independently routable; per-step routing intent resolves at dispatch, and `drain` / `on_complete` fan out across agents or pools at runtime |
-| Root visibility | The container root is the molecule's handle | The root blocks on `workflow-finalize` and only becomes Ready when the workflow completes (section 2) |
+| Root visibility | The container root is the molecule's handle | The root is a controller-owned latch. It carries `gc.routed_to` and is dependency-ready from creation, but expanded roots are excluded from fresh worker demand and claims; `workflow-finalize` closes them (section 2) |
 
 A minimal v2 formula:
 
@@ -538,6 +538,18 @@ The v2 compiler must emit a flat, topologically ordered graph:
   whose `gc.kind` is not one of the generated `run`, `check`, `retry-run`,
   `retry-eval`, or `spec` kinds. The root is controller-owned; step beads are
   the work that wakes agents and pools.
+- **Expanded roots are not fresh worker work.** Because the finalize edge is
+  non-blocking, the root is dependency-ready from creation, and it carries the
+  graph's `gc.routed_to` so root-only workflows stay claimable and drain
+  readers can recover the execution route. A root compiled with real step
+  beads is stamped `gc.workflow_expanded = "true"`, and every reader of
+  unassigned routed work — the generated pool tier, the controller's demand
+  count, and `gc hook --claim` — refuses such a root while it has no assignee.
+  A root-only formula's root is never stamped and remains the claimable unit
+  of work. A session that already owns a root keeps it as its continuation
+  anchor and is served the root's ready steps first. Older expanded roots
+  missing the stamp require a one-time metadata update after verifying their
+  persisted workflow membership.
 - **Non-blocking `tracks` edges to the root.** Batch instantiation connects
   every non-root node to the root with a `tracks` edge so cascade deletion
   from the root discovers all workflow beads without making the root a

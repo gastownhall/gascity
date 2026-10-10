@@ -61,6 +61,50 @@ func TestProcessDrainSeparateExpandsConvoyIntoUnitRoots(t *testing.T) {
 	}
 }
 
+// TestProcessDrainSeparateItemRootsCarryExpandedStampWhileReady pins the
+// creation-path half of fresh workflow-root admission (#6461): a drain item
+// root is open and dependency-ready from creation, so the admission rule that
+// keeps a second seat off it depends on the gc.workflow_expanded stamp
+// actually landing on the drain's roots.
+func TestProcessDrainSeparateItemRootsCarryExpandedStampWhileReady(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+
+	if _, err := ProcessControl(store, drain, ProcessOptions{FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	manifest := mustDrainManifest(t, drain)
+	if len(manifest.Rows) != 2 {
+		t.Fatalf("manifest rows = %d, want 2", len(manifest.Rows))
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, row := range manifest.Rows {
+		root := mustGetBead(t, store, row.ItemRootID)
+		if root.Status != "open" || root.Assignee != "" {
+			t.Fatalf("item root %s = status %q assignee %q, want a fresh open root", root.ID, root.Status, root.Assignee)
+		}
+		if !beadListContainsID(ready, root.ID) {
+			t.Fatalf("item root %s is not ready; the admission rule exists because it is. ready=%+v", root.ID, ready)
+		}
+		if !beadmeta.IsExpandedWorkflow(root.Metadata) {
+			t.Fatalf("item root %s metadata = %#v, want gc.kind=workflow with gc.workflow_expanded=true", root.ID, root.Metadata)
+		}
+		work := mustFindDrainItemWorkStep(t, store, root.ID)
+		if beadmeta.IsExpandedWorkflow(work.Metadata) {
+			t.Fatalf("item work step %s reads as an expanded root: %#v", work.ID, work.Metadata)
+		}
+		if !beadListContainsID(ready, work.ID) {
+			t.Fatalf("item work step %s should be the ready work; ready=%+v", work.ID, ready)
+		}
+	}
+}
+
 func TestProcessDrainSeparateProjectsMemberDependenciesOntoItemWorkflows(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
