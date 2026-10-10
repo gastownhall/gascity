@@ -164,7 +164,8 @@ func (s *downGetStore) Get(id string) (beads.Bead, error) {
 }
 
 // TestAutocloseSweepRetriesAnUnconfirmedClose: a close deferred because the
-// row could not be read is retried until a read answers.
+// row could not be read is retried until a read answers, one sweep pass
+// interval later (divided here, as the test speedup divides it).
 func TestAutocloseSweepRetriesAnUnconfirmedClose(t *testing.T) {
 	backing := beads.NewMemStore()
 	convoy, err := backing.Create(beads.Bead{Title: "batch", Type: "convoy"})
@@ -181,7 +182,9 @@ func TestAutocloseSweepRetriesAnUnconfirmedClose(t *testing.T) {
 	store := &downGetStore{Store: backing}
 	store.down.Store(true)
 	cs := &controllerState{cityBeadStore: store, eventProv: events.NewFake()}
-	cs.autocloseSweepOf().deferID(member.ID, sweepTestClock(0))
+	sweep := cs.autocloseSweepOf()
+	sweep.interval, sweep.grace = autocloseSweepInterval/6, autocloseSweepGrace/6
+	sweep.deferID(member.ID, sweepTestClock(0))
 
 	if got := cs.runAutocloseSweepPass(sweepTestClock(0)); got.Retried != 1 {
 		t.Fatalf("pass while down = %+v, want one retry", got)
@@ -190,7 +193,7 @@ func TestAutocloseSweepRetriesAnUnconfirmedClose(t *testing.T) {
 	if got := cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 0 {
 		t.Fatalf("the retry ran before it was due: %+v", got)
 	}
-	if got := cs.runAutocloseSweepPass(sweepTestClock(1)); got.Ran != 1 {
+	if got := cs.runAutocloseSweepPass(sweepTestClock(0).Add(sweep.interval)); got.Ran != 1 {
 		t.Fatalf("pass after recovery = %+v, want one autoclose", got)
 	}
 	if got := statusOf(t, backing, convoy.ID); got != "closed" {
@@ -485,7 +488,8 @@ func (s *listDownStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 // TestAutocloseLeavesARunWithAFailedReadToTheSweep: a bead is marked handled
 // only once autoclose has finished its reads. A read error leaves it pending;
 // the sweep retries while the store is down and closes the convoy once it is
-// back.
+// back, one sweep pass interval (divided here, as the test speedup divides
+// it) after the failed retry.
 func TestAutocloseLeavesARunWithAFailedReadToTheSweep(t *testing.T) {
 	syncAutoclose(t)
 	mem := beads.NewMemStore()
@@ -497,11 +501,13 @@ func TestAutocloseLeavesARunWithAFailedReadToTheSweep(t *testing.T) {
 	store := &listDownStore{Store: mem}
 	store.down.Store(true)
 	cs := &controllerState{cityBeadStore: store, eventProv: events.NewFake()}
+	sweep := cs.autocloseSweepOf()
+	sweep.interval, sweep.grace = autocloseSweepInterval/6, autocloseSweepGrace/6
 	closed, _ := mem.Get(member.ID)
 	payload, _ := beads.EncodeBeadEventPayload(closed)
 
 	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: member.ID, Payload: payload})
-	if cs.autocloseSweepOf().hasRan(member.ID) || !cs.autocloseSweepOf().isPending(member.ID) {
+	if sweep.hasRan(member.ID) || !sweep.isPending(member.ID) {
 		t.Fatal("a run whose reads failed was marked handled")
 	}
 	now := time.Now().Add(time.Second)
@@ -509,7 +515,10 @@ func TestAutocloseLeavesARunWithAFailedReadToTheSweep(t *testing.T) {
 		t.Fatalf("sweep while down = %+v, want one retry", got)
 	}
 	store.down.Store(false)
-	if got := cs.runAutocloseSweepPass(now.Add(autocloseSweepInterval)); got.Ran != 1 {
+	if got := cs.runAutocloseSweepPass(now); got.Ran != 0 {
+		t.Fatalf("the retry ran before it was due: %+v", got)
+	}
+	if got := cs.runAutocloseSweepPass(now.Add(sweep.interval)); got.Ran != 1 {
 		t.Fatalf("sweep after recovery = %+v, want one autoclose", got)
 	}
 	if got := statusOf(t, mem, convoy.ID); got != "closed" {
@@ -639,6 +648,44 @@ func TestAutocloseSweepLeavesASuspendedRigCold(t *testing.T) {
 	quiescent.Store(false)
 	if got := cs.runAutocloseSweepPass(sweepTestClock(4)); got.Ran != 1 {
 		t.Fatalf("after resume the sweep ran autoclose %d time(s), want 1", got.Ran)
+	}
+}
+
+// The grace and every re-defer are timed on the sweep's own pass interval, so
+// under the test speedup, which divides that interval, a departure and a
+// suspended rig's deferred close still come due on the next pass. Deferred by
+// the real minute, they would wait six sped-up passes, longer than the
+// shortened quiescence window the speedup exists for.
+func TestAutocloseSweepDefersByItsOwnPassInterval(t *testing.T) {
+	cs, backing, cached, _, convoy, member := convoySweepFixture(t)
+	sweep := cs.autocloseSweepOf()
+	// What clock.Backstop makes of them in a test-hooks gc at speedup 6.
+	sweep.interval, sweep.grace = autocloseSweepInterval/6, autocloseSweepGrace/6
+	pass := func(i int) time.Time { return sweepEpoch.Add(time.Duration(i) * sweep.interval) }
+
+	cs.runAutocloseSweepPass(pass(0))
+	if err := backing.Close(member.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cached.List(beads.ListQuery{Live: true, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	cached.ReconcileNowForTest()
+	cached.ReconcileNowForTest()
+	cs.runAutocloseSweepPass(pass(1))
+
+	cs.setSuspendedRigs(map[string]bool{"r": true})
+	for i := 2; i <= 3; i++ {
+		if got := cs.runAutocloseSweepPass(pass(i)); got.Retried != 1 || got.Ran != 0 {
+			t.Fatalf("pass %d = %+v, want the suspended rig's close due and deferred again on every pass", i, got)
+		}
+	}
+	cs.setSuspendedRigs(nil)
+	if got := cs.runAutocloseSweepPass(pass(4)); got.Ran != 1 {
+		t.Fatalf("the first pass after resume = %+v, want one autoclose", got)
+	}
+	if got := statusOf(t, backing, convoy.ID); got != "closed" {
+		t.Fatalf("convoy %s after the sweep, want closed", got)
 	}
 }
 
