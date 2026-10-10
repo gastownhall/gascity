@@ -199,11 +199,25 @@ func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
 		if role == nil || role["type"] != "choice" || role["default"] != "burst" || len(opts) != 2 || opts[0] != "burst" || opts[1] != "floor" {
 			t.Errorf("%s: workflow_dispatch input role = %v, want a choice of burst (default) or floor", tc.path, role)
 		}
-		if n := strings.Count(text, "inputs.role"); n != 1 {
-			t.Errorf("%s: inputs.role used %d times, want once (run-name only: the worker never reads it)", tc.path, n)
+		// run-name alone reads role: no other reference (inputs.role,
+		// inputs['role'], github.event.inputs.role) and no whole-inputs
+		// exposure (toJSON(inputs), toJSON(github.event), toJSON(github),
+		// github.event.inputs) a step could read. Expressions ignore case
+		// (Inputs.Role, toJson), so the patterns do too.
+		refs := rbeRoleInputRef.FindAllStringIndex(text, -1)
+		if len(refs) != 1 || !strings.HasPrefix(text[strings.LastIndex(text[:refs[0][0]], "\n")+1:], "run-name: ") {
+			t.Errorf("%s: input role referenced %d times, want once, in run-name (the worker never reads it)", tc.path, len(refs))
+		}
+		if m := rbeWholeInputs.FindString(text); m != "" {
+			t.Errorf("%s: %q exposes every input, role included, beyond run-name", tc.path, m)
 		}
 	}
 }
+
+var (
+	rbeRoleInputRef = regexp.MustCompile(`(?i)inputs\s*(\.\s*role\b|\[\s*['"]role['"]\s*\])`)
+	rbeWholeInputs  = regexp.MustCompile(`(?i)toJSON\(\s*(github(\s*\.\s*event(\s*\.\s*inputs)?)?|inputs)\s*\)|github\s*\.\s*event\s*\.\s*inputs`)
+)
 
 func rbeSortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
