@@ -38,6 +38,13 @@ var (
 	// runColdLoadWait bounds how long a first request blocks for the cold replay
 	// before returning a partial (warming) snapshot. A var so tests can shorten it.
 	runColdLoadWait = 5 * time.Second
+	// runProjectWait bounds how long a reader blocks for a deferred projection
+	// (one the tail folded while nobody was watching) before serving the previous
+	// generation rather than the request. It is a safety net, not the expected
+	// path: the wake it sends is served on the loop's next turn, and a whole-city
+	// projection costs order-of-100ms even on a busy city. A var so tests can
+	// shorten it.
+	runProjectWait = 5 * time.Second
 )
 
 const runSessionsFetchTimeout = 10 * time.Second
@@ -170,7 +177,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 		ok = false
 	}
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), projectWake: make(chan struct{}, 1), projectSignal: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
 	m.startLocked(t)
@@ -225,6 +232,28 @@ type cityRunTailer struct {
 	// write. See rundetail_stream.go.
 	subMu sync.Mutex
 	subs  map[*detailStreamSub]struct{}
+
+	// pendingProjection reports that the tail has folded a change the published
+	// projection does not yet reflect. Folding is the cheap half (a delta read
+	// plus an in-memory Apply) and keeps running on the poll; PROJECTING —
+	// filtering every folded bead and rebuilding every run lane — is the
+	// expensive half, so a city nobody is watching records the debt here instead
+	// of paying it once a second into a snapshot no client will read. The loop
+	// sets it when it defers; build() clears it when the debt is paid.
+	pendingProjection atomic.Bool
+
+	// projectWake asks the loop to project a deferred fold now. Buffered with
+	// capacity 1 and coalescing: one queued wake serves every concurrent reader,
+	// and the send is non-blocking so a reader never stalls behind the loop.
+	projectWake chan struct{}
+
+	// projectMu guards projectSignal — the broadcast channel build() closes (and
+	// replaces) after every publish, so a reader waits for the next projection
+	// instead of polling for it. A reader captures the channel BEFORE testing
+	// pendingProjection, which is what makes the wait free of lost wakeups: a
+	// build landing between the two closes the channel the reader already holds.
+	projectMu     sync.Mutex
+	projectSignal chan struct{}
 }
 
 // tailState carries the fold cursor across poll iterations: the byte offset into
@@ -335,6 +364,13 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-t.projectWake:
+			// A reader is waiting on a projection this loop deferred. Fold first:
+			// the events it is asking about may still be below the cursor, and a
+			// fold here is the same delta read the next poll would do.
+			t.foldNext(proj, st)
+			t.logDecodeMisses(proj, st)
+			t.projectDeferred(proj, st)
 		case <-poll.C:
 			t.foldNext(proj, st)
 			t.logDecodeMisses(proj, st)
@@ -418,7 +454,7 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 			decodeMisses := proj.DecodeMisses()
 			changed := proj.Apply(fresh)
 			if changed || proj.DecodeMisses() > decodeMisses {
-				st.marks = t.build(proj, st.marks, nil)
+				st.marks = t.publishFold(proj, st.marks)
 			}
 		}
 		st.activeInfo = info
@@ -465,7 +501,7 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 	decodeMisses := proj.DecodeMisses()
 	changed := proj.Apply(fresh)
 	if changed || proj.DecodeMisses() > decodeMisses {
-		st.marks = t.build(proj, st.marks, nil)
+		st.marks = t.publishFold(proj, st.marks)
 	}
 	t.clearIncrementalReadFailure(st)
 	if sessionChanged {
@@ -570,6 +606,13 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	t.ready = true
 	t.mu.Unlock()
 
+	// The published projection now reflects the fold, so any deferred-build debt
+	// is paid. Clear it BEFORE the broadcast: a reader released by the broadcast
+	// must not observe a stale "still pending" flag and ask for another build.
+	t.pendingProjection.Store(false)
+	projectionBuildCount.Add(1)
+	t.broadcastProjection()
+
 	// This is the single change-gated publish point, so it is also the single
 	// place a detail-stream broadcast fires: notify every subscriber
 	// (non-blocking). A subscriber that has not yet drained its prior notify
@@ -578,6 +621,104 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	// frame per real change.
 	t.notifySubscribers()
 	return marks
+}
+
+// hasWatchers reports whether a live detail-stream subscriber depends on the
+// fold-publish push. A subscriber cannot poll for itself — build()'s notify is
+// the only thing that wakes it — so a watched city projects every folded change.
+//
+// "Watched" means a subscriber on the per-run /runs/{id}/detail/stream, NOT an
+// open dashboard. The ambient home view polls /runs/summary and registers no
+// subscriber, so this is false while a human is looking at it; such a view
+// collects each fold on its own poll instead. That is what makes derived thrash
+// detection (see publishFold's mark handling) sample at the polling client's
+// cadence rather than the fold's.
+func (t *cityRunTailer) hasWatchers() bool {
+	return t.subscriberCount() > 0
+}
+
+// runTailerAfterDeferredFold is a test-only seam invoked once each time the tail
+// defers a projection because nothing is watching. It lets a test wait on the
+// FACT that the deferral happened instead of polling a flag on a timer. Nil (a
+// no-op) in production.
+var runTailerAfterDeferredFold func()
+
+// publishFold projects and publishes a folded change when someone is watching,
+// and otherwise records the debt for the next reader to collect. It is the one
+// place that decides whether the tail projects: the fold has already happened,
+// which keeps the cursor current so a deferred build stays incremental rather
+// than becoming a cold replay. It returns the marks to carry forward, the prior
+// generation's when the projection is deferred, since marks only advance with a
+// published projection.
+func (t *cityRunTailer) publishFold(proj *runproj.Projector, prevMarks map[string]runproj.LaneProgressMark) map[string]runproj.LaneProgressMark {
+	if t.hasWatchers() {
+		return t.build(proj, prevMarks, nil)
+	}
+	t.pendingProjection.Store(true)
+	if runTailerAfterDeferredFold != nil {
+		runTailerAfterDeferredFold()
+	}
+	return prevMarks
+}
+
+// projectDeferred projects and publishes a fold the tail deferred, and does
+// nothing when the published projection is already current. It is the loop's
+// answer to a reader's wake; a test that drives foldNext by hand (no loop
+// goroutine) calls it for the same reason, since the projector is owned by
+// whoever folds it.
+func (t *cityRunTailer) projectDeferred(proj *runproj.Projector, st *tailState) {
+	if !t.pendingProjection.Load() {
+		return
+	}
+	st.marks = t.build(proj, st.marks, nil)
+}
+
+// awaitProjection brings the published projection up to the current fold for a
+// reader, and must be called by every warm reader before it takes t.mu. When
+// nothing is pending it returns immediately (the common case: a poll at an
+// unchanged generation costs nothing). When a fold was deferred it wakes the loop
+// and waits for that build, bounded by the caller's context and runProjectWait.
+func (t *cityRunTailer) awaitProjection(ctx context.Context) {
+	signal := t.projectionSignal()
+	if !t.pendingProjection.Load() {
+		return
+	}
+	select {
+	case t.projectWake <- struct{}{}:
+	default:
+	}
+	timer := time.NewTimer(runProjectWait)
+	defer timer.Stop()
+	select {
+	case <-signal:
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+// projectionSignal returns the broadcast channel the next publish closes,
+// creating it on first use so a directly-constructed tailer (tests) needs no
+// extra wiring.
+func (t *cityRunTailer) projectionSignal() chan struct{} {
+	t.projectMu.Lock()
+	defer t.projectMu.Unlock()
+	if t.projectSignal == nil {
+		t.projectSignal = make(chan struct{})
+	}
+	return t.projectSignal
+}
+
+// broadcastProjection releases every reader waiting on the projection that just
+// published, by closing the current signal channel and installing a fresh one
+// for the next generation.
+func (t *cityRunTailer) broadcastProjection() {
+	t.projectMu.Lock()
+	signal := t.projectSignal
+	t.projectSignal = make(chan struct{})
+	t.projectMu.Unlock()
+	if signal != nil {
+		close(signal)
+	}
 }
 
 // markIncrementalReadFailure publishes a retryable incomplete state and logs
@@ -632,6 +773,12 @@ const runDetailSnapshotVersion = 1
 // same fold generation build once. It carries no production behavior.
 var detailBuildCount atomic.Int64
 
+// projectionBuildCount counts every whole-city run-lane projection the tailer
+// builds and publishes. It exists so a test can prove an unwatched fold defers
+// its build and that one reader then pays for exactly one. It carries no
+// production behavior.
+var projectionBuildCount atomic.Int64
+
 // snapshotFoldCount counts every run-snapshot fold the detail path performs
 // (i.e. a snapshot-cache miss). It exists so a test can prove repeated detail()
 // calls at the same fold generation fold the run exactly once — a same-generation
@@ -659,6 +806,7 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 	case <-ctx.Done():
 	case <-time.After(runColdLoadWait):
 	}
+	t.awaitProjection(ctx)
 
 	t.mu.RLock()
 	beadSlice := t.beads
@@ -773,6 +921,7 @@ func (t *cityRunTailer) enrichedSummary(ctx context.Context) runproj.RunSummary 
 	case <-ctx.Done():
 	case <-time.After(runColdLoadWait):
 	}
+	t.awaitProjection(ctx)
 
 	t.mu.RLock()
 	base := t.summary

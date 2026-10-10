@@ -55,7 +55,8 @@ func (t *cityRunTailer) unsubscribe(sub *detailStreamSub) {
 
 // subscriberCount reports the number of live detail-stream subscribers. It backs
 // the goroutine-leak test (the count must return to zero after every connection
-// closes) and carries no production behavior.
+// closes) AND the production projection gate: see hasWatchers in runtailer.go,
+// which defers the whole-city projection while this is zero.
 func (t *cityRunTailer) subscriberCount() int {
 	t.subMu.Lock()
 	defer t.subMu.Unlock()
