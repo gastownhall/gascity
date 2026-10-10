@@ -25,7 +25,6 @@ INTEGRATION_SOLO_TESTS = {
     "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",  # 32 s
     "gc_managed_bd_rig_hard_kill_test": "TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",  # 26 s
     "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # 22 s
-    "gc_provider_owned_real_init_test": "TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace",  # 29 s
 }
 
 # Solo tests still too long to run whole: their subtests run in series, and
@@ -36,6 +35,10 @@ INTEGRATION_SOLO_TESTS = {
 # integration build like INTEGRATION_SOLO_TESTS. Seconds measured 2026-10-10
 # under bazel on rbe-west (--config=ci --config=integration).
 INTEGRATION_SOLO_SPLIT_TESTS = {
+    "TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace": {
+        "gc_provider_owned_real_init_direct_test": "direct",  # ~14 s
+        "gc_provider_owned_real_init_test": "",  # proxied, ~15 s
+    },
     "TestPhase2WorkerCoreRealTransportProof": {
         "gc_phase2_worker_core_transport_claude_test": "claude",  # 25 s
         "gc_phase2_worker_core_transport_codex_test": "codex",  # 26 s
