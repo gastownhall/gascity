@@ -283,7 +283,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		})
 
 		startupOutput, readErr := managedDoltLogSuffixFn(layout.LogFile, logOffset)
-		if readErr == nil && strings.Contains(strings.ToLower(startupOutput), "address already in use") {
+		if readErr == nil && doltStartupPortInUse(startupOutput) {
 			report.AddressInUse = true
 			// Wait briefly on the originally requested port to outlast a
 			// TIME_WAIT socket before bumping ports. See
@@ -307,6 +307,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	}
 
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
+}
+
+// doltStartupPortInUse reports whether dolt's startup output says it could
+// not take its configured port.
+func doltStartupPortInUse(output string) bool {
+	return strings.Contains(strings.ToLower(output), "address already in use")
 }
 
 // managedDoltLockReleaseTimeoutFn resolves the configured wait window for

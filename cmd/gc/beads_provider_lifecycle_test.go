@@ -5222,6 +5222,26 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 }
 
 func TestGcBeadsBdStartRetriesAutoPortBindConflict(t *testing.T) {
+	assertGcBeadsBdStartRetriesAutoPortConflict(t, `listen tcp 0.0.0.0:${port}: bind: address already in use`)
+}
+
+// TestGcBeadsBdStartRetriesAutoPortInUseText is the bind-conflict retry with
+// dolt 2.3.3's own diagnostic. When the requested port already has a
+// listener, dolt 2.3.3 prints "Port N already in use." and exits 1 without
+// ever producing the kernel's "address already in use" text, so the retry
+// matcher has to recognize that form too.
+func TestGcBeadsBdStartRetriesAutoPortInUseText(t *testing.T) {
+	assertGcBeadsBdStartRetriesAutoPortConflict(t, `Port ${port} already in use.`)
+}
+
+// assertGcBeadsBdStartRetriesAutoPortConflict runs `start` against a fake dolt
+// whose first sql-server attempt prints diagnostic after the startup banner
+// and exits 1, and whose second attempt stays up. diagnostic is a shell
+// double-quoted string in which ${port} is the port dolt was asked to bind.
+// It asserts the script made exactly two attempts, on different ports, and
+// recorded the retry port in the provider state.
+func assertGcBeadsBdStartRetriesAutoPortConflict(t *testing.T, diagnostic string) {
+	t.Helper()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5278,7 +5298,7 @@ case "$cmd" in
     printf '%%s\n' "$count" > "$attempts_file"
     if [ "$count" -eq 1 ]; then
       echo "Starting server with Config HP=\"0.0.0.0:${port}\"|T=\"300000\"|R=\"false\"|L=\"warning\""
-      echo "listen tcp 0.0.0.0:${port}: bind: address already in use"
+      echo "%s"
       exit 1
     fi
     sleep 60
@@ -5288,7 +5308,7 @@ case "$cmd" in
     exit 0
     ;;
 esac
-`, attemptsFile, portsFile)
+`, attemptsFile, portsFile, diagnostic)
 	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -11868,6 +11888,211 @@ esac
 	if got := readDoltStartCountForTest(t, countFile); got <= initialStartCount {
 		t.Fatalf("dolt sql-server launch count = %d, want greater than initial %d", got, initialStartCount)
 	}
+
+	// The relaunch only counts as a restart if the stale server is gone:
+	// otherwise the new one would be fighting it for the port. Stopping an
+	// owned server that holds deleted inodes is the one thing start does to
+	// a port holder, so pin it separately from the launch count.
+	stalePID, err := strconv.Atoi(firstPID)
+	if err != nil {
+		t.Fatalf("parse first pid %q: %v", firstPID, err)
+	}
+	if !waitForProcessExit(stalePID, 5*time.Second) {
+		t.Fatalf("stale dolt server (pid %d) is still running after start restarted it", stalePID)
+	}
+	if secondPID == firstPID {
+		t.Fatalf("pid file still names the stale server (pid %s) after the restart", firstPID)
+	}
+}
+
+// TestGcBeadsBdStartLeavesForeignPortHolderAlone pins that the shell start
+// never kills a process it does not own. When another process (a different
+// scope's dolt server, say) already listens on the requested port and no gc
+// helper is configured (GC_BIN unset), start says so on stderr, leaves the
+// holder running, and starts its own server on the next free port. Killing the
+// holder took a live city's sql-server down for ~90s; the Go managed start has
+// never done that (TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder).
+func TestGcBeadsBdStartLeavesForeignPortHolderAlone(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The fake dolt records the port it was asked to bind and then listens on
+	// it from inside the data dir, which is how verify_our_server recognizes
+	// the process as this scope's own server when `stop` cleans it up.
+	portsFile := filepath.Join(t.TempDir(), "dolt-ports")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	fakeScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+ports_file=%q
+data_dir=%q
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  sql-server)
+    config_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--config" ]; then
+        config_file="$arg"
+        break
+      fi
+      prev="$arg"
+    done
+    port=$(awk '/^[[:space:]]*port:/ {print $2; exit}' "$config_file")
+    printf '%%s\n' "$port" >> "$ports_file"
+    mkdir -p "$data_dir"
+    cd "$data_dir"
+    exec python3 - "$port" <<'INNERPY'
+import signal
+import socket
+import sys
+import time
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("0.0.0.0", int(sys.argv[1])))
+sock.listen(128)
+sock.settimeout(1.0)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+deadline = time.time() + 120
+while time.time() < deadline:
+    try:
+        conn, _ = sock.accept()
+        conn.close()
+    except socket.timeout:
+        continue
+INNERPY
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, portsFile, filepath.Join(cityPath, ".beads", "dolt"))
+	if err := os.WriteFile(fakeDolt, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	holderPID, holderPort, holderExited := startForeignPortHolderForTest(t)
+
+	// sanitizedBaseEnv strips every GC_* variable, so GC_BIN is unset and start
+	// takes the shell's own inspection path rather than the gc helper's.
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"GC_DOLT_PORT="+holderPort,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	var stdout, stderr bytes.Buffer
+	start := exec.Command(script, "start")
+	start.Env = env
+	start.Stdout = &stdout
+	start.Stderr = &stderr
+	if err := start.Run(); err != nil {
+		t.Fatalf("start with a foreign holder on port %s: %v\nstdout:\n%s\nstderr:\n%s", holderPort, err, stdout.String(), stderr.String())
+	}
+
+	select {
+	case <-holderExited:
+		t.Errorf("start killed the foreign port holder (pid %d) listening on port %s", holderPID, holderPort)
+	default:
+	}
+
+	wantNotice := fmt.Sprintf("gc-beads-bd: port %s is held by pid %d, which is not this scope's dolt server; leaving it alone and starting on another port.", holderPort, holderPID)
+	if !strings.Contains(stderr.String(), wantNotice) {
+		t.Errorf("start stderr does not say it left the holder alone; want %q in:\n%s", wantNotice, stderr.String())
+	}
+
+	ports := strings.Fields(string(mustReadFile(t, portsFile)))
+	if len(ports) == 0 {
+		t.Fatalf("fake dolt was never launched; start output:\n%s%s", stdout.String(), stderr.String())
+	}
+	for _, port := range ports {
+		if port == holderPort {
+			t.Errorf("dolt was launched on port %s, which the foreign holder (pid %d) was listening on", holderPort, holderPID)
+		}
+	}
+	serverPort := ports[len(ports)-1]
+
+	state, err := readDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read provider state: %v", err)
+	}
+	if got := strconv.Itoa(state.Port); got != serverPort {
+		t.Errorf("provider state port = %s, want the port the new server runs on (%s)", got, serverPort)
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", serverPort), 2*time.Second)
+	if err != nil {
+		t.Errorf("new dolt server is not reachable on port %s: %v", serverPort, err)
+	} else {
+		_ = conn.Close()
+	}
+}
+
+// startForeignPortHolderForTest starts a child process that listens on a port
+// it picks itself, and returns the child's pid, that port, and a channel that
+// is closed once the child has exited and been reaped (so a signaled holder
+// reads as gone instead of as a zombie that still answers kill -0). The holder
+// is a child of the test, never the test process: a script that signals its
+// port holder must take down this child, not the test binary. It also stops
+// listening on its own after two minutes in case a failed test leaks it.
+func startForeignPortHolderForTest(t *testing.T) (pid int, port string, exited <-chan struct{}) {
+	t.Helper()
+	holder := exec.Command("python3", "-c", `import socket, time
+sock = socket.socket()
+sock.bind(("0.0.0.0", 0))
+sock.listen(16)
+print(sock.getsockname()[1], flush=True)
+sock.settimeout(1.0)
+deadline = time.time() + 120
+while time.time() < deadline:
+    try:
+        conn, _ = sock.accept()
+        conn.close()
+    except socket.timeout:
+        continue
+`)
+	holder.Env = sanitizedBaseEnv()
+	var holderErr bytes.Buffer
+	holder.Stderr = &holderErr
+	out, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatalf("foreign port holder stdout pipe: %v", err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start foreign port holder: %v", err)
+	}
+	if _, err := fmt.Fscanln(out, &port); err != nil {
+		_ = holder.Process.Kill()
+		_ = holder.Wait()
+		t.Fatalf("read foreign port holder's port: %v\nstderr:\n%s", err, holderErr.String())
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = holder.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = holder.Process.Kill()
+		<-done
+	})
+	return holder.Process.Pid, port, done
 }
 
 func TestGcBeadsBdEnsureReadyDoesNotRestartAfterTransientTCPProbeFailure(t *testing.T) {
