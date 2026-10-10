@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,6 +27,10 @@ const (
 	BeadsStoreNameExecStore = "ExecStore"
 	// BeadsStoreNameNativeDoltStore is the diagnostic store name for native Dolt stores.
 	BeadsStoreNameNativeDoltStore = "NativeDoltStore"
+	// BeadsStoreNameLibraryBackendStore is the diagnostic store name for a
+	// store the linked beads library opened through a backend it registered as
+	// an extension (contract.IsLibraryExtensionBackend), such as http.
+	BeadsStoreNameLibraryBackendStore = "LibraryBackendStore"
 
 	// BeadsGateProxiedProvider is the preflight gate recorded when a scope
 	// falls back to the bd CLI front door because its persisted dolt_mode is
@@ -433,7 +438,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	}
 
 	if backend, ok := libraryExtensionBackend(opts.ScopeRoot); ok {
-		return opts.openLibraryExtensionStore(ctx, backend)
+		return opts.openLibraryExtensionStore(ctx, provider, backend)
 	}
 
 	// The persisted topology is checked before preflight runs. A proxied-server
@@ -525,12 +530,30 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 }
 
 // libraryExtensionBackend reports the backend a scope's metadata names when
-// the linked beads library registered it as an extension backend — a workspace
-// gc does not serve, such as one `bd connect <url> --convert-workspace`
-// pointed at a remote server.
+// the linked beads library registered it as a self-sufficient extension
+// backend (contract.IsLibraryExtensionBackend) and the metadata carries no
+// storage fields — the workspace `bd connect <url> --convert-workspace`
+// leaves, whose target lives beside metadata.json. A scope that carries
+// storage_endpoint or storage_database is a complete storage binding whatever
+// it names, and keeps the preflight verdict and the bd front-door fallback.
 func libraryExtensionBackend(scopeRoot string) (string, bool) {
-	backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
-	if err != nil || !ok || !contract.IsLibraryExtensionBackend(backend) {
+	data, err := fsys.OSFS{}.ReadFile(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil {
+		return "", false
+	}
+	var meta struct {
+		Backend         string          `json:"backend"`
+		StorageEndpoint json.RawMessage `json:"storage_endpoint"`
+		StorageDatabase json.RawMessage `json:"storage_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false
+	}
+	if len(meta.StorageEndpoint) != 0 || len(meta.StorageDatabase) != 0 {
+		return "", false
+	}
+	backend := strings.TrimSpace(meta.Backend)
+	if !contract.IsLibraryExtensionBackend(backend) {
 		return "", false
 	}
 	return backend, true
@@ -544,7 +567,7 @@ func libraryExtensionBackend(scopeRoot string) (string, bool) {
 // the bd front door, because nothing vetted that fallback for this scope and
 // the operator needs the backend's own reason. Executable bd hooks still route
 // to the bd front door exactly as they do for a Dolt scope.
-func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, backend string) (StoreOpenResult, error) {
+func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, provider, backend string) (StoreOpenResult, error) {
 	if scopeHasExecutableBdHooks(opts.ScopeRoot) {
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
@@ -553,7 +576,7 @@ func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, back
 			PreflightReason:     nativeHooksReason,
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
-		return opts.openBdFallback(opts.Provider, diag)
+		return opts.openBdFallback(provider, diag)
 	}
 	native, err := opts.openNativeStore(ctx)
 	if err != nil {
@@ -562,7 +585,7 @@ func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, back
 	return opts.stampedResult(StoreOpenResult{
 		Store: native,
 		Diagnostic: BeadsDiagnostic{
-			Store:               storeNameNativeDoltStore,
+			Store:               BeadsStoreNameLibraryBackendStore,
 			NativeStoreEligible: true,
 		},
 	}, nil)

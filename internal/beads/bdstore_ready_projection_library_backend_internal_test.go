@@ -10,10 +10,10 @@ import (
 // registered — recognizing the name at the metadata layer does not make gc's
 // issues/wisps schema assumption true for it.
 func TestReadyProjectionOnALibraryExtensionBackendNeverSpendsBdSQL(t *testing.T) {
-	const name = "gctest-ext"
+	const name = "http"
 	registerLibraryBackendForTest(t, name)
 	scope := t.TempDir()
-	writeScopeMetadata(t, scope, map[string]any{"backend": name, "dolt_mode": "server"})
+	writeScopeMetadata(t, scope, map[string]any{"database": "dolt", "backend": name, "dolt_database": "gascity", "project_id": "proj-1"})
 	runner := blockedDoorRunner(`[{"id":"mc-2","blocked_by_count":1,"blocked_by":["mc-1"]}]`)
 	s := NewBdStore(scope, runner.run, WithBdStoreNoticeSink(&bytes.Buffer{}))
 

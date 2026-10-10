@@ -659,14 +659,15 @@ func TestConditionalWritesDegradedRecorder(t *testing.T) {
 // therefore reaches this layer as its %T spelling.
 func TestConditionalWritesEventStoreKind(t *testing.T) {
 	for in, want := range map[string]string{
-		beads.BeadsStoreNameBdStore:         "bd",
-		beads.BeadsStoreNameNativeDoltStore: "native",
-		beads.BeadsStoreNameFileStore:       "file",
-		"MemStore":                          "mem",
-		"CachingStore":                      "caching",
-		"SQLiteStore":                       "sqlite-graph",
-		"*beads.DoltliteReadStore":          "bd",
-		"someFutureStore":                   "someFutureStore",
+		beads.BeadsStoreNameBdStore:             "bd",
+		beads.BeadsStoreNameNativeDoltStore:     "native",
+		beads.BeadsStoreNameLibraryBackendStore: "native",
+		beads.BeadsStoreNameFileStore:           "file",
+		"MemStore":                              "mem",
+		"CachingStore":                          "caching",
+		"SQLiteStore":                           "sqlite-graph",
+		"*beads.DoltliteReadStore":              "bd",
+		"someFutureStore":                       "someFutureStore",
 	} {
 		if got := conditionalWritesEventStoreKind(in); got != want {
 			t.Errorf("conditionalWritesEventStoreKind(%q) = %q, want %q", in, got, want)

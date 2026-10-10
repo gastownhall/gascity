@@ -119,7 +119,9 @@ func conditionalWritesEventStoreKind(kind string) string {
 	switch kind {
 	case beads.BeadsStoreNameBdStore:
 		return "bd"
-	case beads.BeadsStoreNameNativeDoltStore:
+	case beads.BeadsStoreNameNativeDoltStore, beads.BeadsStoreNameLibraryBackendStore:
+		// A library-backend store is the native store the linked beads library
+		// opened through a registered extension backend.
 		return "native"
 	case beads.BeadsStoreNameFileStore:
 		return "file"
