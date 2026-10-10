@@ -150,9 +150,10 @@ func (r *scopeRecordingBD) callsUnder(t *testing.T, root string) []string {
 }
 
 // runEveryCityOrder runs each city-level order once with `gc order run`, all
-// at once, and returns their names. A failing order is logged, not fatal: what
-// the caller asserts is which scopes the orders touched, and run one after
-// another they took half a minute.
+// at once (one after another they took half a minute), and returns their
+// names. A failing order fails the test: an order that stopped short never
+// reached the scopes it would touch, so the caller's assertion on which scopes
+// the orders touched would pass without measuring it.
 func runEveryCityOrder(t *testing.T, city *helpers.City) []string {
 	t.Helper()
 	out, err := city.GCStdout("order", "list", "--json")
@@ -177,7 +178,7 @@ func runEveryCityOrder(t *testing.T, city *helpers.City) []string {
 		go func(name string) {
 			defer wg.Done()
 			if out, err := city.GC("order", "run", name); err != nil {
-				t.Logf("gc order run %s: %v\n%s", name, err, out)
+				t.Errorf("gc order run %s: %v\n%s", name, err, out)
 			}
 		}(order.Name)
 	}
@@ -210,6 +211,12 @@ func newQuiescenceCity(t *testing.T) *quiescenceCity {
 	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
 	shim := newScopeRecordingBD(t, wrappedBD)
 	env = forwardBackstopSpeedup(t, env.With("BD_BIN", shim.path))
+	// The orders the rows run, and the controller's, call bare `gc` through
+	// PATH: unless that gc is the binary under test, they never start or run
+	// another gc, and a row measures nothing or the wrong binary.
+	if err := helpers.VerifyPathGC(env); err != nil {
+		t.Fatal(err)
+	}
 
 	city := helpers.NewCity(t, env)
 	cityRoot := city.Dir

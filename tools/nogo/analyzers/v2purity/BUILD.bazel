@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "default.go",
         "methods.go",
+        "seal.go",
         "v2purity.go",
     ],
     importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/v2purity",

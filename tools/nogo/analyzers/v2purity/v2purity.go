@@ -20,6 +20,9 @@
 //   - A function on the Exempt list, with its reason, is a leaf: the
 //     reviewed baseline, which only shrinks, and holds no live entry once
 //     the Cutover constant is true (C9).
+//   - The seal: a value of a sealed type (a proof only a fresh read mints)
+//     is built, or a field of one written, only in its minting file
+//     (seal.go).
 package v2purity
 
 import (
@@ -62,6 +65,8 @@ type Config struct {
 	// Cutover names a package bool constant (v2EffectsReal) that is true
 	// from C9: then a live exemption fails the build.
 	Cutover string
+	// Sealed maps a sealed type's name, in Package, to its minting file.
+	Sealed map[string]string
 }
 
 // Exemption is one baseline entry. Class is "live" (reachable in v2 at run
@@ -90,7 +95,7 @@ func (r *Reaches) String() string { return "reaches " + r.Target + " via " + r.P
 func New(c Config) *analysis.Analyzer {
 	return &analysis.Analyzer{
 		Name:      "v2purity",
-		Doc:       "the v2 reconciler's //gc:pure reachability rule",
+		Doc:       "the v2 reconciler's //gc:pure reachability and sealed-type rules",
 		Run:       func(pass *analysis.Pass) (any, error) { return nil, c.run(pass) },
 		FactTypes: []analysis.Fact{new(Reaches), new(Methods)},
 	}
@@ -101,6 +106,7 @@ func (c Config) run(pass *analysis.Pass) error {
 	case path == c.Package:
 		g := c.build(pass, true)
 		g.purity()
+		c.seal(pass)
 		c.cutover(pass)
 	case c.Module != "" && strings.HasPrefix(path, c.Module) && !strings.HasSuffix(path, "_test"):
 		c.build(pass, false).export()

@@ -1375,6 +1375,10 @@ func releaseUnexecutedClaimsOnKill(
 		}
 	}
 	identifiers := sessionAssignmentIdentifiersForConfig(sessionBead, cfg)
+	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
+		releaseKilledSeatClaimsFromIndex(idx, cfg, sessionBead, identifiers, executed, stderr)
+		return
+	}
 	// One deadline bounds the started-work gate and the release together.
 	deadline := time.Now().Add(budget)
 	started, err := killedSeatHoldsStartedWork(cityPath, cfg, store, rigStores, identifiers, executed, deadline)
@@ -1394,6 +1398,43 @@ func releaseUnexecutedClaimsOnKill(
 		releasable:    func(b beads.Bead) bool { return claimIsLaneVisible(cfg, b, fallbackRoute) },
 		deadline:      deadline,
 	}, budget, stderr)
+}
+
+// releaseKilledSeatClaimsFromIndex is releaseUnexecutedClaimsOnKill inside a
+// reconcile tick: the started-work gate and the release set come from the
+// tick's seat work index, so the pass costs one fenced release per lane-visible
+// claim, not a scan per identity, status and leg (on bd, `bd update
+// --if-status --if-assignee`: the live check and the write are one call). The
+// gate reads the index's rows as they were read: a stale started row only keeps
+// the seat. An unreadable leg fails the gate, and nothing is released.
+func releaseKilledSeatClaimsFromIndex(idx *seatWorkIndex, cfg *config.City, sessionBead beads.Bead, identifiers []string, executed map[string]bool, stderr io.Writer) {
+	for _, q := range []seatWorkQuery{
+		{ids: identifiers, statuses: []string{"in_progress"}},
+		{ids: identifiers, statuses: []string{"open"}, keep: func(_ beads.Store, b beads.Bead) (bool, error) { return executed[b.ID], nil }},
+	} {
+		started, err := idx.snapshot(q, true)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: checking killed session %s for started work: %v; releasing nothing\n", sessionBead.ID, err) //nolint:errcheck
+			return
+		}
+		if len(started) > 0 {
+			return
+		}
+	}
+	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
+	claims, err := idx.snapshot(seatWorkQuery{ids: identifiers, statuses: []string{"open"}, keep: func(_ beads.Store, b beads.Bead) (bool, error) {
+		return claimIsLaneVisible(cfg, b, fallbackRoute), nil
+	}}, false)
+	if err != nil {
+		// Unreachable after a passing gate (it fails on any unreadable leg); the
+		// listed claims are released below, each fenced on its row.
+		fmt.Fprintf(stderr, "session beads: listing claims held by killed session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
+	}
+	for _, claim := range claims {
+		if err := workAssignmentForStore(beads.WorkStore{Store: claim.store}).ReleaseWorkBead(claim.bead, fallbackRoute); err != nil {
+			fmt.Fprintf(stderr, "session beads: releasing unexecuted claim %s held by killed session %s: %v\n", claim.bead.ID, sessionBead.ID, err) //nolint:errcheck
+		}
+	}
 }
 
 // killedSeatSnapshotHasReleasableClaim reports whether the tick's assigned-work

@@ -98,6 +98,7 @@ go_test(
         "session_object_integration_test.go",
         "session_roster_test.go",
         "staging_test.go",
+        "start_held_name_test.go",
         "start_ops_construction_test.go",
         "startcrash_redaction_test.go",
         "startup_capacity_test.go",
