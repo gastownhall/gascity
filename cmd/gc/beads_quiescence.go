@@ -13,7 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // Suspension is quiescence. A suspended rig, and every scope of a suspended
@@ -177,6 +179,12 @@ var suspendedScopePair = func(scopeRoot string) (proxied, live bool) {
 	return true, !doctor.ProxiedStoreNotRunning(scopeRoot)
 }
 
+// stopSuspendedScopeStore runs the lifecycle "stop" op (`bd dolt stop`) for a
+// suspended scope's store. A variable so tests can observe what overlaps it.
+var stopSuspendedScopeStore = func(ctx context.Context, cityPath, scopeRoot string) error {
+	return runProviderOwnedScopeLifecycleOpContext(ctx, cityPath, scopeRoot, "stop")
+}
+
 // retireSuspendedScopes stops the bd-owned pair of every suspended scope whose
 // sessions have been drained for a whole tick, so the drain's own bead
 // bookkeeping is done before the pair goes away.
@@ -223,11 +231,46 @@ func (cr *CityRuntime) retireSuspendedScopes(ctx context.Context, suspended bead
 		case !proxied && cr.retiredScopes.done(root, suspended.epoch):
 			continue
 		}
-		if err := runProviderOwnedScopeLifecycleOpContext(ctx, cr.cityPath, root, "stop"); err != nil {
-			fmt.Fprintf(cr.stderr, "suspended scope %s: stopping its bd proxy: %v\n", root, err) //nolint:errcheck // best-effort stderr
-		}
-		cr.retiredScopes.mark(root, suspended.epoch)
+		cr.stopStillSuspendedScope(ctx, root, suspended.City())
 	}
+}
+
+// stopStillSuspendedScope stops root's store if root is still suspended. The
+// tick read the suspension state before it checked drain and liveness, and a
+// resume may have landed since — followed at once by a read that started the
+// pair this tick then found live (ga-vnycm2.14). So it takes the suspension
+// fence, re-reads the state, and stops only a scope that is still suspended,
+// holding the fence until the stop is done: a resume written meanwhile, by
+// the API or by the CLI writing the state file, waits for the stop rather
+// than handing its caller a pair that is being torn down. city says whether
+// the caller retires the city's scopes (enterBeadsQuiescenceIfDue) or only
+// rigs suspended in their own right (tickRetireSuspendedRigScopes).
+func (cr *CityRuntime) stopStillSuspendedScope(ctx context.Context, root string, city bool) {
+	release, err := suspensionstate.Fence(cr.cityPath)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "suspended scope %s: %v; not stopping its bd proxy\n", root, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	defer release()
+	st, err := loadSuspensionState(fsys.OSFS{}, cr.cityPath)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "suspended scope %s: re-reading suspension state: %v; not stopping its bd proxy\n", root, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	now := suspendedBeadsScopesWithState(cr.cityPath, cr.cfg, st)
+	if !city {
+		now = now.withoutCity()
+	}
+	if !now.Suspended(root) {
+		return
+	}
+	if !samePath(root, cr.cityPath) && !now.City() && proxyendpoint.SharesCityRoot(cr.cityPath, root) {
+		return
+	}
+	if err := stopSuspendedScopeStore(ctx, cr.cityPath, root); err != nil {
+		fmt.Fprintf(cr.stderr, "suspended scope %s: stopping its bd proxy: %v\n", root, err) //nolint:errcheck // best-effort stderr
+	}
+	cr.retiredScopes.mark(root, now.epoch)
 }
 
 // beadsScopeRoots lists the city root and every configured rig root.
