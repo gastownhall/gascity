@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/loopbackport"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -299,6 +299,11 @@ func PublicationsPath(cityPath string) string {
 	return filepath.Join(DefaultHome(), "supervisor", "publications.json")
 }
 
+// seedIsolatedSupervisorConfig writes a private supervisor.toml for an
+// isolated GC_HOME (a test binary, or GC_ISOLATED=1). Its API port comes from
+// loopbackport.Reserve: outside the kernel's ephemeral range and leased
+// host-wide, so concurrent isolated homes are not seeded the same port
+// (ga-96smfk.87).
 func seedIsolatedSupervisorConfig(path string) (bool, error) {
 	if !shouldSeedIsolatedSupervisorConfig(path) {
 		return false, nil
@@ -306,7 +311,7 @@ func seedIsolatedSupervisorConfig(path string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
-	port, err := reserveLoopbackPort()
+	port, err := loopbackport.Reserve()
 	if err != nil {
 		return false, err
 	}
@@ -338,17 +343,4 @@ func shouldSeedIsolatedSupervisorConfig(path string) bool {
 		return false
 	}
 	return pathutil.SamePath(path, ConfigPath())
-}
-
-func reserveLoopbackPort() (int, error) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer lis.Close() //nolint:errcheck // best-effort cleanup
-	addr, ok := lis.Addr().(*net.TCPAddr)
-	if !ok || addr.Port <= 0 {
-		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
-	}
-	return addr.Port, nil
 }

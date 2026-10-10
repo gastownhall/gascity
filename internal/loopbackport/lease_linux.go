@@ -1,6 +1,6 @@
 //go:build linux
 
-package testutil
+package loopbackport
 
 import (
 	"errors"
@@ -16,7 +16,7 @@ const portLeasesEnforced = true
 // name is scoped to the network namespace the port lives in and is released
 // by the kernel when the holder exits. ok is false when another holder has it.
 func leasePort(port int) (lease net.Listener, ok bool, err error) {
-	lis, err := net.Listen("unix", "@gascity-test-loopback-port-"+strconv.Itoa(port))
+	lis, err := net.Listen("unix", "@gascity-loopback-port-"+strconv.Itoa(port))
 	if err != nil {
 		if errors.Is(err, syscall.EADDRINUSE) {
 			return nil, false, nil

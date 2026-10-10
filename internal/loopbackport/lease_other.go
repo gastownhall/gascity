@@ -1,6 +1,6 @@
 //go:build !linux
 
-package testutil
+package loopbackport
 
 import "net"
 
