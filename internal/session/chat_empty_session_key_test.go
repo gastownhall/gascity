@@ -195,7 +195,7 @@ func TestStartRuntimeOnly_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T
 	sp.commands = nil
 	sp.armed = true
 
-	if err := mgr.StartRuntimeOnly(context.Background(), testActor(mgr, ActorController), info.ID, resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("StartRuntimeOnly should recover with a fresh start when session_key is empty, got: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *te
 	sp.commands = nil
 	sp.armed = true
 
-	err := mgr.StartRuntimeOnly(context.Background(), testActor(mgr, ActorController), info.ID, freshCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, freshCmd, runtime.Config{WorkDir: "/tmp"})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly should fail when the start dies and there is no resume shape to strip")
 	}

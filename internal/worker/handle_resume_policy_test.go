@@ -30,7 +30,7 @@ func TestNudgeToHeldSessionQueues(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := handle.Nudge(context.Background(), testAgent(t), NudgeRequest{Text: "hello", Delivery: delivery})
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{Text: "hello", Delivery: delivery})
 			if err != nil {
 				t.Fatalf("Nudge: %v", err)
 			}

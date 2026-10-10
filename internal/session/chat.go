@@ -541,6 +541,9 @@ func drainAckStopPendingMetadata(meta map[string]string) bool {
 // (queueFor). replacing is an interrupt's restart of the runtime it just
 // stopped: the hold was decided before that stop, so it is not re-read.
 func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+	if err := by.CheckStarts(); err != nil {
+		return err
+	}
 	// A kill-fenced row reads asleep while its runtime is still being torn
 	// down. Treating that runtime as live would flip the row back to active
 	// (confirmLiveSessionState) and erase the fence, so once the Stop landed the
@@ -734,10 +737,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	// It runs under its caller's lease and takes none: without one (by.Lease),
-	// or a city to take one in, it refuses rather than start outside the lease.
-	if by.Lease == nil && by.City.IsZero() {
-		return RefuseWithoutCity(by.City.Path(), fmt.Sprintf("session %q", id))
+	// It runs under its caller's lease (by.Lease) and takes none: without
+	// one it refuses rather than start outside the lease.
+	if by.Lease == nil {
+		return fmt.Errorf("%w: session %q", ErrNoCallerLease, id)
+	}
+	if err := checkBorrowed(by.Lease, id, sessName); err != nil {
+		return err
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -1055,7 +1061,7 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 }
 
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return SubmitOutcome{}, err
 	}
 	var outcome SubmitOutcome
@@ -1096,7 +1102,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // other callers that need bounded startup without attaching a terminal. A
 // dormant row it may not resume as its actor returns ErrResumeHeld.
 func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return err
 	}
 	return withSessionStartLock(ctx, id, func() error {
@@ -1113,7 +1119,10 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary. It runs under by.Lease, the caller's.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
+	if err := by.CheckStarts(); err != nil {
 		return err
 	}
 	return withSessionMutationLock(id, func() error {
@@ -1157,7 +1166,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // an operational error. A held row the actor may not resume returns
 // ErrResumeHeld, queueing nothing, so the caller queues it and says why.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return false, err
 	}
 	var delivered bool

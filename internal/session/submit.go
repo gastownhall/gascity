@@ -97,7 +97,7 @@ func (m *Manager) Submit(ctx context.Context, by Actor, id, message, resumeComma
 }
 
 func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return SubmitOutcome{}, err
 	}
 	var outcome SubmitOutcome

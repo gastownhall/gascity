@@ -21,12 +21,52 @@ func testOperator(t testing.TB) sessionpkg.Actor {
 	return testActor(t, sessionpkg.ActorOperator)
 }
 
-func testAgent(t testing.TB) sessionpkg.Actor {
+// handleActor is an Actor of kind on h's Manager's city, when h is a session
+// handle, and on a fresh city otherwise (a runtime-only handle has no
+// Manager).
+func handleActor(t testing.TB, h any, kind sessionpkg.ActorKind) sessionpkg.Actor {
 	t.Helper()
-	return testActor(t, sessionpkg.ActorAgent)
+	if sh, ok := h.(*SessionHandle); ok {
+		if city, err := sh.manager.CityDir(); err == nil {
+			return sessionpkg.Actor{Kind: kind, City: city}
+		}
+	}
+	return testActor(t, kind)
 }
 
-func testController(t testing.TB) sessionpkg.Actor {
+// startLeaseActor is handleActor's controller for h's runtime-only start
+// (StartResolved), carrying the lease on h's runtime that the legacy start
+// holds across it. A runtime-only handle takes the name's flock itself.
+func startLeaseActor(t testing.TB, h any) sessionpkg.Actor {
 	t.Helper()
-	return testActor(t, sessionpkg.ActorController)
+	by := handleActor(t, h, sessionpkg.ActorController)
+	sh, ok := h.(*SessionHandle)
+	if !ok {
+		return by
+	}
+	id, err := sh.ensureSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := sh.manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Release)
+	by.Lease = l
+	return by
+}
+
+// managerActor is an Actor of kind on m's city.
+func managerActor(t testing.TB, m *sessionpkg.Manager, kind sessionpkg.ActorKind) sessionpkg.Actor {
+	t.Helper()
+	city, err := m.CityDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sessionpkg.Actor{Kind: kind, City: city}
 }

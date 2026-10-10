@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestRuntimeHandleExcludedFromInvocationTelemetry enforces the RuntimeHandle
@@ -40,10 +41,10 @@ func TestRuntimeHandleExcludedFromInvocationTelemetry(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if _, err := handle.Message(ctx, testAgent(t), MessageRequest{Text: "summarize the worker contract"}); err != nil {
+	if _, err := handle.Message(ctx, handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "summarize the worker contract"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	if _, err := handle.Nudge(ctx, testAgent(t), NudgeRequest{Text: "still there?"}); err != nil {
+	if _, err := handle.Nudge(ctx, handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{Text: "still there?"}); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 

@@ -39,7 +39,19 @@ var Analyzer = New(Config{
 		"reapStaleSessionBeads":                             0,
 		"autoSuspendChatSessions":                           0,
 	},
-	Sweep:   session + ".ActorSweep",
+	Sweep: session + ".ActorSweep",
+	// The three stop sweeps that build the sweep's actor, and the session
+	// functions that interpret it: its lease mode, its refusal to start, and
+	// the shutdown suspend.
+	SweepSites: []string{
+		cmdGC + ":stopTargetThroughWorkerBoundary",
+		worker + ":SessionHandle.StopForShutdown",
+		worker + ":RuntimeHandle.StopForShutdown",
+		session + ":Actor.leaseMode",
+		session + ":Actor.CheckStarts",
+		session + ":Manager.Suspend",
+	},
+	Actor:   session + ".Actor",
 	Allowed: allowed,
 })
 

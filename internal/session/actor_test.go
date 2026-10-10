@@ -183,8 +183,12 @@ func TestLifecycleVerbsRefuseAnActorWithoutCityOrKind(t *testing.T) {
 					}
 				}
 				startsBefore, stopsBefore := len(m.sp.starts), len(m.sp.stops)
-				if err := do(m, c.by(m)); !errors.Is(err, c.want) {
-					t.Errorf("%s: %v, want %v", name, err, c.want)
+				want := c.want
+				if name == "StartRuntimeOnly" && errors.Is(want, ErrRuntimeLeaseNoCity) {
+					want = ErrNoCallerLease // it takes no lease of its own, so it needs its caller's
+				}
+				if err := do(m, c.by(m)); !errors.Is(err, want) {
+					t.Errorf("%s: %v, want %v", name, err, want)
 				}
 				if len(m.sp.starts) != startsBefore || len(m.sp.stops) != stopsBefore {
 					t.Errorf("%s: the refused call reached the provider (starts %q, stops %q)", name, m.sp.starts, m.sp.stops)

@@ -652,7 +652,7 @@ func TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead(t *testing.T) 
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.StartRuntimeOnly(context.Background(), testActor(mgr, ActorController), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -695,7 +695,7 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.StartRuntimeOnly(context.Background(), testActor(mgr, ActorController), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
@@ -5963,4 +5963,23 @@ func operatorSuspend(m *Manager, id string) error {
 // sweepSuspend is the city stop sweep's Suspend of id, as a method value.
 func sweepSuspend(m *Manager, id string) error {
 	return m.Suspend(context.Background(), testActor(m, ActorSweep), id, false)
+}
+
+// runtimeOnlyActor is the controller on m's city carrying the lease on
+// session id's runtime, as the legacy start holds it across its runtime-only
+// start (StartRuntimeOnly).
+func runtimeOnlyActor(t testing.TB, m *Manager, id string) Actor {
+	t.Helper()
+	info, err := m.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := testActor(m, ActorController)
+	l, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Release)
+	by.Lease = l
+	return by
 }

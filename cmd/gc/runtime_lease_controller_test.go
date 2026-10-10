@@ -350,7 +350,7 @@ func TestOperatorResumeOfAStopPendingRowIsRefused(t *testing.T) {
 	}
 	d := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "tok-1")
 	mgr := newSessionManagerWithConfig(city, store, sp, nil)
-	err := mgr.Start(context.Background(), testOperator(t), "gc-worker", "resume-cmd", runtime.Config{})
+	err := mgr.Start(context.Background(), testOperatorIn(t, city), "gc-worker", "resume-cmd", runtime.Config{})
 	if !errors.Is(err, sessionpkg.ErrSessionStopping) {
 		t.Fatalf("operator resume of a stop-pending row = %v, want ErrSessionStopping", err)
 	}

@@ -462,8 +462,8 @@ func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	if err := mgr.Start(context.Background(), Actor{Kind: ActorOperator}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("start without a city = %v, want ErrRuntimeLeaseNoCity", err)
 	}
-	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
-		t.Fatalf("runtime-only start without a city or a lease = %v, want ErrRuntimeLeaseNoCity", err)
+	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, cmd, hints); !errors.Is(err, ErrNoCallerLease) {
+		t.Fatalf("runtime-only start without a lease = %v, want ErrNoCallerLease", err)
 	}
 	if m.sp.IsRunning(m.info.SessionName) {
 		t.Fatal("the refused runtime-only start started the runtime")

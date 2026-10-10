@@ -208,6 +208,8 @@ func runPostStartAttempt(ctx context.Context, t *testing.T, item preparedStart, 
 	if sp.city == "" {
 		sp.city = t.TempDir()
 	}
+	item, release := leasedStart(t, sp.city, item)
+	defer release()
 	done := make(chan startResult, 1)
 	begin := time.Now()
 	go func() {
@@ -592,6 +594,8 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 		if !ok {
 			t.Fatalf("reserve async start slot: %s", reason)
 		}
+		item, releaseLease := leasedStart(t, testCity, item)
+		defer releaseLease()
 		var released, finished atomic.Int64
 		finishedC := make(chan struct{})
 		rec := events.NewFake()
