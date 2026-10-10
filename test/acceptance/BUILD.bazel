@@ -56,6 +56,7 @@ SOLO_TESTS = {
     "blocked_repair_on_proxied_city_and_rig_test": "TestBlockedRepairOnProxiedCityAndRig",
     "doctor_leaves_a_stopped_proxied_city_stopped_test": "TestDoctorLeavesAStoppedProxiedCityStopped",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
+    "proxied_native_lifecycle_test": "TestProxiedNativeLifecycle",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
 }

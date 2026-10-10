@@ -1571,7 +1571,7 @@ worker), `GC_ACCEPTANCE_TOPOLOGY_MATRIX=1` and
 Dolt lifecycle (the topology matrix's M1 and M5 shapes, blocked repair
 on a proxied city and rig, the proxied idle timeout, the two
 suspension-quiescence rows, the heavy proxied start, rig, and restart
-lifecycle tests, and doctor on stopped proxied city) are its `SOLO_TESTS`: each runs
+lifecycle tests, doctor on stopped proxied city, and proxied-native lifecycle) are its `SOLO_TESTS`: each runs
 alone in a target of its own, and `acceptance_test` skips them.
 
 The same switch covers a row's own precondition. The lane runs

@@ -10,7 +10,6 @@
 # Add a test here when it takes more than about 40 s. A test much over 90 s is
 # better split into independent top-level tests: Go shards per top-level test,
 # never per subtest.
-TestProxiedNativeLifecycle 75
 TestBeadsProxiedIgnoresUserLevelSharedServer 65
 TestBeadsProxiedDefaultInit 60
 TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped 60
