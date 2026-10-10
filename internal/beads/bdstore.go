@@ -1236,6 +1236,21 @@ func isBdOperationUnsupported(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "not supported")
 }
 
+// isBdNotFoundEnvelope reports whether bd's --json stdout is a structured
+// not-found error ({"error": "no issues found ..."}). Against a remote bd serve
+// (BEADS_SERVER_URL), bd show of a missing ID exits 1 with this envelope on
+// stdout and only an unrelated "not served over HTTP" line on stderr, so the
+// error text alone does not say not-found.
+func isBdNotFoundEnvelope(out []byte) bool {
+	var env struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(extractJSON(out), &env) != nil || env.Error == "" {
+		return false
+	}
+	return isBdBeadNotFound(errors.New(env.Error))
+}
+
 func isBdClaimConflictMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "already assigned") ||
@@ -1445,7 +1460,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
 		// SIGTERMs a live runtime on it), so an infrastructure failure whose
 		// text happens to say "not found" must surface as itself.
-		if !isBdBeadNotFound(err) {
+		if !isBdBeadNotFound(err) && !isBdNotFoundEnvelope(out) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
 		// bd show only queries the issues table; ephemeral beads live in the
