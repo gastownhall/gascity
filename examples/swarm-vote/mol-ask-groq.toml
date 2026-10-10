@@ -1,0 +1,59 @@
+formula     = "mol-ask-groq"
+version     = 1
+type        = "workflow"
+description = """
+Single-voter fragment for swarm consensus.
+
+Instantiated once per entry by mol-swarm-vote's on_complete fanout.
+The voter reads the question, reasons independently, writes a structured
+answer to gc.output_json, and closes.
+
+The tally control reads the "answer" field from each voter's gc.output_json
+to compute the majority verdict.
+
+Not intended to be instantiated directly — use mol-swarm-vote instead.
+"""
+
+[vars]
+
+[vars.question]
+description = "The question or proposal to evaluate"
+required    = true
+
+[[steps]]
+id       = "answer"
+title    = "Cast vote on: {{question}}"
+provider = "groq"
+description = """
+Evaluate the question independently and cast a structured vote.
+
+**1. Prime:**
+```bash
+gc prime
+gc bd prime
+```
+
+**2. Think carefully, then commit to a single answer.**
+
+Your vote must be one of:
+- `"yes"` — you endorse / agree / approve
+- `"no"`  — you oppose / disagree / reject
+
+(For domain-specific questions the coordinator may use different values;
+check the bead metadata for `gc.vote_field` guidance.)
+
+**3. Write your answer and close:**
+```bash
+ANSWER="yes"   # or "no"
+
+gc bd update $BEAD_ID --metadata "gc.output_json={\"answer\":\"$ANSWER\"}"
+gc bd close $BEAD_ID
+```
+
+**Important:**
+- Vote independently.  Do not read other voters' beads before closing.
+- The answer must be a single token with no spaces or punctuation.
+- Write gc.output_json *before* closing — the tally control reads it
+  immediately after the bead closes.
+- Do not add reasoning to gc.output_json; put any notes in bead notes.
+"""
