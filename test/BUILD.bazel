@@ -36,6 +36,7 @@ test_suite(
         "//internal/orders:orders_test",
         "//internal/processgroup:processgroup_test",
         "//internal/runtime/acp:acp_test",
+        "//internal/runtime/exec:exec_test",
         "//internal/runtime/herdr:herdr_test",
         "//internal/runtime/ssh:ssh_test",
         "//internal/runtime/subprocess:subprocess_test",

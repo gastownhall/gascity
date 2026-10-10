@@ -36,6 +36,10 @@ type Provider struct {
 	handshakeOnce sync.Once
 	handshakeInfo runtime.ProtocolInfo
 	handshakeErr  error
+
+	// readyPrompts maps a session name to the ready-prompt prefix it was
+	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
+	readyPrompts sync.Map
 }
 
 type startupWatchEvent struct {
@@ -209,6 +213,7 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	// Was this name already occupied before we touched it? Asked structurally,
 	// before the attempt, because it is the only question whose answer cannot
 	// be garbled by how the adapter happens to word a refusal — and it is the
@@ -284,6 +289,7 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // agent is launched separately by launchAgent. Otherwise it falls back to the
 // welded Start (which both provisions and launches). (Un-weld B3b.)
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
@@ -304,6 +310,7 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
@@ -579,6 +586,7 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 
 // Stop destroys the named session: script stop <name>
 func (p *Provider) Stop(name string) error {
+	p.forgetReadyPrompt(name)
 	_, err := p.run(nil, "stop", name)
 	return err
 }
@@ -680,16 +688,10 @@ func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 // IsAttached reports terminal attachment via `script is-attached <name>`
 // when the executable declared the report-attachment capability in its
 // protocol handshake; otherwise it is always false. Op errors read as
-// not attached.
+// not attached; [Provider.IsAttachedWithError] keeps them.
 func (p *Provider) IsAttached(name string) bool {
-	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
-		return false
-	}
-	out, err := p.run(nil, "is-attached", name)
-	if err != nil {
-		return false
-	}
-	return out == "true"
+	attached, err := p.IsAttachedWithError(name)
+	return attached && err == nil
 }
 
 // Attach connects the terminal to the session: script attach <name>
@@ -827,9 +829,17 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports that exec-backed sessions support timed-only idle
-// sleep via controller-driven lifecycle decisions.
+// SleepCapability reports the idle-sleep capability the pack's handshake
+// supports. A pack that declares report-activity, report-attachment and
+// proc.exec gets full idle sleep: it has an activity clock, an attachment
+// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// Every other pack keeps the timed-only floor. The floor is never disabled:
+// non-interactive sleep and the queued-nudge poller rely on timed-only for
+// exec runtimes that report no activity.
 func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	if p.idleBoundaryDeclared() {
+		return runtime.SessionSleepCapabilityFull
+	}
 	return runtime.SessionSleepCapabilityTimedOnly
 }
 
@@ -853,8 +863,11 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 
 // Provider implements the optional connection primitive.
 var (
-	_ runtime.ExecProvider     = (*Provider)(nil)
-	_ runtime.RelaunchProvider = (*Provider)(nil)
+	_ runtime.ExecProvider                = (*Provider)(nil)
+	_ runtime.RelaunchProvider            = (*Provider)(nil)
+	_ runtime.SleepCapabilityProvider     = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements

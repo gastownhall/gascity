@@ -82,7 +82,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
-		return execProfile{core, b, b, timed}
+		return execProfile{core, b, b, b, b, timed}
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
@@ -191,7 +191,9 @@ type (
 	}
 	execProfile struct {
 		Provider
+		AttachmentObserverWithError
 		DialogProvider
+		IdleWaitProvider
 		RelaunchProvider
 		sleepTrait
 	}

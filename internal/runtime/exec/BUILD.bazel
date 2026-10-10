@@ -6,6 +6,7 @@ go_library(
         "cutover.go",
         "exec.go",
         "handshake.go",
+        "idle.go",
         "json.go",
         "seams.go",
     ],
@@ -14,6 +15,7 @@ go_library(
     deps = [
         "//internal/execgrace",
         "//internal/runtime",
+        "//internal/runtime/tmux",
     ],
 )
 
@@ -26,6 +28,8 @@ go_test(
         "exec_reuse_test.go",
         "exec_test.go",
         "handshake_test.go",
+        "idle_integration_test.go",
+        "idle_test.go",
         "json_test.go",
         "seams_test.go",
         "testenv_import_test.go",
