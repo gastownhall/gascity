@@ -5367,8 +5367,14 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	lastProviderName := "fake"
+	t.Cleanup(func() { close(od.release) })
 	start := time.Now()
-	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	reloaded := make(chan struct{})
+	go func() {
+		defer close(reloaded)
+		cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	}()
+	awaitClose(t, reloaded, "reloadConfig with a dispatcher that never drains")
 	elapsed := time.Since(start)
 	// The claim under test is that reload stops waiting on a dispatcher that
 	// never drains once reloadOrderDrainTimeout expires. That is proven by
@@ -5376,8 +5382,9 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 	// whole reloadConfig call (config read, order scan, watcher restart),
 	// which stretches arbitrarily under CPU contention without saying
 	// anything about the drain bound (ga-96smfk.64):
-	//   - reloadConfig returned while od.release is still open, so it did
-	//     not wait for the stuck work;
+	//   - reloadConfig returned (awaitClose above) while od.release was
+	//     still open, since it is closed only at cleanup, so reload did not
+	//     wait for the stuck work;
 	//   - the drain ctx carried a deadline no later than
 	//     reloadOrderDrainTimeout after drain entry, so the bound is the
 	//     reload budget, not something longer;
@@ -5406,14 +5413,11 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 		t.Fatal("reload kept the undrained dispatcher live, want it replaced")
 	}
 	// Contention only ever slows reload down, so the drain wait is a hard
-	// floor; the ceiling is only a hang detector.
+	// floor. There is no wall-clock ceiling: awaitClose above is the hang
+	// detector.
 	if elapsed < reloadOrderDrainTimeout {
 		t.Fatalf("reload elapsed = %s, want at least the %s drain wait", elapsed, reloadOrderDrainTimeout)
 	}
-	if elapsed > hangBudget {
-		t.Fatalf("reload elapsed = %s, want it to return well inside the hang budget", elapsed)
-	}
-	close(od.release)
 }
 
 func TestCityRuntimeRunReloadsConfigBeforeStartupReconcile(t *testing.T) {
