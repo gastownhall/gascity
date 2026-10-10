@@ -35,8 +35,11 @@ const idleSleepProbeTimeout = time.Second
 // cannot fit two of them into the 1s default, and a probe that times out fails
 // closed on every tick, so the session never drains. The budget is clamped to
 // [idleSleepProbeTimeout, fenceProbeTimeout]: the cap is the bound every other
-// effect-fence probe already has, so a pass never waits longer than it can
-// today. A leaf without a budget gets idleSleepProbeTimeout.
+// effect-fence probe already has, so no single idle wait exceeds the existing
+// per-probe fence bound. It is not a per-pass bound: a v2 pass that needs the
+// idle proof runs it after its other legs, so such a pass can take up to
+// fenceProbeTimeout - idleSleepProbeTimeout longer than before. A leaf without
+// a budget gets idleSleepProbeTimeout.
 func idleSleepProbeTimeoutFor(sp runtime.Provider, name string) time.Duration {
 	if sp == nil {
 		return idleSleepProbeTimeout

@@ -510,11 +510,14 @@ probe, abort the idle-sleep attempt for that tick.
   `5s`, because each pane capture is a full round trip to the box and two
   of them cannot reliably fit in `1s`; a timed-out probe fails closed on
   every tick. The v2 effect pass's `provedIdle` uses the same timeout.
-- probes run synchronously inside the single-threaded reconciler
-- at most `3` new probes may run in one patrol tick
-- the reconciler reserves `2s` of the `5s` `defaultTickBudget` for
-  non-probe work, so no new idle probe is started once that reserve
-  would be consumed
+  The cap means no single idle wait exceeds the bound every other
+  effect-fence probe already has; it is not a per-pass bound, because
+  `provedIdle` runs after the other fence legs, one after another.
+- the reconciler's idle probes (`launchIdleProbes`) run asynchronously,
+  one goroutine per probe, so a probe never blocks the patrol tick; only
+  the v2 effect pass's `provedIdle` waits synchronously
+- at most `maxIdleSleepProbesPerTick` (`3`) probes are in flight at once;
+  a tick starts only as many new probes as that leaves room for
 - remaining candidates are skipped until the next tick
 - `advanceSessionDrainsWithSessionsTraced` always runs even when the tick
   admits zero new probes
