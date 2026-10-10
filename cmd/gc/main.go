@@ -1840,9 +1840,21 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
+	if observeOpenedStore != nil {
+		result.Store = observeOpenedStore(scopeRoot, result.Store)
+	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
 }
+
+// observeOpenedStore is a test seam at the single store-open point. When set,
+// it receives every store this process opens, with the scope root it was
+// opened for, and returns the store callers will use. It runs inside the
+// bead-policy wrapper, so policy behavior and unwrapBeadPolicyStore see exactly
+// what they see in production. It is nil in production; request-budget tests
+// set it to count every operation a hook issues. Tests that set it must stay
+// serial.
+var observeOpenedStore func(scopeRoot string, store beads.Store) beads.Store
 
 // loadCityConfigForStoreOpen loads the city config for a store open that was
 // handed none. A missing city.toml is not an error: most opens through the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,9 +60,11 @@ import (
 // name rather than in a magic status value.
 //
 // There is no ExcludeStatus member to spell "everything but closed"
-// with, so the status axis cannot be pushed down at all; gc's three-value
-// projection (mapBdStatus, ListQuery.Matches) is the only definition of it and
-// it runs Go-side, where it always did.
+// with, so gc's "open" and its not-closed default cannot be pushed down; gc's
+// three-value projection (mapBdStatus, ListQuery.Matches) is the only
+// definition of them and runs Go-side. The two statuses that map one-to-one
+// onto a bd status are pushed beside AllFlag (nativeListRequestFromListQuery),
+// which keeps the pinned-flag default lifted under a named status.
 //
 // The four include flags lift the type and plane suppressions in the same
 // spirit. They are stated individually rather than as IncludeAllTypes because
@@ -145,39 +148,110 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 }
 
 // List returns beads matching the query, through the reader role's listing.
+// It sends NativeListPlan's requests over the store's own pushable type set;
+// see NativeListPlan for what a fanned-out plan reads.
 func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	var out []Bead
+	s.listCounters.noteList()
+	pushable := s.listPushableTypes
+	if s.typePushdownOff.Load() {
+		pushable = nil
+	}
+	plan := nativeListPlan(query, pushable)
+	s.noteUnkeyedPlan(query, plan)
+	var (
+		out   []Bead
+		tally nativeListTally
+	)
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		tally = nativeListTally{}
 		reader, err := storage.IssueReader()
 		if err != nil {
 			return err
 		}
-		page, err := reader.List(ctx, nativeListRequestFromListQuery(query))
-		if err != nil {
-			return err
-		}
-		s.noteRows(len(page.Items))
-		beads := make([]Bead, 0, len(page.Items))
-		for _, row := range page.Items {
-			bead, err := beadFromNativeIssueRow(row)
+		var beads []Bead
+		seen := make(map[string]bool)
+		for _, req := range plan {
+			if req.IssueType != "" && s.typePushdownOff.Load() {
+				req.IssueType = ""
+			}
+			page, err := s.listPlanRequest(ctx, reader, req, &tally)
 			if err != nil {
-				if isNativeIssueMetadataParseError(err) {
-					continue
-				}
 				return err
 			}
-			beads = append(beads, bead)
+			s.noteRows(len(page.Items))
+			for _, row := range page.Items {
+				bead, err := beadFromNativeIssueRow(row)
+				if err != nil {
+					if isNativeIssueMetadataParseError(err) {
+						continue
+					}
+					return err
+				}
+				if len(plan) > 1 {
+					if seen[bead.ID] {
+						continue
+					}
+					seen[bead.ID] = true
+				}
+				beads = append(beads, bead)
+			}
+		}
+		if len(plan) > 1 && query.Sort == SortDefault {
+			// One request answers in the backend's default order, and an
+			// unsorted Limit keeps that order's prefix. A union of several is
+			// put back into it, so the prefix ApplyListQuery keeps is the one
+			// the single request would have kept.
+			sortBeadsNativeListDefaultOrder(beads)
 		}
 		out = ApplyListQuery(beads, query)
 		return nil
 	})
+	s.listCounters.commit(tally)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// listPlanRequest sends one plan request. A pushed type the backend refuses is
+// sent again without it; type pushdown latches off only when that retry is
+// answered, and a retry that fails too returns the refusal. Both sends are
+// counted.
+func (s *NativeDoltStore) listPlanRequest(ctx context.Context, reader issueops.Reader, req issueops.ListRequest, tally *nativeListTally) (issueops.IssuePage, error) {
+	page, err := reader.List(ctx, req)
+	tally.noteRequest(req, len(page.Items))
+	if err == nil || req.IssueType == "" || !nativeListTypeRefused(err) {
+		return page, err
+	}
+	refusedType := req.IssueType
+	req.IssueType = ""
+	retried, retryErr := reader.List(ctx, req)
+	tally.noteRequest(req, len(retried.Items))
+	if retryErr != nil {
+		return issueops.IssuePage{}, err
+	}
+	s.disableTypePushdown(refusedType, err)
+	return retried, nil
+}
+
+// sortBeadsNativeListDefaultOrder sorts items into the reader role's default
+// listing order (sqlbuild.OrderByForColumns with no sort key): priority
+// ascending with an unset priority as 2, then created_at descending, then id
+// ascending.
+func sortBeadsNativeListDefaultOrder(items []Bead) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if pa, pb := readySortPriority(a), readySortPriority(b); pa != pb {
+			return pa < pb
+		}
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	})
 }
 
 // Ready returns open, unblocked actionable beads through the reader role.
@@ -585,22 +659,28 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 // nativeListRequestFromListQuery projects a ListQuery onto the role's request.
 //
 // Only the predicates that push down EXACTLY travel: a parent, an assignee, one
-// label, the metadata equality map and the created-before bound. Three of gc's
-// selectors deliberately stay Go-side, and each has a reason the role's own
-// contract supplies:
+// label, the metadata equality map, the created-before bound, the two statuses
+// that map one-to-one onto a bd status, and a type from the
+// store's pushable set. The plural assignee set is fanned out by NativeListPlan.
+// Everything else stays Go-side, and each has a reason the role's own contract
+// supplies:
 //
-//   - STATUS, because the request has no ExcludeStatus and no way to name
-//     "every status but closed", and because any named status re-arms the
-//     pinned-flag default. See nativeListReadRequest.
-//   - TYPE, because BuildListFilter VALIDATES it against the workspace
-//     vocabulary and fails a request naming an unknown one, where the raw
-//     filter answered empty — and because naming an INFRA type (agent, role,
-//     message) routes the query to the ephemeral plane ALONE, which would hide
-//     every durable mail bead. gc's type predicate is exact in ApplyListQuery.
+//   - STATUS "open" and the not-closed default, because the request has no
+//     ExcludeStatus and gc's "open" is every bd status but closed and
+//     in_progress. "in_progress" and "closed" are exact: mapBdStatus maps them
+//     one-to-one, and AllFlag keeps the pinned-flag default lifted under a
+//     named status. See nativeListReadRequest.
+//   - TYPE outside the store's pushable set (nativeListPushableTypesFor),
+//     because BuildListFilter VALIDATES it against the workspace vocabulary
+//     and fails a request naming an unknown one, where the raw filter answered
+//     empty — and because naming a type the server classifies as INFRA routes
+//     the query to the ephemeral plane ALONE, which would hide every durable
+//     row of it (every durable mail bead, for message). gc's type predicate
+//     is exact in ApplyListQuery.
 //   - TIER, because the plane knobs only ADMIT. There is no member that
 //     excludes the ephemeral rows a TierIssues read must drop, so that filter
 //     is ApplyListQuery's, as the wisp-tier filter already was.
-func nativeListRequestFromListQuery(query ListQuery) issueops.ListRequest {
+func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bool) issueops.ListRequest {
 	req := nativeListReadRequest()
 	limit := nativeListLimitPushdown(query)
 	req.Limit = &limit
@@ -624,6 +704,12 @@ func nativeListRequestFromListQuery(query ListQuery) issueops.ListRequest {
 	}
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
+	}
+	if nativeListPushableStatus(query.Status) {
+		req.Status = query.Status
+	}
+	if pushableTypes[query.Type] {
+		req.IssueType = query.Type
 	}
 	return req
 }
@@ -652,8 +738,10 @@ func nativeListLimitPushdown(query ListQuery) int {
 	if query.Limit <= 0 {
 		return 0
 	}
-	// The status, type and tier predicates below run only in ApplyListQuery, so
-	// a backing limit under any of them cuts rows before the residual filter.
+	// The status, type and tier predicates below are applied, or re-applied,
+	// by ApplyListQuery: gc's "open" and the tier never reach the backing, and
+	// a pushed type is dropped again if the backend refuses it. A backing limit
+	// under any of them would cut rows before the residual filter.
 	if query.Status != "" || !query.IncludeClosed || query.Type != "" || query.TierMode != TierBoth {
 		return 0
 	}
