@@ -168,9 +168,7 @@ func TestSplitStoreWork_KilledSeatReleasesItsWorkStoreClaim(t *testing.T) {
 
 			assertWork(t, work, routed.ID, "open", "")
 			assertClosedAsKilled(t, e.reload(t, e.seat.ID))
-			// On a single-store city the close cascade still lists its one
-			// store per identity; the cascade change takes it onto the index.
-			if shape == "split" && len(perIdentity) != 0 {
+			if len(perIdentity) != 0 {
 				t.Fatalf("the tick read the work store per identity %d times (first %+v); want only the index's lists", len(perIdentity), perIdentity[0])
 			}
 		})
