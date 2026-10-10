@@ -480,6 +480,44 @@ func TestHookClaimUnwindsOnResultDeliveryFailure(t *testing.T) {
 	}
 }
 
+// TestHookClaimUnwoundClaimDoesNotEnqueueContinuationNudge pins that the
+// continuation nudge follows a DELIVERED claim result. When the result cannot
+// leave the process the claim is released (F-C), and a nudge for a claim the
+// session no longer holds would wake it for work it does not own.
+func TestHookClaimUnwoundClaimDoesNotEnqueueContinuationNudge(t *testing.T) {
+	var enqueued, assigned, released []string
+	ops := buildContinuationNudgeOps(workflowRootCandidates(), []string{"sib-1"}, &enqueued)
+	ops.AssignContinuation = func(_ context.Context, _ string, _ []string, beadID, _ string) error {
+		assigned = append(assigned, beadID)
+		return nil
+	}
+	ops.Release = func(_ context.Context, _ string, _ []string, beadID, _ string) (bool, error) {
+		released = append(released, beadID)
+		return true, nil
+	}
+	ops.EmitClaimReleased = func(hookClaimReleaseRecord) {}
+
+	var stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"route-1"},
+		JSON:         true,
+	}, ops, brokenPipeWriter{}, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(assigned, ","); got != "sib-1" {
+		t.Fatalf("assigned siblings = %q, want sib-1: without it the nudge gate is shut and this test proves nothing", got)
+	}
+	if got := strings.Join(released, ","); got != "root-1" {
+		t.Fatalf("released = %q, want root-1: the claim must have been unwound", got)
+	}
+	if len(enqueued) != 0 {
+		t.Fatalf("continuation nudge enqueued for %v, want none for an unwound claim", enqueued)
+	}
+}
+
 // TestHookClaimKeepsDeliveredClaim is the control for F-C: a fence that released
 // on SUCCESS would destroy every claim the fleet makes, and only this direction
 // catches it.

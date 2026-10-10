@@ -1054,6 +1054,7 @@ go_test(
         "cmd_hook_claim_budget_deferred_test.go",
         "cmd_hook_claim_claimed_at_test.go",
         "cmd_hook_claim_collapsed_identity_test.go",
+        "cmd_hook_claim_continuation_nudge_test.go",
         "cmd_hook_claim_drain_pending_test.go",
         "cmd_hook_claim_hold_label_test.go",
         "cmd_hook_claim_metadata_test.go",
