@@ -159,13 +159,15 @@ func TestWatchdogWorkflow_CheckoutIsTrustedBaseOnlyOrAbsent(t *testing.T) {
 			}
 			with, _ := step["with"].(map[string]any)
 			ref, _ := with["ref"].(string)
-			// The base branch by name (its tip): trusted content that carries
-			// the current .github/actions this workflow, also read from the
-			// base branch tip, uses. pull_request.base.sha is the PR's merge
-			// base, which for a long-lived PR predates those actions and fails
-			// the job before the watchdog runs.
-			if ref != "${{ github.event.pull_request.base.ref }}" {
-				t.Fatalf("job %q checkout must pin ref to the PR base branch (pull_request.base.ref) only, got ref=%q", jobName, ref)
+			// The commit this workflow file was read from: under
+			// pull_request_target always a default-branch commit, whatever the
+			// PR's base, so it carries the .github/actions these steps use and
+			// is never PR head content. A checkout of the PR's base can lack
+			// those actions and fail the job before the watchdog runs:
+			// pull_request.base.sha is an old commit on a long-lived PR, and
+			// pull_request.base.ref need not be the default branch.
+			if ref != "${{ github.workflow_sha }}" {
+				t.Fatalf("job %q checkout must pin ref to the workflow file's own commit (github.workflow_sha) only, got ref=%q", jobName, ref)
 			}
 			persist, hasPersist := with["persist-credentials"].(bool)
 			if !hasPersist || persist {
@@ -197,11 +199,11 @@ func TestWatchdogWorkflow_UsesExplicitPRHeadSHANotBareGithubSHA(t *testing.T) {
 	if !strings.Contains(text, "github.event.pull_request.head.sha") {
 		t.Fatalf("workflow must read the PR head SHA explicitly from github.event.pull_request.head.sha for API lookups, got:\n%s", text)
 	}
-	// Under pull_request_target, github.sha resolves to the BASE branch
-	// commit, not the PR head -- using it here would silently evaluate the
-	// wrong commit's evidence. This is precisely the class of bug this
-	// watchdog exists to catch (observed on fork PR #4967).
+	// Under pull_request_target, github.sha resolves to the latest
+	// default-branch commit, not the PR head -- using it here would silently
+	// evaluate the wrong commit's evidence. This is precisely the class of
+	// bug this watchdog exists to catch (observed on fork PR #4967).
 	if strings.Contains(text, "${{ github.sha }}") {
-		t.Fatalf("workflow must not use the bare github.sha context (resolves to the base ref under pull_request_target, not the PR head):\n%s", text)
+		t.Fatalf("workflow must not use the bare github.sha context (resolves to the default branch under pull_request_target, not the PR head):\n%s", text)
 	}
 }
