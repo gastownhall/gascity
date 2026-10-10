@@ -109,11 +109,12 @@ func taskWorkDirs(w *World) taskWorkDirResolver {
 // verbStep is S1's table over the attempt's fresh runtime read and the
 // fresh row (the premise holds it to the pass's token): the verb, as a
 // refusal, the adoption's commit, a no-op, or, for a bringUp over nothing
-// present, the empty step that goes on to the Launch. An adopt never
-// launches. A runtime alive and Current is noted (v5 O4).
+// present, the step that goes on to the Launch with the row it acts on. An
+// adopt never launches. A runtime alive and Current is noted (v5 O4).
 func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 	return func(v txView, prepared *preparedStart, prepErr error) txStep {
-		if res, ok := v.World.Templates.lookup(v.Row); !ok || res.Err != nil {
+		res, ok := v.World.Templates.lookup(v.Row)
+		if !ok || res.Err != nil {
 			return txStep{Refuse: causeTemplate, Err: res.Err}
 		}
 		switch v.RT.Class {
@@ -123,7 +124,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 			if adopt {
 				return txStep{Refuse: causeNotPresent}
 			}
-			return txStep{}
+			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP}}
 		case rtCorpse, rtZombie:
 			return txStep{Refuse: causeDead}
 		}

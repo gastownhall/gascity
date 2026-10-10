@@ -129,8 +129,10 @@ type planner struct {
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
 
 	// observations is the cache a fresh read's Noted fact is written to; nil
-	// notes none.
+	// notes none. capacity is the endpoint breaker a start admits its ticket
+	// on; nil admits without one.
 	observations func() *ObservationCache
+	capacity     func() *endpointCapacityGuard
 
 	inflight plannerInflight
 	backoff  *backoffTable
@@ -373,7 +375,8 @@ func (p *planner) record(ev events.Event) {
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
 // resets its record; a refusal, failure or ambiguous outcome (an abandoned
-// write) backs it off with its cause, except a swap pause.
+// write) backs it off with its cause, except a swap pause and an endpoint-gate
+// refusal, deferrals the gate itself paces.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
@@ -383,7 +386,7 @@ func (p *planner) backoffSettled(s settlement) {
 	case key == "":
 	case s.Outcome == settledLanded || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause:
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

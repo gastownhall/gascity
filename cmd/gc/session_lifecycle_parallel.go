@@ -1421,19 +1421,7 @@ func preparedStartSessionWorkDir(info sessionpkg.Info) string {
 }
 
 func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPath string, cfg *config.City, store beads.Store) (bool, error) {
-	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
-	if !ok {
-		return false, nil
-	}
-	patch := sessionpkg.MetadataPatch{}
-	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
-	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
-	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
-		patch[beadmeta.WorkDirMetadataKey] = concreteDir
-	}
-	if samePreparedWorkDirPath(legacy, templateDir) {
-		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
-	}
+	patch := concretePoolWorkDirRepairPatch(*candidate, cityPath, cfg)
 	if len(patch) == 0 {
 		return false, nil
 	}
@@ -1447,6 +1435,26 @@ func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPa
 	}
 	candidate.info = info
 	return true, nil
+}
+
+// concretePoolWorkDirRepairPatch is the work_dir repair of a concrete pool
+// session still pointing at its template's directory: empty when nothing
+// needs repair. The v2 start effect folds it into its PreWake CAS.
+func concretePoolWorkDirRepairPatch(candidate startCandidate, cityPath string, cfg *config.City) sessionpkg.MetadataPatch {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	if !ok {
+		return nil
+	}
+	patch := sessionpkg.MetadataPatch{}
+	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
+	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
+	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
+		patch[beadmeta.WorkDirMetadataKey] = concreteDir
+	}
+	if samePreparedWorkDirPath(legacy, templateDir) {
+		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
+	}
+	return patch
 }
 
 func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath string, cfg *config.City, workDir string) error {
@@ -2779,33 +2787,21 @@ func commitStartResultTraced(
 		return startCommitFailed
 	}
 	metadata := startCommitPatch(&result.prepared, info, clk.Now())
-	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
+	mcp, err := startCommitMCPPatch(&result.prepared, info)
 	if err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: encoding MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_encode_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	if storedMCPSnapshot != "" || info.MCPServersSnapshot != "" {
-		metadata[sessionpkg.MCPServersSnapshotMetadataKey] = storedMCPSnapshot
+	for k, v := range mcp {
+		metadata[k] = v
 	}
 	if err := sessionpkg.PersistRuntimeMCPServersSnapshot(result.prepared.cfg.Env["GC_CITY_PATH"], info.ID, result.prepared.cfg.MCPServers); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing runtime MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
-	}
-	if result.prepared.candidate.tp.IsACP ||
-		info.MCPIdentity != "" ||
-		info.MCPServersSnapshot != "" {
-		storedMCPIdentity := firstNonEmptyGCString(
-			info.MCPIdentity,
-			info.ConfiguredNamedIdentity,
-			info.AgentName,
-		)
-		if storedMCPIdentity != "" || info.MCPIdentity != "" {
-			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
-		}
 	}
 	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease)
 	if err != nil {
@@ -2923,6 +2919,29 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
 	})
+}
+
+// startCommitMCPPatch is a start commit's MCP keys for prepared on info: the
+// encoded servers snapshot, when there is one or info stored one, and the
+// MCP identity of an ACP session or one that recorded MCP state. The
+// caller persists the runtime snapshot before it commits. The v2 start
+// effect's launch commit writes the same keys.
+func startCommitMCPPatch(prepared *preparedStart, info sessionpkg.Info) (sessionpkg.MetadataPatch, error) {
+	snapshot, err := sessionpkg.EncodeMCPServersSnapshot(prepared.cfg.MCPServers)
+	if err != nil {
+		return nil, err
+	}
+	patch := sessionpkg.MetadataPatch{}
+	if snapshot != "" || info.MCPServersSnapshot != "" {
+		patch[sessionpkg.MCPServersSnapshotMetadataKey] = snapshot
+	}
+	if prepared.candidate.tp.IsACP || info.MCPIdentity != "" || info.MCPServersSnapshot != "" {
+		identity := firstNonEmptyGCString(info.MCPIdentity, info.ConfiguredNamedIdentity, info.AgentName)
+		if identity != "" || info.MCPIdentity != "" {
+			patch[sessionpkg.MCPIdentityMetadataKey] = identity
+		}
+	}
+	return patch, nil
 }
 
 // commitCapacityRefusal commits a start the serving endpoint refused. The

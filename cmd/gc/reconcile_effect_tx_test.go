@@ -826,7 +826,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -840,7 +840,9 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 
 // effectCapGrants are the capabilities each kind holds: the create its
 // runner, the adopt the read-only stores its prepare reads.
-var effectCapGrants = map[string]caps{intentCreate: capCreate, intentAdopt: capReadStores}
+var effectCapGrants = map[string]caps{
+	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode,
+}
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
 // by applyFacts. A new field fails here until applyFacts and this table

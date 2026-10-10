@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -45,8 +47,10 @@ type effectSpec struct {
 type caps uint8
 
 const (
-	capCreate     caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
-	capReadStores                  // the read-only city and rig stores (reads)
+	capCreate        caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
+	capReadStores                     // the read-only city and rig stores (reads)
+	capProviderStart                  // the start's provider, endpoint breaker and clock (a Call's)
+	capEpisode                        // the #46 startup-health episode record (a Call's)
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -60,7 +64,21 @@ type txCaps struct {
 	exits   *[]func(final settlement) // onExit's, run at every exit
 	create  *createPass               // capCreate
 	creates *createEffects
-	reads   effectReads // capReadStores: read-only, blind writes refused
+	reads   effectReads         // capReadStores: read-only, blind writes refused
+	start   startCaps           // capProviderStart
+	episode startupHealthRecord // capEpisode
+}
+
+// startCaps are what the start's Calls hold to admit the endpoint ticket and
+// start a runtime: the composite provider, which the Call routes (RouteACP)
+// and resolves to its leaf itself, since capsFor runs before the name lock;
+// the breaker; the recorder and stderr its transitions go to; the clock.
+type startCaps struct {
+	sp       runtime.Provider
+	capacity *endpointCapacityGuard
+	rec      events.Recorder
+	stderr   io.Writer
+	clock    plannerClock
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
@@ -79,6 +97,13 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capReadStores != 0 {
 		c.reads = p.reads
+	}
+	if grant&capProviderStart != 0 {
+		c.start = p.held.start
+		c.start.sp, c.start.clock = p.Runtime, p.Clock
+	}
+	if grant&capEpisode != 0 {
+		c.episode = p.held.episode
 	}
 	return c
 }

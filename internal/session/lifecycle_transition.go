@@ -263,7 +263,7 @@ type PreWakePatchInput struct {
 // caller that carries the marker only while the claim is held always carries
 // the start of the current episode. A marker that does not parse is replaced.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
-	startedAt := pendingCreateStartedAt(input.Now)
+	startedAt := input.Now.UTC().Format(time.RFC3339) // every caller passes Now (R12: no clock fallback)
 	if episode := strings.TrimSpace(input.EpisodePendingCreateStartedAt); episode != "" {
 		if t, err := time.Parse(time.RFC3339, episode); err == nil && !t.IsZero() {
 			startedAt = episode
