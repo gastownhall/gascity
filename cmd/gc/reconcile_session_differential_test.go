@@ -105,6 +105,10 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #37 (A6; mc-d4atw)", "v2 stamps currently_processing_bead_id one pass after legacy: A6 decides on the pass's read and stamps only rows AL1 wants awake, so a row whose quarantine just cleared is stamped a pass later",
 		[]string{session.CurrentBeadIDKey},
 	},
+	"§12.2#35 fenced-timer-heal": {
+		"CONTRACT v5 §12.2 #35 (A2 before A6; mc-uyclc)", "an expired quarantine is not cleared while a kill fence is live: v2 holds the row until the fence expires; legacy clears it (and zeroes wake_attempts and churn_count) under the live fence",
+		[]string{"quarantined_until", "wake_attempts", "churn_count"},
+	},
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
@@ -139,7 +143,8 @@ var parityFindings = map[string]parityEntry{
 		"C6d, BEHAVIORS DRAIN-044", "legacy cancels an idle-respawn drain no longer eligible; A19 holds it until C6d completes its policy row",
 		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
-	"suspended-named-heal": {"BEHAVIORS SESS-009, SESS-531 (mc-92clf; owner call pending)", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended, with no hold", []string{"state"}},
+	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy", []string{"state"}},
+	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
 	"stability-accrual": {
 		"DIF-L1, BEHAVIORS SESS-537/538 (S3 abandon table + S6 #46)", "legacy counts a death inside the 30s stability threshold as a wake failure and one before the productivity threshold as churn (quarantining it); no v2 arm or effect accrues either, yet §12.2 row 18 claims them",
 		[]string{"wake_attempts", "churn_count", "quarantined_until", "sleep_reason"},
@@ -156,6 +161,7 @@ var parityUnported = map[string]parityEntry{
 	"A7 identity":     {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
 	"A20 idle-sleep":  {"C6a2, BEHAVIORS SESS-532", "legacy drains an idle row (its probe answers idle) and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input; v2 registers no drain-policy arm yet", []string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at"}},
 	"A20 drain-begin": {"C6a2 (A20 + D2)", "legacy begins a drain v2 does not: on a live row its quarantine keeps from waking (canceled again once its work vetoes it), on an unwanted row past the INC-003 grace, and on a managed suspend; v2 registers no drain-begin arm yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
+	"A21 killed-seat": {"C5c1 (#7314), owner ruling B1 (CONTRACT C3 killed pool seats)", "past the kill grace legacy releases a killed seat's open claim and closes it, and the freed demand creates and starts a fresh seat; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
