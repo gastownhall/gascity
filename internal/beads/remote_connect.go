@@ -119,7 +119,14 @@ func ConnectRemoteScope(ctx context.Context, req RemoteConnectRequest) (RemoteCo
 	switch {
 	case named && contract.BackendIsRemote(current):
 		prior, priorErr := bdhttp.LoadTarget(beadsDir)
-		if priorErr == nil && prior.BaseURL != nil {
+		if priorErr != nil && !errors.Is(priorErr, bdhttp.ErrNotConnected) {
+			// A sidecar that exists but cannot be read may pin another
+			// server or project; replacing it is a re-pin like any other,
+			// never a silent overwrite.
+			if !req.Retarget {
+				return refuse("%s cannot be read (%v); it may pin another server or project, so pass --retarget to replace it", bdhttp.TargetPath(beadsDir), priorErr)
+			}
+		} else if priorErr == nil && prior.BaseURL != nil {
 			sameServer := remoteOrigin(prior.BaseURL) == remoteOrigin(base) && strings.TrimRight(prior.BaseURL.Path, "/") == strings.TrimRight(base.Path, "/")
 			sameProject := target.ExpectProjectID == "" || target.ExpectProjectID == prior.ExpectProjectID
 			if !sameServer || !sameProject {

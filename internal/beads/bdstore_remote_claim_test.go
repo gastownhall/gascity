@@ -60,3 +60,27 @@ func TestBdStoreClaimOfAWispTheServerCannotClaimIsANamedRefusal(t *testing.T) {
 		t.Fatalf("the refusal must never read as ErrNotFound (the class route would escalate on it): %v", err)
 	}
 }
+
+// TestBdStoreClaimOfAProxy404IsNotNotFound: a 404 from something in front of
+// bd serve (a gateway answering for a path it does not route) carries no
+// not_found code. Reading its "Not Found" text as ErrNotFound would send the
+// class route looking in the graph store and skip the bead as absent
+// everywhere; it is an error, said loudly.
+func TestBdStoreClaimOfAProxy404IsNotNotFound(t *testing.T) {
+	for _, stderr := range []string{
+		"Error updating gc-7: updateIssue: bd serve at https://beads.example answered 404: Not Found\n" +
+			`{"error":"1 of 1 issues failed to update","failed":[{"id":"gc-7","error":"updating issue: updateIssue: bd serve at https://beads.example answered 404: Not Found"}],"schema_version":1}`,
+		"Error updating gc-7: updateIssue: bd serve at https://beads.example answered 404: 404 page not found",
+	} {
+		runner := func(_, _ string, _ ...string) ([]byte, error) {
+			return nil, bdExitWithStderr(stderr)
+		}
+		_, ok, err := beads.NewBdStore("/city", runner).Claim("gc-7")
+		if ok || err == nil {
+			t.Fatalf("Claim through a proxy 404 = ok %v err %v, want an error", ok, err)
+		}
+		if errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("a proxy 404 read as ErrNotFound (the class route would escalate on it): %v", err)
+		}
+	}
+}

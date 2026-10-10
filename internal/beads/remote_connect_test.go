@@ -2,12 +2,17 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -244,4 +249,241 @@ func TestRemoteBootGate(t *testing.T) {
 			t.Fatalf("gate on an unattached http scope = remote %v err %v, want a not_connected refusal", remote, err)
 		}
 	})
+}
+
+// scriptedTransport answers every remote dial of a test with one canned
+// outcome: a transport error, or a bare HTTP status.
+type scriptedTransport func(*http.Request) (*http.Response, error)
+
+func (f scriptedTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func transportError(err error) scriptedTransport {
+	return func(*http.Request) (*http.Response, error) { return nil, err }
+}
+
+func transportStatus(status int, contentType, body string) scriptedTransport {
+	return func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": {contentType}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	}
+}
+
+// closedLoopbackURL is a loopback URL nothing listens on: a server that is
+// down.
+func closedLoopbackURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return "http://" + addr
+}
+
+// TestRemoteBootGateTransportFailuresWarnAndStart: a server that cannot be
+// reached at boot is an outage, not a structural mismatch. The gate WARNs,
+// naming the scope, and the city starts; the store open deals with the outage
+// later. The warning never offers native_transport = "off" as the remedy.
+func TestRemoteBootGateTransportFailuresWarnAndStart(t *testing.T) {
+	hermeticRemoteHTTPEnv(t)
+	RegisterRemoteBackends("gc/test")
+
+	assertWarns := func(t *testing.T, scope string, result contract.PreflightCheckResult, remote bool, err error) {
+		t.Helper()
+		var refusal *RemoteCapabilityGateError
+		if errors.As(err, &refusal) {
+			t.Fatalf("a transport failure refused the city's start: %v", err)
+		}
+		var down *RemoteScopeUnreachableError
+		if !remote || !errors.As(err, &down) || down.ScopeRoot != scope {
+			t.Fatalf("gate = %+v remote %v err %v, want a *RemoteScopeUnreachableError naming %s", result, remote, err, scope)
+		}
+		if result.State != contract.PreflightCheckWarn {
+			t.Fatalf("verdict = %s (%s), want WARN", result.State, result.Summary)
+		}
+		if !strings.Contains(err.Error(), scope) {
+			t.Fatalf("warning %q does not name the scope", err)
+		}
+		for _, text := range []string{err.Error(), result.Summary} {
+			if strings.Contains(text, "native_transport") {
+				t.Fatalf("an outage's text suggests native_transport: %q", text)
+			}
+		}
+	}
+
+	t.Run("server down", func(t *testing.T) {
+		scope := scopeAt(t, closedLoopbackURL(t), false)
+		result, remote, err := CheckRemoteScopeBootGate(context.Background(), "", scope)
+		assertWarns(t, scope, result, remote, err)
+	})
+	for _, tc := range []struct {
+		name      string
+		transport scriptedTransport
+	}{
+		{"dns", transportError(&net.DNSError{Err: "no such host", Name: "bd.invalid", IsNotFound: true})},
+		{"connection refused", transportError(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})},
+		{"handshake timeout", transportError(context.DeadlineExceeded)},
+		{"5xx problem", transportStatus(http.StatusInternalServerError, "application/problem+json", `{"type":"about:blank","title":"Internal Server Error","status":500,"code":"internal"}`)},
+		{"5xx from a proxy", transportStatus(http.StatusBadGateway, "text/html", "<html>bad gateway</html>")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routeOpensThrough(t, tc.transport)
+			scope := scopeAt(t, "http://127.0.0.1:9", false)
+			result, remote, err := CheckRemoteScopeBootGate(context.Background(), "", scope)
+			assertWarns(t, scope, result, remote, err)
+		})
+	}
+}
+
+// TestRemoteBootGateStructuralFailuresRefuse: what no retry can fix refuses
+// the start by name: a rejected or missing credential, a project mismatch,
+// an api_version or wire_revision mismatch (and, in TestRemoteBootGate, a
+// missing capability and an unconnected scope).
+func TestRemoteBootGateStructuralFailuresRefuse(t *testing.T) {
+	hermeticRemoteHTTPEnv(t)
+	RegisterRemoteBackends("gc/test")
+
+	contextBody := func(apiVersion string, wireRevision int) string {
+		body, err := json.Marshal(map[string]any{
+			"api_version": apiVersion, "backend": "dolt", "bd_version": "1.3.1",
+			"beads_dir": "/srv/.beads", "capabilities": fullRemoteCapabilities(),
+			"database": "beads", "dolt_mode": "server", "project_id": remoteHTTPProjectID,
+			"wire_revision": wireRevision,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	assertRefuses := func(t *testing.T, scope string, result contract.PreflightCheckResult, remote bool, err error, want string) {
+		t.Helper()
+		var refusal *RemoteCapabilityGateError
+		if !remote || !errors.As(err, &refusal) || refusal.ScopeRoot != scope {
+			t.Fatalf("gate = %+v remote %v err %v, want a *RemoteCapabilityGateError naming %s", result, remote, err, scope)
+		}
+		var down *RemoteScopeUnreachableError
+		if errors.As(err, &down) {
+			t.Fatalf("a structural failure was read as an outage: %v", err)
+		}
+		if result.State != contract.PreflightCheckFail {
+			t.Fatalf("verdict = %s (%s), want FAIL", result.State, result.Summary)
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		transport scriptedTransport
+		want      string
+	}{
+		{"401", transportStatus(http.StatusUnauthorized, "application/problem+json", `{"type":"about:blank","title":"Unauthorized","status":401,"code":"unauthenticated"}`), "credential"},
+		{"403 from a proxy", transportStatus(http.StatusForbidden, "text/html", "<html>forbidden</html>"), "credential"},
+		{"api_version", transportStatus(http.StatusOK, "application/json", contextBody("v9", 0)), "api_version"},
+		{"wire_revision", transportStatus(http.StatusOK, "application/json", contextBody("v0", 99)), "wire revision"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routeOpensThrough(t, tc.transport)
+			scope := scopeAt(t, "http://127.0.0.1:9", false)
+			result, remote, err := CheckRemoteScopeBootGate(context.Background(), "", scope)
+			assertRefuses(t, scope, result, remote, err, tc.want)
+		})
+	}
+	t.Run("project mismatch", func(t *testing.T) {
+		newRemoteHTTPServer(t, fullRemoteCapabilities())
+		scope := writeRemoteTestScope(t, `{"backend": "http"}`)
+		base, _ := url.Parse("http://127.0.0.1:9")
+		if err := bdhttp.SaveTarget(filepath.Join(scope, ".beads"), bdhttp.Target{BaseURL: base, ExpectProjectID: "someone-elses-project"}); err != nil {
+			t.Fatal(err)
+		}
+		result, remote, err := CheckRemoteScopeBootGate(context.Background(), "", scope)
+		assertRefuses(t, scope, result, remote, err, "project")
+	})
+	t.Run("missing credential", func(t *testing.T) {
+		newRemoteHTTPServer(t, fullRemoteCapabilities())
+		scope := scopeAt(t, "http://127.0.0.1:9", false)
+		t.Setenv("GC_TEST_ABSENT_BEADS_TOKEN", "")
+		installRemoteCredentialLookup(t, map[string]RemoteCredentialConfig{
+			filepath.Clean(scope): {Source: mustCredentialSource(t, "env:GC_TEST_ABSENT_BEADS_TOKEN"), Scope: "[beads]", FromCity: true},
+		})
+		result, remote, err := CheckRemoteScopeBootGate(context.Background(), "", scope)
+		assertRefuses(t, scope, result, remote, err, "credential")
+		if strings.Contains(err.Error(), "native_transport") {
+			t.Fatalf("a credential refusal offers native_transport, which runs the same credential through the bd CLI: %v", err)
+		}
+	})
+}
+
+// TestConnectRemoteScopeNeedsConsentToRetarget: a scope attached to one
+// server is not re-pinned to another without --retarget, and is with it.
+func TestConnectRemoteScopeNeedsConsentToRetarget(t *testing.T) {
+	hermeticRemoteHTTPEnv(t)
+	RegisterRemoteBackends("gc/test")
+	server := newRemoteHTTPServer(t, fullRemoteCapabilities())
+	scope := scopeAt(t, "http://127.0.0.1:8", false)
+	before := readFileForTest(t, bdhttp.TargetPath(filepath.Join(scope, ".beads")))
+
+	_, err := ConnectRemoteScope(context.Background(), RemoteConnectRequest{ScopeRoot: scope, URL: server.URL})
+	if !errors.Is(err, ErrRemoteConnectRefused) || !strings.Contains(err.Error(), "--retarget") {
+		t.Fatalf("err = %v, want a refusal naming --retarget", err)
+	}
+	if len(server.requests()) != 0 {
+		t.Fatalf("a refused re-pin dialed the server: %v", server.requests())
+	}
+	if after := readFileForTest(t, bdhttp.TargetPath(filepath.Join(scope, ".beads"))); after != before {
+		t.Fatalf("a refused re-pin rewrote the sidecar:\n%s", after)
+	}
+
+	if _, err := ConnectRemoteScope(context.Background(), RemoteConnectRequest{ScopeRoot: scope, URL: server.URL, Retarget: true}); err != nil {
+		t.Fatalf("re-pin with --retarget: %v", err)
+	}
+	target, err := bdhttp.LoadTarget(filepath.Join(scope, ".beads"))
+	if err != nil || target.BaseURL == nil || target.BaseURL.String() != server.URL {
+		t.Fatalf("sidecar after --retarget = %+v (%v), want %s", target, err, server.URL)
+	}
+}
+
+// TestConnectRemoteScopeNeverOverwritesAnUnreadableSidecar: a remote scope
+// whose http_target.json cannot be read is not silently re-pinned; it takes
+// --retarget, like any other re-pin.
+func TestConnectRemoteScopeNeverOverwritesAnUnreadableSidecar(t *testing.T) {
+	hermeticRemoteHTTPEnv(t)
+	RegisterRemoteBackends("gc/test")
+	server := newRemoteHTTPServer(t, fullRemoteCapabilities())
+	scope := writeRemoteTestScope(t, `{"backend": "http"}`)
+	sidecar := bdhttp.TargetPath(filepath.Join(scope, ".beads"))
+	if err := os.WriteFile(sidecar, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ConnectRemoteScope(context.Background(), RemoteConnectRequest{ScopeRoot: scope, URL: server.URL})
+	if !errors.Is(err, ErrRemoteConnectRefused) || !strings.Contains(err.Error(), "--retarget") || !strings.Contains(err.Error(), filepath.Base(sidecar)) {
+		t.Fatalf("err = %v, want a refusal naming the unreadable sidecar and --retarget", err)
+	}
+	if got := readFileForTest(t, sidecar); got != "{not json" {
+		t.Fatalf("a refused connect rewrote the unreadable sidecar: %q", got)
+	}
+	if _, err := ConnectRemoteScope(context.Background(), RemoteConnectRequest{ScopeRoot: scope, URL: server.URL, Retarget: true}); err != nil {
+		t.Fatalf("connect with --retarget over an unreadable sidecar: %v", err)
+	}
+	if target, err := bdhttp.LoadTarget(filepath.Join(scope, ".beads")); err != nil || target.BaseURL == nil || target.BaseURL.String() != server.URL {
+		t.Fatalf("sidecar after --retarget = %+v (%v), want %s", target, err, server.URL)
+	}
+}
+
+func readFileForTest(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

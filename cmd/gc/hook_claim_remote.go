@@ -26,7 +26,9 @@ import (
 // native_transport = "off" (the rollback lever) the bd CLI is the lane, and
 // its child must carry the scope's per-scope credential the way every other
 // BdStore child of that scope does (G7), or it would fall back to the
-// machine-wide credential ladder.
+// machine-wide credential ladder. The hook's work query is such a child too
+// (bd ready against the remote scope, on either lane), so hookWorkQueryRunner
+// projects the same credential into it.
 //
 // remoteRoutedHookClaimOps decides that PER CALL: one federated claim walks
 // several legs (rig store, city store) under one ops value, and only a leg
@@ -156,22 +158,64 @@ func hookClaimEnvWithScopeCredential(cityPath, scopeRoot string, env []string) (
 
 // hookClaimRemoteScopeRoot is the scope a leg's work store lives in: the
 // parent of the leg's own BEADS_DIR (the value bd itself resolves the store
-// from; every setter writes filepath.Join(root, ".beads")), else dir.
-func hookClaimRemoteScopeRoot(dir string, env []string) string {
+// from; every setter writes filepath.Join(root, ".beads")), else dir. A nil
+// env inherits the process environment, so its BEADS_DIR is the process's.
+//
+// One exception keeps the scope a RIG's: a rig with no metadata of its own
+// under a remote city reaches the city's server, so its leg's BEADS_DIR names
+// the CITY's activation (bd_env.go), but its credential is the rig's own
+// beads_credential when it has one. Its leg also carries GC_STORE_ROOT (the
+// work-query env's store scope), and that scope wins when its activation IS
+// the one BEADS_DIR names. A GC_STORE_ROOT that does not share the activation
+// (a variable inherited from an agent's own scope) is ignored.
+func hookClaimRemoteScopeRoot(cityPath, dir string, env []string) string {
+	if env == nil {
+		env = os.Environ()
+	}
 	beadsDir := hookClaimEnvValue(env, "BEADS_DIR")
 	if beadsDir == "" || filepath.Base(filepath.Clean(beadsDir)) != ".beads" {
 		return dir
 	}
-	if root := filepath.Dir(filepath.Clean(beadsDir)); root != "" && root != "." {
-		return root
+	root := filepath.Dir(filepath.Clean(beadsDir))
+	if root == "" || root == "." {
+		return dir
 	}
-	return dir
+	if store := hookClaimEnvValue(env, "GC_STORE_ROOT"); store != "" && filepath.IsAbs(store) && !samePath(store, root) {
+		if activation, remote := beads.RemoteBackendActivationRoot(store, cityPath); remote && samePath(activation, root) {
+			return filepath.Clean(store)
+		}
+	}
+	return root
+}
+
+// hookWorkQueryRunner is the hook's work-query runner. A work query (bd
+// ready, or gc ready's bd legs) is a bd child of its leg's store like any
+// other, so a leg whose scope is served by a registered remote backend gets
+// the scope's per-scope credential projected exactly the way gc bd's and
+// BdStore's children get it: BEADS_HTTP_TOKEN=host:port=token in this child's
+// env only, from the scope's shared provider, the ambient token command and
+// CA blanked, and never on argv (the command string is unchanged). This holds
+// on either claim lane: the work query runs before the lane is chosen. A
+// scope with no configured credential, and every local leg, runs exactly as
+// before.
+func hookWorkQueryRunner(cityPath string) hookStoreRunner {
+	return func(command, dir string, env []string) (string, error) {
+		scope := hookClaimRemoteScopeRoot(cityPath, dir, env)
+		if _, remote := beads.RemoteBackendActivationRoot(scope, cityPath); remote {
+			projected, err := hookClaimEnvWithScopeCredential(cityPath, scope, env)
+			if err != nil {
+				return "", fmt.Errorf("running the work query against the remote work store at %s: %w", scope, err)
+			}
+			env = projected
+		}
+		return shellWorkQueryWithEnv(command, dir, env)
+	}
 }
 
 // leg resolves one call's leg. remote is false for a local leg, which the
 // caller hands to the base op untouched.
 func (r *hookClaimRemoteRouter) leg(dir string, env []string) (lane hookClaimRemoteLane, scope string, legEnv []string, remote bool, err error) {
-	scope = hookClaimRemoteScopeRoot(dir, env)
+	scope = hookClaimRemoteScopeRoot(r.cityPath, dir, env)
 	if !r.isRemote(scope) {
 		return hookClaimRemoteLane{}, scope, env, false, nil
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -501,6 +502,16 @@ func remoteWireHandshakeWith(scope string, plan remoteOpenPlan) (contract.Prefli
 	return handshake, nil
 }
 
+// problemStatus is the HTTP status of a *bdhttp.ProblemError in err's chain,
+// or 0.
+func problemStatus(err error) int {
+	var problem *bdhttp.ProblemError
+	if errors.As(err, &problem) {
+		return problem.Status
+	}
+	return 0
+}
+
 func classifyRemoteHandshakeError(err error) contract.PreflightWireReason {
 	switch {
 	case errors.Is(err, bdhttp.ErrProjectMismatch):
@@ -509,7 +520,9 @@ func classifyRemoteHandshakeError(err error) contract.PreflightWireReason {
 		return contract.PreflightWireAPIVersion
 	case errors.Is(err, bdhttp.ErrCapabilityAbsent):
 		return contract.PreflightWireCapability
-	case errors.Is(err, bdhttp.ErrUnauthenticated):
+	case errors.Is(err, bdhttp.ErrUnauthenticated), problemStatus(err) == http.StatusForbidden:
+		// A 403 is a rejected credential as surely as a 401: a gateway in
+		// front of bd serve answering for a token it will not honor.
 		return contract.PreflightWireUnauthenticated
 	default:
 		return contract.PreflightWireUnreachable

@@ -1790,8 +1790,15 @@ const structuralInitFailureBackoff = time.Hour
 // knows up to vM"), which requires an out-of-band bd binary upgrade.
 // Mirrors runtime.IsSessionGone's message-substring classification style
 // for external-subprocess errors with no typed sentinel available.
+//
+// A remote beads boot gate refusal is structural too: the gate refuses only
+// what no retry fixes (a missing capability, a project or version mismatch,
+// an unconnected scope, a missing or rejected credential), while a server
+// that is merely unreachable never refuses (beads.CheckRemoteScopeBootGate).
+// Editing city.toml (native_transport = "off", a credential) still resets
+// the backoff through the config-mtime check.
 func isStructuralInitFailureMessage(msg string) bool {
-	return strings.Contains(msg, "schema version mismatch")
+	return strings.Contains(msg, "schema version mismatch") || beads.IsRemoteBootGateRefusalMessage(msg)
 }
 
 // initFailureBackoffDelay computes the retry backoff for the count-th
@@ -2195,7 +2202,7 @@ func startOneCity(
 
 	// The boot capability gate: a remote beads scope whose server cannot
 	// serve the native store refuses this city before it starts its store.
-	if gateErr := remoteBeadsBootGate(context.Background(), path, cfg); gateErr != nil {
+	if gateErr := remoteBeadsBootGate(context.Background(), path, cfg, stderr); gateErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "remote_capability_gate", gateErr, stderr)
 		recordInitFailure(cityName, gateErr.Error())
 		return

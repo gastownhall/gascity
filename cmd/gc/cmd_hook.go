@@ -476,7 +476,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], hookWorkQueryRunner(cityPath))
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -776,7 +776,9 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	remote := newHookClaimRemoteRouter(cityPath, stderr)
 	defer remote.Close()
 	ops := classRoutedHookClaimOps(remoteRoutedHookClaimOps(hookClaimOps{}, remote), route)
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+	// The work query runs through hookWorkQueryRunner, so a remote leg's
+	// bd ready carries its scope's credential like the claim lanes do.
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookWorkQueryRunner(cityPath), emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim

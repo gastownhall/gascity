@@ -1247,6 +1247,21 @@ func isBdBeadNotFound(err error) bool {
 	return true
 }
 
+// isBdClaimNotFound is Claim's not-found: bd saying the bead does not exist
+// (isBdBeadNotFound), and not a 404 from something in front of bd serve. bd
+// serve's own refusal carries the not_found code (and bd prints "Issue <id>
+// not found"); a gateway or proxy answering 404 for a path it does not route
+// reaches bd as a codeless "answered 404", whose text may well say "Not
+// Found". Read as ErrNotFound, that would send the hook's class route to the
+// graph store and skip the bead as absent everywhere.
+func isBdClaimNotFound(err error) bool {
+	if !isBdBeadNotFound(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return !strings.Contains(msg, " answered 404") || strings.Contains(msg, " answered 404 not_found")
+}
+
 // isBdOperationUnsupported reports whether err is bd telling us a backend
 // does not implement the attempted operation at all (e.g. the Postgres
 // backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
@@ -1900,7 +1915,11 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
 			return Bead{}, false, nil
 		}
-		if isBdNotFound(err) {
+		// Strict: a not-found here sends the hook's class route looking
+		// for the bead in another store, so only bd saying the BEAD is
+		// absent counts (isBdClaimNotFound), never an infrastructure
+		// "not found" or a gateway's 404.
+		if isBdClaimNotFound(err) {
 			return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
 		}
 		if msg != "" {

@@ -846,7 +846,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// The boot capability gate: a remote beads scope whose server cannot
 	// serve the native store refuses the start here, by name, before any
 	// bead store starts and rather than at the controller's first open.
-	if err := remoteBeadsBootGate(context.Background(), cityPath, cfg); err != nil {
+	if err := remoteBeadsBootGate(context.Background(), cityPath, cfg, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                                     //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" and read its wire_compat check") //nolint:errcheck // best-effort stderr
 		return 1

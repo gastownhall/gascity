@@ -286,10 +286,10 @@ func TestRemoteRoutedHookClaimOpsRoutesEveryWithEnvField(t *testing.T) {
 }
 
 func TestHookClaimRemoteScopeRootReadsTheLegsBeadsDir(t *testing.T) {
-	if got := hookClaimRemoteScopeRoot("/work/dir", []string{"BEADS_DIR=/city/rigs/a/.beads/"}); got != "/city/rigs/a" {
+	if got := hookClaimRemoteScopeRoot("/city", "/work/dir", []string{"BEADS_DIR=/city/rigs/a/.beads/"}); got != "/city/rigs/a" {
 		t.Fatalf("scope = %q, want the BEADS_DIR parent", got)
 	}
-	if got := hookClaimRemoteScopeRoot("/work/dir", nil); got != "/work/dir" {
+	if got := hookClaimRemoteScopeRoot("/city", "/work/dir", []string{"PATH=/usr/bin"}); got != "/work/dir" {
 		t.Fatalf("scope without BEADS_DIR = %q, want dir", got)
 	}
 }
