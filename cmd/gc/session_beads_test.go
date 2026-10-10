@@ -10265,6 +10265,10 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsUnreapableStatesAndTransports(t *t
 			Metadata: map[string]string{"session_name": "w-manual", "template": "worker", "state": "active", "manual_session": "true"},
 		},
 		{
+			ID: "s-api-manual", Status: "open", Type: sessionBeadType, CreatedAt: created,
+			Metadata: map[string]string{"session_name": "w-api-manual", "template": "worker", "state": "active", "session_origin": "manual", "session_key": "native", "started_config_hash": "config"},
+		},
+		{
 			ID: "s-acp", Status: "open", Type: sessionBeadType, CreatedAt: created,
 			Metadata: map[string]string{"session_name": "w-acp", "template": "worker", "state": "active", "transport": "acp"},
 		},
@@ -10291,7 +10295,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsUnreapableStatesAndTransports(t *t
 	if got := cleanupDeadRuntimeSessionCorpses(testCity, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0; stderr=%q", got, stderr.String())
 	}
-	for _, id := range []string{"s-draining", "s-manual", "s-acp", "s-drained", "s-nostate", "s-city-stop"} {
+	for _, id := range []string{"s-draining", "s-manual", "s-api-manual", "s-acp", "s-drained", "s-nostate", "s-city-stop"} {
 		b, err := store.Get(id)
 		if err != nil || b.Status != "open" {
 			t.Fatalf("%s should stay open: status=%q err=%v", id, b.Status, err)
@@ -10411,5 +10415,35 @@ func TestSweepProcessTableOrphansConfirmsClosedLive(t *testing.T) {
 	var stderr bytes.Buffer
 	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 0 || len(sp.terminated) != 0 {
 		t.Fatalf("swept %d (terminated %v) on a cached closed row the store has reopened; stderr=%q", got, sp.terminated, stderr.String())
+	}
+}
+
+func TestReapStaleSessionBeadsRetainsStartedManualConversation(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin, hash string
+		want               int
+	}{{"started manual", "manual", "started", 0}, {"never started manual", "manual", "", 1}, {"automatic worker", "pool", "started", 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			b, err := store.Create(beads.Bead{Title: "conversation", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "own-conversation", "state": "creating", "session_origin": tc.origin, "session_key": "native-key", "started_config_hash": tc.hash}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk := &clock.Fake{Time: b.CreatedAt.Add(2 * time.Minute)}
+			var output bytes.Buffer
+			if got := reapStaleSessionBeads(store, sp, nil, nil, clk, &output); got != tc.want {
+				t.Fatalf("reaped %d, want %d: %s", got, tc.want, output.String())
+			}
+			if tc.want == 0 {
+				got, err := store.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status == "closed" || got.Metadata["session_key"] != "native-key" {
+					t.Fatalf("closed/reset committed conversation: %#v", got)
+				}
+			}
+		})
 	}
 }

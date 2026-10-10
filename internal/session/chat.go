@@ -281,6 +281,14 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	cfg runtime.Config,
 	unroute func(),
 ) (bool, error) {
+	// A dead runtime is not consent to reset a committed conversation. The same
+	// policy fences advisory healing and this lower-level startup retry.
+	if PreserveConversationOnRuntimeLoss(infoFromPersistedBead(*b)) {
+		if unroute != nil {
+			unroute()
+		}
+		return false, fmt.Errorf("retaining committed conversation after failed resume: %w: %w", ErrResumeRequired, runtime.ErrSessionDiedDuringStartup)
+	}
 	// An empty session_key does not mean there is nothing to recover. The
 	// command can still carry a generated resume shape, because it was built
 	// while the key was present and the key was cleared before this start ran.

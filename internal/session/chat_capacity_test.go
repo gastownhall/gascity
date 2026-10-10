@@ -159,3 +159,69 @@ func TestEnsureRunningRuntimeOnly_PlainStartupDeathStillRetriesFresh(t *testing.
 		t.Errorf("continuation_reset_pending = %q, want true", got)
 	}
 }
+
+// A startup death says nothing about the identity of a committed conversation.
+func TestCommittedConversationStartupFailurePreservesIdentity(t *testing.T) {
+	for _, runtimeOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("runtimeOnly=%t", runtimeOnly), func(t *testing.T) {
+			mgr, sp, store, id, name := seedResumableACPSession(t, func(string) error { return runtime.ErrSessionDiedDuringStartup })
+			if err := store.SetMetadata(id, "session_origin", "manual"); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if runtimeOnly {
+				err = mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+			} else {
+				err = mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			}
+			if err == nil {
+				t.Fatal("failed resume reported success")
+			}
+			b, e := store.Get(id)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if b.Metadata["session_key"] != capacityTestSessionKey || b.Metadata["started_config_hash"] != capacityTestConfigHash || b.Metadata["continuation_reset_pending"] != "" {
+				t.Fatalf("failed resume reset committed identity: %v", b.Metadata)
+			}
+			if startCallCount(sp) != 1 {
+				t.Fatalf("fresh fallback launches = %d", startCallCount(sp)-1)
+			}
+			if !slices.Contains(sp.unrouted, name) {
+				t.Fatal("failed resume retained route")
+			}
+		})
+	}
+}
+
+func TestCommittedConversationImmediateExitPreservesIdentity(t *testing.T) {
+	for _, runtimeOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("runtimeOnly=%t", runtimeOnly), func(t *testing.T) {
+			_, sp, store, id, _ := seedResumableACPSession(t, func(string) error { return nil })
+			if err := store.SetMetadata(id, "session_origin", "manual"); err != nil {
+				t.Fatal(err)
+			}
+			fake := &failOnceStartProvider{Fake: sp.Fake, armed: true}
+			mgr := NewManagerWithOptions(store, fake, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+			var err error
+			if runtimeOnly {
+				err = mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+			} else {
+				err = mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			}
+			if err == nil {
+				t.Fatal("immediate exit reported success")
+			}
+			b, e := store.Get(id)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if b.Metadata["session_key"] != capacityTestSessionKey || b.Metadata["continuation_reset_pending"] != "" {
+				t.Fatal("immediate exit reset committed identity")
+			}
+			if startCallCount(sp) != 1 {
+				t.Fatalf("starts=%d, want one failed resume", startCallCount(sp))
+			}
+		})
+	}
+}

@@ -5289,7 +5289,7 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
-	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "ephemeral"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5351,7 +5351,7 @@ func TestEnsureRunning_StartupDeathWithoutStrippableResumeRecovers(t *testing.T)
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "claude --dangerously", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
-	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "ephemeral"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -5601,9 +5601,9 @@ func TestEnsureRunning_RetriesWhenSessionIDKeyDiverged(t *testing.T) {
 // Issue #1655 — a session created without resume capability
 // (ProviderResume{} on Create → empty resume_flag in bead metadata)
 // must still be able to recover from a stale session_key. The
-// named-always case in the issue body is one instance of this shape;
-// the invariant is general — any session whose start command was
-// never resume-capable should clear a stale key and start fresh
+// original report also named always-on conversations, which now retain
+// their identity. Recyclable workers whose start command was
+// never resume-capable may clear a stale key and start fresh
 // rather than bail. Previously retryFreshStartAfterStaleKey refused
 // the retry because stripResumeFlag is a no-op when resume_flag is
 // empty, and the function misclassified that as a strip failure.
@@ -5616,9 +5616,9 @@ func TestEnsureRunning_RetriesWhenResumeFlagIsEmpty(t *testing.T) {
 
 	// Create a session without resume capability — ProviderResume{}
 	// yields an empty resume_flag in bead metadata. The same shape
-	// arises for any configured-named-always session whose start
-	// command lacks a --resume-style flag.
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "fakecmd --follow worker", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	// arises for recyclable workers whose start command lacks
+	// a --resume-style flag. Committed conversations are tested separately.
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Title: "", Command: "fakecmd --follow worker", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "ephemeral"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

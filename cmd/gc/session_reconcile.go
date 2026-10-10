@@ -717,7 +717,8 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	// left behind by older builds. The store write is best-effort (its error is
 	// intentionally ignored, as before) while the Info fold is unconditional.
 	//
-	// Exception: keep a conversation that provably still exists on disk. The
+	// Exceptions: retain committed manual conversations, and keep a conversation
+	// that provably still exists on disk. The
 	// reset is recovery for an unresumable key, but any single wake failure
 	// lands here — a transient tmux/spawn flake included — and for providers
 	// that persist a keyed transcript the reset would permanently orphan a
@@ -726,7 +727,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	// existing unconditional behavior. Attempt accrual and quarantine below are
 	// untouched either way, so a genuinely broken session still escalates.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
-		if !wakeFailureKeepsConversation(info) {
+		if !sessionpkg.HasStartedManualConversation(info) && !wakeFailureKeepsConversation(info) {
 			reset := sessionpkg.ConversationResetPatch(true)
 			_ = sessFront.ApplyPatch(info.ID, reset)
 			info = info.ApplyPatch(reset)
@@ -818,11 +819,13 @@ func isDeliberateSleepReason(reason string) bool {
 func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	count, _ := strconv.Atoi(info.ChurnCount)
 
-	// Always clear session_key on churn — context exhaustion means the
+	// Clear automatic-session keys on churn — context exhaustion means the
 	// conversation itself is the problem. A fresh conversation avoids
-	// re-hitting the same wall. Best-effort store write (error ignored, as
+	// re-hitting the same wall. Manual conversations retain identity and use
+	// the same retry/quarantine accounting; replacing one requires explicit reset.
+	// Best-effort store write (error ignored, as
 	// before) with an unconditional Info fold.
-	if info.SessionKey != "" {
+	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
 		reset := sessionpkg.ConversationResetPatch(false)
 		_ = sessFront.ApplyPatch(info.ID, reset)
 		info = info.ApplyPatch(reset)
@@ -1031,7 +1034,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 			batch["sleep_reason"] = string(sessionpkg.SleepReasonFailedCreate)
 		}
 		if view.ResetContinuation || stalePendingCreateRollback {
-			if !isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always" {
+			if !sessionpkg.PreserveConversationOnRuntimeLoss(info) {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"
