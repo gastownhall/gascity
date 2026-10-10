@@ -54,6 +54,14 @@ go_library(
 
 go_test(
     name = "productmetrics_test",
+    # The suite is fsync-bound by design: storage syncs a directory after every
+    # entry it unlinks, so the tests make about 62,000 fsyncs, six of them
+    # 1,500 to 5,100 each. Every one waits on the disk under the sandbox's
+    # hermetic /tmp. A loaded gate host took 180 s for one 5,046-fsync test,
+    # and both shards of the old 2-shard split overran 300 s (ga-46vdxg). Six
+    # shards keep the heaviest tests apart; the long timeout covers a gate
+    # host slower than the one measured.
+    timeout = "long",
     srcs = [
         "config_state_test.go",
         "control_unix_test.go",
@@ -92,7 +100,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":productmetrics"],
-    shard_count = 2,
+    shard_count = 6,
     deps = [
         "//:gascity",
         "//internal/testenv",
