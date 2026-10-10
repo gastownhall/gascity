@@ -68,7 +68,8 @@ func (o RecordedOp) NotFound() bool {
 //
 // It forwards the optional capabilities both the file and native stores
 // implement (the conditional-write family, ReleaseIfCurrent, DepListBatch,
-// ReadyContext and DepMetadata) and ListRequestCounter. A forwarded capability the delegate lacks answers an
+// ReadyContext and DepMetadata), and reports the delegate's ListRequestStatsOf
+// counts through ListRequestStats. A forwarded capability the delegate lacks answers an
 // error wrapping errors.ErrUnsupported. Capabilities only the native store has
 // (Count, Claim, IDPrefix) are deliberately not forwarded, so a file-backed
 // fixture keeps the code paths it takes without the recorder.
@@ -420,10 +421,8 @@ func (r *OpRecordingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, 
 // ListRequestStats forwards the delegate's backend listing counters, or zero
 // counts when the delegate does not keep them.
 func (r *OpRecordingStore) ListRequestStats() beads.ListRequestStats {
-	if c, ok := r.delegate.(beads.ListRequestCounter); ok {
-		return c.ListRequestStats()
-	}
-	return beads.ListRequestStats{}
+	stats, _ := beads.ListRequestStatsOf(r.delegate)
+	return stats
 }
 
 var (

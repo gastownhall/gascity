@@ -203,12 +203,23 @@ type ListRequestStats struct {
 	Rows int64
 }
 
-// ListRequestCounter is the optional capability of a store that counts the
-// backend listing requests its List calls issue. NativeDoltStore implements
-// it; budget tests read it to prove a hook never walks the whole ledger.
-type ListRequestCounter interface {
-	// ListRequestStats returns the counts accumulated since the store opened.
-	ListRequestStats() ListRequestStats
+// listRequestCounter is implemented by a store that counts the backend listing
+// requests its List calls issue. It is unexported so the diagnostic stays out
+// of the engine's method set, which the store wrappers must forward in full.
+type listRequestCounter interface {
+	listRequestStats() ListRequestStats
+}
+
+// ListRequestStatsOf returns the backend listing counts store has accumulated
+// since it opened, and false when store does not keep them. NativeDoltStore
+// keeps them; budget tests read them to prove a hook never walks the whole
+// ledger.
+func ListRequestStatsOf(store Store) (ListRequestStats, bool) {
+	c, ok := store.(listRequestCounter)
+	if !ok {
+		return ListRequestStats{}, false
+	}
+	return c.listRequestStats(), true
 }
 
 // nativeListCounters is the atomic backing of ListRequestStats.
@@ -254,8 +265,8 @@ func (c *nativeListCounters) snapshot() ListRequestStats {
 	}
 }
 
-// ListRequestStats implements ListRequestCounter.
-func (s *NativeDoltStore) ListRequestStats() ListRequestStats {
+// listRequestStats implements listRequestCounter.
+func (s *NativeDoltStore) listRequestStats() ListRequestStats {
 	if s == nil {
 		return ListRequestStats{}
 	}

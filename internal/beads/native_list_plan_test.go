@@ -64,7 +64,7 @@ func TestNativeListRequestKeyed(t *testing.T) {
 	}
 }
 
-// ListRequestStats counts what List actually sent, so a budget test can tell a
+// ListRequestStatsOf counts what List actually sent, so a budget test can tell a
 // keyed read from a whole-ledger walk on a real store.
 func TestNativeDoltStoreCountsListRequests(t *testing.T) {
 	storage := &nativeDoltReaderSpy{
@@ -79,13 +79,16 @@ func TestNativeDoltStoreCountsListRequests(t *testing.T) {
 	if _, err := store.List(ListQuery{AllowScan: true}); err != nil {
 		t.Fatalf("scan List: %v", err)
 	}
-	got := store.ListRequestStats()
+	got, ok := ListRequestStatsOf(store)
+	if !ok {
+		t.Fatal("ListRequestStatsOf reports NativeDoltStore keeps no counts")
+	}
 	want := ListRequestStats{Lists: 2, Requests: 2, Unkeyed: 1, Rows: 4}
 	if got != want {
-		t.Fatalf("ListRequestStats = %+v, want %+v", got, want)
+		t.Fatalf("ListRequestStatsOf = %+v, want %+v", got, want)
 	}
-	if _, ok := Store(store).(ListRequestCounter); !ok {
-		t.Fatal("NativeDoltStore does not implement ListRequestCounter")
+	if _, ok := ListRequestStatsOf(NewMemStore()); ok {
+		t.Fatal("ListRequestStatsOf reports counts for a store that keeps none")
 	}
 }
 
@@ -117,4 +120,15 @@ func nativeListRequestsEqual(a, b issueops.ListRequest) bool {
 
 func nativeIssueRowForTest(id string) *issueops.IssueWithCounts {
 	return &issueops.IssueWithCounts{Issue: &beadslib.Issue{ID: id, Title: id, Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask}}
+}
+
+// listRequestStatsForTest reads store's backend listing counts, failing the
+// test when the store keeps none.
+func listRequestStatsForTest(t *testing.T, store Store) ListRequestStats {
+	t.Helper()
+	stats, ok := ListRequestStatsOf(store)
+	if !ok {
+		t.Fatalf("ListRequestStatsOf(%T) reports no counts", store)
+	}
+	return stats
 }

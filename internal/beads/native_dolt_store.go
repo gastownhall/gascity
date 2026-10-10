@@ -371,7 +371,7 @@ type NativeDoltStore struct {
 	sawRows atomic.Bool
 
 	// listCounters counts the backend listing requests List issues; see
-	// ListRequestCounter.
+	// ListRequestStatsOf.
 	listCounters nativeListCounters
 
 	// listPushableTypes is the issue types a listing of this scope may push,
