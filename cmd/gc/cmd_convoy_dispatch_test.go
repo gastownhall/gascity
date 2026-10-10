@@ -3527,7 +3527,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		sequence = sequence[1:]
 		return next, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -3602,7 +3602,7 @@ func TestRunWorkflowServeDrainsReadyBatchBeforeRequery(t *testing.T) {
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -3683,7 +3683,7 @@ func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
 		}
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		if beadID == "gc-ctrl-bad" {
 			return retryableErr
@@ -4929,7 +4929,7 @@ func TestRunWorkflowServeDedupsTraceWarningsAcrossNestedControlDispatch(t *testi
 		sequence = sequence[1:]
 		return next, nil
 	}
-	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, _ *executionEmitDeferral) error {
 		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
@@ -5061,7 +5061,7 @@ func TestRunWorkflowServeDedupsLegacyTraceWarningsAcrossNestedControlDispatch(t 
 		sequence = sequence[1:]
 		return next, nil
 	}
-	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, _ *executionEmitDeferral) error {
 		return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 	}
 
@@ -5816,7 +5816,7 @@ func TestRunWorkflowServeOverridesInheritedCityBeadsDir(t *testing.T) {
 		capturedEnv = maps.Clone(env)
 		return nil, nil // no work: exits immediately
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		return nil
 	}
 
@@ -5896,7 +5896,7 @@ name = "myrig"
 	}
 
 	var gotCityPath, gotStorePath, gotBeadID string
-	controlDispatcherServe = func(cityPath, storePath, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		gotCityPath = cityPath
 		gotStorePath = storePath
 		gotBeadID = beadID
@@ -6164,7 +6164,7 @@ name = "rigrepo"
 		gotDir = dir
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatal("controlDispatcherServe should not run when no control work is returned")
 		return nil
 	}
@@ -6221,7 +6221,7 @@ func TestRunWorkflowServeRetriesBrieflyAfterProcessingBeforeIdleExit(t *testing.
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -6276,7 +6276,7 @@ func TestRunWorkflowServeSkipsPendingControlBeadAndProcessesLaterReady(t *testin
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-pending" {
 			return dispatch.ErrControlPending
@@ -6427,7 +6427,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlBeadAndProcessesLaterRead
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -6478,7 +6478,7 @@ func TestRunWorkflowServeDispatchesUnexpectedNonControlOnly(t *testing.T) {
 			{ID: "gc-task", Metadata: map[string]string{"gc.routed_to": "workflows.codex-max"}},
 		}, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		controlled = append(controlled, beadID)
 		return nil
 	}
@@ -6540,7 +6540,7 @@ func TestRunWorkflowServeQuarantinesUnexpectedNonControlBead(t *testing.T) {
 		}
 		return []hookBead{{ID: nonControl.ID, Metadata: map[string]string{"gc.kind": "workflow"}}}, nil
 	}
-	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
+	controlDispatcherServe = func(cityPath, storePath, beadID string, stdout, stderr io.Writer, _ *executionEmitDeferral) error {
 		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 		return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 	}
@@ -6602,7 +6602,7 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 		}
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if beadID != "gc-retry-control" {
 			t.Fatalf("controlDispatcherServe beadID = %q, want gc-retry-control", beadID)
 		}
@@ -6653,7 +6653,7 @@ func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
 		}
 		return nil, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-transient" {
 			return fmt.Errorf("gc-transient: spawning iteration 2: adding dep: failed to check for dependency cycle: invalid connection: i/o timeout")
@@ -7154,7 +7154,7 @@ func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 			{ID: "gc-legacy", Metadata: map[string]string{"gc.kind": "ralph"}},
 		}, nil
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		attempted = append(attempted, beadID)
 		if beadID == "gc-legacy" {
 			return fmt.Errorf("gc-legacy: recording attempt log: setting metadata on %q: failed to record event: old_value is too large", beadID)
@@ -7199,7 +7199,7 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, os.ErrDeadlineExceeded
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatal("controlDispatcherServe should not be called on query failure")
 		return nil
 	}
@@ -7256,7 +7256,7 @@ dir = "backend"
 	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
 		return nil, errors.New("signal: killed")
 	}
-	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		t.Fatal("controlDispatcherServe should not be called on query failure")
 		return nil
 	}
@@ -7363,7 +7363,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		processed = append(processed, beadID)
 		return errors.New("synthetic dispatch failure")
 	}
@@ -7446,7 +7446,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 			return nil, nil
 		}
 	}
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if beadID == "gc-pending" {
 			return dispatch.ErrControlPending
 		}
@@ -7536,7 +7536,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 		}
 	}
 	processedAfterWake := false
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		if beadID == "gc-woke" {
 			processedAfterWake = true
 		}
@@ -10283,6 +10283,194 @@ func TestCloseWorkflowMatchesClosesTheBindingBeforeTheRetainedCopies(t *testing.
 	}
 	if current.Status != "closed" {
 		t.Errorf("the binding's live root is still %s; the sweep faulted on the retained copies before it reached the tree the city is running", current.Status)
+	}
+}
+
+// stampEveryIDStore batches CloseAll the way bd and the native Dolt store do: the
+// metadata lands on every id it is handed, closed or not, because the batch
+// makes no per-row status read. MemStore reads each status first and skips a
+// closed row, so a sweep tested against MemStore alone cannot tell a caller that
+// keeps its finished steps out of the batch from one that hands them over.
+type stampEveryIDStore struct {
+	beads.Store
+	closeAllCalls int
+}
+
+func (s *stampEveryIDStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closeAllCalls++
+	for _, id := range ids {
+		if err := s.SetMetadataBatch(id, metadata); err != nil {
+			return 0, err
+		}
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// seedWorkflowWithAFinishedStep seeds a workflow part way through its run: the
+// root and one step are open, and one step already finished with its own
+// outcome.
+func seedWorkflowWithAFinishedStep(t *testing.T, store beads.Store) (root, finished, pending beads.Bead) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{Title: "the workflow root", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the root: %v", err)
+	}
+	finished, err = store.Create(beads.Bead{
+		Title: "a step that already passed",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+			"close_reason":                 "the step's own reason",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the finished step: %v", err)
+	}
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("closing the finished step: %v", err)
+	}
+	if finished, err = store.Get(finished.ID); err != nil {
+		t.Fatalf("reading the finished step back: %v", err)
+	}
+	pending, err = store.Create(beads.Bead{
+		Title:    "a step that has not run",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("seeding the pending step: %v", err)
+	}
+	return root, finished, pending
+}
+
+// assertWorkflowBeadClosedWith reads a bead back and checks the outcome and
+// close reason it carries.
+func assertWorkflowBeadClosedWith(t *testing.T, store beads.Store, id, outcome, reason string) {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("reading %s back: %v", id, err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("%s is %s, want closed", id, got.Status)
+	}
+	if got.Metadata[beadmeta.OutcomeMetadataKey] != outcome || got.Metadata["close_reason"] != reason {
+		t.Errorf("%s carries outcome %q and close_reason %q, want %q and %q",
+			id, got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata["close_reason"], outcome, reason)
+	}
+}
+
+// TestCloseWorkflowMatchesLeavesAFinishedStepsOutcomeAlone pins that the skip
+// sweep closes what is still open and nothing else. A workflow match is listed
+// with IncludeClosed, so it carries the steps that already finished, and a store
+// that stamps every id it is handed would rewrite a passed step to skipped.
+func TestCloseWorkflowMatchesLeavesAFinishedStepsOutcomeAlone(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, finished, pending := seedWorkflowWithAFinishedStep(t, store)
+
+	closed, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: store,
+		beads: []beads.Bead{root, finished, pending},
+		label: "city",
+		path:  "/city",
+		role:  convoyViewMigrationSource,
+	}})
+	if err != nil {
+		t.Fatalf("closeWorkflowMatches: %v", err)
+	}
+	if closed != 2 {
+		t.Errorf("closed = %d, want the 2 beads that were still open", closed)
+	}
+	assertWorkflowBeadClosedWith(t, store, finished.ID, beadmeta.OutcomePass, "the step's own reason")
+	for _, id := range []string{root.ID, pending.ID} {
+		assertWorkflowBeadClosedWith(t, store, id, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+}
+
+// TestCloseWorkflowMatchesWritesNothingToAFinishedWorkflow pins the empty
+// sweep: when every matched bead already finished there is nothing to close, so
+// no batch is sent and the verify pass alone confirms the workflow is closed.
+func TestCloseWorkflowMatchesWritesNothingToAFinishedWorkflow(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, err := store.Create(beads.Bead{Title: "a finished workflow", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the root: %v", err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("closing the root: %v", err)
+	}
+	if root, err = store.Get(root.ID); err != nil {
+		t.Fatalf("reading the root back: %v", err)
+	}
+
+	closed, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: store,
+		beads: []beads.Bead{root},
+		label: "city",
+		path:  "/city",
+		role:  convoyViewMigrationSource,
+	}})
+	if err != nil {
+		t.Fatalf("closeWorkflowMatches: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("closed = %d, want 0", closed)
+	}
+	if store.closeAllCalls != 0 {
+		t.Errorf("CloseAll ran %d times over a workflow with nothing open", store.closeAllCalls)
+	}
+}
+
+// TestApplySourceWorkflowMatchCleanupLeavesAFinishedStepsOutcomeAlone is the
+// delete-source half of TestCloseWorkflowMatchesLeavesAFinishedStepsOutcomeAlone.
+func TestApplySourceWorkflowMatchCleanupLeavesAFinishedStepsOutcomeAlone(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, finished, pending := seedWorkflowWithAFinishedStep(t, store)
+
+	var stderr bytes.Buffer
+	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
+		label: "city",
+		store: store,
+		roots: []beads.Bead{root},
+		beads: []beads.Bead{root, finished, pending},
+	}, false, &stderr)
+	if incomplete {
+		t.Fatalf("incomplete = true: %s", stderr.String())
+	}
+	if closed != 2 || deleted != 0 {
+		t.Errorf("closed, deleted = %d, %d, want 2, 0", closed, deleted)
+	}
+	assertWorkflowBeadClosedWith(t, store, finished.ID, beadmeta.OutcomePass, "the step's own reason")
+	for _, id := range []string{root.ID, pending.ID} {
+		assertWorkflowBeadClosedWith(t, store, id, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+}
+
+// TestApplySourceWorkflowMatchCleanupDeletesTheFinishedStepsToo pins that the
+// close filter does not narrow the delete: --delete erases the whole match,
+// finished steps included.
+func TestApplySourceWorkflowMatchCleanupDeletesTheFinishedStepsToo(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, finished, pending := seedWorkflowWithAFinishedStep(t, store)
+
+	var stderr bytes.Buffer
+	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
+		label: "city",
+		store: store,
+		roots: []beads.Bead{root},
+		beads: []beads.Bead{root, finished, pending},
+	}, true, &stderr)
+	if incomplete {
+		t.Fatalf("incomplete = true: %s", stderr.String())
+	}
+	if closed != 2 || deleted != 3 {
+		t.Errorf("closed, deleted = %d, %d, want 2, 3", closed, deleted)
+	}
+	for _, id := range []string{root.ID, finished.ID, pending.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
 	}
 }
 

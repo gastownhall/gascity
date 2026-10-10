@@ -166,9 +166,9 @@ ENDREPORT
 gc bd update "$WORK_BEAD_ID" --append-notes "$REPORT"
 ```
 
-**2. Close the bead:**
+**2. Close the bead** with a one-line summary of the findings as the reason:
 ```bash
-gc bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID" --reason "Report: <one-line root cause or 'unknown — further investigation required'>"
 ```
 
 **3. Close this step, signal reconciler, and exit.**

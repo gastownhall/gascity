@@ -24,17 +24,13 @@ go_test(
     ],
     # bead_id_test.go reads ../agents/lib/bead-id.sh and ../agents/*.sh;
     # dolt_config_timeout_test.go parses dolt_config_test.go as a text
-    # fixture (it is not a source dep). //:repo_source_tree covers the
-    # former, the glob covers the latter.
+    # fixture (it is not a source dep). //test:agents covers the former,
+    # the glob covers the latter.
     data = glob(
         ["*.go"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//:repo_source_tree",
-    ],
-    tags = [
-        "external",
-        "requires-network",
+        "//test:agents",
     ],
     deps = [
         "//internal/testenv",
@@ -45,6 +41,7 @@ go_test(
     name = "integration_test",
     srcs = [
         "bdstore_batch_delete_test.go",
+        "bdstore_batch_reads_test.go",
         "bdstore_runner_isolation_test.go",
         "bdstore_test.go",
         "bead_id_helpers_test.go",
@@ -86,7 +83,6 @@ go_test(
         "mail_test.go",
         "review_check_scripts_test.go",
         "review_formula_test.go",
-        "session_k8s_test.go",
         "skill_lifecycle_test.go",
         "start_drift_test.go",
         "supervisor_unit_guard_test.go",
@@ -100,13 +96,13 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//test:agents",
     ] + select({
         # Only the integration-tagged tests exec these. The untagged tests that
         # also build in the default configuration (bead_id_test.go,
         # dolt_config_timeout_test.go) read sources only, so `bazel test //...`
         # neither links nor stages them; the gc links are 207 MB each.
-        ":gotags_integration": [
+        "//:gotags_integration": [
             "//cmd/gc",
             "//cmd/gc:gc_drift_new",
             "//cmd/gc:gc_drift_old",
@@ -122,10 +118,6 @@ go_test(
         "//conditions:default": [],
     }),
     shard_count = 14,
-    tags = [
-        "external",
-        "requires-network",
-    ],
     deps = [
         "//internal/api/apicontract",
         "//internal/bazeltest",
@@ -141,8 +133,6 @@ go_test(
         "//internal/materialize",
         "//internal/pathutil",
         "//internal/runtime",
-        "//internal/runtime/exec",
-        "//internal/runtime/runtimetest",
         "//internal/supervisor",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
@@ -165,12 +155,6 @@ exports_files(
     visibility = ["//scripts:__pkg__"],
 )
 
-# The integration lane builds with --define=gotags=integration (bazel-test.yml).
-config_setting(
-    name = "gotags_integration",
-    define_values = {"gotags": "integration"},
-)
-
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -179,6 +163,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

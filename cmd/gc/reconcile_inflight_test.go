@@ -32,7 +32,7 @@ func ambiguousCreate(t *testing.T, settledAt time.Time) *inflightMap {
 	t.Helper()
 	m := newInflightMap()
 	seq := mustAdd(t, m, createEntry)
-	m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: createEntry.Token, Ambiguous: true, At: settledAt})
+	m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: createEntry.Token, Outcome: settledAmbiguous, At: settledAt})
 	return m
 }
 
@@ -86,7 +86,11 @@ func TestInflightOnlyAmbiguousCreatesOutliveSettlement(t *testing.T) {
 	for _, ambiguous := range []bool{false, true} {
 		m := newInflightMap()
 		seq := mustAdd(t, m, createEntry)
-		m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: createEntry.Token, Ambiguous: ambiguous, At: inflightT0})
+		s := settlement{Kind: inflightCreate, Seq: seq, Token: createEntry.Token, Outcome: settledLanded, At: inflightT0}
+		if ambiguous {
+			s.Outcome = settledAmbiguous
+		}
+		m.settle(s)
 		if held := len(m.view().Entries) == 1; held != ambiguous {
 			t.Fatalf("create ambiguous=%v: held %v after settlement, want %v", ambiguous, held, ambiguous)
 		}
@@ -212,7 +216,7 @@ func TestInflightCountsEffectOnce(t *testing.T) {
 				seq := m.add(inflightEntry{Kind: inflightCreate, Token: tok, Leg: "sessions"})
 				switch rng.Intn(3) {
 				case 0:
-					m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: tok, Ambiguous: true, At: inflightT0})
+					m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: tok, Outcome: settledAmbiguous, At: inflightT0})
 				case 1:
 					m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: tok, At: inflightT0}) // landed: its row shows
 					pending[row], c.Tokens[tok] = true, true
@@ -256,7 +260,7 @@ func TestInflightAddAndSettleOnce(t *testing.T) {
 
 	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: "tok-other", At: inflightT0})
 	m.settle(settlement{Kind: "start", Seq: startSeq, Key: rowKey{Leg: "sessions", ID: "gc-other"}, At: inflightT0})
-	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: createEntry.Token, Ambiguous: true, At: inflightT0})
+	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: createEntry.Token, Outcome: settledAmbiguous, At: inflightT0})
 	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: createEntry.Token, At: inflightT0.Add(time.Minute)})
 	if e := m.creates[createEntry.Token]; !e.Ambiguous || e.SettledAt != inflightT0 {
 		t.Fatalf("create = %+v, want held by its first settlement", e)
@@ -283,7 +287,7 @@ func TestInflightRowSettlementClearsWhateverItCarries(t *testing.T) {
 	for name, extra := range map[string]func(*settlement){
 		"plain":     func(*settlement) {},
 		"token":     func(s *settlement) { s.Token = "tok-row" },
-		"ambiguous": func(s *settlement) { s.Token, s.Ambiguous = "tok-row", true },
+		"ambiguous": func(s *settlement) { s.Token, s.Outcome = "tok-row", settledAmbiguous },
 		"error":     func(s *settlement) { s.Err = fmt.Errorf("provider: boom") },
 	} {
 		for _, k := range []string{"start", "zombie"} {
@@ -322,7 +326,11 @@ func TestInflightEmptyAtQuiescence(t *testing.T) {
 		settles = append(settles, settlement{Kind: "start", Seq: seq, Key: row, At: inflightT0})
 		tok := fmt.Sprintf("tok-%d", i)
 		seq = mustAdd(t, m, inflightEntry{Kind: inflightCreate, Token: tok})
-		settles = append(settles, settlement{Kind: inflightCreate, Seq: seq, Token: tok, Ambiguous: i%2 == 0, At: inflightT0})
+		s := settlement{Kind: inflightCreate, Seq: seq, Token: tok, Outcome: settledLanded, At: inflightT0}
+		if i%2 == 0 {
+			s.Outcome = settledAmbiguous
+		}
+		settles = append(settles, s)
 	}
 	for _, s := range settles {
 		m.settle(s)

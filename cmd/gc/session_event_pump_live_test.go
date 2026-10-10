@@ -136,16 +136,16 @@ func usePrivateHerdrConfigRoot(t *testing.T) {
 
 // useBareHerdrPaneShell runs herdr's panes under plain sh for the rest of the
 // test. herdr spawns each pane's shell from $SHELL (sh when unset) and Start
-// types the agent's launch line into it. Every repo test runner preserves the
-// invoking user's SHELL, so on a zsh host each pane runs zsh, and under a HOME
-// with none of zsh's startup files (a release gate's fresh private HOME) zsh
-// runs its new-user wizard. The wizard reads one key: it eats the first typed
-// character, "exec" becomes "xec", the agent never starts, and the test can
-// only time out with "no reconcile poke". It is a race: the wizard needs a
-// terminal of at least 72 columns when zsh starts, and herdr shrinks a pane
-// from its 24x80 spawn size moments after creating it, so it hit about one run
-// in forty (ga-sux0ij). This test only needs a shell to exec /bin/sh from, so
-// pin one with no startup ritual.
+// types the agent's launch line into it. The repo test runners pin SHELL to
+// /bin/sh, but a bare go test inherits the invoking user's SHELL, so on a zsh
+// host each pane runs zsh, and under a HOME with none of zsh's startup files (a
+// release gate's fresh private HOME) zsh runs its new-user wizard. The wizard
+// reads one key: it eats the first typed character, "exec" becomes "xec", the
+// agent never starts, and the test can only time out with "no reconcile poke".
+// It is a race: the wizard needs a terminal of at least 72 columns when zsh
+// starts, and herdr shrinks a pane from its 24x80 spawn size moments after
+// creating it, so it hit about one run in forty (ga-sux0ij). This test only
+// needs a shell to exec /bin/sh from, so pin one with no startup ritual.
 func useBareHerdrPaneShell(t *testing.T) {
 	t.Helper()
 	t.Setenv("SHELL", "/bin/sh")

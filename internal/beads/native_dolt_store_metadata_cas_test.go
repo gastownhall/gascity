@@ -22,6 +22,7 @@ func TestNativeDoltStoreConditionalWriterConformance(t *testing.T) {
 		beadstest.ConditionalWriterOptions{
 			RowBackedMutationFlavors: true,
 			RestrictedUpdateFields:   true,
+			LabelsGuarded:            true,
 			SuppliesCurrent:          true,
 		},
 	)

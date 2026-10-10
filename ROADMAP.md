@@ -13,9 +13,10 @@ release.
   reviewed first. Work outside them is still welcome, but expect it to wait.
 - **Tracking.** Each priority area has one tracking issue on GitHub. Its
   sub-issues are the work; their state is the progress report.
-- **Proposing work.** Every pull request links a documented issue. File one
-  with the feature form (motivation, impact, risk, verification) before or
-  alongside your pull request. To propose a new priority area, open an issue
+- **Proposing work.** For a change worth discussing, file an issue with the
+  feature form (motivation, impact, risk, verification) before or alongside
+  your pull request; small, self-explanatory changes can go straight to a
+  pull request. To propose a new priority area, open an issue
   and tag the roadmap owner. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Priority areas for 1.6
@@ -56,7 +57,8 @@ benchmark exists.
 
 **Goal.** A new contributor, human or agent, finds the rules for the code
 they are changing next to that code, understands its intent and invariants,
-and lands a change with a documented issue and pull request.
+and lands a change with a well-explained pull request, backed by an issue
+when the change warrants one.
 
 **This period.**
 - Slim root `AGENTS.md`, colocated area rules, and documented-issue intake

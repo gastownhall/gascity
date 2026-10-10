@@ -38,6 +38,7 @@ func run() error {
 
 	fetcher := &githubFetcher{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		apiBase:    "https://api.github.com",
 		repo:       repo,
 		token:      token,
 		checkNames: []string{
@@ -88,10 +89,13 @@ func (realSleeper) Sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
-// githubFetcher retrieves check runs from the GitHub Checks API, one
-// paginated request per tracked check name.
+// githubFetcher retrieves check runs from the GitHub Checks API: one
+// paginated request per poll for every run on the commit, filtered here to
+// the tracked names. Asking per name cost one request per tracked check per
+// poll against the token's rate limit for the same data.
 type githubFetcher struct {
 	httpClient *http.Client
+	apiBase    string
 	repo       string
 	token      string
 	checkNames []string
@@ -112,25 +116,20 @@ type checkRun struct {
 }
 
 func (f *githubFetcher) FetchCheckRuns(ctx context.Context, headSHA string) ([]prwatchdog.CheckRun, error) {
-	var all []prwatchdog.CheckRun
+	tracked := make(map[string]bool, len(f.checkNames))
 	for _, name := range f.checkNames {
-		runs, err := f.fetchByName(ctx, headSHA, name)
-		if err != nil {
-			return nil, fmt.Errorf("fetching check runs named %q: %w", name, err)
-		}
-		all = append(all, runs...)
+		tracked[name] = true
 	}
-	return all, nil
-}
-
-func (f *githubFetcher) fetchByName(ctx context.Context, headSHA, name string) ([]prwatchdog.CheckRun, error) {
 	var out []prwatchdog.CheckRun
 	for pageNum := 1; ; pageNum++ {
-		page, err := f.fetchPage(ctx, headSHA, name, pageNum)
+		page, err := f.fetchPage(ctx, headSHA, pageNum)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("fetching check runs: %w", err)
 		}
 		for _, r := range page.CheckRuns {
+			if !tracked[r.Name] {
+				continue
+			}
 			startedAt, _ := time.Parse(time.RFC3339, r.StartedAt)
 			out = append(out, prwatchdog.CheckRun{
 				Name:       r.Name,
@@ -147,12 +146,11 @@ func (f *githubFetcher) fetchByName(ctx context.Context, headSHA, name string) (
 	}
 }
 
-func (f *githubFetcher) fetchPage(ctx context.Context, headSHA, name string, pageNum int) (checkRunsResponse, error) {
+func (f *githubFetcher) fetchPage(ctx context.Context, headSHA string, pageNum int) (checkRunsResponse, error) {
 	q := url.Values{}
-	q.Set("check_name", name)
 	q.Set("per_page", "100")
 	q.Set("page", strconv.Itoa(pageNum))
-	reqURL := fmt.Sprintf("https://api.github.com/repos/%s/commits/%s/check-runs?%s", f.repo, headSHA, q.Encode())
+	reqURL := fmt.Sprintf("%s/repos/%s/commits/%s/check-runs?%s", f.apiBase, f.repo, headSHA, q.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -172,7 +170,11 @@ func (f *githubFetcher) fetchPage(ctx context.Context, headSHA, name string, pag
 		return checkRunsResponse{}, fmt.Errorf("reading response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return checkRunsResponse{}, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		apiErr := fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if reset, ok := rateLimitReset(resp, time.Now()); ok {
+			return checkRunsResponse{}, &prwatchdog.RateLimitError{Reset: reset, Err: apiErr}
+		}
+		return checkRunsResponse{}, apiErr
 	}
 
 	var page checkRunsResponse
@@ -180,6 +182,27 @@ func (f *githubFetcher) fetchPage(ctx context.Context, headSHA, name string, pag
 		return checkRunsResponse{}, fmt.Errorf("decoding response: %w", err)
 	}
 	return page, nil
+}
+
+// rateLimitReset reports when a 403/429 rate-limit refusal lifts, per
+// GitHub's documented headers: Retry-After (seconds, secondary limits) or an
+// exhausted primary limit (X-RateLimit-Remaining: 0 with X-RateLimit-Reset,
+// a Unix time). Any other refusal is not a rate limit.
+func rateLimitReset(resp *http.Response, now time.Time) (time.Time, bool) {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return time.Time{}, false
+	}
+	if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs >= 0 {
+		return now.Add(time.Duration(secs) * time.Second), true
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
+		return time.Time{}, false
+	}
+	unix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(unix, 0), true
 }
 
 // renderSummary produces the Markdown rendering shared by stdout and

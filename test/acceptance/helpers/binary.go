@@ -14,9 +14,12 @@ import (
 // Panics on failure — intended for TestMain.
 func BuildGC(dir string) string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_GC_BIN")); override != "" {
-		bin, err := filepath.Abs(override)
-		if err != nil {
-			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + err.Error())
+		// A BUILD target may name its gc with $(rootpath ...) (the
+		// testhooks-stamped gc of the quiescence rows), which is relative to
+		// the runfiles root, not to the package directory the test runs in.
+		bin := resolveToolOverride(override)
+		if bin == "" {
+			panic("acceptance: resolving GC_ACCEPTANCE_GC_BIN: " + override)
 		}
 		info, err := os.Stat(bin)
 		if err != nil {
@@ -70,13 +73,16 @@ func FindModuleRoot() string {
 }
 
 // FindBD returns the path to the bd binary, or empty string if not found.
+//
+// GC_ACCEPTANCE_BD_BIN, when set, is the only candidate: a set override that
+// does not name a file yields "", never another bd, so a run that pinned a
+// bd version cannot silently test a different one.
 func FindBD() string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
-		if bin, err := filepath.Abs(override); err == nil {
-			if info, statErr := os.Stat(bin); statErr == nil && !info.IsDir() {
-				return bin
-			}
+		if bin := resolveToolOverride(override); statBinary(bin) {
+			return bin
 		}
+		return ""
 	}
 	// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 	// (http_archive of the same release the go-test CI installs); prefer it
@@ -98,6 +104,24 @@ func FindBD() string {
 	return p
 }
 
+// resolveToolOverride makes a tool path from the environment absolute. Under
+// bazel test a relative path is a $(rootpath ...) a BUILD target expanded,
+// relative to the main repository's runfiles directory rather than to the
+// package directory the test runs in; elsewhere it is relative to the
+// working directory.
+func resolveToolOverride(path string) string {
+	if !filepath.IsAbs(path) && bazeltest.IsBazel() {
+		if workspace := os.Getenv("TEST_WORKSPACE"); workspace != "" {
+			return filepath.Join(os.Getenv("TEST_SRCDIR"), workspace, filepath.FromSlash(path))
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
 func statBinary(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
@@ -108,6 +132,9 @@ func RequireBD(t *testing.T) string {
 	t.Helper()
 	p := FindBD()
 	if p == "" {
+		if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
+			t.Fatalf("GC_ACCEPTANCE_BD_BIN=%s names no bd binary", override)
+		}
 		t.Skip("bd not available")
 	}
 	return p

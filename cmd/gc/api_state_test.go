@@ -2046,6 +2046,10 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 
 	updated := created
 	updated.Status = "in_progress"
+	// The scan that emitted the snapshot read it from the backing.
+	if err := backing.Update(created.ID, beads.UpdateOpts{Status: &updated.Status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 	payload, err := json.Marshal(updated)
 	if err != nil {
 		t.Fatalf("marshal updated bead: %v", err)
@@ -2178,7 +2182,7 @@ func TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep(t *
 	ep := &listCountingEventProvider{Fake: events.NewFake()}
 	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevCityStore })
@@ -2363,7 +2367,7 @@ func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
 	replacement := beads.NewMemStore()
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: replacement}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2387,7 +2391,7 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2423,7 +2427,7 @@ func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T)
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, 200*time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2455,7 +2459,7 @@ func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -3732,7 +3736,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	ep := newBlockingLatestEventProvider()
 	var storeOpened atomic.Bool
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		storeOpened.Store(true)
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
@@ -3766,7 +3770,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3822,7 +3826,7 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3873,7 +3877,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {

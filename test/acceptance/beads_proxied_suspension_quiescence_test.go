@@ -16,13 +16,59 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-// quiescenceWindow is long enough for every periodic backstop that touches a
-// scope on a running city (the 30s beads-health, the 1m order-tracking sweep,
-// the controller's reconcile and demand passes) to come round several times.
-const quiescenceWindow = 3 * time.Minute
+// realQuiescenceWindow is long enough for every periodic backstop that
+// touches a scope on a running city (the 30s beads-health, the 1m
+// order-tracking sweep, the controller's reconcile and demand passes) to come
+// round several times.
+const realQuiescenceWindow = 3 * time.Minute
+
+// backstopSpeedup is the factor this test runs under: clock.BackstopSpeedupEnv
+// parsed the way a test-hooks gc parses it, or 1 when unset. Bazel's PR
+// targets set it (and run the testhooks-stamped gc); the nightly
+// *_realtime_test targets leave it unset and run the real three minutes.
+func backstopSpeedup() int {
+	n, _, ok := clock.ParseBackstopSpeedup(os.Getenv(clock.BackstopSpeedupEnv))
+	if !ok {
+		return 1
+	}
+	return n
+}
+
+// quiescenceWindow is realQuiescenceWindow divided by backstopSpeedup. gc
+// divides the backstop cadences that go through clock.Backstop (listed in
+// clock.BackstopSpeedupEnv's doc) by the same factor, so each of those still
+// comes round as many times inside the window. A cadence outside that list
+// keeps its real period and comes round fewer times; the nightly
+// *_realtime_test targets, which run the full window, cover it.
+func quiescenceWindow() time.Duration { return realQuiescenceWindow / time.Duration(backstopSpeedup()) }
+
+// forwardBackstopSpeedup hands this process's clock.BackstopSpeedupEnv, if
+// any, to the gc processes env starts (the supervisor and its controller
+// inherit it), so the window and gc's divided cadences shrink together. Those
+// backstops come round as many times in the shortened window as in the real
+// one only if gc really divided them, so with a factor above 1 it requires
+// gc's active-hook notice: a gc without test hooks ignores the variable and
+// fails the test here.
+func forwardBackstopSpeedup(t *testing.T, env *helpers.Env) *helpers.Env {
+	t.Helper()
+	v, ok := os.LookupEnv(clock.BackstopSpeedupEnv)
+	if !ok {
+		return env.Without(clock.BackstopSpeedupEnv)
+	}
+	env = env.With(clock.BackstopSpeedupEnv, v)
+	if backstopSpeedup() > 1 {
+		_, stderr, _ := helpers.RunGCStreams(env, "", "version")
+		if !strings.Contains(stderr, clock.BackstopActiveNotice) {
+			t.Fatalf("%s=%s but gc did not report %q (a gc without test hooks ignores it, so its backstops would come round "+
+				"fewer times in the shortened window); gc stderr:\n%s", clock.BackstopSpeedupEnv, v, clock.BackstopActiveNotice, stderr)
+		}
+	}
+	return env
+}
 
 // suspendDrainWait bounds how long a suspend takes to reach quiescence: the
 // controller stops the suspended scope's sessions over its next ticks, then
@@ -116,20 +162,36 @@ func runEveryCityOrder(t *testing.T, city *helpers.City) []string {
 	return ran
 }
 
-func TestProxiedSuspensionIsQuiescence(t *testing.T) {
-	// Two multi-minute quiescence windows over a running city: not Tier A
-	// smoke material. The proxied-native acceptance job runs it.
+// quiescenceCity is a running city with one rig, both bd-owned proxied
+// scopes with their pairs up, whose bd forks go through a scopeRecordingBD.
+type quiescenceCity struct {
+	city    *helpers.City
+	rigDir  string
+	rigName string
+	shim    *scopeRecordingBD
+}
+
+// newQuiescenceCity starts the city each suspension row measures. Each row
+// gets its own: the two quiescence windows are minutes of waiting each, and
+// as independent top-level tests the sharded Bazel lane runs them at once.
+func newQuiescenceCity(t *testing.T) *quiescenceCity {
+	t.Helper()
+	// Multi-minute quiescence windows over a running city: not Tier A smoke
+	// material. Bazel's acceptance lane sets the switch and runs each row as
+	// a target of its own.
 	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := requireProxiedTooling(t)
 	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
 	shim := newScopeRecordingBD(t, wrappedBD)
-	env = env.With("BD_BIN", shim.path)
+	env = forwardBackstopSpeedup(t, env.With("BD_BIN", shim.path))
 
 	city := helpers.NewCity(t, env)
 	cityRoot := city.Dir
 	rigDir := createGitRig(t)
 	t.Cleanup(func() {
-		helpers.RunGC(env, cityRoot, "stop", cityRoot)         //nolint:errcheck // best effort
+		// The city's own cleanups (helpers.City) have stopped it by now, so
+		// only a pair still running calls for a further gc stop.
+		stopIfPairsRemain(t, env, cityRoot, rigDir)
 		helpers.RunGC(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best effort
 		for _, root := range []string{cityRoot, rigDir} {
 			if leaked := waitForNoDoltProcesses(t, root, 20*time.Second); len(leaked) > 0 {
@@ -145,63 +207,75 @@ func TestProxiedSuspensionIsQuiescence(t *testing.T) {
 			t.Fatalf("gc bd --rig %s list: %v\n%s", rigName, err, out)
 		}
 	}
+	return &quiescenceCity{city: city, rigDir: rigDir, rigName: rigName, shim: shim}
+}
 
-	t.Run("suspended-rig", func(t *testing.T) {
-		if out, err := city.GC("rig", "suspend", rigName); err != nil {
-			t.Fatalf("gc rig suspend: %v\n%s", err, out)
-		}
-		if leaked := waitForNoDoltProcesses(t, rigDir, suspendDrainWait); len(leaked) > 0 {
-			t.Fatalf("the suspended rig's pair is still running:\n%s", strings.Join(leaked, "\n"))
-		}
-		shim.reset(t)
-		start := time.Now()
-		// Every city-level order once, so no order's cadence can hide a
-		// visit to the suspended rig behind the window.
-		ran := runEveryCityOrder(t, city)
-		if remaining := quiescenceWindow - time.Since(start); remaining > 0 {
-			time.Sleep(remaining)
-		}
-		if calls := shim.callsUnder(t, rigDir); len(calls) > 0 {
-			t.Fatalf("gc touched the suspended rig %d time(s) in %s (orders run: %s):\n%s", len(calls), time.Since(start).Round(time.Second), strings.Join(ran, ", "), strings.Join(calls, "\n"))
-		}
-		if started := doltProcessesUnder(t, rigDir); len(started) > 0 {
-			t.Fatalf("the suspended rig's pair came back:\n%s", strings.Join(started, "\n"))
-		}
-		if out, err := city.GC("rig", "resume", rigName); err != nil {
-			t.Fatalf("gc rig resume: %v\n%s", err, out)
-		}
-		if out, err := city.GC("bd", "--rig", rigName, "list", "--json"); err != nil {
-			t.Fatalf("gc bd --rig %s list after resume: %v\n%s", rigName, err, out)
-		}
-	})
+func TestProxiedSuspensionIsQuiescenceSuspendedRig(t *testing.T) {
+	q := newQuiescenceCity(t)
+	city, rigDir, rigName, shim := q.city, q.rigDir, q.rigName, q.shim
 
-	t.Run("suspended-city", func(t *testing.T) {
-		if out, err := city.GC("suspend"); err != nil {
-			t.Fatalf("gc suspend: %v\n%s", err, out)
+	if out, err := city.GC("rig", "suspend", rigName); err != nil {
+		t.Fatalf("gc rig suspend: %v\n%s", err, out)
+	}
+	if leaked := waitForNoDoltProcesses(t, rigDir, suspendDrainWait); len(leaked) > 0 {
+		t.Fatalf("the suspended rig's pair is still running:\n%s", strings.Join(leaked, "\n"))
+	}
+	shim.reset(t)
+	start := time.Now()
+	// Every city-level order once, so no order's cadence can hide a
+	// visit to the suspended rig behind the window.
+	ran := runEveryCityOrder(t, city)
+	window := quiescenceWindow()
+	t.Logf("quiescence window %s (backstop speedup %d)", window, backstopSpeedup())
+	if remaining := window - time.Since(start); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if calls := shim.callsUnder(t, rigDir); len(calls) > 0 {
+		t.Fatalf("gc touched the suspended rig %d time(s) in %s (orders run: %s):\n%s", len(calls), time.Since(start).Round(time.Second), strings.Join(ran, ", "), strings.Join(calls, "\n"))
+	}
+	if started := doltProcessesUnder(t, rigDir); len(started) > 0 {
+		t.Fatalf("the suspended rig's pair came back:\n%s", strings.Join(started, "\n"))
+	}
+	if out, err := city.GC("rig", "resume", rigName); err != nil {
+		t.Fatalf("gc rig resume: %v\n%s", err, out)
+	}
+	if out, err := city.GC("bd", "--rig", rigName, "list", "--json"); err != nil {
+		t.Fatalf("gc bd --rig %s list after resume: %v\n%s", rigName, err, out)
+	}
+}
+
+func TestProxiedSuspensionIsQuiescenceSuspendedCity(t *testing.T) {
+	q := newQuiescenceCity(t)
+	city, rigDir, shim := q.city, q.rigDir, q.shim
+	cityRoot := city.Dir
+
+	if out, err := city.GC("suspend"); err != nil {
+		t.Fatalf("gc suspend: %v\n%s", err, out)
+	}
+	// The controller stops the city's sessions first and only then the
+	// pairs, so this waits for the whole drain.
+	for _, root := range []string{cityRoot, rigDir} {
+		if leaked := waitForNoDoltProcesses(t, root, suspendDrainWait); len(leaked) > 0 {
+			sessions, _ := city.GC("session", "list")
+			t.Fatalf("a suspended city's pair under %s is still running:\n%s\nsessions:\n%s", root, strings.Join(leaked, "\n"), sessions)
 		}
-		// The controller stops the city's sessions first and only then the
-		// pairs, so this waits for the whole drain.
-		for _, root := range []string{cityRoot, rigDir} {
-			if leaked := waitForNoDoltProcesses(t, root, suspendDrainWait); len(leaked) > 0 {
-				sessions, _ := city.GC("session", "list")
-				t.Fatalf("a suspended city's pair under %s is still running:\n%s\nsessions:\n%s", root, strings.Join(leaked, "\n"), sessions)
-			}
+	}
+	shim.reset(t)
+	window := quiescenceWindow()
+	t.Logf("quiescence window %s (backstop speedup %d)", window, backstopSpeedup())
+	time.Sleep(window)
+	for _, root := range []string{cityRoot, rigDir} {
+		if calls := shim.callsUnder(t, root); len(calls) > 0 {
+			t.Errorf("gc touched %s %d time(s) in %s while the city was suspended:\n%s", root, len(calls), window, strings.Join(calls, "\n"))
 		}
-		shim.reset(t)
-		time.Sleep(quiescenceWindow)
-		for _, root := range []string{cityRoot, rigDir} {
-			if calls := shim.callsUnder(t, root); len(calls) > 0 {
-				t.Errorf("gc touched %s %d time(s) in %s while the city was suspended:\n%s", root, len(calls), quiescenceWindow, strings.Join(calls, "\n"))
-			}
-			if started := doltProcessesUnder(t, root); len(started) > 0 {
-				t.Errorf("a pair under %s came back while the city was suspended:\n%s", root, strings.Join(started, "\n"))
-			}
+		if started := doltProcessesUnder(t, root); len(started) > 0 {
+			t.Errorf("a pair under %s came back while the city was suspended:\n%s", root, strings.Join(started, "\n"))
 		}
-		if out, err := city.GC("resume"); err != nil {
-			t.Fatalf("gc resume: %v\n%s", err, out)
-		}
-		if out, err := city.GC("bd", "list", "--json"); err != nil {
-			t.Fatalf("gc bd list after resume: %v\n%s", err, out)
-		}
-	})
+	}
+	if out, err := city.GC("resume"); err != nil {
+		t.Fatalf("gc resume: %v\n%s", err, out)
+	}
+	if out, err := city.GC("bd", "list", "--json"); err != nil {
+		t.Fatalf("gc bd list after resume: %v\n%s", err, out)
+	}
 }

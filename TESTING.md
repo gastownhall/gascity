@@ -26,25 +26,189 @@ not describe a target as an existing gate.
 | Large/E2E ownership and cadence | Target; the executable manifest is owned by `ga-80po0c.6` |
 | First-attempt flake and quarantine policy | Target; required Playwright retry and legacy unledgered skips remain noncompliant debt under `ga-80po0c` |
 
-## Bazel: the fast feedback loop for agents
+## Building and testing: Bazel is the gate
 
-Everything below describes the `go test` policy that CI enforces. For
-day-to-day iteration, agents should prefer the **Bazel side-by-side
-suite**: same tests, remote-cached, shared across worktrees and CI:
+Bazel is how Gas City is built and tested. CI gates on `bazel test`
+(`.github/workflows/bazel.yml`): its lanes run every Go test, nogo (go
+vet's analyzers plus the linters `.golangci.yml` enables), formatting,
+generated-artifact drift and the repo-policy guards as Bazel targets on
+rbe-west. The policy in the rest of this file applies to tests however they
+are run; Bazel is the runner that enforces it.
+
+| Tier | CI lane | Command | `make` alias |
+|---|---|---|---|
+| Unit, nogo, format, generated artifacts, policy | `unit` | `bazel test //...` | `make test` (`make check` adds the shell guards) |
+| Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
+| Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
+| `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
+| Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
+| Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
+
+Narrow while iterating: `bazel test //internal/config:config_test`, or
+`bazel test //internal/beads/...` for a subtree;
+`--test_filter=TestName` selects tests inside a target. The CI lanes add
+`--config=ci` (result policy and scheduling only, no action-key change:
+tests start beside nogo rather than after it) and the per-run
+transport config. Passing `--config=acceptance` or `--config=integration`
+matters: they set the `gotags` define, the timeout and, for integration,
+`GC_FAST_UNIT=0`, exactly as the lanes do (`.bazelrc`).
+
+**Where actions run** (details in "Bazel cache tiers" below):
+
+- **Contributors:** `--config=fork-cache` reads rbe-west's anonymous,
+  read-only cache, so anything CI already ran is a hit; misses build and run
+  on your machine, nothing is uploaded, no credential is needed.
+- **Maintainers:** `--config=remote-exec` with an rbe-west mTLS client
+  certificate executes on rbe-west's `oss` pool.
+- **Agent hosts:** the operator's `~/.bazelrc` names the executor and
+  certificate, so plain `bazel test` executes remotely; whole-repo `go
+  test` fan-out on a shared host is never the right tool.
+
+Put `build --config=fork-cache` or `build --config=remote-exec` in the
+gitignored `.bazelrc.local` to make it your default, or pass it per command
+(`make test BAZEL_FLAGS=--config=fork-cache`). After changing imports or
+adding packages or files, run `make bazel-sync` and commit the regenerated
+BUILD files (the `BUILD files in sync` gate checks this). See
+`engdocs/bazel-quickstart.md` for setup and `engdocs/bazel-ci-budget.md` for
+the CI optimization loop.
+
+**Plain `go test` is an inner-loop convenience, not the gate.** `go test
+./internal/config -run TestX` is fine for a quick edit-compile-run cycle on
+one package. It runs none of the nogo, format, generated-artifact or policy
+targets, uses your host's environment instead of the pinned one, and a pass
+there is not evidence for CI. The Go-native make targets (`make test-go`,
+`make check-go`, `make test-acceptance-go`, `make test-integration-go`,
+`make check-docs-go`, and the sharded runners under "Cross-category runners"
+below) exist for offline work and for hosts Bazel does not serve, such as
+the macOS jobs. Workflow jobs that still run a Go-native suite call these
+`-go` names explicitly, so each workflow says which engine it uses.
+
+`//go:build integration` tests outside `test/integration` run in the
+`integration-packages` lane, the Bazel form of `go test -tags integration`
+with `GC_FAST_UNIT=0`:
 
 ```bash
-bazel test //...          # full suite; ~0.6s on a warm cache
-bazel test //internal/X   # one package while iterating
+bazel test --config=integration //test:integration_packages
+bazel test --config=integration //internal/runtime/tmux:tmux_test
 ```
 
-The first run costs the same as `go test`; every later run is a cache
-hit because the remote CAS is shared fleet-wide. A test that passed on
-CI does not re-execute locally. After changing imports or adding
-packages, run `make bazel-sync` and commit the regenerated BUILD files
-(the CI sync gate checks this).
+`//test/integration` itself gates only through the `integration-smoke`
+lane (`bazel test --config=integration-smoke //test/integration:integration_test`):
+the bdstore and REST smoke tests `scripts/test-integration-shard` names. The
+full suite runs evidence-only on pushes until its flaky tests are fixed.
 
-See `engdocs/bazel-quickstart.md` for local setup and
-`engdocs/bazel-ci-budget.md` for the CI optimization loop.
+`make bazel-sync` lists every package with an integration-tagged file (or a
+`GC_FAST_UNIT=0` process gate) in that suite. Tools those tests run by name
+come from pinned data deps, not the host: a go_test passes their
+`$(rootpath)`s in `GC_TEST_TOOL_PATHS` (prepended to `PATH` by
+`internal/testenv`), and Bazel-built helper binaries by `$(rootpath)` in an
+env var the test reads with `bazeltest.DataPath` instead of `go build`.
+
+### Nightly fresh test run
+
+`bazel-nightly.yml` passes `fresh-test-results: true` to every `bazel.yml`
+lane it runs, which appends `--config=fresh` (`.bazelrc`:
+`--nocache_test_results`) to each lane's `bazel test`. This exists because
+`tools/rbe/worker-env` keys `git` and `yq` at major version only: a minor
+upgrade of either tool on the rbe-west workers moves no action key, so a PR
+or push run reuses its cached `PASS` forever and a regression that upgrade
+introduced never shows up (the 2026-10-07 worker-env outage review). The
+nightly run re-executes every test once a day instead, exercising the real
+worker toolchain, exactly as beads' nightly does
+(`gastownhall/beads` `.bazelrc`'s `test:fresh`). It still writes the shared
+remote cache: `--nocache_test_results` only skips reading a cached result,
+and rbe-west's workers upload their own results regardless of this flag.
+Run the same thing locally with:
+
+```bash
+bazel test //... --config=fresh
+```
+
+The nightly run also adds `//test/acceptance:acceptance_realtime_tests` to
+the acceptance lane: the timer-bound acceptance rows at their real timers,
+which PR and push runs shorten (next section).
+
+### Test-only timer hooks
+
+A few acceptance rows assert what a running city does *not* do over a window
+long enough for the controller's periodic backstops to come round several
+times. To keep them out of the lane's critical path they run shortened on PRs
+and pushes, through these variables. `GC_TEST_BACKSTOP_SPEEDUP` is read by
+non-test code, so it is in the GC_* env-read inventory
+(`internal/testenv/testdata/gc_env_read_baseline.golden`);
+`GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` is read only by a test file, which that
+inventory does not scan.
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides the controller backstop cadences that go through `internal/clock.Backstop` (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. Other cadences (the supervisor patrol, the proxied guard tick, the Dolt scope watchdog, the lanes' intervals and retries) keep their real periods, so they come round fewer times in the shortened window; the nightly real-timer rows cover them. |
+| `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures: 20 s when unset; a value that is not a duration of at least 5 s fails the row. |
+
+`GC_TEST_BACKSTOP_SPEEDUP` cannot be turned on in a binary users run: gc
+honors it only when linked with
+`-X github.com/gastownhall/gascity/internal/clock.testHooks=enabled`, which
+only the testonly `//cmd/gc:gc_testhooks` target does
+(`scripts/cmd_gc_testhooks_test.go` keeps the stamp out of every other link,
+`.goreleaser.yml` and the Makefile). Any gc run with the variable set prints a
+`gc: WARNING: GC_TEST_BACKSTOP_SPEEDUP=...` line on stderr at startup saying
+whether the hook is active or ignored, and the quiescence rows fail unless gc
+reports it active. `test/acceptance/BUILD.bazel` sets both variables
+(`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
+
+### Merge queue
+
+The required-check workflows are merge-queue ready but the queue is off: it
+starts working only when a maintainer adds a `merge_queue` rule to the main
+ruleset. `bazel.yml`, `ci.yml` and `codeql.yml` run on
+`merge_group: [checks_requested]`, so every required check reports on a
+queue entry's merge-group commit: `Check` and `CI / required` (`ci.yml`),
+the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
+`code_scanning` rule), `bazel test (side-by-side)` and `BUILD files in sync`
+(`bazel.yml`). `scripts/ci_merge_queue_test.go` pins this:
+
+- **Same-repo trust.** A merge group has no `github.event.pull_request`, so
+  the `rbe` job takes the same-repo path (mode `remote`, no mint), whoever
+  queued the entry. Every expression in the three workflows that reads the
+  event is listed in the test with its `merge_group` value. A new one fails
+  the test until someone checks that value.
+- **The tested tree is the queue ref.** `fresh-merge` and the `rbe` job's
+  `base` step run on `pull_request` only, because the merge-group commit is
+  already the merge. The OpenAPI breaking-change gate compares the spec
+  against `merge_group.base_sha`, the commit the entry is queued onto (main
+  or the entry ahead of it). `ci.yml`'s path filter diffs `base_sha` to
+  `head_sha`, which is the entry's own change, as on a PR.
+- **Queue runs are never canceled.** `bazel.yml` and `ci.yml` key a merge
+  group's concurrency group on its own `gh-readonly-queue/*` ref, which is
+  unique per entry and base, with `cancel-in-progress` false. A PR's runs,
+  keyed on its number, never share a queue entry's group.
+- **The lanes match a PR's.** Unit, acceptance, integration-packages and
+  integration-smoke run, and a queue run reuses cached test results like
+  any other run. The `integration` lane can later be gated on `merge_group`
+  only (G3).
+
+**Recommended queue settings** (for 60-70 merges a day, with a peak of 7 an
+hour from 2026-10-05 to 10-07). A queue run costs about what a push run
+does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
+
+| Setting | Value | Why |
+|---|---|---|
+| Merge method | `SQUASH` | The ruleset allows merge and squash; `main` history is squash-shaped |
+| Grouping strategy | `ALLGREEN` | Every group's checks must pass; a red entry is ejected, not merged with the rest |
+| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, so going higher mostly adds rbe-west load |
+| Group size (`max_entries_to_merge`) | 5 | Bursts merge together |
+| `min_entries_to_merge` / wait | 1 / 5 min | Never wait for a batch (the wait is inert at 1) |
+| Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |
+| Required checks | the ruleset's 7 contexts, unchanged | Classic branch protection keeps `CI / required`, which also reports on `merge_group` |
+
+Repository auto-merge is already on, so `gh pr merge --auto` queues a PR.
+After enabling the queue, watch the first day's `merge_group` run times, then
+adjust the build concurrency.
+
+**Security.** A queue run executes the queued commit's own workflows with
+CI secrets, including the rbe-west executor credentials. Queueing a fork PR
+is therefore the same trust decision as merging it. Review a fork PR's
+changes to `.github/**`, `.bazelrc`, `tools/**`, `MODULE.bazel` and BUILD
+files before you queue it.
 
 ### Measuring cache hits (BEP cache report)
 
@@ -64,18 +228,16 @@ rate, test time run versus skipped, the action-level runner counts
 executed tests. Pass one `PHASE=FILE` per invocation; `--json-out PATH`
 writes the machine-readable report (schema 1), `--allow-missing` shows an
 absent file as "no BEP file" instead of failing, and `--top N` sizes the
-slowest list. `bazel-test.yml` runs it after every `bazel test` step
-(unit, acceptance, integration) into the job summary and uploads the JSON
-as the `bazel-bep-summary-<attempt>` artifact, so hit rates can be
-compared across pre-push, PR, and main runs. `bazel.yml` does the same per
-lane: each lane uploads its BEP file, redacted to the fields the report
-reads (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
+slowest list. In CI, each `bazel.yml` lane (unit, acceptance,
+integration-packages, integration-smoke, integration) uploads its BEP file, redacted to the fields the report reads
+(`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
 expanded command line, including `--remote_executor`), and the
-`bazel / test cache report` job reports them in one table (one phase per
-lane, context `<event>/<mode>`) and uploads
-`bazel-yml-bep-summary-<attempt>`.
-`scripts/bazel_bep_summary_workflow_test.go` fails if a `bazel test`
-invocation or a `bazel.yml` lane stops writing a BEP file the report reads.
+`bazel / test cache report` job reports them in one table in its job
+summary (one phase per lane, context `<event>/<mode>`) and uploads the JSON
+as `bazel-yml-bep-summary-<attempt>`, so hit rates can be compared across
+pre-push, PR, and main runs. `scripts/bazel_bep_summary_workflow_test.go`
+fails if a `bazel test` runs outside the lanes or a lane stops writing a
+BEP file the report reads.
 
 ### Bazel cache tiers
 
@@ -84,14 +246,15 @@ every flag that can change an action key is committed, unconditionally, in
 `.bazelrc` (notably the pinned test `PATH`, with Go at `/usr/local/go`). The
 per-mode configs and the gitignored `.bazelrc.local` carry transport only:
 endpoints, credentials, timeouts, download and parallelism policy.
-`scripts/bazel_key_parity_test.go` enforces this, including against the lines
-`bazel-test.yml` writes, so pre-push, PR and main runs compute the same keys.
+`scripts/bazel_key_parity_test.go` enforces this, including against the rc
+`setup-bazel` writes and the lines `bazel.yml`'s lanes add to
+`.bazelrc.local`, so pre-push, PR and main runs compute the same keys.
 
 | tier | how | executes | writes the shared cache |
 |---|---|---|---|
 | contributor (default) | `--config=fork-cache` | locally, on cache misses | never |
 | maintainer (opt-in, allowlisted; not live yet) | `--config=remote-exec` + a client certificate | rbe-west, `oss` instance | only rbe-west's own workers |
-| CI (`bazel-test.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
+| CI (`bazel.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
 
 - **Contributor.** `fork-cache` reads rbe-west's anonymous, read-only cache
   (`rbe-cache.ops.gascity.com:8443`, instance `oss`): anything CI already ran
@@ -106,8 +269,9 @@ endpoints, credentials, timeouts, download and parallelism policy.
   runs lands in the `oss` action cache, which anyone can read anonymously
   by digest, and the Blacksmith-donated pool serves OSS work only. Never
   point it at a private repository. There is no self-service path in this
-  repo (the `rbe-fork` mint used by `tools/rbe/fork-credential.sh`
-  certifies only in-progress PR runs): an rbe-west operator signs your
+  repo (the `rbe-fork` mint used by
+  `.github/actions/setup-bazel/fork-credential.sh` certifies only
+  in-progress PR runs): an rbe-west operator signs your
   certificate (infra `nativelink-cas/west`, README "rbe-maint").
 
   Your GitHub account must be on `.github/rbe-fork-allowlist.txt` (its
@@ -186,10 +350,12 @@ endpoints, credentials, timeouts, download and parallelism policy.
   land in the `oss` action cache that CI and contributors read, so a
   pre-push result is a PR and main hit. Pre-push executes remotely only on
   main's current `worker-env` pin (see **Pre-push** below).
-- **CI.** `bazel-test.yml` is the trusted writer: its actions execute on
+- **CI.** `bazel.yml` is the trusted writer: its actions execute on
   rbe-west's `oss` workers, which alone write the `oss` action cache that
-  contributors and fork PRs read. Fork PRs get the read-only cache, or
-  `rbe-fork` remote execution with a certificate minted for that run.
+  contributors and fork PRs read. Fork PRs get `rbe-fork` remote execution
+  with a certificate minted for that run, or, when the mint is closed or
+  refuses, the read-only cache with execution on the runner; either way
+  every lane runs and gates.
 
 **Pre-push.** `.githooks/pre-push` runs the suite through
 `.githooks/lib/push-suite.sh` when a push changes Go sources. Mode by
@@ -200,7 +366,12 @@ endpoints, credentials, timeouts, download and parallelism policy.
 | `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor and the checkout's `worker-env` pin is current; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
 | `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor or the `worker-env` pin is not current |
 | `cache` | `bazel test //... --config=fork-cache` |
-| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
+| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite), behind a banner saying it is not what CI enforces |
+
+Whenever the push runs `make test-fast-parallel` instead of Bazel, whether
+by `auto`'s fallback or an explicit `go`, it prints a banner with the reason
+and the fix, and says CI runs `bazel test //...`: a push that passes the go
+suite can still fail nogo, formatting or a generated-artifact target.
 
 `auto` asks Bazel which options its rc files set (`bazel info --announce_rc
 --config=remote-exec`, which contacts no remote): a non-empty
@@ -243,48 +414,101 @@ readable main, or an open drift issue, `auto` prints why and runs the
 non-remote mode instead (`fork-cache`, or `make test-fast-parallel` by the
 rules above), and `rbe` fails the push. Rebase onto main to execute
 remotely again; a change that moves the pin runs its remote suite in CI
-after it merges, as `bazel-test.yml`'s own preflight does.
+after it merges, as `bazel.yml`'s own preflight does.
+
+### Remote repo contents cache (CI lanes)
+
+A cold lane client spends 15-38 s re-running repository rules (go_deps,
+npm, debs) before its first action. Bazel's remote repo contents cache
+serves those extracted trees from rbe-west's `oss` action cache instead
+(`engdocs/design/bazel-remote-repo-contents-cache.md`). The repository
+variable `RBE_REPO_CONTENTS_CACHE` rolls it out in mode `remote` only:
+
+| value | effect |
+|---|---|
+| unset / `off` | nothing (default) |
+| `seed` | each push to main runs `bazel.yml`'s `rrc-seed` job: every lane's command with `--nobuild`, uploading repository trees with a 30-minute `rbe-rrc-writer` certificate rbe-west's mint signs only for that job (GitHub OIDC; `.github/scripts/rrc-writer-credential.sh`). rbe-west's `rrc-gate` admits only repo-contents entries from it |
+| `canary` | `seed`, and the `unit` lane reads the cache |
+| `on` | `seed`, and every lane reads the cache |
+
+Readers add `startup --experimental_remote_repo_contents_cache` and
+`common --loading_phase_threads=64` to `.bazelrc.local` (key neutral,
+`scripts/bazel_key_parity_test.go`) and still upload nothing. Developer
+machines, fork runs and macOS/Windows jobs never read it. Rollback: set the
+variable to `off`; lanes fetch as before.
+
+Nothing on a reader checks a cached tree against what its repository rule
+produces, so `bazel.yml`'s `rrc-verify` job (from `bazel-nightly.yml`, or a
+dispatch, whenever the variable is not `off`) fetches every lane's
+repositories cold and compares each tree and marker file with the entry a
+lane would read (`tools/bazel/rrc_verify.py`). A mismatch, a poisoned entry
+or a rule falsely marked reproducible, fails the job and opens an issue
+labeled `rrc-verify`: set the variable to `off` first, then investigate.
 
 ### Re-pinning the RBE worker host
 
 Every action's key carries `worker-env`, the sha256 of
 `tools/rbe/worker-env.txt` (`//platforms:rbe_worker`). That file is the
-manifest of the Blacksmith host the pool workers run on: OS, arch, Go,
-dolt, and the dpkg versions of the worker toolset. rbe-west's oss and
-oss-fork schedulers match `worker-env` exactly. The default instance
+toolchain manifest of the Blacksmith host the pool workers run on. rbe-west's
+oss and oss-fork schedulers match `worker-env` exactly. The default instance
 ignores it. Each worker advertises the hash of the host it measures
-(`tools/rbe/worker-env`). An action runs only on a worker whose host is
-the pinned one.
+(`tools/rbe/worker-env`). An action runs only on a worker whose toolchain
+is the pinned one. gastownhall/beads shares the pools and carries a
+byte-identical copy of the manifest and the same pin.
 
-The measurement is stable while the Blacksmith image is. The worker
-installs its toolset from the image's own apt lists (no `apt-get
-update`) and Go and dolt by checksum. It changes with an image refresh,
-or with a change to the toolset, Go or dolt. That is drift, and it is
-loud (`tools/rbe/worker-env-drift`):
+The manifest records what can change an action's result, and nothing else.
+We don't control the Blacksmith image, and it takes Ubuntu security updates
+on its own schedule:
+
+- **Kept in full:** the arch, the OS release (`ubuntu 24.04`), and the Go
+  and dolt the worker installs by checksum.
+- **Kept as the upstream release:** each measured package
+  (`tools/rbe/worker-env`'s `measured` list). The Debian epoch and the
+  Ubuntu revision are dropped, so `9.4-3ubuntu6.1` and `9.4-3ubuntu6.2`
+  both measure `9.4`.
+  - The libraries the hermetic toolchain and test binaries load (glibc,
+    libstdc++, libgcc_s, ICU, zlib, libxml2, liblzma) are cut to
+    major.minor, their ABI.
+  - The tools that tests, genrules and test wrappers run (bash, dash,
+    coreutils, python3, tmux, jq, ...) are cut to major.minor too. The
+    archive holds that fixed for a release.
+  - git comes from the git-core PPA, which ships every upstream minor as a
+    security update, so it is cut to its major.
+  - yq is not a dpkg package; it is measured from `yq --version` and cut
+    to its major.
+- **Not measured:** the kernel; the `-dev` headers and cmake (no action
+  reads host headers or runs cmake); and every other image package.
+
+So a glibc minor, another arch or OS release, a library or archive tool
+minor, a git or yq major, or a Go or dolt bump is a new manifest. A
+security patch of the same releases is not. The measurement changes with
+an image refresh only when the refresh changes one of those.
+`tools/rbe/worker-env --raw` prints dpkg's versions as installed. That
+listing is for diagnosis and is never hashed. When the measurement does
+change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
 
 - A drifted worker still registers, advertising the hash it measured.
-  The pools are shared with beads, whose actions send no `worker-env`
-  and still run on it. gascity's actions carry the pin and never match
-  it.
-- The pool run's measurement step fails, with the diff and the manifest
-  and pin to commit in the step summary. The worker keeps serving. The
-  run's `await-drift` and `report-drift` jobs open or update the GitHub
-  issue labelled `rbe-worker-env-drift`, titled
+  Actions that send no `worker-env` still run on it. Actions that carry
+  the pin (gascity's and beads') never match it.
+- The pool run's measurement step fails. The step summary has the diff,
+  the manifest and pin to commit, and the raw listing. The worker keeps
+  serving. The run's `await-drift` and `report-drift` jobs open or update
+  the GitHub issue labelled `rbe-worker-env-drift`, titled
   `rbe worker-env drift: <pin>`.
 - That issue is the farm's signal too. While any open
   `rbe-worker-env-drift` issue exists, each rbe-west pool scaler caps
   its pool at `NLPOOL_DRIFT_MAX_WORKERS` (default 2), so the unmatched
   queue can't drive the pool to 16 VMs. Keep that label, and keep the
   issue open until the re-pin lands.
-- While the issue is open, remote `bazel-test` and `bazel` (bazel.yml)
-  runs on its pin fail at their preflight instead of queueing.
+- While the issue is open, remote `bazel.yml` runs on its pin fail at
+  their preflight instead of queueing.
 - `rbe-worker-env-canary.yml` measures a Blacksmith runner every six
   hours, so drift usually opens the issue before CI meets it.
 - A change to the worker host (`tools/rbe/worker-env*`,
   `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
-  Blacksmith image in the required `bazel test` job (and in bazel.yml's
-  `bazel / unit` lane). If the PR's manifest is not what that image
-  measures, the job fails.
+  Blacksmith image in bazel.yml's `worker-host` job, which the required
+  `bazel test (side-by-side)` gate fans in. If the PR's manifest is not
+  what that image measures, the job fails.
 
 To re-pin, anyone with write access:
 
@@ -293,11 +517,15 @@ To re-pin, anyone with write access:
 2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
    `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
    checks that they agree with each other, `go.mod` and the toolset.
+   Make the same change in gastownhall/beads (its
+   `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
+   together: once the pool workers serve the new pin, beads' actions on
+   the old pin don't schedule.
 3. Open the PR. Pool workers run the default branch's provisioning, so
-   the new pin isn't reliably served before it merges, and
-   `bazel test` (and every bazel.yml lane) skips the remote suite. It
-   measures its own Blacksmith host against the new manifest instead
-   (bazel.yml: the unit lane), and fails if they differ.
+   the new pin isn't reliably served before it merges, and every
+   bazel.yml lane skips the remote suite. The worker-host job measures
+   its own Blacksmith host against the new manifest instead, and fails
+   if they differ.
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
@@ -313,7 +541,29 @@ re-pin.
 If an issue stays open for the current pin while hosts match again,
 close it by hand.
 
-## The outcome: protected PR feedback in under five minutes
+### Bumping the rbe-worker pin
+
+`.github/actions/rbe-worker/pin` names the `gastownhall/rbe-worker` commit
+the worker code pins (not to be confused with the worker-env manifest pin
+above). Bumping it is a one-line PR: change the 40-hex sha in `pin` to the
+new commit, open it, merge it.
+
+`bazel.yml`'s `worker-host` job measures the bump before it lands: it
+fetches the PR's pinned commit anonymously (no secret, `refs/heads/main`
+only), checks the fetched tree against this checkout's `tools/rbe` (S3-S5
+parity), and, because the pin moved, measures this Blacksmith host against
+it. H5 then walks every commit between the default branch's pin and the
+PR's: each one must be a GitHub-verified, signed commit, authored by
+`web-flow` (GitHub's merge-button identity), with an associated pull
+request merged into `rbe-worker`'s main. A direct push to `rbe-worker`
+main, however it's signed, fails this check: only a squash-merged PR
+reaches it. A rollback (a new pin that is not a descendant of the old one)
+warns instead of failing, so reverting a bad rbe-worker commit isn't
+blocked on rewriting its own history.
+
+The range check is dormant on a PR that doesn't move the pin: H5 has
+nothing to walk, and the parity/measure steps run anyway (every
+`worker-host` run fetches and diffs during S3-S5, pin-moved or not).
 
 The developer-visible service-level objective is p95 **under five minutes**
 from GitHub Actions PR-workflow creation until the required automated `CI`
@@ -661,10 +911,15 @@ provider-store owners instead of being repeated by each command consumer. Body
 review is not a reason to remove a retained boundary test.
 
 `TestDockerSessionProtocol` owns fast Docker CLI mapping, injected failures,
-and cleanup transitions through a strict `PATH`-injected executable. The
-real-Docker `scripts/test-docker-session` harness remains the composition owner
-until each retained container invariant has a replacement contract and the
-real proof is deliberately consolidated.
+and cleanup transitions through a strict `PATH`-injected executable.
+`TestDockerSessionScript` (`//test/containerhost`, integration tier) is the
+composition owner: it drives `scripts/gc-session-docker` through every
+session operation against `test/containerhost`, an emulated container host
+that runs each container as a tagged group of host processes with its own
+`/run`, an image-defined `PATH` and the adapter's real in-container tmux. It
+needs no Docker daemon, privileges or user namespaces, so it runs on every
+rbe-west lane, fork lanes included. What it does not prove is Docker itself
+(image builds, pulls, cgroups, namespaces).
 
 The canonical identity is package directory plus package clause plus top-level
 `Test`, `Benchmark`, `Fuzz`, or `TestMain` name. Nested function literals and
@@ -790,21 +1045,23 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 497 calls / 183 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | fixed_sleep: 497 calls / 184 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 748 calls / 220 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 747 calls / 223 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-cp3hwi | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestPassthroughEnvWithholdsControllerTokenFromChildProcess: subprocess | ga-cp3hwi | the controller-token withholding proof is a checked Medium subprocess owner; the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map | P0.4b | 2026-10-31 |
-| Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-cp3hwi | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-31 |
+| Medium owner | `cmd/gc` package `main` | TestRuntimeLeaseCLIVsLegacyStart: subprocess | ga-cp3hwi | the CLI-vs-legacy runtime lease harness is a checked Medium subprocess owner; the CLI process is confined to TestRuntimeLeaseCLIVsLegacyStart, which re-execs the test binary as a gc session CLI starting a row through its Manager: the lease's flock and record must exclude a second process, so only a real one proves the controller's legacy start defers to it | P0.4b | 2026-10-31 |
+| Medium owner | `internal/api/apierr` package `apierr` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-cp3hwi | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint: subprocess | ga-cp3hwi | doctor custom-types configured-store targeting regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair | P0.4b | 2026-10-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-cp3hwi | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-10-31 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext: subprocess | ga-cp3hwi | doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner; the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server | P0.4b | 2026-10-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-10-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-10-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-10-31 |
+| Medium owner | `internal/session` package `session` | TestRuntimeLeaseCrossProcess: subprocess | ga-cp3hwi | the runtime lease cross-process harness is a checked Medium subprocess owner; the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store | P0.4b | 2026-10-31 |
 | Medium owner | `internal/workrecord` package `workrecord` | TestCommitReachableOnBranch: subprocess | ga-cp3hwi | the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner; the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestAddTestenvImportSkipsNestedGitWorktrees: subprocess | ga-t00ejy | the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner; the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestCacheZstdProbe: http_test_server | ga-cp3hwi | the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner; the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd | P0.4b | 2026-10-31 |
@@ -816,27 +1073,27 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestRBEWorkerJSONIsolationOffMatchesPreO1: subprocess | ga-cp3hwi | the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner; the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestRBEWorkerScrubCAS: subprocess | ga-cp3hwi | the sticky-disk CAS scrub proof is a checked Medium subprocess owner; the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker | P0.4b | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 284 / 43) | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
-| Small debt ratchet | `cmd/gc` untagged test source | environment: 117 calls / 14 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | `cmd/gc` untagged test source | environment: 119 calls / 16 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 60 calls / 25 files (historical regex census: 75 / 25) | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 319 calls / 122 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 319 calls / 123 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
 | Small debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 300 / 66) | ga-cp3hwi | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
 | Small debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
-| Small debt ratchet | all untagged test source | subprocess: 476 calls / 138 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | subprocess: 472 calls / 138 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
 | Small debt ratchet | all untagged test source | tmux: 3 calls / 2 files (historical regex census: 1 / 1) | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-31 |
-| Source debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 14 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment: 124 calls / 16 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 61 calls / 25 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 319 calls / 122 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 319 calls / 123 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
-| Source debt ratchet | all untagged test source | subprocess: 501 calls / 147 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | subprocess: 499 calls / 149 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | tmux: 9 calls / 4 files (historical regex census: 7 / 3) | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-31 |
 
@@ -877,15 +1134,17 @@ func TestFileStoreOpenCorruptedJSON(t *testing.T) {
 When to use: corrupted data, concurrent writes, specific error types,
 double-claim conflicts, rollback behavior, boundary conditions.
 
-`make test` and `make test-cover` now follow this boundary strictly: they
-run the fast unit loop only, with `GC_FAST_UNIT=1` gating slow `cmd/gc`
-process scenarios. Slow process-backed cases
+`make test` (`bazel test //...`), `make test-go` and `make test-cover`
+follow this boundary strictly: they run the fast unit loop only, with
+`GC_FAST_UNIT=1` gating slow `cmd/gc` process scenarios. Slow process-backed cases
 such as managed Dolt recovery, real `bd` lifecycle, tutorial regression
 scripts, and the large `gc-beads-bd` provider suite are routed out of the
-default path so local `make check` and CI `Check` stay focused on quick
+default path so local `make check` and the CI unit lane stay focused on quick
 feedback. If you need that full `cmd/gc` scenario coverage locally, run
-`make test-cmd-gc-process`. In CI, the required non-short path is the
-dedicated Linux `cmd/gc process` job. The generic integration package
+`make test-cmd-gc-process`, or `bazel test --config=integration
+//cmd/gc:gc_test`. In CI, the required non-short path is that target in
+bazel.yml's gating integration-packages lane, for every PR, fork ones
+included. The generic integration package
 shards keep `GC_FAST_UNIT=1` for `cmd/gc` unless explicitly overridden,
 so they exercise the fast package sweep without duplicating the slow
 process-backed suite. If you need the heavier package
@@ -897,8 +1156,10 @@ Codecov flags.
 
 ### Cross-category runners, timing, and resource isolation
 
-For broad local runs, prefer the repo's sharded wrappers over raw `go test`
-commands. They use the same buckets as CI, run under a scrubbed environment,
+These are the Go-native runners: for offline work, hosts Bazel does not
+serve, and the CI jobs that have not moved to Bazel yet. The gate is still
+`bazel test` ("Building and testing" above). When you do run Go-native
+sweeps, prefer the repo's sharded wrappers over raw `go test` commands. They use the same buckets as CI, run under a scrubbed environment,
 and split single-package bottlenecks such as `cmd/gc` across multiple
 processes.
 
@@ -971,8 +1232,10 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
-The `productmetrics_testhook` profile is a required, path-gated CI lane with
-six named owners, including the real CLI re-exec process contract. Its tagged
+The `productmetrics_testhook` profile has six named owners, including the
+real CLI re-exec process contract. In CI it is the Bazel target
+`//cmd/gc:gc_productmetrics_testhook_test` (gc_test built with the tag), in
+bazel.yml's required unit lane. Its tagged
 process owner is intentionally absent from ordinary untagged `cmd/gc` shard
 enumeration. The serial `make test-cmd-gc-process` target runs the ordinary
 suite and then this profile; `make test-cmd-gc-process-parallel` and
@@ -982,93 +1245,36 @@ The existing macOS `mac-cmd-gc-process` matrix runs the same profile once on
 shard 6 so the Darwin production composition remains covered without another
 Mac runner.
 
-#### PR static-check scope
+#### Lint and vet (nogo)
 
-The `preflight-static` job has two fail-safe scopes. Only an effective
-`pull_request` event whose default checkout is validated as GitHub's two-parent
-synthetic merge, with its first parent equal to the event's exact base SHA, may
-use the changed scope. The checkout keeps the default `GITHUB_SHA` and uses
-`fetch-depth: 2` so that validation is local and exact. A missing or different
-base, a non-merge checkout, or an unknown event selects the full scope.
+Lint and vet run as [nogo](https://github.com/bazel-contrib/rules_go/blob/master/go/nogo.rst)
+inside the Bazel build. `//tools/nogo` bundles `go vet`'s analyzer suite and
+the linters `.golangci.yml` enables (errcheck, ineffassign, staticcheck,
+unused, errorlint, misspell, gocritic, revive, unconvert, unparam) with
+golangci-lint's default settings; `MODULE.bazel` registers it with
+`go_sdk.nogo`. Every first-party Go compile is validated, so a finding fails
+`bazel build`/`bazel test` wherever it runs, including bazel.yml's unit lane on
+rbe-west. There is no changed-scope selection: the action cache re-analyzes
+only packages whose inputs changed. `//nolint:<linter>` directives work as with
+golangci-lint; staticcheck findings are suppressed by check name
+(`//nolint:SA1019`).
 
-Pushes to `main`, schedules, manual dispatches, and every other non-PR event run
-the full static suite. Reusable workflows inherit their caller's event; the
-reusable call itself grants no changed-scope exemption. An effective
-`pull_request` event may still qualify after the same synthetic-merge
-validation, while an invocation such as the current RC `workflow_dispatch`
-remains full. The classifier never guesses a base from `origin/main` or a
-merge-base calculation.
+| Target | What it runs |
+| --- | --- |
+| `make lint` (= `make vet`) | `bazel build --keep_going --output_groups=nogo_fix //...`: every package's nogo analysis, no linking. |
+| `make lint-changed` | The same for the Bazel packages of changed Go files (`LINT_CHANGED_SCOPE=staged\|tracked\|worktree`); pre-commit uses `staged`. |
+| `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job (darwin-only files the Linux nogo build does not compile). |
 
-Even a validated PR merge runs the full scope when its diff touches static
-analysis or build policy:
+`tools/nogo/config.json` scopes the analyzers the way golangci-lint saw the
+tree (no external repos, generated `_gen.go` files, testdata) and carries the
+path/text exclusions from `.golangci.yml`; keep the two in step while the
+macOS job still runs golangci-lint. `unused` and `unparam` report only from
+compile units that include test files, because golangci-lint analyzes a tested
+package together with its tests; see `tools/nogo/analyzers/internal/testunit`.
 
-- `go.mod`, `go.sum`, `go.work`, or `go.work.sum`
-- any root `.golangci.*` configuration or `Makefile`
-- `.github/workflows/**`, `.github/actions/**`, or `.githooks/**`
-- `vendor/**` or `scripts/cipolicy/**`
-- `scripts/ci-static-scope` and `scripts/ci-static-select`
-
-The two scopes own different commands:
-
-| Scope | Commands | Selection guarantee |
-| --- | --- | --- |
-| Changed PR | `make lint-affected`, `make fmt-check-changed` | Lint and vet every package owning a changed Go build input or embedded file, every native package that could consume a changed path, and all transitive reverse dependents; format-check only changed regular `.go` files that still exist. |
-| Full/fail-safe | `make lint`, `make fmt-check`, `make vet` | Analyze and format-check the whole repository, then run standalone `go vet ./...`. |
-
-Affected-package discovery examines every changed path. It selects packages
-for changed Go-tool build inputs (`.go`, `.c`, `.cc`, `.cpp`, `.cxx`, `.m`,
-`.h`, `.hh`, `.hpp`, `.hxx`, `.f`, `.F`, `.for`, `.f90`, `.s`, `.S`, `.sx`,
-`.swig`, `.swigcxx`, and `.syso`) and maps changed embedded files to every
-owning package using `EmbedFiles`, `TestEmbedFiles`, and `XTestEmbedFiles` from
-the canonical records in one complete
-`go list -mod=readonly -test -json ./...` graph.
-Additions, modifications, deletions, and both sides of cross-package moves are
-included. Git rename coalescing is disabled so a move cannot hide the old
-package. Native compiler include and linker inputs can have recognized or
-arbitrary names and may live outside their consuming package. Every changed
-path therefore selects every package with native Go-tool sources, plus their
-reverse dependents. This is the smallest sound scope available without trying
-to duplicate compiler-specific dependency discovery. An unrelated non-build,
-non-embedded path remains a no-op when the graph has no native package that
-could consume it.
-
-Reverse dependents are included because analyzers such as `govet` consume
-exported facts, including through test-only imports. If the package graph
-cannot be loaded completely, affected lint fails safe to `./...` instead of
-trusting a partial graph. This includes a deleted required embed input. A
-deleted glob member no longer appears in the current resolved embed inventory,
-so a deletion that may match any current `EmbedPatterns`, `TestEmbedPatterns`,
-or `XTestEmbedPatterns` entry fails safe even when a nested package still owns
-the deleted build-input directory. Any other deletion beneath a package that
-has neither a current embed owner nor a current direct package owner also fails
-safe to full scope. These guards run before native shared-input shortcuts,
-including for recognized headers. File selection is NUL-delimited. Formatting
-remains limited to
-changed `.go` paths, excludes deletions and symlinks, accepts only existing
-regular files, and never invokes the formatter with an empty file list.
-
-`lint-affected` is the conservative PR target. It runs the configured
-golangci linters, including golangci's `govet`, then runs the Go tool's `vet`
-over the exact same affected package closure. The bounded duplicate preserves
-both tools' distinct diagnostics without repeating either analysis across the
-whole repository. It also retains standalone-vet diagnostics in generated
-files and unchanged reverse dependents. If selection fails, the same pair runs
-over `./...`; fallback never disables configured linters. `lint-changed`
-remains the faster local/pre-commit target and intentionally checks only
-packages that contain changed Go files. Both accept `LINT_CHANGED_SCOPE` and
-`LINT_CHANGED_REF`; CI uses `tracked` and the event's exact PR base SHA.
-
-The golangci configuration enables `govet` explicitly in both scopes.
-Golangci's `govet` execution is not assumed to be semantically equivalent to
-standalone `go vet`: generated-file exclusions and analyzer/configuration drift
-can differ. Full-scope runs therefore retain standalone `go vet ./...`, while
-the changed lane invokes standalone vet on its conservative closure.
-
-`make test-ci-policy` runs independently of changed/full static selection and
-always executes the focused workflow-scope, golangci-`govet`, affected-target,
-and fail-closed-classifier contracts. A self-binding test in the existing CI
-policy package rejects any Makefile change that removes this focused Go suite
-from the target.
+`make test-ci-policy` runs the focused lint-placement and formatting-scope
+contracts. A self-binding test in the CI policy package rejects any Makefile
+change that removes this focused Go suite from the target.
 
 #### Historical timing summaries
 
@@ -1226,10 +1432,11 @@ unrelated Tier A flows.
 
 #### Beads topology tests (`GC_ACCEPTANCE_BD_BIN`, `GC_ACCEPTANCE_LEGACY_GC_BIN`)
 
-Two Tier A tests drive a real `bd` and a real `dolt` instead of the hermetic
-providers: `TestBeadsProxiedDefault`, which proves the proxied-local default,
-and `TestBeadsInitTopologyMatrix`, which walks every supported way to
-initialise a beads scope. Both skip typed when their tooling is absent, so the
+Two groups of Tier A tests drive a real `bd` and a real `dolt` instead of the
+hermetic providers: the `TestBeadsProxiedDefault*` tests, which prove the
+proxied-local default (independent top-level tests, so the sharded Bazel lane
+can spread them), and `TestBeadsInitTopologyMatrix`, which walks every
+supported way to initialise a beads scope. Both skip typed when their tooling is absent, so the
 default `make test-acceptance` run is unaffected.
 
 | variable | selects | who needs it |
@@ -1237,7 +1444,7 @@ default `make test-acceptance` run is unaffected.
 | `GC_ACCEPTANCE_BD_BIN` | the `bd` binary under test; must have `--proxied-server`, so bd >= 1.3.0 | both tests, all shapes |
 | `GC_ACCEPTANCE_LEGACY_GC_BIN` | a `gc` built before the scope-ownership journal | the matrix's legacy GC-managed shape only |
 | `GC_ACCEPTANCE_TOPOLOGY_MATRIX` | opts a run in to the matrix; it is too slow for the Tier A smoke budget and skips without this | `TestBeadsInitTopologyMatrix` only |
-| `GC_ACCEPTANCE_PERF` | turns the proxied-native `gc status --json` wall-clock line (0.5s target, gated at 3x) from a log line into an assertion; the nightly `Beads / proxied-native perf lane` job sets it, and `make test-acceptance` passes it through as `ACCEPTANCE_PERF` | `TestBeadsProxiedDefault` only |
+| `GC_ACCEPTANCE_PERF` | turns the proxied-native `gc status --json` wall-clock line (0.5s target, gated at 3x) from a log line into an assertion; the nightly `Beads / proxied-native perf lane` job sets it, and `make test-acceptance` passes it through as `ACCEPTANCE_PERF` | `TestBeadsProxiedDefaultNativeLane` only |
 
 `make test-beads-topology-matrix` sets the matrix opt-in and
 `GC_REQUIRE_ACCEPTANCE_TOOLING=1` itself, so a missing `bd` or `dolt` fails the
@@ -1246,12 +1453,23 @@ target instead of turning it into a green no-op. Through the general
 yourself — `TEST_ENV` is `env -i`, so exporting the variable in your shell is
 not enough.
 
-The same switch covers a row's own precondition. The required
-`Beads / proxied-native acceptance` job runs `TestProxiedNativeLifecycle` and
-`TestProxiedNativeSafety` under `GC_REQUIRE_ACCEPTANCE_TOOLING=1`, and a row
-there whose precondition the `bd` under test does not produce (a database with
-no ignored-lane row to remove, a proxy record `bd` cleaned up after a SIGKILL)
-calls `helpers.MissingPrecondition`, which skips locally and fails in that job.
+In CI these rows run in Bazel's required acceptance lane
+(`bazel test --config=acceptance //test/acceptance:acceptance_test
+//test/acceptance:acceptance_solo_tests`). `test/acceptance/BUILD.bazel`
+gives `acceptance_test` the pinned `bd` and `dolt` (first on `PATH`, so every
+`dolt sql-server` the rows start is a loopback child of the test on the remote
+worker), `GC_ACCEPTANCE_TOPOLOGY_MATRIX=1` and
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1`. The few rows that wait out minutes of real
+Dolt lifecycle (the topology matrix's M1 and M5 shapes, the proxied idle
+timeout, the two suspension-quiescence rows) are its `SOLO_TESTS`: each runs
+alone in a target of its own, and `acceptance_test` skips them.
+
+The same switch covers a row's own precondition. The lane runs
+`TestProxiedNativeLifecycle` and `TestProxiedNativeSafety` under
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1`, and a row there whose precondition the
+`bd` under test does not produce (a database with no ignored-lane row to
+remove, a proxy record `bd` cleaned up after a SIGKILL) calls
+`helpers.MissingPrecondition`, which skips locally and fails in the lane.
 Those files never call `t.Skip` in a row;
 `scripts/acceptance_run_selection_test.go` enforces it.
 
@@ -1570,12 +1788,17 @@ in a real browser against a real HTTP supervisor, so it exercises the full
 fetch → generated client → projection helper → render path.
 
 It is a **Tier 3** browser tier — it needs a built SPA bundle + Chromium, so it
-is NOT in the Go integration shard set. Run it with `make dashboard-e2e-play`
+is NOT in the Go integration shard set. In CI it is the Bazel target
+`//internal/api/dashboardspa/web/frontend:playwright_test`, which `bazel test
+//...` runs remotely like any other test: the fakesupervisor builds with the
+`integration` tag (`gotags`) and embeds the Bazel-built SPA bundle, Chromium is
+Playwright's pinned `chrome-headless-shell` build, and the shared libraries it
+needs beyond the worker host are pinned Ubuntu packages (`MODULE.bazel`). The
+HTML report and traces land in the test's undeclared outputs. Locally, run it
+with that `bazel test` target, or with `make dashboard-e2e-play` through npm
 (builds the SPA, builds the fakesupervisor with `-tags integration`, installs
 Chromium via `npx playwright install chromium`, then runs the specs);
-`make dashboard-e2e` runs both layers. In CI it runs as appended steps in the
-existing **`dashboard`** job (`.github/workflows/ci.yml`), which already has Go +
-Node provisioned; a `playwright-report` artifact is uploaded on failure. Add new
+`make dashboard-e2e` runs both layers. Add new
 routes/assertions by editing `e2e/render-smoke.spec.ts`; keep
 `e2e/fixtures/expected.ts` aligned **manually** with the exported constants in
 `test/dashport/corpus/corpus.go` (there is no automated parity check — the two
@@ -1620,11 +1843,13 @@ They currently verify:
 - local Markdown link targets across the repo docs
 - Mintlify navigation page references in `docs/docs.json`
 
-Run them directly with:
+Run them with `make check-docs`, which is:
 
 ```
-go test ./test/docsync
+bazel test //test/docsync:docsync_test
 ```
+
+(`go test ./test/docsync` works for a quick local iteration.)
 
 ### Additional integration guidance
 

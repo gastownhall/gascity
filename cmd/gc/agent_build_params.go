@@ -32,6 +32,10 @@ type agentBuildParams struct {
 	rigs            []config.Rig
 	sessionTemplate string
 	beaconTime      time.Time
+	// decisionTime is this build's clock for time-dependent pool decisions
+	// (kill-fence grace, alias-retry backoff); see now. Legacy sets it to the
+	// build's poolDecisionTime, because its beaconTime is fixed at gc start.
+	decisionTime    time.Time
 	packDirs        []string
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
@@ -115,6 +119,11 @@ type agentBuildParams struct {
 	// nil elsewhere, which disables the counters.
 	realizeProbe *poolRealizeProbe
 
+	// realizeMemo is the v2 allocator's per-pass realization index for one
+	// pool agent (allocator_index.go). Legacy never sets it: nil is legacy's
+	// path, unchanged.
+	realizeMemo *poolRealizeMemo
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
@@ -165,6 +174,19 @@ func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
 		return p.sessionSnapshotComplete
 	}
 	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
+}
+
+// now is the build's decision clock: decisionTime when the caller set it,
+// else beaconTime, which the v2 allocator sets to its pass time. The pool
+// decide reads no wall clock (allocator_decide_purity_test.go).
+func (p *agentBuildParams) now() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	if !p.decisionTime.IsZero() {
+		return p.decisionTime
+	}
+	return p.beaconTime
 }
 
 // newAgentBuildParams constructs agentBuildParams from the common startup values.

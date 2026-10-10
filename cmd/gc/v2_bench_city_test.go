@@ -63,7 +63,7 @@ func newV2BenchCity(tb testing.TB, sessions, templates int) v2BenchCity {
 			continue
 		}
 		name := "s-" + id
-		attrs[name] = InventoryAttrs{DeadKnown: true, AttachedKnown: true}
+		attrs[name] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity(id)}
 		listed = append(listed, name)
 		if active++; active%2 == 1 {
 			city.Work = append(city.Work, beads.Bead{
@@ -97,14 +97,13 @@ func newV2BenchCity(tb testing.TB, sessions, templates int) v2BenchCity {
 		collected.DefaultDemand[template] = d
 	}
 
-	census, err := readSessionCensus(censusNow, cfg, []classStoreCandidate{{ref: benchSessionsLeg, store: censusStore(city.Sessions...)}})
+	census, err := readSessionCensus(censusNow, []classStoreCandidate{{ref: benchSessionsLeg, store: censusStore(city.Sessions...)}})
 	if err != nil {
 		tb.Fatalf("bench census: %v", err)
 	}
 	city.In = allocInputs{
 		Now:       censusNow,
 		Epoch:     "e1",
-		SelGen:    1,
 		Cfg:       cfg,
 		ConfigRev: "rev-1",
 		CityPath:  "/city",

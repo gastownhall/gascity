@@ -1,0 +1,11 @@
+# beads_test's longest tests in the integration build (//test:integration_packages;
+# seconds measured 2026-10-09 on rbe-west, whole target ~300 s). rules_go
+# shards a go_test round-robin over its tests in source order, so two of
+# these in one shard make that shard the integration-packages lane's
+# critical path. The guard scripts/integration_packages_shards_test.go fails
+# when shard_count in BUILD.bazel would put two of them in the same shard,
+# and prints the counts that do not. Add a test here when it takes more than
+# about 18 s.
+TestNativeDoltStoreReadySurvivesMoreThanFiftyDistinctBlockers 36
+TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop 35
+TestNativeDoltLabelCASRace 19

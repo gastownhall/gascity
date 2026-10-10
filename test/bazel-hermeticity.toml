@@ -22,12 +22,6 @@
 # engdocs/contributors/bazel-test-hermeticity-audit.md
 
 [[target]]
-package = "test/integration"
-tags = ["external", "requires-network"]
-reason = "dolt_config resolves the worker's hostname through DNS. The suite has not yet been run on a network-less executor since start-drift moved to prebuilt //cmd/gc:gc_drift_* binaries and gc init stopped cloning gascity-packs (#7005), so the requires-network tag stays until that run proves the rest offline."
-evidence = ["test/integration/dolt_config_test.go:48 net.LookupHost(os.Hostname())"]
-
-[[target]]
 package = "internal/testpolicy/waiverexpiry"
 tags = ["external"]
 reason = "TestDatedWaiversAgainstToday is the one place a dated waiver (provider ledger, resource census, beads conformance skips) is compared with time.Now(); it must re-run every day, so it is never cached. The ledgers' own structural tests stay cached and date-free."
@@ -41,4 +35,4 @@ reason = "TestRunAnalyzeReliability_FullPipelineMatchesGoldenSnapshot sizes its 
 [[reviewed]]
 package = "internal/runtime/ssh"
 signal = "network-cli"
-reason = "ssh_test.go dials 127.0.0.1:1 (refused) through the image's ssh client; the host-sshd test lives in ssh_localhost_integration_test.go behind the integration build tag, outside the Bazel target."
+reason = "ssh_test.go dials 127.0.0.1:1 (refused) through the image's ssh client. ssh_localhost_integration_test.go (compiled only under --config=integration) dials localhost only and skips without passwordless ssh to localhost, which the pinned worker image (worker-env) does not provide, so no result depends on a remote host."

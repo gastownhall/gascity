@@ -38,6 +38,15 @@ jobs:
         with:
           # No GITHUB_TOKEN in .git/config: remote actions run on this runner (S11.3).
           persist-credentials: false
+      # Cutover switch (D8, S3-S5): unset (today) takes in-tree, this
+      # checkout's own tools/rbe, byte-for-byte what ran before S3b. Set the
+      # repository variable RBE_WORKER_SOURCE_OSS to pinned to fetch
+      # gastownhall/rbe-worker instead (S4). No secret in this step.
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+        with:
+          source: ${{ vars.RBE_WORKER_SOURCE_OSS || 'in-tree' }}
       # worker-env (tools/rbe/worker-env-drift): provision and measure this
       # host against the pin before serving. Drift fails this step, never the
       # worker: a drifted worker still registers (advertising what it
@@ -48,7 +57,9 @@ jobs:
         continue-on-error: true
         env:
           WORKER_MODE: measure
-        run: tools/rbe/blacksmith-worker.sh
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       - name: Upload the worker-env drift
         if: steps.worker-env.outcome == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -62,6 +73,8 @@ jobs:
           RBE_WORKER_TLS_CERT: ${{ secrets.RBE_WORKER_TLS_CERT }}
           RBE_WORKER_TLS_KEY: ${{ secrets.RBE_WORKER_TLS_KEY }}
           RBE_WEST_HOST: ${{ secrets.RBE_WEST_HOST }}
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
           WORKER_MODE: pool
           POOL_IDLE_MINUTES: ${{ inputs.idle_minutes }}
           POOL_MAX_MINUTES: ${{ inputs.max_minutes }}
@@ -84,7 +97,7 @@ jobs:
           # the running pool runs, which keep their store until they retire.
           RBE_WIRE_ZSTD: ${{ vars.RBE_WIRE_ZSTD || '0' }}
           RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}
-        run: tools/rbe/blacksmith-worker.sh
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # Beside the worker, which serves for hours: wait for its drift upload to
   # complete, so drift is reported while the worker still runs. GitHub-hosted,
@@ -103,11 +116,17 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - name: Fetch the pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+        with:
+          source: ${{ vars.RBE_WORKER_SOURCE_OSS || 'in-tree' }}
       - name: Wait for the worker's measurement
         id: await
         env:
           GH_TOKEN: ${{ github.token }}
-        run: tools/rbe/worker-env-drift await "rbe pool worker (Blacksmith, OSS scheduler)" "Upload the worker-env drift"
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: '"$RBE_WORKER_DIR/worker-env-drift" await "rbe pool worker (Blacksmith, OSS scheduler)" "Upload the worker-env drift"'
 
   # The pinned host's drift issue: opened with the manifest and pin to commit,
   # or updated with a new measurement. The farm caps the pools while it is
@@ -136,9 +155,16 @@ jobs:
         with:
           name: worker-env-drift
           path: ${{ runner.temp }}/worker-env-drift
+      - name: Fetch the pinned rbe-worker
+        if: steps.drift.outcome == 'success'
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+        with:
+          source: ${{ vars.RBE_WORKER_SOURCE_OSS || 'in-tree' }}
       - name: Open or update the drift issue
         if: steps.drift.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: tools/rbe/worker-env-drift report "$RUNNER_TEMP/worker-env-drift"
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: '"$RBE_WORKER_DIR/worker-env-drift" report "$RUNNER_TEMP/worker-env-drift"'

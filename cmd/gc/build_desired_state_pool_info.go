@@ -224,13 +224,14 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// (derivePoolSessionName -> errPoolSessionNameUnavailable) until an
 		// operator manually closes it. A freeable-asleep (idle/idle-timeout/
 		// city-stop/failed-create/runtime-missing/provider-terminal-error/
-		// max-session-age — see isPoolSessionSlotFreeableInfo) one_shot exit
-		// carries no deliberate hold, so it is reused instead: the ordinary
-		// wake path retires the exit and remints the identity in place.
-		// Persistent pools keep today's behavior (a genuine crash gets a
-		// fresh identity rather than resuming a possibly-corrupt
-		// conversation).
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info) {
+		// max-session-age/killed without an honored kill fence — see
+		// isPoolSessionSlotFreeableInfo) one_shot exit carries no deliberate
+		// hold, so it is reused instead: the ordinary wake path retires the
+		// exit and remints the identity in place. Persistent pools keep
+		// today's behavior (a genuine crash gets a fresh identity rather than
+		// resuming a possibly-corrupt conversation); their freeable rows are
+		// closed by the reconciler's pool-slot close instead.
+		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
 			return false
 		}
 		// A one_shot exit that still holds an open/in-progress assigned work
@@ -269,6 +270,9 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	if bp == nil || bp.sessionBeads == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.reusablePoolSessionInfos(bp, cfgAgent, template, used)
+	}
 	candidates := []session.Info{}
 	for _, info := range bp.sessionBeads.OpenInfos() {
 		if reusablePoolSessionInfo(bp, cfgAgent, template, info, used) {
@@ -299,18 +303,23 @@ func reusablePoolSessionInfosForRequest(
 	if request.SessionBeadID != "" {
 		return candidates
 	}
-	filtered := candidates[:0]
-	for _, info := range candidates {
-		if poolSessionConsumesNewDemandInfo(info) {
+	// Filtered into a copy from the first dropped row only: the v2
+	// realization memo hands out a shared list (A3).
+	var filtered []session.Info
+	for i, info := range candidates {
+		keep := poolSessionConsumesNewDemandInfo(info) ||
+			(strings.TrimSpace(info.WaitHold) == "" &&
+				!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
+				!metadataTimeInFuture(info.QuarantinedUntil, decisionTime))
+		switch {
+		case filtered != nil && keep:
 			filtered = append(filtered, info)
-			continue
+		case filtered == nil && !keep:
+			filtered = append(make([]session.Info, 0, len(candidates)), candidates[:i]...)
 		}
-		if strings.TrimSpace(info.WaitHold) != "" ||
-			metadataTimeInFuture(info.HeldUntil, decisionTime) ||
-			metadataTimeInFuture(info.QuarantinedUntil, decisionTime) {
-			continue
-		}
-		filtered = append(filtered, info)
+	}
+	if filtered == nil {
+		return candidates
 	}
 	return filtered
 }
@@ -629,13 +638,14 @@ func recordDeferredNonExpandingPoolAliasConflictInfo(
 	// gate rather than writing on every buildDesiredState call. Do not
 	// duplicate the backoff predicate here -- that duplication is exactly how
 	// this call site went unguarded the first time.
-	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, time.Now().UTC()) {
+	now := bp.now().UTC()
+	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, now) {
 		return info, nil
 	}
 	metadata := session.UpdatedAliasMetadataFromInfo(info, "")
 	metadata[poolAliasConflictMetadataKey] = canonical
 	metadata[poolAliasConflictCountMetadataKey] = strconv.Itoa(count + 1)
-	metadata[poolAliasConflictAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
+	metadata[poolAliasConflictAtMetadataKey] = now.Format(time.RFC3339)
 	if bp != nil && bp.beadStore != nil && info.ID != "" {
 		if err := bp.beadStore.Update(info.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
 			return info, fmt.Errorf("recording deferred singleton pool alias conflict for bead %s: %w", info.ID, err)
