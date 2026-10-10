@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -84,6 +85,108 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, close
 		}
 	}
 	return false, closedAt, nil
+}
+
+// prevBeadStillAssignedToSession fetches id over the caller's residency
+// topology with one fresh read and reports whether its LIVE assignee is still
+// one of this session's own identifiers. ga-pvjbx3 Q3: after ga-2weagw's
+// store/closed_at fix, row A/C can defer on a previous bead that is still open
+// but has since been handed to someone else (e.g. a reviewer) — that deferral
+// is then keyed to an unrelated future close event with no relationship to
+// what this session is doing by then. Narrowing row A/C to require the live
+// assignee still match is a strict subset of the pre-existing (open ⇒ defer)
+// condition, so it cannot regress any case where the assignee still matches;
+// when it does not match, the caller falls through immediately to the Q1/Q2
+// checks instead of deferring on a bead this session no longer owns. The read
+// goes through the same topology as prevAssignedBeadStatus: a rig-scoped
+// previous bead is absent from the city store, so a single-store read would
+// report an error and drop the deferral for exactly the rig work it exists to
+// protect.
+func prevBeadStillAssignedToSession(topo storeref.Topology, id string, identifiers []string) (bool, error) {
+	b, err := byIDBeadForTopology(topo, id)
+	if err != nil {
+		return false, err
+	}
+	assignee := strings.TrimSpace(b.Assignee)
+	if assignee == "" {
+		return false, nil
+	}
+	for _, ident := range identifiers {
+		if ident != "" && ident == assignee {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// sessionHasFreshInProgressClaim reports whether this session currently
+// holds ANY assigned work bead — anywhere its topology can reach, via one
+// fresh, uncached read — with status == in_progress. ga-pvjbx3 Q1: the
+// fresh-cycle guard's old self-claim check compared the anchor
+// (ComputeAwakeSet's assignedAnchor, which discards every candidate but one
+// — exact match to the stamped bead, else first-in-order fallback) against
+// current_claim_bead_id, but the anchor and this session's real self-claim
+// can be two different, unrelated beads. The correct check is anchor-agnostic
+// existence, not anchor equality: does this session hold ANY live
+// in_progress claim at all, regardless of which bead the anchor separately
+// resolved to. Delegates to the existing progress-stall-recycle existence
+// check, which already sweeps the unrestricted store+rig topology
+// (assignedWorkSweepPlan, not the agent-scoped
+// assignedWorkPlanForSessionInfo) and already excludes mail and session
+// beads — the same population workBeadHasAwakeDemand treats as
+// awake-eligible.
+func sessionHasFreshInProgressClaim(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
+	return sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, info)
+}
+
+// freshAnchorBeadTerminal fetches the fresh-cycle guard's anchor bead
+// (ComputeAwakeSet's decision.AssignedWorkBeadID) with one fresh, uncached
+// read and reports whether it is already terminal (closed). ga-pvjbx3 Q2:
+// the tick's assigned-work snapshot can already be several minutes stale by
+// the time the kill decision runs; cycling a session onto an anchor that has
+// since closed is pure loss — there is no work left to reassign onto.
+// Sweeps the same unrestricted store+rig topology assignedWorkSweepPlan
+// gives sessionHasFreshInProgressClaim (not the agent-scoped
+// assignedWorkPlanForSessionInfo), because the anchor itself was resolved
+// from that same unrestricted candidate population, not from this session's
+// own reachable stores.
+func freshAnchorBeadTerminal(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info, anchorID string) (bool, error) {
+	anchorID = strings.TrimSpace(anchorID)
+	if anchorID == "" {
+		return false, nil
+	}
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
+	if err != nil {
+		return false, err
+	}
+	var anchor beads.Bead
+	var found bool
+	res, err := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
+		if leg.Store == nil {
+			return false, nil
+		}
+		b, gerr := leg.Store.Get(anchorID)
+		if gerr != nil {
+			if errors.Is(gerr, beads.ErrNotFound) {
+				return false, nil
+			}
+			return false, gerr
+		}
+		anchor = b
+		found = true
+		return true, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		if serr := assignedWorkScanComplete(res); serr != nil {
+			return false, serr
+		}
+		return false, nil
+	}
+	return convoycore.IsTerminalStatus(anchor.Status), nil
 }
 
 // cycleAliveSessionForFreshReassign tears down a live wake_mode=fresh

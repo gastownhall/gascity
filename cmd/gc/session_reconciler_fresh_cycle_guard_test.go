@@ -17,10 +17,9 @@ package main
 // (prevAssignedBeadStatus resolving via storeref.Topology + falling back to
 // UpdatedAt when closed_at metadata is absent) and passes after it.
 //
-// Out of scope, deliberately not covered here: self-claim recognition
-// (rows E/F) is the sibling architecture bead ga-pvjbx3 — see
-// /var/tmp/ga-81yg38-artifacts/session_reconciler_fresh_cycle_guard_repro_test.go
-// for those repros; they are not duplicated into this package.
+// Self-claim recognition (rows E/F) is the sibling architecture bead
+// ga-pvjbx3, covered by session_reconciler_fresh_cycle_selfclaim_test.go,
+// which reuses the fixtures below.
 
 import (
 	"context"
@@ -194,7 +193,9 @@ func TestFreshCycleRepro_IncarnationStartedAfterRealCloseDefers(t *testing.T) {
 }
 
 // Row C again, but with the previous bead in the rig store — both defects at
-// once, which is the production shape for every ga-* bead.
+// once, which is the production shape for every ga-* bead. As in the city-store
+// variant, the new bead lives only in the assigned-work snapshot: stored in_progress
+// it would be a self-claim, which defers without row C.
 func TestFreshCycleRepro_IncarnationStartedAfterRealCloseInRigStoreDefers(t *testing.T) {
 	env, session, sessionName := freshCycleReproEnv(t, nil)
 	rig := reproMemStore()
@@ -205,8 +206,7 @@ func TestFreshCycleRepro_IncarnationStartedAfterRealCloseInRigStoreDefers(t *tes
 		sessionpkg.CurrentBeadIDKey: "ga-prev",
 		"awake_started_at":          awake.Format(time.RFC3339Nano),
 	})
-	reproCreate(t, rig, beads.Bead{ID: "ga-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"})
-	anchor, _ := rig.Get("ga-new")
+	anchor := beads.Bead{ID: "ga-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"}
 
 	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
 
@@ -232,7 +232,9 @@ func TestFreshCycleRepro_IncarnationStartedBeforeRealCloseCycles(t *testing.T) {
 	assertCycled(t, env, session, "this incarnation started before wb-prev closed")
 }
 
-// The cycle direction again, with the previous bead in the rig store.
+// The cycle direction again, with the previous bead in the rig store. As in the
+// city-store variant, the new bead lives only in the assigned-work snapshot:
+// stored in_progress it would be a self-claim, which the guard never cycles.
 func TestFreshCycleRepro_IncarnationStartedBeforeRealCloseInRigStoreCycles(t *testing.T) {
 	env, session, _ := freshCycleReproEnv(t, nil)
 	rig := reproMemStore()
@@ -242,8 +244,7 @@ func TestFreshCycleRepro_IncarnationStartedBeforeRealCloseInRigStoreCycles(t *te
 		"awake_started_at":          time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
 	})
 	reproCloseForReal(t, rig, "ga-prev")
-	reproCreate(t, rig, beads.Bead{ID: "ga-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"})
-	anchor, _ := rig.Get("ga-new")
+	anchor := beads.Bead{ID: "ga-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"}
 
 	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
 
