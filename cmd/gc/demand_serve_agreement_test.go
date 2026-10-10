@@ -116,7 +116,7 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
-			// The discriminating row for LABEL comparison, and it points the
+			// The discriminating row for HOLD comparison, and it points the
 			// other way: the reader serves it (exact-match miss) but the hook
 			// strips it (EqualFold hit), so the worker never sees it.
 			name: "routed bead held by a case-variant hold label",
@@ -126,6 +126,42 @@ func agreementRows() []agreementRow {
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
 			},
 			wantServable: false,
+		},
+		{
+			// The discriminating row for a label the worker's query excludes that is
+			// NOT a dispatch hold: bd's native human label, a bead parked for a
+			// person. beadmeta.DispatchHoldLabels names only the two canonical
+			// holds, so the generated hold rows below cannot reach it. Without its
+			// own row demand would keep counting a bead no worker is ever served:
+			// the seat spawns, its hook reads empty, it drains, and the row is
+			// counted again.
+			name: "routed bead flagged for a human",
+			bead: beads.Bead{
+				ID: "a-14", Status: "open", Type: "task",
+				Labels:   []string{"human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: false,
+		},
+		{
+			// Human labels are exact-match exclusions; case variants remain
+			// claimable and must also count as demand.
+			name: "routed bead with Human label",
+			bead: beads.Bead{
+				ID: "a-15", Status: "open", Type: "task",
+				Labels:   []string{"Human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
+		},
+		{
+			name: "routed bead with HUMAN label",
+			bead: beads.Bead{
+				ID: "a-16", Status: "open", Type: "task",
+				Labels:   []string{"HUMAN"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
 		},
 		{
 			// Collapse x hold: the route form is fixed by the pass, and the row
