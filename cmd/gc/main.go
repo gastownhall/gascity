@@ -1123,7 +1123,10 @@ func rigFromCwdDir(cityPath, cwd string, mode contextResolutionMode) string {
 	if mode.advisory {
 		return ""
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	// Rig resolution only reads cfg.Rigs; it never needs builtin packs
+	// materialized on disk. Skip the ~400ms per-city builtin-pack refresh
+	// (see registeredRigBindings for the full rationale, sys-s3pd).
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if err != nil {
 		return ""
 	}
@@ -1313,14 +1316,21 @@ func siteBindingHasCandidate(city supervisor.CityEntry, siteBinding *config.Site
 }
 
 // loadRegisteredCityConfig loads one registered city's config for a rig-binding
-// scan. An advisory scan refuses to wait on the repo-cache lock, and takes
-// builtin packs as they already are on disk — the same staleness window shell
-// completion has always accepted.
+// scan. Enumerating rig bindings only reads cfg.Rigs (via
+// siteBoundRigBindings): builtin-pack materialization
+// (ensureBuiltinPacksForConfigLoad) is ~400ms per city, is the dominant cost of
+// resolveContext's registry scan on every city-needing gc invocation
+// (sys-s3pd, follow-up to sys-ro2a), and has no bearing on which rigs a city
+// declares — so neither mode refreshes. The command that actually resolves to
+// and operates a city still performs its own full loadCityConfig (with refresh)
+// via its RunE, so skipping it here never skips it where it is needed.
+// An advisory scan additionally refuses to wait on the repo-cache lock —
+// the same staleness window shell completion has always accepted.
 func loadRegisteredCityConfig(cityPath string, mode contextResolutionMode) (*config.City, error) {
 	if mode.advisory {
 		return loadCityConfigAdvisory(cityPath)
 	}
-	return loadCityConfig(cityPath, io.Discard)
+	return loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 }
 
 func registeredCityLoadError(city supervisor.CityEntry, err error) string {

@@ -1595,6 +1595,7 @@ go_test(
         "residency_leg_agreement_test.go",
         "residency_namespace_test.go",
         "residency_topology_test.go",
+        "resolve_context_no_builtin_refresh_test.go",
         "retired_key_strict_test.go",
         "rig_add_path_durability_test.go",
         "rig_anywhere_test.go",
