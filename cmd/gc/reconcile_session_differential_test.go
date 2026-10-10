@@ -136,7 +136,11 @@ var parityFindings = map[string]parityEntry{
 		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
 	"suspended-named-heal": {"BEHAVIORS SESS-009, SESS-531 (mc-92clf; owner call pending)", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended, with no hold", []string{"state"}},
-	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
+	"stability-accrual": {
+		"DIF-L1, BEHAVIORS SESS-537/538 (S3 abandon table + S6 #46)", "legacy counts a death inside the 30s stability threshold as a wake failure and one before the productivity threshold as churn (quarantining it); no v2 arm or effect accrues either, yet §12.2 row 18 claims them",
+		[]string{"wake_attempts", "churn_count", "quarantined_until", "sleep_reason"},
+	},
+	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
@@ -145,6 +149,7 @@ var parityUnported = map[string]parityEntry{
 	"A18 start":       {"C5a1 (#7320, #7321), C5b", "legacy starts a wanted row in the same tick; v2 registers no start arm yet", parityStartKeys},
 	"A21 close":       {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A21 stranded":    {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
+	"A7 identity":     {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
@@ -1023,7 +1028,11 @@ func TestSessionDifferentialFixtures(t *testing.T) {
 // unported entry's owner is still unregistered.
 func TestSessionDifferentialEntriesHaveFixtures(t *testing.T) {
 	shown := map[string]bool{}
-	for _, f := range parityFixtures() {
+	fixtures := parityFixtures()
+	for _, f := range timelineFixtures() {
+		fixtures = append(fixtures, f.parityFixture)
+	}
+	for _, f := range fixtures {
 		for _, id := range f.Explain {
 			shown[id] = true
 		}
