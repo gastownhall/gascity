@@ -63,3 +63,82 @@ func TestFindBareHookEntries_InvalidJSON(t *testing.T) {
 		t.Error("expected error for invalid JSON")
 	}
 }
+
+func TestFindInvalidHookMatchers_FlagsPermissionSyntax(t *testing.T) {
+	data := []byte(`{"hooks":{"PreToolUse":[
+		{"matcher":"Bash(*bd mol pour*patrol*)","hooks":[{"type":"command","command":"ok"}]}
+	]}}`)
+	invalid, err := FindInvalidHookMatchers(data)
+	if err != nil {
+		t.Fatalf("FindInvalidHookMatchers: %v", err)
+	}
+	if len(invalid) != 1 {
+		t.Fatalf("invalid matchers = %d, want 1", len(invalid))
+	}
+	if invalid[0].Category != "PreToolUse" || invalid[0].Index != 0 {
+		t.Errorf("got %+v, want {PreToolUse 0 ...}", invalid[0])
+	}
+}
+
+func TestFindInvalidHookMatchers_FlagsOtherInvalidRegex(t *testing.T) {
+	data := []byte(`{"hooks":{"PreToolUse":[{"matcher":"[unterminated","hooks":[{"type":"command","command":"ok"}]}]}}`)
+	invalid, err := FindInvalidHookMatchers(data)
+	if err != nil {
+		t.Fatalf("FindInvalidHookMatchers: %v", err)
+	}
+	if len(invalid) != 1 {
+		t.Fatalf("invalid matchers = %d, want 1", len(invalid))
+	}
+}
+
+func TestFindInvalidHookMatchers_AcceptsMatchAllForms(t *testing.T) {
+	data := []byte(`{"hooks":{"PreToolUse":[
+		{"matcher":"","hooks":[{"type":"command","command":"ok"}]},
+		{"matcher":"*","hooks":[{"type":"command","command":"ok"}]}
+	]}}`)
+	invalid, err := FindInvalidHookMatchers(data)
+	if err != nil {
+		t.Fatalf("FindInvalidHookMatchers: %v", err)
+	}
+	if len(invalid) != 0 {
+		t.Errorf("invalid matchers = %d, want 0: %+v", len(invalid), invalid)
+	}
+}
+
+func TestFindInvalidHookMatchers_AcceptsValidToolNameMatcher(t *testing.T) {
+	data := []byte(`{"hooks":{"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"ok"}]}]}}`)
+	invalid, err := FindInvalidHookMatchers(data)
+	if err != nil {
+		t.Fatalf("FindInvalidHookMatchers: %v", err)
+	}
+	if len(invalid) != 0 {
+		t.Errorf("invalid matchers = %d, want 0: %+v", len(invalid), invalid)
+	}
+}
+
+func TestFindInvalidHookMatchers_SkipsBareEntries(t *testing.T) {
+	data := []byte(`{"hooks":{"PreToolUse":[{"type":"command","command":"bare"}]}}`)
+	invalid, err := FindInvalidHookMatchers(data)
+	if err != nil {
+		t.Fatalf("FindInvalidHookMatchers: %v", err)
+	}
+	if len(invalid) != 0 {
+		t.Errorf("invalid matchers = %d, want 0: %+v", len(invalid), invalid)
+	}
+}
+
+func TestFindInvalidHookMatchers_NoHooksObject(t *testing.T) {
+	invalid, err := FindInvalidHookMatchers([]byte(`{"editorMode":"vim"}`))
+	if err != nil {
+		t.Fatalf("FindInvalidHookMatchers: %v", err)
+	}
+	if len(invalid) != 0 {
+		t.Errorf("invalid matchers = %d, want 0", len(invalid))
+	}
+}
+
+func TestFindInvalidHookMatchers_InvalidJSON(t *testing.T) {
+	if _, err := FindInvalidHookMatchers([]byte(`not json`)); err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+}
