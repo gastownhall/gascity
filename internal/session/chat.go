@@ -563,6 +563,18 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
+		// An operator's resume of a live row the operator holds (a suspend
+		// whose drain has not stopped it yet) consumes the hold too, under the
+		// runtime lease (tried, not waited for: a busy lease is the
+		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
+		if premise := liveUserHoldPremise(b.Metadata, policy, m.now()); premise != nil {
+			_, release, err := m.leaseRuntime(ctx, id, sessName, 0)
+			if err != nil {
+				return err
+			}
+			defer release()
+			return m.consumeUserHold(id, premise, m.now())
+		}
 		if err := m.confirmLiveSessionState(id, &b); err != nil {
 			return err
 		}
@@ -626,6 +638,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	// An operator's resume of a row the operator holds consumes the hold, but
+	// only once the runtime is up (resume_user_hold.go).
+	var holdPremise map[string]string
+	if policy == ResumeOperator {
+		holdPremise = userHoldPremise(b.Metadata, m.now())
+	}
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
 	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
@@ -699,6 +717,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
+	}
+	if holdPremise != nil {
+		return m.consumeUserHold(id, holdPremise, m.now())
 	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {

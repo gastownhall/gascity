@@ -5273,6 +5273,15 @@ func (s *failStopPendingStore) SetMetadataBatch(id string, kvs map[string]string
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// Update fails the marker the same way: it is written by CAS on a fresh read
+// (markDrainAckStopPending), which lands as an Update.
+func (s *failStopPendingStore) Update(id string, opts beads.UpdateOpts) error {
+	if opts.Metadata["state_reason"] == sessionpkg.DrainAckStopPendingReason {
+		return errors.New("stop-pending metadata failed")
+	}
+	return s.Store.Update(id, opts)
+}
+
 func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}

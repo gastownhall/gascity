@@ -352,6 +352,14 @@ func TestOwnershipVeto_DeliberateInFlightDrainsNotCanceled(t *testing.T) {
 		t.Run(reason, func(t *testing.T) {
 			f := newOwnershipFixture(t)
 			f.claimOutOfProcess(t)
+			if reason == "user-hold" {
+				// A user-hold drain is in flight only while the row holds the
+				// intent; without it the drain is released (userHoldDrainReleased).
+				f.env.setSessionMetadata(&f.session, map[string]string{
+					"held_until":   f.env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339),
+					"sleep_intent": "user-hold",
+				})
+			}
 			f.beginInFlightOrphanedDrain(t, reason, false)
 			f.env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{f.session}, map[string]int{}, f.dops)
 			if ds := f.env.dt.get(f.session.ID); ds == nil || ds.reason != reason {

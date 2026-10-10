@@ -190,33 +190,59 @@ func isDrainAckStopPendingInfo(info sessionpkg.Info) bool {
 		strings.TrimSpace(info.StateReason) == sessionpkg.DrainAckStopPendingReason
 }
 
-// markDrainAckStopPending persists the drain-ack stop-pending transition through
-// the session front door and returns the refreshed Info as a LOCAL fold
-// (write-returns-Info, Step 6d): ApplyPatchInfo emits DrainAckStopPendingPatch and
-// folds the same patch onto the caller's coherent snapshot Info in one step, so
-// the two callers assign the returned Info directly instead of reconstructing the
-// patch. It no longer mirrors onto a raw *beads.Bead: no later this-tick reader
-// consumes the raw bead for these keys — a drain-acked session `continue`s before
-// the wakeTargets/startCandidates append, and the post-loop scans read only
-// orderedBeads[i].ID. On a persist error the input Info is returned unchanged with a
-// false ok, so the caller skips the fold (identical to the old bool-return).
-func markDrainAckStopPending(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) (sessionpkg.Info, bool) {
+// markDrainAckStopPending persists the drain-ack stop-pending transition and
+// returns the refreshed Info as a LOCAL fold (write-returns-Info, Step 6d), so
+// the two callers assign it directly. The marker is destructive (the async
+// stop honors it), so, like the kill, it is decided on a fresh read under the
+// runtime lease: taken without waiting (a busy lease defers to a later tick),
+// the row read live, and the marker written by CAS on that read. A
+// reconciler-owned user-hold ack whose live row no longer holds the intent (an
+// operator's resume consumed it after the tick's snapshot) is stale: the ack is
+// cleared and the tracker entry dropped instead. On a deferral, a stale ack or
+// a failed write the input Info is returned unchanged with a false ok, so the
+// caller skips the fold and the stop.
+func markDrainAckStopPending(cityPath string, store beads.Store, info sessionpkg.Info, sessFront *sessionpkg.Store, sp runtime.Provider, dops drainOps, dt *drainTracker, clk clock.Clock, stderr io.Writer) (sessionpkg.Info, bool) {
 	if info.ID == "" || sessFront == nil {
 		return info, false
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	updated, err := sessFront.ApplyPatchInfo(info, sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC()))
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		name = info.ID
+	}
+	_, release, err := controllerStopLease(store, cityPath, name, info.ID, stderr)
 	if err != nil {
-		name := strings.TrimSpace(info.SessionNameMetadata)
-		if name == "" {
-			name = info.ID
+		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s deferred: %v\n", name, err) //nolint:errcheck
+		return info, false
+	}
+	defer release()
+	patch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
+	stale := false
+	ok, err := sessFront.UpdateMetadataFenced(info.ID, 3, func(fresh sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		reason, owned := reconcilerDrainAckMatchesSessionInfo(fresh, sp, name)
+		if stale = owned && userHoldDrainReleased(reason, fresh, clk.Now()); stale || fresh.Closed {
+			return nil
 		}
+		return patch
+	})
+	switch {
+	case stale:
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+		if dops != nil {
+			_ = dops.clearDrain(name)
+		}
+		clearDrainTrackerForStopPending(info.ID, dt)
+		return info, false
+	case err == nil && !ok:
+		err = errors.New("row closed or contended")
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
 		return info, false
 	}
-	return updated, true
+	return info.ApplyPatch(patch), true
 }
 
 func clearDrainTrackerForStopPending(id string, dt *drainTracker) {
@@ -2486,7 +2512,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
-							if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
+							if updated, ok := markDrainAckStopPending(cityPath, store, infoByID[id], sessFront, sp, dops, dt, clk, stderr); ok {
 								// markDrainAckStopPending persisted the stop-pending transition and
 								// returned the folded snapshot Info (write-returns-Info, Step 6d) —
 								// assign it directly. Cross-session isDrainAckStopPendingInfo reader.
@@ -2960,6 +2986,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSessionInfo(infoByID[id], sp, name)
+					// A user-hold ack whose row no longer carries the hold is
+					// stale: an operator's resume consumed the hold after the
+					// drain began. Clear it and leave the runtime up.
+					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id], clk.Now()) {
+						_ = clearReconcilerDrainAckMetadata(sp, name)
+						_ = dops.clearDrain(name)
+						if dt != nil {
+							dt.clearIdleProbe(id)
+							dt.remove(id)
+						}
+						telemetry.RecordDrainTransition(context.Background(), name, ackReason, "cancel")
+						if trace != nil {
+							trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode(ackReason), TraceOutcomeClear, tp.TemplateName, name, nil)
+						}
+						continue
+					}
 					// gc-kkgak: a reconciler-owned drain ack is minted from the
 					// desired-state / assigned-work view. During a partial store
 					// query that view is unreliable, so defer the reconciler-owned
@@ -3109,7 +3151,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
-						if updated, ok := markDrainAckStopPending(infoByID[id], sessFront, clk, stderr); ok {
+						if updated, ok := markDrainAckStopPending(cityPath, store, infoByID[id], sessFront, sp, dops, dt, clk, stderr); ok {
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
 							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
