@@ -33,8 +33,15 @@ gc_harness_watchdog_pgid=""
 
 # A launch whose PID is not yet published: "run" or "watchdog" from just before
 # its fork until gc_harness_launch_publish records the PID, otherwise empty.
-# gc_harness_launch_prior_pid is $! as it stood before that fork, which is how
-# publishing tells whether the fork has happened yet.
+# gc_harness_launch_prior_pid is $! as it stood before that fork (empty when
+# nothing had been forked yet), which is how publishing tells whether the fork
+# has happened yet.
+#
+# Both functions read $! only behind a (( ${#!} == 0 )) guard. $! is unset
+# until a script forks its first background job, and under `set -u` bash 3.2
+# aborts on any expansion of an unset $!, a defaulted one included; only its
+# length is safe to take. The runners that source this file run `set -u` and
+# need not have forked anything before their first launch.
 gc_harness_launching=""
 gc_harness_launch_prior_pid=""
 
@@ -47,7 +54,8 @@ gc_harness_launch_prior_pid=""
 # tear down, and the just-forked job would outlive the runner holding every
 # descriptor it inherited, the caller's stdout included (ga-96smfk.61).
 gc_harness_launch_begin() {
-  gc_harness_launch_prior_pid="${!:-}"
+  gc_harness_launch_prior_pid=""
+  (( ${#!} == 0 )) || gc_harness_launch_prior_pid="$!"
   gc_harness_launching="${1}"
 }
 
@@ -58,10 +66,12 @@ gc_harness_launch_begin() {
 # if not, nothing was forked and there is nothing to record.
 gc_harness_launch_publish() {
   [[ -n "${gc_harness_launching}" ]] || return 0
-  if [[ "${!:-}" != "${gc_harness_launch_prior_pid}" ]]; then
+  local last_pid=""
+  (( ${#!} == 0 )) || last_pid="$!"
+  if [[ "${last_pid}" != "${gc_harness_launch_prior_pid}" ]]; then
     case "${gc_harness_launching}" in
-      run) gc_harness_supervised_pgid="$!" ;;
-      watchdog) gc_harness_watchdog_pgid="$!" ;;
+      run) gc_harness_supervised_pgid="${last_pid}" ;;
+      watchdog) gc_harness_watchdog_pgid="${last_pid}" ;;
     esac
   fi
   gc_harness_launching=""
@@ -167,7 +177,12 @@ gc_harness_watchdog() {
 #
 # An empty deadline runs without a watchdog. The caller is expected to trap
 # INT/TERM/EXIT and call gc_harness_terminate_supervised so a signal to the
-# runner tears down the run and its watchdog rather than orphaning them.
+# runner tears down the run and its watchdog rather than orphaning them. That
+# signal trap must then exit or re-raise the signal, as both runners' traps
+# do, never return: a signal that lands just before a fork finds nothing to
+# tear down and closes the launch window, so a trap that returned would resume
+# into a fork whose PID is never published, and nothing would tear that job
+# down.
 gc_harness_run_supervised() {
   local label="${1}" deadline="${2}" quit_grace="${3}"
   shift 3
