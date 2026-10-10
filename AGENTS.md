@@ -170,6 +170,12 @@ These decisions are final. Do not revisit them.
 - **ZERO hardcoded roles.** Roles are pure configuration. No role name
   appears in Go source code.
 
+Instruction-file checks follow the provider: Claude-family providers expecting
+`CLAUDE.md` also accept a regular `.claude/CLAUDE.md` (including a symlink
+to a regular file). Doctor must not create a root instruction file when that
+project-memory file exists. Custom filenames and other provider families keep
+their declared expectations.
+
 ## Key design principles
 
 - **Keep judgment out of Go.** Go handles transport, not reasoning. The
