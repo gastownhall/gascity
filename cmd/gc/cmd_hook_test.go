@@ -3258,3 +3258,36 @@ func TestFilterUnreadyHookCandidatesExcludesClosedBeadsFromReworkDrift(t *testin
 		t.Fatalf("filterUnreadyHookCandidates returned %d items for closed bead, want 0; got %q", len(items), got)
 	}
 }
+
+// TestFilterUnreadyHookCandidatesDropsOnlyUnassignedExpandedWorkflowRoot pins
+// the hook-side half of the expanded-root rule. An expanded workflow root
+// (gc.kind=workflow AND gc.workflow_expanded=true) that no session holds is a
+// container, not work, and is stripped whatever query produced it. Everything
+// near that shape stays: an expanded root a session already holds is its
+// anchor, a root-only root is itself the unit of work, a marked attempt root
+// with gc.kind=task is real work, and a row that does not decode as a bead
+// fails open.
+func TestFilterUnreadyHookCandidatesDropsOnlyUnassignedExpandedWorkflowRoot(t *testing.T) {
+	in := `[
+		{"id":"expanded-unassigned","status":"open","metadata":{"gc.kind":"workflow","gc.routed_to":"worker","gc.workflow_expanded":"true"}},
+		{"id":"expanded-assigned","status":"in_progress","assignee":"worker-1","metadata":{"gc.kind":"workflow","gc.routed_to":"worker","gc.workflow_expanded":"true"}},
+		{"id":"root-only","status":"open","metadata":{"gc.kind":"workflow","gc.routed_to":"worker"}},
+		{"id":"attempt-root","status":"open","metadata":{"gc.kind":"task","gc.routed_to":"worker","gc.workflow_expanded":"true"}},
+		{"id":12345,"status":"open","metadata":{"gc.kind":"workflow","gc.routed_to":"worker","gc.workflow_expanded":"true"}}
+	]`
+	got := filterUnreadyHookCandidates(in, time.Now())
+
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(got), &rows); err != nil {
+		t.Fatalf("filtered output is not a JSON array: %v (output %q)", err, got)
+	}
+	want := []any{"expanded-assigned", "root-only", "attempt-root", float64(12345)}
+	if len(rows) != len(want) {
+		t.Fatalf("filterUnreadyHookCandidates kept %d rows, want %d: %s", len(rows), len(want), got)
+	}
+	for i, id := range want {
+		if rows[i]["id"] != id {
+			t.Fatalf("row %d id = %v, want %v (only the unassigned expanded workflow root must be dropped): %s", i, rows[i]["id"], id, got)
+		}
+	}
+}

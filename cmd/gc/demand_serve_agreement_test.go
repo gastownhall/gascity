@@ -82,10 +82,10 @@ func agreementRows() []agreementRow {
 			// The discriminating row for the gc.run_target FALLBACK. a-6 above
 			// is the #2763 shape the fallback exists for — a root-only molecule
 			// whose root IS the unit of work. This one was compiled with real
-			// child steps, so gc.workflow_expanded is stamped and the root is
-			// only ever claimable via gc.routed_to (#5900). Counting it would
-			// be permanent demand for a row every worker's claim matcher
-			// refuses: seat spawns, hook reads empty, drains, counted again.
+			// child steps, so gc.workflow_expanded is stamped and the fallback
+			// does not speak for it (#5900). Counting it would be permanent
+			// demand for a row every worker's claim matcher refuses: seat
+			// spawns, hook reads empty, drains, counted again.
 			name: "fully-expanded workflow root with only run_target",
 			bead: beads.Bead{ID: "a-13", Status: "open", Type: "task", Metadata: map[string]string{
 				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
@@ -93,6 +93,49 @@ func agreementRows() []agreementRow {
 				beadmeta.WorkflowExpandedMetadataKey: "true",
 			}},
 			wantServable: false,
+		},
+		{
+			// The canonical-route twin of a-6: a root-only molecule whose root
+			// IS the unit of work, routed by gc.routed_to instead of the
+			// run_target hint. It stays demand, so excluding expanded roots
+			// below cannot be done by excluding workflow roots wholesale.
+			name: "root-only workflow root routed by routed_to",
+			bead: beads.Bead{ID: "a-14", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:        agreementTemplate,
+			}},
+			wantServable: true,
+		},
+		{
+			// The canonical-route twin of a-13, and the discriminating row for
+			// the gc.routed_to path. Roots are stamped with gc.routed_to, so an
+			// expanded root that is open and unassigned (reopened after a
+			// close) is routed and dependency-ready, yet its real child steps
+			// are the executable work: counting it mints a seat for a row no
+			// worker can run, and serving it hands a worker a workflow in
+			// place of a task.
+			name: "fully-expanded workflow root routed by routed_to",
+			bead: beads.Bead{ID: "a-15", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey:  beadmeta.FormulaContractGraphV2,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			// The discriminating row for the marker half of the rule. Retry and
+			// ralph attempt roots carry gc.workflow_expanded=true with
+			// gc.kind=task and are real work a worker claims, so excluding on
+			// the marker alone would leave them counted by nobody.
+			name: "marked attempt root with kind task routed by routed_to",
+			bead: beads.Bead{ID: "a-16", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindTask,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: true,
 		},
 		{
 			name: "routed epic",

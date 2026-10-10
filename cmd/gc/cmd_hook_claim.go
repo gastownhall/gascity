@@ -3227,8 +3227,22 @@ func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
 	return strings.TrimSpace(candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) != "true"
 }
 
+// hookClaimMatchesRoute reports whether candidate is routed to one of
+// routeTargets as claimable work: by its canonical gc.routed_to, or by the
+// gc.run_target fallback when it carries no canonical route
+// (workflowRunTargetFallbackEligible).
+//
+// An expanded workflow root (beadmeta.IsExpandedWorkflowRoot) never matches,
+// on either key. It is a container whose child steps are the work, so a route
+// stamped on it names where those steps run, not a unit a worker can take.
+// The refusal is route-level and assignee-blind, so the fresh claim
+// (hookCandidateClaimable) and the stale-lease reclaim
+// (hookCandidateReclaimEligible) both inherit it.
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
+		return false
+	}
+	if beadmeta.IsExpandedWorkflowRoot(candidate.Metadata) {
 		return false
 	}
 	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
