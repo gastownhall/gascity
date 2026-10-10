@@ -224,8 +224,12 @@ func TestCachingStoreIgnoresStaleUpdateEventAfterLocalClose(t *testing.T) {
 	}
 }
 
+// The Update's own refresh read lags its write; the backing is read-after-write
+// again by the time the stale event is checked. A backing that still lagged at
+// the check would confirm the stale event, inside the recency window as past it
+// (mc-xlphf): every refresh assumes read-after-write (CacheRevision).
 func TestCachingStoreIgnoresStaleUpdateEventAfterLocalUpdate(t *testing.T) {
-	backing := &staleReadsAfterUpdateStore{Store: beads.NewMemStore(), staleReadCount: 2}
+	backing := &staleReadsAfterUpdateStore{Store: beads.NewMemStore(), staleReadCount: 1}
 	created, err := backing.Create(beads.Bead{Title: "update me"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1666,9 +1670,16 @@ func TestCachingStoreCachedReadyIgnoresStaleDependencyEventsAfterLocalMutation(t
 		if err != nil {
 			t.Fatalf("Create(blocker): %v", err)
 		}
-		target, err := mem.Create(beads.Bead{Title: "Target", Needs: []string{blocker.ID}})
+		// The edge is added, not created through Needs: a MemStore row keeps
+		// its create-time Needs after DepRemove, so its point read would
+		// confirm the stale event (mc-xlphf); bd, SQLite and native rows
+		// carry their edges from the deps table.
+		target, err := mem.Create(beads.Bead{Title: "Target"})
 		if err != nil {
 			t.Fatalf("Create(target): %v", err)
+		}
+		if err := mem.DepAdd(target.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd: %v", err)
 		}
 		cache := beads.NewCachingStoreForTest(mem, nil)
 		if err := cache.PrimeActive(); err != nil {

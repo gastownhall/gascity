@@ -203,9 +203,11 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - an ApplyEvent whose verification against the backing fails or times
 //     out, or whose field conflict the backing does not confirm while its
 //     read equals the cached row (gastownhall/gascity#2927), a clean row's
-//     unconfirmed field update included (mc-03lk4). A read that differs
-//     from the cached row installs instead, stamped. An event merged onto a
-//     cached row never clears a mark: it is not a backing read;
+//     unconfirmed field update included (mc-03lk4), and one within five
+//     seconds of a local write to the row (mc-xlphf; only an event whose
+//     updated_at the cached row's postdates drops there unchecked). A read
+//     that differs from the cached row installs instead, stamped. An event
+//     merged onto a cached row never clears a mark: it is not a backing read;
 //   - an ApplyEvent for a row the cache does not hold that a local write or
 //     deletion of the row overlapped;
 //   - a refetch (Get, the overlay, a Live or Parent list, a conditional

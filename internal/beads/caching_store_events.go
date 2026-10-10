@@ -126,14 +126,27 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	// drops a clean row's unverified field update, and this verification is
 	// what still lets a real one apply.
 	staleRisk := eventType == "bead.updated" && fieldConflictCached
-	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || staleRisk) && !recentlyLocal && !verifiedConflict {
-		// The bead is flagged locally mutated only because a prior applied
-		// event set its mutation seq (noteMutationLocked sets beadSeq on every
-		// applied event), or because of a local write older than the recency
-		// window, including one whose beadSeq a later scan cleared (a late
-		// event snapshotted before that write must not roll it back), or it
-		// is clean and the patch would change its fields (above). Backing reads are reliable here (no in-flight write-through),
-		// so verify the conflicting event against the backing store instead of
+	// Inside the recency window, an event older than the cached row is the
+	// echo of a local write a later one superseded (Update then Release on
+	// one tick, both fed back), so it drops without a read, as every
+	// conflicting event there once did. That blanket drop also lost an
+	// operator's write landing seconds after the controller's own, leaving
+	// the row clean until the next scan (mc-xlphf); any other conflicting
+	// event is verified below.
+	if conflictsCached && eventType != "bead.closed" && recentlyLocal && !verifiedConflict &&
+		cacheEventPredatesRow(patch, conflictBase) {
+		return
+	}
+	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || recentlyLocal || staleRisk) && !verifiedConflict {
+		// The bead is flagged locally mutated because a prior applied event
+		// set its mutation seq (noteMutationLocked sets beadSeq on every
+		// applied event) or a local write did, or it carries a local write,
+		// including one whose beadSeq a later scan cleared (a late event
+		// snapshotted before that write must not roll it back), or it is
+		// clean and the patch would change its fields (above). Backing reads
+		// are reliable here: a local write installs only after its backing
+		// write commits, so a check inside the recency window reads it too.
+		// So verify the conflicting event against the backing store instead of
 		// dropping it outright: drop only genuinely stale events (which would
 		// clobber an unflushed local write); apply when the backing store
 		// already reflects the event — e.g. a gc.routed_to stamp written by
@@ -170,28 +183,6 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		verifiedRecentLocal = true
 		verifiedRecentLocalBase = conflictBase
 		verifiedFresh = check.fresh
-	} else {
-		if fieldConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
-			return
-		}
-		if dependencyConflictCached && eventType != "bead.closed" && locallyMutated && !verifiedConflict {
-			return
-		}
-	}
-	if conflictsCached && recentlyLocal && !verifiedConflict {
-		verifiedRecentLocal = true
-		verifiedRecentLocalBase = conflictBase
-		check, verifyErr := c.checkEvent(patch.ID, patch, fields)
-		if verifyErr == nil && !check.matches {
-			return
-		}
-		verifiedFresh = check.fresh
-		if verifyErr != nil {
-			// An unverifiable event must not overwrite a recent local write
-			// as a clean row.
-			c.dirtyUncheckedEvent(eventType, patch.ID, verifyErr)
-			return
-		}
 	}
 
 	b := patch
@@ -904,6 +895,14 @@ func closedEventCarriesRichCloseSnapshot(patch Bead) bool {
 
 func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawMessage) bool {
 	return !cacheEventConflictsCached(current, depsFromBeadFields(current), true, patch, fields)
+}
+
+// cacheEventPredatesRow reports whether an event's updated_at is older than
+// the cached row's, so the row reflects a later write than the event's. Both
+// stamps mirror the backing's clock; either one missing, or a tie, proves
+// nothing.
+func cacheEventPredatesRow(patch, row Bead) bool {
+	return !patch.UpdatedAt.IsZero() && !row.UpdatedAt.IsZero() && patch.UpdatedAt.Before(row.UpdatedAt)
 }
 
 func recentLocalMutation(mutatedAt time.Time, now time.Time) bool {
