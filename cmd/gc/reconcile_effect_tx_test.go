@@ -804,8 +804,9 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 // Kills a spec table that loses a kind's admission facts or runs an effect
 // that has not merged, a body anywhere but the create, and a capability
 // reached without its grant: every kind has a cap class, only the merged
-// kinds run, the create's body declares no needs and alone holds a
-// capability, and caps without capCreate hold no create handle.
+// kinds run, the create's body declares no needs, each kind holds exactly
+// the capabilities effectCapGrants lists, and caps without capCreate hold no
+// create handle.
 func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	var running []string
 	for kind, spec := range effectSpecs {
@@ -815,8 +816,8 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 		if spec.runs() {
 			running = append(running, kind)
 		}
-		if spec.caps != 0 && kind != intentCreate {
-			t.Errorf("%s holds capabilities %b", kind, spec.caps)
+		if granted := effectCapGrants[kind]; spec.caps != granted {
+			t.Errorf("%s holds capabilities %b, want %b", kind, spec.caps, granted)
 		}
 	}
 	slices.Sort(running)
@@ -825,7 +826,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -837,6 +838,10 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	}
 }
 
+// effectCapGrants are the capabilities each kind holds: the create its
+// runner, the adopt the read-only stores its prepare reads.
+var effectCapGrants = map[string]caps{intentCreate: capCreate, intentAdopt: capReadStores}
+
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
 // by applyFacts. A new field fails here until applyFacts and this table
 // consume it.
@@ -844,6 +849,8 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 	rec := &memRecorder{}
 	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.rec = rec
+	cache := newObserveCache()
+	p.observations = func() *ObservationCache { return cache.ObservationCache }
 	var transitions []string
 	saved := recordDrainTransition
 	recordDrainTransition = func(_ context.Context, name, reason, transition string) {
@@ -854,12 +861,14 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		Events:     []events.Event{{Type: "session.test"}},
 		Transition: &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
 		Work:       &workVerdict{BeadID: "gc-w1", Refused: true},
+		Noted:      &notedRuntime{Name: "s1", At: plannerT0},
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
 		"Events":     len(rec.events) == 1,
 		"Transition": slices.Equal(transitions, []string{"s/idle/cancel"}),
 		"Work":       p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Noted":      cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

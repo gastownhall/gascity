@@ -83,7 +83,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 // that field):
 var effectSpecs = map[string]effectSpec{
 	intentStart:           {class: capStarts, tokens: 1, needs: needs{Lease: true}},
-	intentAdopt:           {class: capProbing, needs: needs{Lease: true}},
+	intentAdopt:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capReadStores, sections: adoptSections},
 	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                 // C1, C2
 	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections}, // A3: writes the incarnation under the row's lease record
 	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Lease: true}},

@@ -423,8 +423,10 @@ func TestEffectSpecFuncsAreLinted(t *testing.T) {
 			}
 		}
 		for _, sec := range spec.sections {
-			for _, fn := range append([]any{sec.Decide}, sec.defs...) {
-				check(kind, fn)
+			for _, fn := range []any{sec.Decide, sec.probeDef, sec.decideDef, sec.callDef} {
+				if fn != nil {
+					check(kind, fn)
+				}
 			}
 			n++
 		}

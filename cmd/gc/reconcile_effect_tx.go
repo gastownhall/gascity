@@ -270,15 +270,20 @@ type section struct {
 	call   func(ctx context.Context, c txCaps, in any) (any, error)
 	// callKind is the Call's kind (called), when it has one.
 	callKind callKind
-	defs     []any // the kind's own Probe and Call, which the effect lint covers
+	// The kind's own Probe, Decide and Call as given to probed and called,
+	// which the effect lint covers; each set by one write, never read by the
+	// transaction.
+	probeDef, decideDef, callDef any
 }
 
 // probed is a section whose Probe, a bounded read under both locks after the
 // transaction's own reads (it sees the expected row), hands Decide its typed
 // result. A probe past fenceProbeTimeout answers errProbeExpired. Every decide
-// passed here is a v2purity root, as a section's Decide is:
+// passed here is a v2purity root, as a section's Decide is; the probe is
+// stored, reached only through a read of section.probe (or probeDef):
 //
 //gc:pure-param decide
+//gc:stored-param probe
 func probed[P any](probe func(context.Context, effectReads, txView) (P, error), decide func(txView, P, error) txStep) section {
 	return section{
 		probe: func(ctx context.Context, r effectReads, v txView) (any, error) { return probe(ctx, r, v) },
@@ -286,7 +291,8 @@ func probed[P any](probe func(context.Context, effectReads, txView) (P, error), 
 			p, _ := v.probe.(P)
 			return decide(v, p, v.probeErr)
 		},
-		defs: []any{probe, decide},
+		probeDef:  probe,
+		decideDef: decide,
 	}
 }
 
@@ -307,14 +313,17 @@ const (
 // called is sec with a provider Call after it, run under the name lock with
 // the mutation lock released, and only like a write (the context, then the
 // latch). It takes the step's Pass, typed In, and hands the next section's
-// Decide its result (callResult[Out]).
+// Decide its result (callResult[Out]). The call is stored, reached only
+// through a read of section.call (or callDef):
+//
+//gc:stored-param call
 func called[In, Out any](kind callKind, sec section, call func(context.Context, txCaps, In) (Out, error)) section {
 	sec.callKind = kind
 	sec.call = func(ctx context.Context, c txCaps, in any) (any, error) {
 		typed, _ := in.(In)
 		return call(ctx, c, typed)
 	}
-	sec.defs = append(sec.defs, call)
+	sec.callDef = call
 	return sec
 }
 
@@ -376,14 +385,26 @@ type effectFacts struct {
 	Events     []events.Event   // recorded once drained (session.woke, ...)
 	Transition *drainTransition // legacy's drain telemetry
 	Work       *workVerdict     // a worktree verdict for the work item's backoff
+	// Noted is a fresh read that found the row's runtime alive and Current,
+	// which the planner notes in the observation cache (v5 O4).
+	Noted *notedRuntime
 }
 
-func (f effectFacts) empty() bool { return len(f.Events) == 0 && f.Transition == nil && f.Work == nil }
+// notedRuntime is a runtime name a fresh read issued at At found alive.
+type notedRuntime struct {
+	Name string
+	At   time.Time
+}
+
+func (f effectFacts) empty() bool {
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil
+}
 
 func (f *effectFacts) merge(g effectFacts) {
 	f.Events = append(f.Events, g.Events...)
 	f.Transition = cmp.Or(g.Transition, f.Transition)
 	f.Work = cmp.Or(g.Work, f.Work)
+	f.Noted = cmp.Or(g.Noted, f.Noted)
 }
 
 // Transaction causes. A refusal backs the row off (P4).

@@ -128,6 +128,10 @@ type planner struct {
 	metrics     *passMetrics
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
 
+	// observations is the cache a fresh read's Noted fact is written to; nil
+	// notes none.
+	observations func() *ObservationCache
+
 	inflight plannerInflight
 	backoff  *backoffTable
 	bucket   bucketState
@@ -338,6 +342,15 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 		p.backoff.Refuse(workBackoffKey(f.Work.BeadID), at, time.Time{}, createStageWorktree, f.Work.Fingerprint)
 	default:
 		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
+	}
+	if n := f.Noted; n != nil && p.observations != nil {
+		if cache := p.observations(); cache != nil {
+			// Listed, running and the agent alive, at the read's issue time,
+			// so a later inventory pass overrides it either way (v5 O4).
+			for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
+				cache.Note(n.Name, kind, ObsYes, n.At, SourceProbe, "")
+			}
+		}
 	}
 }
 
