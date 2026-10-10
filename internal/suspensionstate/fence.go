@@ -18,13 +18,17 @@ func FenceFile(cityPath string) string {
 	return citylayout.RuntimePath(cityPath, "runtime", "suspension-state.lock")
 }
 
-// Fence takes the city's suspension fence, an exclusive advisory lock that
-// every [Save] through the OS filesystem also takes. A controller that is
-// about to act on a scope being suspended — stopping its store — holds the
-// fence from re-reading the state until the action is done, so a resume
-// written by any process either lands before that re-read (and the action is
-// skipped) or waits until the action has finished (and the resumed scope's
-// next read finds a store nothing will stop under it).
+// Fence takes the city's suspension fence, an exclusive advisory lock that,
+// on the OS filesystem, [Save] also takes for its write and [Update] from its
+// read through its write. A controller that is about to act on a scope being
+// suspended — stopping its store — holds the fence from re-reading the state
+// until the action is done, so a resume written by any process either lands
+// before that re-read (and the action is skipped) or waits until the action
+// has finished (and the resumed scope's next read finds a store nothing will
+// stop under it).
+//
+// The lock belongs to the open lock file, not to the process, so a holder
+// that calls Save, Update, or Fence for the same city waits on itself.
 //
 // The lock is released when the returned func is called, or by the kernel if
 // the process dies; the lock file itself carries no state. The release func

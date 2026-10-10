@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "dolt.go",
         "failure_artifacts.go",
+        "flock_linux.go",
         "git.go",
         "path.go",
         "timeout.go",

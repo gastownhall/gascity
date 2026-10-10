@@ -1034,20 +1034,14 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	st, err := loadSuspensionState(fs, cityPath)
+	changed, err := updateRigSuspension(fs, cityPath, rigName, suspendRigInState)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: reading state: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc rig suspend: updating state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	if !suspendRigInState(&st, rigName) {
+	if !changed {
 		fmt.Fprintf(stdout, "Rig '%s' is already suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
-	}
-
-	if err := saveSuspensionState(fs, cityPath, st); err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 	for _, r := range cfg.Rigs {
 		if r.Name == rigName {
@@ -1157,20 +1151,14 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	st, err := loadSuspensionState(fs, cityPath)
+	changed, err := updateRigSuspension(fs, cityPath, rigName, resumeRigInState)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: reading state: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc rig resume: updating state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	if !resumeRigInState(&st, rigName) {
+	if !changed {
 		fmt.Fprintf(stdout, "Rig '%s' is not suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
-	}
-
-	if err := saveSuspensionState(fs, cityPath, st); err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 
 	fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
