@@ -11,6 +11,14 @@
 #
 # Keeps PR and push lanes on bazel.yml unchanged otherwise: unit,
 # acceptance, integration-packages and integration-smoke still run there.
+#
+# Fresh on drift (rbe-reexecution-design.md S3c): the scheduled run re-executes
+# every test (fresh-test-results) only when rbe-worker-env-canary.yml's host
+# fingerprint has moved since the last green fresh run, or the ISO week has, so
+# at least weekly; otherwise it reuses cached results like any push. A dispatch
+# is always fresh. Shadow mode until the repository variable RBE_FRESH_ON_DRIFT
+# is "on": every scheduled run stays fresh and only logs what it would have
+# done (step summary "fresh-on-drift:"). Rollback: unset the variable.
 name: bazel nightly
 
 on:
@@ -25,8 +33,62 @@ permissions:
   contents: read
 
 jobs:
+  # Decides fresh-test-results. Fails safe: anything it cannot read (no canary
+  # run yet, an expired artifact, an API error) means fresh.
+  decide:
+    name: fresh on host drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      fresh: ${{ steps.d.outputs.fresh }}
+      key: ${{ steps.d.outputs.key }}
+    steps:
+      - id: d
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHADOW: ${{ vars.RBE_FRESH_ON_DRIFT != 'on' }}
+        run: |
+          set -uo pipefail
+          fingerprint() {
+            local run fp
+            run=$(gh run list -R "$GITHUB_REPOSITORY" -w rbe-worker-env-canary.yml -b main -s success -L 1 \
+              --json databaseId -q '.[0].databaseId') && [ -n "$run" ] || return 1
+            gh run download "$run" -R "$GITHUB_REPOSITORY" -n host-fingerprint -D "$RUNNER_TEMP/fp" >/dev/null || return 1
+            fp=$(head -c 64 "$RUNNER_TEMP/fp/host-fingerprint.txt") && [[ $fp =~ ^[0-9a-f]{64}$ ]] || return 1
+            echo "$fp"
+          }
+          key="" decision=true
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            reason="a dispatch is always fresh"
+          elif ! fp=$(fingerprint); then
+            reason="no host fingerprint from rbe-worker-env-canary.yml: fresh (fail safe)"
+          else
+            key="fresh-$fp-$(date -u +%G-W%V)"
+            # Only main's entries: a PR's cache (refs/pull/N/merge) is the PR
+            # author's to write, and must never suppress a fresh run.
+            if gh cache list -R "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$key" --json key -q '.[].key' | grep -qx "$key"; then
+              decision=false reason="a green fresh run already covered this host this week"
+            else
+              reason="a new host fingerprint or a new week"
+            fi
+          fi
+          echo "key=$key" >>"$GITHUB_OUTPUT"
+          echo "fresh-on-drift: key=${key:-none} would-run-fresh=$decision shadow=$SHADOW ($reason)" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$SHADOW" = true ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "fresh=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "fresh=$decision" >>"$GITHUB_OUTPUT"
+          fi
+
   bazel:
     name: "bazel (nightly: integration + coverage)"
+    needs: decide
+    # A failed or cancelled decide job never skips the nightly: its empty
+    # output is "not false", so the run is fresh (fail open, the safe side).
+    if: ${{ !cancelled() }}
     # A called workflow's jobs get at most the caller job's token
     # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
     # write), its lanes read worker-env drift issues (issues: read) and its
@@ -53,6 +115,25 @@ jobs:
       # lanes still write the shared remote cache (--nocache_test_results
       # only skips reading a cached result; rbe-west's workers upload their
       # own results regardless, .bazelrc build:remote-exec
-      # --noremote_upload_local_results).
-      fresh-test-results: true
+      # --noremote_upload_local_results). Only on host drift and weekly
+      # (decide, above), and on every dispatch.
+      fresh-test-results: ${{ needs.decide.outputs.fresh != 'false' }}
     secrets: inherit
+
+  # A green fresh run covers its (host fingerprint, ISO week): the marker cache
+  # entry decide looks for. A red or skipped one leaves none, so the next
+  # scheduled run is fresh again.
+  remember:
+    name: remember the fresh run
+    needs: [decide, bazel]
+    if: needs.decide.outputs.key != '' && needs.decide.outputs.fresh == 'true' && needs.bazel.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - run: echo ok >fresh-state
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fresh-state
+          key: ${{ needs.decide.outputs.key }}
