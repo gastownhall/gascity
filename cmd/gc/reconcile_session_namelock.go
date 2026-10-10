@@ -84,11 +84,12 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 // to each. A lease failure other than busy (the store unreachable, the row
 // closed) is logged, and the sequence runs under the name's flock alone: a
 // store never holds a stop hostage. Busy is session.ErrRuntimeLeaseBusy, which
-// the caller defers to a later tick. Without a city path there is nothing to
-// lock.
+// the caller defers to a later tick. A city path that is not absolute has no
+// runtime dir to lock in: the stop refuses with session.ErrRuntimeLeaseNoCity
+// and kills nothing.
 func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (context.Context, func(), error) {
-	if cityPath == "" {
-		return session.WithoutLeaseWait(context.Background()), func() {}, nil // no city, no names to lock
+	if !filepath.IsAbs(cityPath) {
+		return nil, func() {}, fmt.Errorf("%w (%q): runtime %q", session.ErrRuntimeLeaseNoCity, cityPath, name)
 	}
 	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
 	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {

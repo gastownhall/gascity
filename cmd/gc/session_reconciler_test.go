@@ -1388,7 +1388,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1432,7 +1432,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "stale-token"), nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "stale-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "stale-token"), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1787,7 +1787,7 @@ func TestAsyncDrainAckStopSkipsOnUnverifiableToken(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1817,7 +1817,7 @@ func TestAsyncDrainAckStopUnverifiableTokenLogsOncePerEpisode(t *testing.T) {
 	var stderr synchronizedBuffer
 	for range 3 {
 		tracker := &asyncStartTracker{}
-		queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, dt, &stderr)
+		queueDrainAckAsyncStop(t.TempDir(), beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, dt, &stderr)
 		if !tracker.wait(time.Second) {
 			t.Fatal("async drain-ack stop did not complete")
 		}

@@ -129,6 +129,47 @@ func TestControllerStopSequencesDeferOnABusyLease(t *testing.T) {
 	}
 }
 
+// TestControllerStopSequencesRefuseWithoutACity: a controller stop sequence
+// handed no absolute city path has no runtime dir to lock in, so it takes no
+// lease and kills nothing, the escalation's process-table kill included: it
+// defers with ErrRuntimeLeaseNoCity.
+func TestControllerStopSequencesRefuseWithoutACity(t *testing.T) {
+	for _, city := range []string{"", "relative/city"} {
+		if _, _, err := controllerStopLease(beads.NewMemStore(), city, "worker", "sess-1", io.Discard); !errors.Is(err, sessionpkg.ErrRuntimeLeaseNoCity) {
+			t.Fatalf("controllerStopLease(%q) = %v, want ErrRuntimeLeaseNoCity", city, err)
+		}
+		for _, seq := range []string{"async stop", "escalation"} {
+			t.Run(seq+"/"+city, func(t *testing.T) {
+				sp := runtime.NewFake()
+				if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "x"}); err != nil {
+					t.Fatal(err)
+				}
+				store := beads.NewMemStore()
+				gen := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
+				var stderr synchronizedBuffer
+				tracker := &asyncStartTracker{}
+				if seq == "async stop" {
+					queueDrainAckAsyncStop(city, store, sp, &config.City{}, "sess-1", "worker", "", gen, nil, tracker, nil, &stderr)
+				} else {
+					done, _ := tracker.startDrainAckStop("escalate:sess-1")
+					queueDrainAckForcedTermination(city, store, sp, &config.City{}, sessionpkg.Info{ID: "sess-1", Generation: gen}, "worker",
+						"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, 0, done, nil, &stderr)
+				}
+				if !tracker.wait(5 * time.Second) {
+					t.Fatal("the stop sequence never finished")
+				}
+				got := stderr.String()
+				if !strings.Contains(got, "deferred") || !strings.Contains(got, sessionpkg.ErrRuntimeLeaseNoCity.Error()) || sp.CountCalls("Stop", "worker") != 0 || !sp.IsRunning("worker") {
+					t.Fatalf("stderr %q, stops %d; want deferred with ErrRuntimeLeaseNoCity and no stop", got, sp.CountCalls("Stop", "worker"))
+				}
+				if strings.Contains(got, "terminat") {
+					t.Fatalf("stderr %q: the escalation reached its process-table kill", got)
+				}
+			})
+		}
+	}
+}
+
 // TestConfigDriftResetDefersOnABusyLease: a config-drift reset whose stop is
 // refused by another holder's lease decides nothing this tick: no patch, the
 // runtime and the row as they were.
