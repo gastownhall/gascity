@@ -67,6 +67,62 @@ func TestResolveCodexTranscriptBySessionOrderAnchorsOnAwakeStartedAt(t *testing.
 	}
 }
 
+func TestResolveOpenCodeTranscriptBySessionOrder(t *testing.T) {
+	root := t.TempDir()
+	workDir := "/data/projects/opencode-project"
+	const provider = "opencode"
+
+	startA := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	startB := startA.Add(30 * time.Second)
+
+	pathA := writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-3591-7532-a1ef-8b9e882bea2f", startA)
+	writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-ffff-7000-a1ef-8b9e882bea2f", startB)
+
+	sessions := []Info{
+		infoFromPersistedBead(sleptCodexSessionBead("sess-a", workDir, provider, startA)),
+		infoFromPersistedBead(sleptCodexSessionBead("sess-b", workDir, provider, startB)),
+	}
+
+	got := ResolveCodexTranscriptBySessionOrder([]string{root}, provider, workDir, "sess-a", sessions)
+	if got != pathA {
+		t.Fatalf("ResolveCodexTranscriptBySessionOrder(opencode) = %q, want %q", got, pathA)
+	}
+}
+
+func TestResolveOpenCodeMultipleConcurrentSessionsInSameRig(t *testing.T) {
+	root := t.TempDir()
+	workDir := "/data/projects/multi-opencode-rig"
+	const provider = "opencode"
+
+	startA := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	startB := startA.Add(20 * time.Second)
+	startC := startA.Add(40 * time.Second)
+
+	pathA := writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-1111-7532-a1ef-8b9e882bea2f", startA)
+	pathB := writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-2222-7532-a1ef-8b9e882bea2f", startB)
+	pathC := writeCodexRolloutForAnchor(t, root, workDir, "019e3e8e-3333-7532-a1ef-8b9e882bea2f", startC)
+
+	sessions := []Info{
+		infoFromPersistedBead(sleptCodexSessionBead("sess-a", workDir, provider, startA)),
+		infoFromPersistedBead(sleptCodexSessionBead("sess-b", workDir, provider, startB)),
+		infoFromPersistedBead(sleptCodexSessionBead("sess-c", workDir, provider, startC)),
+	}
+
+	for _, tc := range []struct {
+		id   string
+		want string
+	}{
+		{"sess-a", pathA},
+		{"sess-b", pathB},
+		{"sess-c", pathC},
+	} {
+		got := ResolveCodexTranscriptBySessionOrder([]string{root}, provider, workDir, tc.id, sessions)
+		if got != tc.want {
+			t.Errorf("ResolveCodexTranscriptBySessionOrder(%s) = %q, want %q", tc.id, got, tc.want)
+		}
+	}
+}
+
 func TestResolveKeyedTranscriptPathCodexUsesExactSessionKey(t *testing.T) {
 	root := t.TempDir()
 	workDir := "/data/projects/keyed-codex"
