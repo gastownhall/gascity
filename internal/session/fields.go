@@ -241,7 +241,6 @@ var observed = []struct {
 	{op("internal/session/store.go", "Store.SetState"), false, []string{"state", "state_reason"}},
 	{op(srcWaitStore, "Store.wakeSessionFromBead"), false, []string{"churn_count", "held_until", "quarantined_until", "sleep_intent", "wait_hold", "wake_attempts", "wake_refused_event_at"}},
 	{v2("cmd/gc/allocator_create_named.go", "reopenNamed"), true, []string{RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey}},
-	{op(srcManager, "Manager.Archive"), false, []string{"archived_at", "continuity_eligible", "pending_create_claim", "pending_create_started_at", "state", "state_reason"}},
 }
 
 func withObserved(fields []Field) []Field {
@@ -301,8 +300,8 @@ var registry = slices.Concat([]Field{
 	// Counters.
 	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
-	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only Manager.Reactivate writes it, and nothing calls that"},
-	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only Manager.Quarantine writes it, and nothing calls that"},
+	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
+	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
 	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
 
 	// Markers.
