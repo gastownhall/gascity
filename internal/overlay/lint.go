@@ -166,22 +166,31 @@ func FindInvalidHookMatchers(data []byte) ([]HookMatcherFinding, error) {
 }
 
 // hookMatcherProblem classifies matcher, found under the given hook event. It
-// returns an empty severity when the matcher is usable. The permission-syntax
-// check runs before compilation because such a matcher usually fails to compile
-// too, and the author needs the specific explanation, not a parse error.
+// returns an empty severity when the matcher is usable. A matcher shaped like a
+// permission rule, Tool(args), is flagged as such only when it fails to compile
+// or, on a tool event, selects no known tool: the author needs that specific
+// explanation, not a parse error or a typo warning. A valid grouped regex such
+// as Notebook(Edit|Read) selects real tools and lints clean.
 func hookMatcherProblem(category, matcher string) (Severity, string) {
-	if permissionSyntaxMatcher.MatchString(matcher) {
-		return SeverityError, "is permission-rule syntax (Tool(args)), not a regex; hook matchers are regexes matched against the tool name only. Use e.g. ^Bash$ and filter on tool_input inside the hook"
-	}
+	permissionSyntax := permissionSyntaxMatcher.MatchString(matcher)
 	re, err := regexp.Compile(matcher)
 	if err != nil {
+		if permissionSyntax {
+			return SeverityError, permissionSyntaxProblem
+		}
 		return SeverityError, fmt.Sprintf("does not compile as a regular expression: %v", err)
 	}
 	if toolMatcherEvents[category] && !strings.Contains(matcher, mcpToolPrefix) && !selectsKnownTool(matcher, re) {
+		if permissionSyntax {
+			return SeverityError, permissionSyntaxProblem
+		}
 		return SeverityWarning, "compiles but matches no known Claude Code tool name; check for a typo"
 	}
 	return "", ""
 }
+
+// permissionSyntaxProblem explains a matcher written as a permission rule.
+const permissionSyntaxProblem = "is permission-rule syntax (Tool(args)), not a regex; hook matchers are regexes matched against the tool name only. Use e.g. ^Bash$ and filter on tool_input inside the hook"
 
 // selectsKnownTool reports whether matcher selects at least one known tool,
 // reading it the way Claude Code does: a matcher made only of name characters

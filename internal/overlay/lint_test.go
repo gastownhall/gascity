@@ -95,6 +95,7 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		// Permission-rule syntax: the shape that shipped dead in gm-zlf3a.
 		{"permission syntax", "PreToolUse", "Bash(*bd mol pour*patrol*)", SeverityError, "permission-rule syntax"},
 		{"permission syntax with alternation", "PreToolUse", "Edit|Write(*.go)", SeverityError, "permission-rule syntax"},
+		{"permission syntax that compiles under RE2", "PreToolUse", "Bash(git:*)", SeverityError, "permission-rule syntax"},
 
 		// Not a regular expression at all.
 		{"unbalanced bracket", "PreToolUse", "[Bash", SeverityError, "does not compile"},
@@ -120,6 +121,8 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"comma list of exact names", "PreToolUse", "Edit, Write", "", ""},
 		{"exact list with one real tool", "PreToolUse", "Edit|Frobnicate", "", ""},
 		{"prefix regex", "PreToolUse", "Notebook.*", "", ""},
+		{"grouped prefix regex", "PreToolUse", "Notebook(Edit|Read)", "", ""},
+		{"grouped prefix regex over Task tools", "PreToolUse", "Task(Create|Update)", "", ""},
 		{"regex is searched, not anchored", "PreToolUse", "Bas.*", "", ""},
 		{"grouped anchored alternation", "PreToolUse", "^(Read|Glob|Grep)$", "", ""},
 		{"MCP tool regex", "PreToolUse", "mcp__memory__.*", "", ""},
