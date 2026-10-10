@@ -146,6 +146,12 @@ func (f *reapFixture) startWithOutput(t *testing.T, out *os.File, extraEnv ...st
 	return cmd
 }
 
+// harnessBash returns a bash running script, the one way these tests drive
+// scripts/lib/harness-reap.sh functions directly rather than through a runner.
+func harnessBash(script string) *exec.Cmd {
+	return exec.Command("bash", "-c", script)
+}
+
 // waitWithin reaps cmd, failing if it has not exited before within elapses so
 // a regression in the runner cannot wedge the suite.
 func waitWithin(t *testing.T, cmd *exec.Cmd, within time.Duration) error {
@@ -325,7 +331,7 @@ gc_harness_kill_pid() { printf 'KILLED %%s\n' "$1" >> %q ; }
 gc_harness_sweep_stale_orphans %s
 `, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), killLog, minAge)
 
-	cmd := exec.Command("bash", "-c", script)
+	cmd := harnessBash(script)
 	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -561,7 +567,7 @@ gc_harness_launch_publish
 			}
 			t.Cleanup(func() { _ = stdout.Close() })
 
-			cmd := exec.Command("bash", "-c", script)
+			cmd := harnessBash(script)
 			cmd.Stdout = stdoutWriter
 			cmd.Stderr = stdoutWriter
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
