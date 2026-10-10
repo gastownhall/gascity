@@ -80,9 +80,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	// A local write keeps a conflicting event under backing verification
 	// after a later scan clears its beadSeq fence, for as long as a consumer
 	// may still be waiting on its watermark.
+	// It covers every local write inside the recency window too: writeAt is
+	// stamped with localBeadAt and pruned only past recentWriteVerifyWindow.
 	recentWrite := c.recentWriteLocked(patch.ID, now)
-	localBeadAt := c.localBeadAt[patch.ID]
-	recentlyLocal := recentLocalMutation(localBeadAt, now)
+	recentlyLocal := recentLocalMutation(c.localBeadAt[patch.ID], now)
 	_, locallyDeleted := c.deletedSeq[patch.ID]
 	fieldConflictCached := cached && cacheEventConflictsCurrent(current, patch, fields)
 	dependencyConflictCached := cached && cacheEventDependencyConflict(currentDeps, depsKnown, patch, fields)
@@ -126,18 +127,20 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	// drops a clean row's unverified field update, and this verification is
 	// what still lets a real one apply.
 	staleRisk := eventType == "bead.updated" && fieldConflictCached
-	// Inside the recency window, an event older than the cached row is the
-	// echo of a local write a later one superseded (Update then Release on
-	// one tick, both fed back), so it drops without a read, as every
-	// conflicting event there once did. That blanket drop also lost an
-	// operator's write landing seconds after the controller's own, leaving
-	// the row clean until the next scan (mc-xlphf); any other conflicting
-	// event is verified below.
-	if conflictsCached && eventType != "bead.closed" && recentlyLocal && !verifiedConflict &&
-		cacheEventPredatesRow(patch, conflictBase) {
+	// Inside the recency window, this cache's own emission coming back after
+	// a later local write superseded it (Update then Release on one tick,
+	// both fed back) drops without a read, as every conflicting event there
+	// once did. That blanket drop also lost an operator's write landing
+	// seconds after the controller's own, leaving the row clean until the
+	// next scan (mc-xlphf); any other conflicting event is verified below.
+	// The echo is told by identity, not by updated_at: Dolt stamps whole
+	// seconds, so two writes in one second tie, and an operator's write in
+	// that second ties with them.
+	if conflictsCached && eventType != "bead.closed" && eventType != "bead.deleted" &&
+		recentlyLocal && locallyMutated && !verifiedConflict && c.ownEmission(patch, fields, now) {
 		return
 	}
-	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || recentlyLocal || staleRisk) && !verifiedConflict {
+	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || staleRisk) && !verifiedConflict {
 		// The bead is flagged locally mutated because a prior applied event
 		// set its mutation seq (noteMutationLocked sets beadSeq on every
 		// applied event) or a local write did, or it carries a local write,
@@ -282,20 +285,16 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				changedSinceVerify := beadChanged(current, verifiedRecentLocalBase, false) ||
 					current.Revision != verifiedRecentLocalBase.Revision ||
 					c.beadSeq[patch.ID] != seqBase
-				// Re-check a genuine recent local write under the write lock to
-				// catch a write that landed between the read-lock verification
-				// and here; it wins unconditionally.
-				dropped := recentLocalMutation(c.localBeadAt[patch.ID], c.clockNow()) &&
-					(!verifiedRecentLocal || changedSinceVerify)
-				// For a bead flagged locally mutated only by a prior event,
-				// apply the conflict only if it was verified against the
-				// backing store under the read lock and nothing changed since
-				// (no concurrent local write); otherwise drop and let
-				// reconciliation reconverge (gastownhall/gascity#2210). A clean
-				// row's field update is held to the same rule (mc-03lk4),
-				// including one that first conflicts here, with a row a read
-				// installed since the read phase.
-				dropped = dropped || (locallyMutated || (eventType == "bead.updated" && fieldConflict)) &&
+				// For a locally mutated bead (a write that landed between the
+				// read-lock verification and here included), apply the conflict
+				// only if it was verified against the backing store under the
+				// read lock and nothing changed since (no concurrent local
+				// write); otherwise drop and let reconciliation reconverge
+				// (gastownhall/gascity#2210). A clean row's field update is held
+				// to the same rule (mc-03lk4), including one that first
+				// conflicts here, with a row a read installed since the read
+				// phase.
+				dropped := (locallyMutated || (eventType == "bead.updated" && fieldConflict)) &&
 					(!verifiedRecentLocal || changedSinceVerify)
 				if dropped {
 					// What changed a verified event's row since its check, with
@@ -897,12 +896,59 @@ func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawM
 	return !cacheEventConflictsCached(current, depsFromBeadFields(current), true, patch, fields)
 }
 
-// cacheEventPredatesRow reports whether an event's updated_at is older than
-// the cached row's, so the row reflects a later write than the event's. Both
-// stamps mirror the backing's clock; either one missing, or a tie, proves
-// nothing.
-func cacheEventPredatesRow(patch, row Bead) bool {
-	return !patch.UpdatedAt.IsZero() && !row.UpdatedAt.IsZero() && patch.UpdatedAt.Before(row.UpdatedAt)
+// ownEmitsPerRow bounds the emissions ownEmits keeps per row.
+const ownEmitsPerRow = 8
+
+// ownEmit is a row snapshot this cache emitted through onChange, and when.
+type ownEmit struct {
+	at  time.Time
+	row Bead
+}
+
+// recordOwnEmission remembers b, which this cache is about to emit, for the
+// recency window, so its echo can be told from another writer's event
+// (ownEmission). It keeps the newest ownEmitsPerRow per row and sweeps
+// expired rows at most once a window.
+func (c *CachingStore) recordOwnEmission(b Bead) {
+	now := c.clockNow()
+	c.ownEmitMu.Lock()
+	defer c.ownEmitMu.Unlock()
+	if c.ownEmits == nil {
+		c.ownEmits = make(map[string][]ownEmit)
+	}
+	if !recentLocalMutation(c.ownEmitsSweptAt, now) {
+		for id, emits := range c.ownEmits {
+			if !recentLocalMutation(emits[len(emits)-1].at, now) {
+				delete(c.ownEmits, id)
+			}
+		}
+		c.ownEmitsSweptAt = now
+	}
+	emits := c.ownEmits[b.ID]
+	for len(emits) > 0 && (len(emits) >= ownEmitsPerRow || !recentLocalMutation(emits[0].at, now)) {
+		emits = emits[1:]
+	}
+	c.ownEmits[b.ID] = append(slices.Clip(emits), ownEmit{at: now, row: cloneBead(b)})
+}
+
+// ownEmission reports whether an event is, field for field, a complete
+// snapshot this cache emitted for the row within the recency window: its own
+// echo, which carries nothing the cache did not already hold. A partial patch
+// never is. updated_at must match too, so only another writer leaving the row
+// equal to an emitted snapshot to the stamp is mistaken for one.
+func (c *CachingStore) ownEmission(patch Bead, fields map[string]json.RawMessage, now time.Time) bool {
+	if !cacheEventLooksComplete(fields) || !hasCacheEventField(fields, "updated_at") {
+		return false
+	}
+	c.ownEmitMu.Lock()
+	defer c.ownEmitMu.Unlock()
+	for _, e := range c.ownEmits[patch.ID] {
+		if recentLocalMutation(e.at, now) && e.row.UpdatedAt.Equal(patch.UpdatedAt) &&
+			cacheEventPatchMatchesBead(e.row, patch, fields) {
+			return true
+		}
+	}
+	return false
 }
 
 func recentLocalMutation(mutatedAt time.Time, now time.Time) bool {
@@ -1040,6 +1086,8 @@ func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead)
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
 		return
 	}
+	// Recorded before onChange, so the echo cannot arrive first.
+	c.recordOwnEmission(b)
 	// Resolve the opaque run/session correlation ids from the bead's metadata at
 	// the record site and pass ONLY those two ids to onChange — never the
 	// free-form metadata map. The run-chain (workflow_id || molecule_id ||

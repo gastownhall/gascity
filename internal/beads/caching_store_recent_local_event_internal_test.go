@@ -2,6 +2,9 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,63 +181,205 @@ func TestCachingStoreStaleEchoAfterRecentLocalWriteKeepsTheRow(t *testing.T) {
 	}
 }
 
-// Inside the window, an event older than the cached row by updated_at, the echo
-// of a superseded local write, drops without a backing read and leaves the row
-// clean; one tied with the row's stamp or carrying none is checked, and, its
-// read equalling the cached row, marks it dirty as any unconfirmed field update
-// does (mc-03lk4). None rolls the row back. Kills: the
-// echo verified anyway (a bd check outlasts its deadline and dirties the row on
-// every reordered echo), and a tie or a missing stamp read as older.
-func TestCachingStoreSupersededEchoInsideWindowReadsNothing(t *testing.T) {
+// sameSecondStore stamps every row it returns with one updated_at, as a
+// Dolt-family backing (DATETIME, whole seconds) does for writes within one
+// second, and counts its point reads.
+type sameSecondStore struct {
+	*casBackingStore
+	stamp time.Time
+}
+
+func (s *sameSecondStore) Get(id string) (Bead, error) {
+	b, err := s.casBackingStore.Get(id)
+	b.UpdatedAt = s.stamp
+	return b, err
+}
+
+func (s *sameSecondStore) List(q ListQuery) ([]Bead, error) {
+	rows, err := s.casBackingStore.List(q)
+	for i := range rows {
+		rows[i].UpdatedAt = s.stamp
+	}
+	return rows, err
+}
+
+// ownEchoFixture is a cache over a sameSecondStore at a frozen clock that has
+// written one row twice, state=creating then state=awake, recording what it
+// emitted for the row.
+type ownEchoFixture struct {
+	backing *sameSecondStore
+	cache   *CachingStore
+	id      string
+	echoes  []json.RawMessage // in emission order
+	clock   atomic.Int64      // the cache's clock, in UnixNano
+}
+
+func newOwnEchoFixture(t *testing.T) *ownEchoFixture {
+	t.Helper()
+	f := &ownEchoFixture{backing: &sameSecondStore{
+		casBackingStore: &casBackingStore{Store: NewMemStore()},
+		stamp:           time.Now().Truncate(time.Second),
+	}}
+	row, err := f.backing.Create(Bead{Title: "seat", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	f.id = row.ID
+	var mu sync.Mutex
+	f.clock.Store(time.Now().UnixNano())
+	f.cache = NewCachingStoreForTest(f.backing, func(_, id string, payload json.RawMessage) {
+		if id == f.id {
+			mu.Lock()
+			defer mu.Unlock()
+			f.echoes = append(f.echoes, payload)
+		}
+	}, WithClock(func() time.Time { return time.Unix(0, f.clock.Load()) }))
+	if err := f.cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	return f
+}
+
+// writeTwice writes state=creating then, gap later on the cache's clock,
+// state=awake.
+func (f *ownEchoFixture) writeTwice(t *testing.T, gap time.Duration) {
+	t.Helper()
+	for i, state := range []string{"creating", "awake"} {
+		if i > 0 {
+			f.clock.Add(int64(gap))
+		}
+		if err := f.cache.SetMetadata(f.id, "state", state); err != nil {
+			t.Fatalf("SetMetadata %s: %v", state, err)
+		}
+	}
+	if len(f.echoes) != 2 {
+		t.Fatalf("emitted %d snapshots of the row, want 2", len(f.echoes))
+	}
+}
+
+// reapplied returns echo with fn applied to its decoded fields.
+func reapplied(t *testing.T, echo json.RawMessage, fn func(map[string]any)) json.RawMessage {
+	t.Helper()
+	var fields map[string]any
+	if err := json.Unmarshal(echo, &fields); err != nil {
+		t.Fatalf("decode echo: %v", err)
+	}
+	fn(fields)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("encode echo: %v", err)
+	}
+	return out
+}
+
+// On a backing that stamps whole seconds, the cache's own echo of the first of
+// two writes in one second, fed back after the second, drops without a backing
+// read and leaves the row clean and the census serving; anything else that
+// conflicts inside the window is checked. Kills: own echoes told by updated_at
+// (they tie here and dirty the row), a tie read as older (drops the operator's
+// same-second write), and each identity condition dropped: the stamp, the
+// complete-snapshot requirement, the delete exclusion and the beadSeq fence.
+func TestCachingStoreOwnEchoInsideWindowReadsNothing(t *testing.T) {
 	t.Parallel()
+	t.Run("own echo", func(t *testing.T) {
+		t.Parallel()
+		f := newOwnEchoFixture(t)
+		f.writeTwice(t, 0)
+		reads := f.backing.getCalls
+		for _, echo := range f.echoes {
+			f.cache.ApplyEventSnapshot("bead.updated", echo)
+		}
+		got, dirty, _ := rowFences(f.cache, f.id)
+		if got.Metadata["state"] != "awake" || dirty || f.backing.getCalls != reads {
+			t.Fatalf("after the own echoes: state %q, dirty %v, %d reads; want awake, clean, none",
+				got.Metadata["state"], dirty, f.backing.getCalls-reads)
+		}
+		if _, ok := f.cache.CachedList(ListQuery{Status: "open"}); !ok {
+			t.Fatal("the census declined after the cache's own echoes")
+		}
+	})
+	t.Run("operator write in the same second", func(t *testing.T) {
+		t.Parallel()
+		f := newOwnEchoFixture(t)
+		f.writeTwice(t, 0)
+		external := writeMetadata(t, f.backing, f.id, "state", "suspended")
+		f.cache.ApplyEventSnapshot("bead.updated", eventPayload(t, external))
+		got, _, _ := rowFences(f.cache, f.id)
+		if got.Metadata["state"] != "suspended" {
+			t.Fatalf("a same-second operator write left cached state %q, want suspended", got.Metadata["state"])
+		}
+	})
 	for _, tc := range []struct {
 		name      string
-		stamp     func(row Bead) time.Time
-		wantReads bool
+		eventType string
+		event     func(t *testing.T, echo json.RawMessage) json.RawMessage
 	}{
-		{"older", func(row Bead) time.Time { return row.UpdatedAt.Add(-time.Millisecond) }, false},
-		{"tied", func(row Bead) time.Time { return row.UpdatedAt }, true},
-		{"unstamped", func(Bead) time.Time { return time.Time{} }, true},
+		{"restamped", "bead.updated", func(t *testing.T, echo json.RawMessage) json.RawMessage {
+			return reapplied(t, echo, func(m map[string]any) {
+				m["updated_at"] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+			})
+		}},
+		{"partial", "bead.updated", func(t *testing.T, echo json.RawMessage) json.RawMessage {
+			return reapplied(t, echo, func(m map[string]any) { delete(m, "title") })
+		}},
+		{"deleted", "bead.deleted", func(_ *testing.T, echo json.RawMessage) json.RawMessage { return echo }},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run("checked: "+tc.name, func(t *testing.T) {
 			t.Parallel()
-			backing := &casBackingStore{Store: NewMemStore()}
-			row, err := backing.Create(Bead{Title: "seat"})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-			frozen := time.Now()
-			cache := NewCachingStoreForTest(backing, nil, WithClock(func() time.Time { return frozen }))
-			if err := cache.Prime(context.Background()); err != nil {
-				t.Fatalf("Prime: %v", err)
-			}
-			if err := cache.SetMetadata(row.ID, "state", "creating"); err != nil {
-				t.Fatalf("SetMetadata: %v", err)
-			}
-			echo, err := backing.Store.Get(row.ID)
-			if err != nil {
-				t.Fatalf("Get: %v", err)
-			}
-			if err := cache.SetMetadata(row.ID, "state", "awake"); err != nil {
-				t.Fatalf("SetMetadata: %v", err)
-			}
-			cached, _, _ := rowFences(cache, row.ID)
-			if cached.UpdatedAt.IsZero() {
-				t.Fatal("the cached row carries no updated_at; the stamps compare nothing")
-			}
-			// The echo's stamp is set relative to the cached row's, which
-			// the backing stamped from its own clock.
-			echo.UpdatedAt = tc.stamp(cached)
-			reads := backing.getCalls
-			cache.ApplyEvent("bead.updated", eventPayload(t, echo))
-			got, dirty, _ := rowFences(cache, row.ID)
-			if got.Metadata["state"] != "awake" || dirty != tc.wantReads {
-				t.Fatalf("after the echo: cached state %q, dirty %v; want awake, dirty %v",
-					got.Metadata["state"], dirty, tc.wantReads)
-			}
-			if read := backing.getCalls > reads; read != tc.wantReads {
-				t.Fatalf("the echo read the backing: %v, want %v", read, tc.wantReads)
+			f := newOwnEchoFixture(t)
+			f.writeTwice(t, 0)
+			reads := f.backing.getCalls
+			f.cache.ApplyEventSnapshot(tc.eventType, tc.event(t, f.echoes[0]))
+			got, _, _ := rowFences(f.cache, f.id)
+			if f.backing.getCalls == reads || got.Metadata["state"] != "awake" {
+				t.Fatalf("after the event: %d reads, cached state %q; want checked, awake",
+					f.backing.getCalls-reads, got.Metadata["state"])
 			}
 		})
 	}
+	// An emission older than the window is no echo the window vouches for,
+	// even while a later write keeps the row inside it: here the first
+	// emission is 5.5s old, the second write 4.5s.
+	t.Run("checked: emitted before the window", func(t *testing.T) {
+		t.Parallel()
+		f := newOwnEchoFixture(t)
+		f.writeTwice(t, time.Second)
+		f.clock.Add(int64(4500 * time.Millisecond))
+		reads := f.backing.getCalls
+		f.cache.ApplyEventSnapshot("bead.updated", f.echoes[0])
+		got, _, _ := rowFences(f.cache, f.id)
+		if f.backing.getCalls == reads || got.Metadata["state"] != "awake" {
+			t.Fatalf("after the echo: %d reads, cached state %q; want checked, awake",
+				f.backing.getCalls-reads, got.Metadata["state"])
+		}
+	})
+	// A dirty-row Get clears beadSeq and keeps the window's stamp; there an
+	// echo is checked, as main's in-window verification checked it.
+	t.Run("checked: no beadSeq", func(t *testing.T) {
+		t.Parallel()
+		f := newOwnEchoFixture(t)
+		if err := f.cache.SetMetadata(f.id, "state", "creating"); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+		f.backing.failNextGet = true // the Update's refresh fails: the row goes dirty
+		if err := f.cache.Update(f.id, UpdateOpts{Metadata: map[string]string{"state": "awake"}}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if _, err := f.cache.Get(f.id); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		f.cache.mu.RLock()
+		_, mutated := f.cache.beadSeq[f.id]
+		f.cache.mu.RUnlock()
+		if mutated {
+			t.Fatal("the dirty-row Get left beadSeq set; the case is vacuous")
+		}
+		reads := f.backing.getCalls
+		f.cache.ApplyEventSnapshot("bead.updated", f.echoes[0])
+		got, _, _ := rowFences(f.cache, f.id)
+		if f.backing.getCalls == reads || got.Metadata["state"] != "awake" {
+			t.Fatalf("after the echo: %d reads, cached state %q; want checked, awake",
+				f.backing.getCalls-reads, got.Metadata["state"])
+		}
+	})
 }
