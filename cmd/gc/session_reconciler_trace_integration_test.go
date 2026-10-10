@@ -383,7 +383,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	wakeEvals := map[string]wakeEvaluation{
 		drainBead.ID: {Reasons: nil},
 	}
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		drainTracker,
 		sp,
 		store,
@@ -607,7 +607,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 				t.Fatal("BeginCycle returned nil")
 			}
 			cycle.syncArms(now, cfg)
-			cr := &CityRuntime{
+			cr := withLegacyWake(&CityRuntime{
 				cityPath:            cityDir,
 				cityName:            "trace-town",
 				cfg:                 cfg,
@@ -619,7 +619,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 				pokeCh:              make(chan struct{}, 1),
 				stdout:              io.Discard,
 				stderr:              io.Discard,
-			}
+			})
 			cr.beadReconcileTick(context.Background(), dsResult, sessionBeads, cycle, false)
 			if !cr.waitForAsyncStarts() {
 				t.Fatal("async starts did not finish")

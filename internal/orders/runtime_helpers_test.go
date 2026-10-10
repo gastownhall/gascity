@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -263,5 +264,40 @@ func TestLastRunAcrossReturnsMaxScope(t *testing.T) {
 	}
 	if !got.Equal(lateRun.CreatedAt) {
 		t.Fatalf("LastRunAcross() = %s, want %s (max across scopes)", got, lateRun.CreatedAt)
+	}
+}
+
+// closedHistoryFailsStore serves every active-row read and fails, hard, every
+// read that includes closed history: the shape of a backing whose closed rows
+// are unreachable while the controller's cache still holds the open ones.
+type closedHistoryFailsStore struct{ *beads.MemStore }
+
+func (s closedHistoryFailsStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.IncludeClosed {
+		return nil, errors.New("closed history unavailable")
+	}
+	return s.MemStore.List(q)
+}
+
+// Over a CachingStore, a hard backing error on the order-run history read must
+// stay an error. Kills: a cached read that turns it into a partial result of
+// the open rows the cache holds, which LastRun and Cursor would trust as
+// surviving rows — a cooldown clock from an open run, a cursor that replays
+// consumed events.
+func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "seq:3"}}); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStore(closedHistoryFailsStore{backing}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := ordersStoreOver(cache)
+	if got, err := store.LastRun("digest"); err == nil {
+		t.Fatalf("LastRun() = %s, nil; a hard backing error was answered from the cache's open rows", got)
+	}
+	if got := store.Cursor("digest"); got != 0 {
+		t.Fatalf("Cursor() = %d, want 0 (unread); a hard backing error was answered from the cache's open rows", got)
 	}
 }

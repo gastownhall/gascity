@@ -68,11 +68,12 @@ package main
 //
 // # The identity set is the whole ballgame
 //
-// The assigned-work gate probes session.AssigneeIdentities, NOT the narrow
-// {ID, session_name, configured_named_identity} set. Pool polecat aliases are
-// first-class assignment identities: an agent that claimed work as "nux" holds
-// it under an identifier the narrow set cannot see, so a narrow probe would
-// report "no assigned work" for a busy agent and authorize killing it.
+// The assigned-work gate probes session.AssigneeIdentities, NOT the narrower
+// config-aware set (sessionAssignmentIdentifiersForConfigInfo). That set honors
+// a session's current stable alias ("nux") but drops a rebinding pool-slot alias
+// and every prior alias in alias_history; an agent that claimed work under one
+// of those holds it under an identifier the narrow set cannot see, so a narrow
+// probe would report "no assigned work" for a busy agent and authorize killing it.
 //
 // The drain-ack CLOSE gate deliberately does NOT adopt this wide set. A
 // transient pool SLOT alias ("gascity/gc.run-operator-1") is a rebinding chair
@@ -98,6 +99,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -163,10 +165,11 @@ const (
 // alias_history), unioned with the configured-named-session fallback the other
 // reconciler gates resolve from config.
 //
-// Deliberately wider than sessionAssignmentIdentifiersForConfigInfo, which stops
-// at {ID, session_name, configured_named_identity} and therefore cannot see work
-// claimed under a pool alias. Being a superset it can only ever find MORE work,
-// so it can only refuse more kills and more closes — never authorize either.
+// Deliberately wider than sessionAssignmentIdentifiersForConfigInfo, which
+// honors only the current stable alias and therefore cannot see work claimed
+// under a rebinding pool-slot alias or a prior alias. Being a superset it can
+// only ever find MORE work, so it can only refuse more kills and more closes —
+// never authorize either.
 func drainAckAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []string {
 	configured := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	wide := sessionpkg.AssigneeIdentities(info)
@@ -194,10 +197,7 @@ func sessionHasOpenAssignedWorkForEscalation(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
-	identifiers := drainAckAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, drainAckAssigneeIdentities(info, cfg))
 }
 
 // drainAckEscalationDue reports whether a wedged row has exceeded its bound, and
@@ -292,9 +292,12 @@ func recordDrainAckEscalationAttempt(store beads.Store, bead beads.Bead, now tim
 //
 // Unreadable activity HOLDS, matching drainReminderQuietHold's #312 rule that
 // "we cannot tell" is never "idle" — the more so here, where the action is
-// destructive rather than informational.
+// destructive rather than informational. An attachment probe that cannot tell
+// holds for the same reason.
 func drainAckEscalationQuietHold(sp runtime.Provider, name string, now time.Time) (string, bool) {
-	if sp.IsAttached(name) {
+	if attached, err := attachmentHolds(sp, name); err != nil {
+		return "attach_unknown", true
+	} else if attached {
 		return "attached", true
 	}
 	activity, err := sp.GetLastActivity(name)
@@ -340,6 +343,7 @@ func escalateWedgedDrainAckStopPending(
 	tracker *asyncStartTracker,
 	clk clock.Clock,
 	rec events.Recorder,
+	dt *drainTracker,
 	stderr io.Writer,
 ) bool {
 	if sp == nil || store == nil || clk == nil {
@@ -378,12 +382,18 @@ func escalateWedgedDrainAckStopPending(
 	}
 
 	// Gate 3 — the token fence (mirrors verifiedStop and the async stop path).
-	// Cheap, and ahead of the work fan-out on purpose. Only a DEFINITE mismatch
-	// refuses: an empty expected or live token means "cannot verify" and falls
-	// through, matching the conservative posture of the sibling fences.
+	// Cheap, and ahead of the work fan-out on purpose. A DEFINITE mismatch
+	// refuses, and so does a token that cannot be read. An empty expected
+	// token, or a live token confirmed unset, falls through, matching the
+	// conservative posture of the sibling fences.
 	if expected := strings.TrimSpace(info.InstanceToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && strings.TrimSpace(actual) != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "%s: %s skipped: instance token mismatch (session was replaced)\n", drainAckEscalationLabel, name) //nolint:errcheck
+			return false
+		case runtimeTokenUnverifiable:
+			logStandingCondition(dt, stderr, info.ID, "token_unverifiable.escalation", fmt.Sprintf(
+				"%s: %s skipped: instance token unverifiable (token_unverifiable): %v", drainAckEscalationLabel, name, err), clk.Now())
 			return false
 		}
 	}
@@ -498,12 +508,30 @@ func queueDrainAckForcedTermination(
 			}
 			done()
 		}()
+		// The whole escalation, its process-table kill included, runs under one
+		// runtime lease, released before the poke. A busy lease means another
+		// holder is starting or stopping this runtime: escalate nothing, and let
+		// a later tick decide again.
+		ctx, release, err := controllerStopLease(store, cityPath, name, sessionID, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %s deferred: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
+			return
+		}
+		defer release()
+		// Decide again under the lease, on a fresh read, before any kill (the
+		// process-table kill included): see queueDrainAckAsyncStop.
+		ctx = drainAckStopPremise(ctx, store, sessionID, info.Generation, expectedToken)
+		if !drainAckStopStillPending(store, sessionID, info.Generation, expectedToken) {
+			fmt.Fprintf(stderr, "%s: %s skipped: the row is no longer stop-pending at its generation and token\n", drainAckEscalationLabel, name) //nolint:errcheck
+			return
+		}
 		// Try the ordinary provider stop once more first: it is the cheap path and
 		// it is what a merely-slow pane needs.
-		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+		if err := controllerKillRowCtx(ctx, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "%s: stopping %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		}
-		if confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
+		if confirmDrainAckRuntimeDead(ctx, cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
+			release()
 			recordDrainAckEscalation(cfg, info, name, reason, "stopped_without_force", attempt, rec)
 			// The caller suppresses its ordinary stop on a true return, so this
 			// goroutine also owns that stop's poke: the runtime is gone but the
@@ -513,14 +541,19 @@ func queueDrainAckForcedTermination(
 			// removed, on the rows this pass exists to rescue. Best-effort and
 			// deliberately unlogged, for the stderr-race reason documented on
 			// queueDrainAckAsyncStop's poke.
-			_ = poke(cityPath)
+			_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
 			return
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
+		if !drainAckStopStillPending(store, sessionID, info.Generation, expectedToken) {
+			fmt.Fprintf(stderr, "%s: %s skipped its process kill: the row is no longer stop-pending at its generation and token\n", drainAckEscalationLabel, name) //nolint:errcheck
+			return
+		}
 		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, now, stderr)
+		release()
 		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
-		_ = poke(cityPath)
+		_ = poke(cityPath, reconcilekey.SessionRef(sessionID, name))
 	}()
 }
 
@@ -545,7 +578,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	now time.Time,
 	stderr io.Writer,
 ) string {
-	scanner, ok := sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(sp)
 	if !ok {
 		fmt.Fprintf(stderr, "%s: %s survived its stop and the provider cannot scan the process table; slot stays occupied\n", //nolint:errcheck
 			drainAckEscalationLabel, name)
@@ -555,9 +588,13 @@ func terminateDrainAckRuntimeByProcessTable(
 	// stop and its confirm loop have just spent seconds, and a replacement may
 	// have taken the name in the meantime.
 	if expected := strings.TrimSpace(expectedToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && strings.TrimSpace(actual) != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "%s: %s force-terminate skipped: instance token mismatch (session was replaced)\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return "token_mismatch"
+		case runtimeTokenUnverifiable:
+			fmt.Fprintf(stderr, "%s: %s force-terminate skipped: instance token unverifiable: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
+			return "token_unverifiable"
 		}
 	}
 	// Re-check the quiet hold too, for the same reason and against the same

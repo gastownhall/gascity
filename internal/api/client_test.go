@@ -887,6 +887,7 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 	var gotBody struct {
 		Message string `json:"message"`
 		Intent  string `json:"intent"`
+		Resume  bool   `json:"resume"`
 	}
 	var sawPost bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -928,6 +929,10 @@ func TestClientSubmitSessionWaitsForResultEvent(t *testing.T) {
 	}
 	if gotBody.Intent != string(session.SubmitIntentInterruptNow) {
 		t.Fatalf("intent = %q, want %q", gotBody.Intent, session.SubmitIntentInterruptNow)
+	}
+	// `gc session submit` is an operator's own send (CONTRACT v5.9 D8).
+	if !gotBody.Resume {
+		t.Fatal("resume = false, want gc session submit to resume a held session")
 	}
 	if resp.Status != "accepted" || resp.ID != "sess-123" || !resp.Queued || resp.Intent != session.SubmitIntentInterruptNow {
 		t.Fatalf("response = %#v, want accepted queued interrupt_now for sess-123", resp)

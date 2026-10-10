@@ -71,12 +71,13 @@ type idleProbeState struct {
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
 	mu               sync.Mutex
-	drains           map[string]*drainState     // session bead ID -> drain state
-	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
-	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
-	zombieCrashes    map[string]bool            // session bead ID -> zombie-process session.crashed event emitted
-	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
-	liveClaimVetoes  map[string]string          // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
+	drains           map[string]*drainState          // session bead ID -> drain state
+	idleProbes       map[string]*idleProbeState      // session bead ID -> async idle probe
+	resetStalls      map[string]bool                 // session bead ID -> reset stall event emitted
+	zombieCrashes    map[string]bool                 // session bead ID -> zombie-process session.crashed event emitted
+	suspendDeferrals map[string]int                  // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	liveClaimVetoes  map[string]string               // session bead ID -> claimed work bead ID whose live claim last vetoed a demand-class drain (log-once dedupe)
+	drainSkips       map[drainSkipKey]*drainSkipMark // session bead ID + condition kind -> last printed line (log-on-transition dedupe; session_drain_skip_log.go)
 	idleProbeCursor  int
 }
 

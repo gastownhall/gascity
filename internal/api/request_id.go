@@ -117,10 +117,13 @@ func (s *Server) emitSessionCreateFailed(requestID, errorCode, errorMessage stri
 }
 
 // emitSessionMessageSucceeded records a request.result.session.message event.
-func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string) {
+func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome) {
 	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
-		RequestID: requestID,
-		SessionID: sessionID,
+		RequestID:          requestID,
+		SessionID:          sessionID,
+		Queued:             out.Queued,
+		WillStart:          out.willStart,
+		WillNotStartReason: out.willNotStartReason,
 	})
 }
 
@@ -130,12 +133,14 @@ func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage str
 }
 
 // emitSessionSubmitSucceeded records a request.result.session.submit event.
-func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, queued bool, intent string) {
+func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string) {
 	s.emitAsyncResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
-		RequestID: requestID,
-		SessionID: sessionID,
-		Queued:    queued,
-		Intent:    intent,
+		RequestID:          requestID,
+		SessionID:          sessionID,
+		Queued:             out.Queued,
+		Intent:             intent,
+		WillStart:          out.willStart,
+		WillNotStartReason: out.willNotStartReason,
 	})
 }
 

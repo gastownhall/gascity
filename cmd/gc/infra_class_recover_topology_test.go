@@ -642,34 +642,64 @@ func TestStorageRecoverStrandedVerifiesRestoredEdgePayloads(t *testing.T) {
 // proof lost too. verifyInfraCopy on the migration path re-reads source.DepList
 // independently, and this stage now holds itself to the same standard.
 //
-// Red-before, on the stage that compared against the cached read:
+// The batched leg is the same standard on the read ga-50tsx moved the walk to:
+// the prefetch answers every anchor in one read, and a proof read off that same
+// answer is the self-referential proof again. The source there carries the
+// stranded mail's chain as well, so the first batch answers SOMETHING and is
+// kept rather than set aside for the per-bead walk.
+//
+// Red-before, on the stage that compared against the cached read (and, for the
+// batched leg, on the stage that compared against the prefetched answer):
 //
 //	the run reported "verified: 1 bead(s) re-read field-, class- and dep-equal"
 //	and exited 0 while the source's own second read names an edge the binding
 //	does not hold
 func TestStorageRecoverStrandedVerifiesEdgesAgainstAFreshSourceRead(t *testing.T) {
-	cityPath, cfg, source, target := convergedRecoveryCity(t)
-	tracker := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
-	follow := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
-	before := manifestIDs(t, target)
+	for _, leg := range []struct {
+		name string
+		// chain seeds the stranded mail's edges as well.
+		chain bool
+		// losing wraps the source so its first read of id's edges answers none
+		// and every read after it answers later.
+		losing func(source beads.Store, id string, later []beads.Dep) beads.Store
+	}{
+		{
+			name: "one bead at a time",
+			losing: func(source beads.Store, id string, later []beads.Dep) beads.Store {
+				return divergentSecondReadSource{Store: source, id: id, seen: map[string]int{}, later: later}
+			},
+		},
+		{
+			name:  "batched",
+			chain: true,
+			losing: func(source beads.Store, id string, later []beads.Dep) beads.Store {
+				return &divergentSecondBatchSource{Store: source, id: id, later: later}
+			},
+		},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			cityPath, cfg, source, target := convergedRecoveryCity(t)
+			if leg.chain {
+				strandedMessageBeads(t, source)
+			}
+			tracker := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
+			follow := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
+			before := manifestIDs(t, target)
 
-	swapRecoverySource(t, divergentSecondReadSource{
-		Store: source,
-		id:    follow.ID,
-		seen:  map[string]int{},
-		later: []beads.Dep{{IssueID: follow.ID, DependsOnID: tracker.ID, Type: "blocks"}},
-	})
+			swapRecoverySource(t, leg.losing(source, follow.ID, []beads.Dep{{IssueID: follow.ID, DependsOnID: tracker.ID, Type: "blocks"}}))
 
-	var stdout, stderr bytes.Buffer
-	code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("the run reported success while the source's own second read names an edge the binding does not hold: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "dep "+follow.ID+" -> "+tracker.ID) {
-		t.Errorf("the refusal does not name the edge the second read found: %q", stderr.String())
-	}
-	if got := manifestIDs(t, target); !slices.Equal(got, before) {
-		t.Errorf("the manifest was extended over an unproven topology: %v -> %v", before, got)
+			var stdout, stderr bytes.Buffer
+			code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("the run reported success while the source's own second read names an edge the binding does not hold: %s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "dep "+follow.ID+" -> "+tracker.ID) {
+				t.Errorf("the refusal does not name the edge the second read found: %q", stderr.String())
+			}
+			if got := manifestIDs(t, target); !slices.Equal(got, before) {
+				t.Errorf("the manifest was extended over an unproven topology: %v -> %v", before, got)
+			}
+		})
 	}
 }
 

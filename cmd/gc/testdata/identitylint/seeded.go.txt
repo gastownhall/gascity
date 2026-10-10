@@ -1,0 +1,25 @@
+package main
+
+// A seeded violation of the identity lint (TestIdentityLintBansDirectEnvReads):
+// one finding per line below.
+
+func seeded(leaf runtime.Provider, rt runtimeIdentity, row session.Info) {
+	_, _ = leaf.GetMeta("x", "GC_INSTANCE_TOKEN")
+	_, _ = leaf.GetMeta("x", "GC_SESSION_ID")
+	_, _ = leaf.GetMeta("x", "GC_RUNTIME_EPOCH")
+	_, _ = strconv.Atoi(rt.Epoch)
+	_, _ = strconv.ParseInt(strings.TrimSpace(rt.Epoch), 10, 64)
+	_ = obs.OwnerState
+	_ = rt.SessionID == row.ID
+	_ = rt.Token != row.InstanceToken
+	_ = rt.Token == "" // an emptiness check: allowed
+	_ = strings.TrimSpace(rt.Token) == row.InstanceToken
+	_ = strings.EqualFold(rt.Token, row.InstanceToken)
+	switch rt.SessionID {
+	case row.ID:
+	}
+	_ = attributePendingCreateRuntime(row)
+}
+
+// identityEnvKeys passes in the identity reader's file only.
+var identityEnvKeys = [...]string{"GC_SESSION_ID"}

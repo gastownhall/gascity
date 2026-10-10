@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Documentation
-    url: https://github.com/gastownhall/gascity/tree/main/docs
-    about: Start with installation, quickstart, contributor guides, and architecture docs.
+    url: https://docs.gascityhall.com
+    about: Start with installation, quickstart, tutorials, and guides.
+  - name: Contributing
+    url: https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md
+    about: Read how issues and pull requests work here, and when an issue is worth filing first.
   - name: Support Policy
     url: https://github.com/gastownhall/gascity/blob/main/SUPPORT.md
     about: Read how to route bugs, docs issues, feature requests, and security reports.

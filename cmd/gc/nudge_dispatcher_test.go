@@ -235,7 +235,7 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
@@ -276,6 +276,66 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
 		t.Fatalf("queue not drained: pending=%d inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession: while a
+// `gc session kill` is tearing the runtime down, a queued nudge must stay
+// queued instead of being typed into the dying process and acked.
+func TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := store.SetMetadataBatch(info.ID, session.KillPendingPatch(time.Now())); err != nil {
+		t.Fatalf("writing kill fence: %v", err)
+	}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(store.Store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store.Store, store.Store, fake, snapshot, nil)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d, want 0 while the kill is in flight", delivered)
+	}
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			t.Fatalf("nudge typed into a runtime being killed: %q", call.Message)
+		}
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue = pending %d, inFlight %d, dead %d; want the nudge still pending", len(pending), len(inFlight), len(dead))
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := state.DispatchSkips["kill-pending"]; got != 1 {
+		t.Fatalf("DispatchSkips[kill-pending] = %d, want 1 (full map: %#v)", got, state.DispatchSkips)
 	}
 }
 
@@ -577,7 +637,7 @@ func TestMaybeStartNudgePollerSkipsInSupervisorModeWhenControllerConfirmsHosting
 	nudgeDispatcherActive.Store(true)
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, nil, nil, nil, nil, nil, nudgeDispatcherActive)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, nil, nil, nil, nil, nudgeDispatcherActive)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -655,7 +715,7 @@ func TestNudgeDispatcherOwnsDelivery(t *testing.T) {
 	nudgeDispatcherActive.Store(true)
 	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, nil, nil, nil, nil, nil, nudgeDispatcherActive)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, nil, nil, nil, nil, nudgeDispatcherActive)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
