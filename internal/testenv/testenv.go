@@ -61,6 +61,23 @@
 // store traced back to test clients reaching the local server on port 3307
 // (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
 // (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
+//
+// Hermetic git template: in go-test mode init() also points GIT_TEMPLATE_DIR
+// at a template directory holding a config with maintenance.auto=false, an
+// empty hooks/ and an empty info/exclude, replacing any ambient
+// GIT_TEMPLATE_DIR (which beats init.templateDir). Every repo this binary or a
+// child it spawns makes with git init or git clone then starts with git's
+// detached auto-maintenance off. Git 2.55 starts that daemon after commit,
+// merge, am, fetch and pull, and it races t.TempDir's RemoveAll ("directory not
+// empty", ga-zoe1wr). The template lives in $TEST_TMPDIR when Bazel sets it,
+// else os.TempDir(), named for the owner's uid and a digest of its contents.
+// Git copies a template's hooks/ into every repo it makes, so an existing
+// template is verified against what init() writes (entry by entry, content
+// byte for byte, and on unix owner and mode) before it is used, and one that
+// differs makes init() panic naming the directory to remove. Testscript
+// subcommand mode is left alone, as above. Code that builds a child env from
+// scratch must carry GIT_TEMPLATE_DIR into it, or the repos that child makes
+// lose the guard.
 package testenv
 
 import (
@@ -349,4 +366,5 @@ func init() {
 			_ = os.Unsetenv(name)
 		}
 	}
+	seedGitTemplate()
 }

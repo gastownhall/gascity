@@ -62,6 +62,10 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		// runner's real global config, which has no beads.role, so `gc doctor`
 		// failed its beads-role check on any host that had never opted in.
 		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+		// internal/testenv points this at a template whose config turns off git's
+		// detached auto-maintenance; the child carries it so the repos it creates
+		// with git init or git clone have that off too (ga-zoe1wr).
+		"GIT_TEMPLATE_DIR",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
