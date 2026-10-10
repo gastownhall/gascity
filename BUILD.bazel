@@ -572,6 +572,7 @@ filegroup(
         "//tools/nogo/analyzers/unconvert:bazel_repo_srcs",
         "//tools/nogo/analyzers/unparam:bazel_repo_srcs",
         "//tools/nogo/analyzers/unused:bazel_repo_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_repo_srcs",
         ":go.mod",
         ":Makefile",
         ":TESTING.md",
@@ -824,6 +825,7 @@ filegroup(
         "//tools/nogo/analyzers/unconvert:bazel_go_srcs",
         "//tools/nogo/analyzers/unparam:bazel_go_srcs",
         "//tools/nogo/analyzers/unused:bazel_go_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_go_srcs",
         ":schemas_embed.go",
     ],
     visibility = ["//visibility:public"],
@@ -1073,6 +1075,7 @@ filegroup(
         "//tools/nogo/analyzers/unconvert:bazel_go_test_srcs",
         "//tools/nogo/analyzers/unparam:bazel_go_test_srcs",
         "//tools/nogo/analyzers/unused:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_go_test_srcs",
     ],
     visibility = ["//visibility:public"],
 )
