@@ -478,7 +478,7 @@ GitHubPRMonitor declares how one repository/base-branch set is monitored and whe
 | `rig` | string | **yes** |  | Rig is the Gas City rig that owns repair work for this repository. |
 | `notify` | []string |  |  | Notify lists session or mail recipients for readiness notifications. |
 | `repair_route` | string | **yes** |  | RepairRoute is the operator-supplied route target for repair work. |
-| `repair_workflow` | string |  |  | RepairWorkflow is the formula attached to repair beads created for this monitor. Empty defaults to the standard polecat repair workflow so routed repair work carries the branch/test/push/refinery steps instead of sitting as a raw routed task. |
+| `repair_workflow` | string |  |  | RepairWorkflow is the formula attached to repair beads created for this monitor, so routed repair work carries the pack's repair steps instead of sitting as a raw routed task. Empty attaches no workflow: the repair bead is still created and routed to repair_route. The formula must resolve from the rig's formula layers (for example, one shipped by an imported pack). |
 | `webhook_secret_env` | string |  |  | WebhookSecretEnv is the environment variable containing the webhook HMAC secret. The secret value itself must not be stored in city.toml. |
 | `webhook_secret_key` | string |  |  | WebhookSecretKey is an optional stable key for identifying the webhook secret during rotation. When omitted, WebhookSecretEnv is the key. |
 | `poll_interval` | string |  |  | PollInterval optionally enables bounded polling/backfill cadence. |

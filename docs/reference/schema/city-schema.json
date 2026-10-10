@@ -1760,7 +1760,7 @@
         },
         "repair_workflow": {
           "type": "string",
-          "description": "RepairWorkflow is the formula attached to repair beads created for this\nmonitor. Empty defaults to the standard polecat repair workflow so routed\nrepair work carries the branch/test/push/refinery steps instead of\nsitting as a raw routed task."
+          "description": "RepairWorkflow is the formula attached to repair beads created for this\nmonitor, so routed repair work carries the pack's repair steps instead of\nsitting as a raw routed task. Empty attaches no workflow: the repair bead\nis still created and routed to repair_route. The formula must resolve\nfrom the rig's formula layers (for example, one shipped by an imported\npack)."
         },
         "webhook_secret_env": {
           "type": "string",
