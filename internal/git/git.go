@@ -207,8 +207,24 @@ func (g *Git) HasUnpushedCommits() bool {
 
 // HasUnpushedCommitsResult is like HasUnpushedCommits but preserves git
 // probe errors for callers that need to expose the precise failure reason.
+//
+// Only remotes that can genuinely publish work off this repository count as
+// having received it (see PublishableRemotes). A remote pointing back at this
+// same repository still creates refs/remotes/<name>/* entries, so consulting
+// every remote-tracking ref — the plain `--remotes` this probe used to pass —
+// reported work as pushed that had never left the host, and callers gating
+// worktree removal on the answer deleted it (gas-9sg). With no publishable
+// remote at all, nothing is published and every commit reads as unpushed.
 func (g *Git) HasUnpushedCommitsResult() (bool, error) {
-	out, err := g.run("log", "HEAD", "--oneline", "--not", "--remotes")
+	remotes, err := g.PublishableRemotes()
+	if err != nil {
+		return false, fmt.Errorf("checking unpushed commits: %w", err)
+	}
+	args := []string{"log", "HEAD", "--oneline", "--not"}
+	for _, name := range remotes {
+		args = append(args, "--remotes="+name)
+	}
+	out, err := g.run(args...)
 	if err != nil {
 		return false, fmt.Errorf("checking unpushed commits: %w", err)
 	}
