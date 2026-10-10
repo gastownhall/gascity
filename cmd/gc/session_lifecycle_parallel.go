@@ -2434,7 +2434,7 @@ func startPreparedStartCandidate(
 				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, cfg, &raw, item.cfg.Nudge, warmClaim)
 					}
 				}
 				return false, nil

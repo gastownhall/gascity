@@ -310,3 +310,155 @@ func TestNudgeStalledPoolClaims_SkipsNonPool(t *testing.T) {
 		t.Fatalf("non-pool marker trigger = %q, want empty", got)
 	}
 }
+
+// idleClaimCollapsedSingletonCfg is the shape sr-xjbo2 is about: an agent that
+// is a canonical-singleton pool (max_active_sessions = 1, no namepool) AND is
+// declared as a configured named session, so poolRuntimeSessionName steps its
+// slot aside onto the "-pool" runtime name rather than landing on the name the
+// named session reserves.
+func idleClaimCollapsedSingletonCfg() *config.City {
+	maxOne := 1
+	return &config.City{
+		Agents: []config.Agent{{
+			Name:              "agent-a",
+			MaxActiveSessions: &maxOne,
+			Nudge:             "Run gc hook --claim --json now; if it returns work, execute it immediately.",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "agent-a"}},
+	}
+}
+
+// idleClaimCollapsedSingletonSession is that slot AFTER buildDesiredState
+// collapsed its phantom pool identity onto the named identity: pool_managed is
+// cleared and session_origin flips to "named", but the bead keeps the runtime
+// name the pool path minted for it.
+func idleClaimCollapsedSingletonSession() beads.Bead {
+	return beads.Bead{
+		ID:     "session-bead-a",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"session_name":             "agent-a-pool",
+			"pool_managed":             "",
+			"session_origin":           "named",
+			"configured_named_session": "true",
+			"template":                 "agent-a",
+			testTriggerBeadIDKey:       "work-a",
+		},
+	}
+}
+
+// A collapsed canonical-singleton pool slot is still a pool slot — it wears the
+// pool path's own step-aside name — so the claim backstop must keep rescuing it
+// when its trigger bead goes unclaimed. Gating on the raw pool_managed value
+// drops exactly the shape gascity#6933 made legal, leaving such a seat with no
+// claim-retry path at all once it stops being killed and recreated.
+func TestNudgeStalledPoolClaims_NudgesCollapsedSingletonPoolSlot(t *testing.T) {
+	sp := runningIdleClaimFake(t, "agent-a-pool")
+	cfg := idleClaimCollapsedSingletonCfg()
+	session := idleClaimCollapsedSingletonSession()
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeTriggerKey]; got != "work-a" {
+		t.Fatalf("idle claim marker trigger = %q, want work-a", got)
+	}
+
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	if got := sp.CountCalls("Nudge", "agent-a-pool"); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1 after grace", got)
+	}
+}
+
+// The step-aside carve-out must not widen the backstop to ordinary named
+// sessions: one that was never a pool slot wears the reserved runtime name, not
+// the "-pool" one, and has no business in the pool claim backstop.
+func TestNudgeStalledPoolClaims_IgnoresPlainNamedSession(t *testing.T) {
+	sp := runningIdleClaimFake(t, "agent-a")
+	cfg := idleClaimCollapsedSingletonCfg()
+	session := idleClaimCollapsedSingletonSession()
+	session.Metadata["session_name"] = "agent-a"
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+
+	if got := sp.CountCalls("Nudge", "agent-a"); got != 0 {
+		t.Fatalf("Nudge calls = %d, want 0 for a plain named session", got)
+	}
+}
+
+// The city-scoped fixtures above keep the mechanics readable, but the shape this
+// exists for is a RIG-SCOPED, pack-bound agent: dir "st", binding "support",
+// identity "st/support.intake-poller", runtime name "st--support__intake-poller",
+// step-aside "st--support__intake-poller-pool". That runs the identity through
+// Agent.QualifiedName, NamedSession.QualifiedName, NamedSessionRuntimeName and
+// SanitizeQualifiedNameForSession, none of which the bare "agent-a" fixture
+// exercises. The session_name is taken from poolRuntimeSessionName itself so the
+// test cannot drift away from the derivation the production code uses.
+func TestNudgeStalledPoolClaims_NudgesRigScopedCollapsedSingletonPoolSlot(t *testing.T) {
+	maxOne := 1
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "intake-poller",
+			BindingName:       "support",
+			Dir:               "st",
+			MaxActiveSessions: &maxOne,
+			Nudge:             "Run gc hook --claim --json now; if it returns work, execute it immediately.",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "intake-poller",
+			BindingName: "support",
+			Dir:         "st",
+			Scope:       "rig",
+		}},
+	}
+	identity := cfg.Agents[0].QualifiedName()
+	if identity != "st/support.intake-poller" {
+		t.Fatalf("precondition: agent identity = %q, want st/support.intake-poller", identity)
+	}
+	sessionName := poolRuntimeSessionName(cfg, identity, identity, false)
+	if sessionName != "st--support__intake-poller-pool" {
+		t.Fatalf("precondition: step-aside name = %q, want st--support__intake-poller-pool", sessionName)
+	}
+
+	sp := runningIdleClaimFake(t, sessionName)
+	session := beads.Bead{
+		ID:     "session-bead-poller",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"session_name":             sessionName,
+			"pool_managed":             "",
+			"session_origin":           "named",
+			"configured_named_session": "true",
+			"template":                 identity,
+			testTriggerBeadIDKey:       "work-a",
+		},
+	}
+	work := []beads.Bead{{ID: "work-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	session = mustGetTestBead(t, store, session.ID)
+	if got := session.Metadata[idleClaimNudgeTriggerKey]; got != "work-a" {
+		t.Fatalf("idle claim marker trigger = %q, want work-a", got)
+	}
+
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), &out)
+	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
+		t.Fatalf("Nudge calls = %d, want 1 after grace", got)
+	}
+}
