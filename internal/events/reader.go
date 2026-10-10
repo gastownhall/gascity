@@ -589,16 +589,42 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat events tail: %w", err)
 	}
-	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+	return readFilteredTailFrom(f, info.Size(), filter, limit)
 }
 
-func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
+// belowFilterFloor reports whether e sits at or below the filter's own lower
+// bound, so no event beneath it can match either.
+//
+// Only AfterSeq qualifies. FileRecorder assigns e.Seq = r.seq++ inside one
+// mutex-and-flock critical section, so the active log is append-only and
+// strictly increasing in seq; activeScanStart already skips the log's head on
+// exactly that basis. A line carrying no seq unmarshals as zero and says
+// nothing about its neighbors, so it is left to matchesFilter.
+//
+// Filter.Since deliberately does NOT terminate the walk. writeRecordLocked
+// preserves a caller-supplied Ts and only defaults a zero one, so event
+// timestamps are not monotonic in the log and an event older than Since says
+// nothing about the events beneath it (TestReadFilteredTailScansBackwardsAcrossChunks
+// pins that tolerance).
+func belowFilterFloor(e Event, f Filter) bool {
+	return f.AfterSeq > 0 && e.Seq > 0 && e.Seq <= f.AfterSeq
+}
+
+func readFilteredTailFrom(r io.ReaderAt, size int64, filter Filter, limit int) ([]Event, error) {
 	if size <= 0 {
 		return nil, nil
 	}
 	const chunkSize int64 = 64 * 1024
 	var reversed []Event
 	var pending []byte
+	// The floor ends the walk only once two lines in a row sit at or below it.
+	// A log that contradicts its seq ordering (a stale post-rotation writer
+	// appending below the file's head) puts a matchable line underneath a
+	// below-floor one, and honoring the floor there would drop events
+	// ReadFiltered returns; abandoning it costs the walk its early stop
+	// instead. Like activeScanStart's head-and-tail check this is partial by
+	// construction: it cannot see a disordered run that ends above the cursor.
+	floorSeen, floorVoid, atFloor := false, false, false
 	end := size
 	for end > 0 && len(reversed) < limit && (filter.MaxScanBytes <= 0 || size-end < filter.MaxScanBytes) {
 		n := chunkSize
@@ -618,7 +644,7 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		}
 		start := end - n
 		chunk := make([]byte, n)
-		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
+		if _, err := r.ReadAt(chunk, start); err != nil && err != io.EOF {
 			return nil, fmt.Errorf("reading events tail: %w", err)
 		}
 		data := make([]byte, 0, len(chunk)+len(pending))
@@ -641,9 +667,22 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 			if err := json.Unmarshal(line, &e); err != nil {
 				continue
 			}
+			if !floorVoid && belowFilterFloor(e, filter) {
+				if floorSeen {
+					atFloor = true
+					break
+				}
+				floorSeen = true
+			} else if floorSeen {
+				floorVoid = true
+				floorSeen = false
+			}
 			if matchesFilter(e, filter) {
 				reversed = append(reversed, e)
 			}
+		}
+		if atFloor {
+			break
 		}
 		end = start
 	}
