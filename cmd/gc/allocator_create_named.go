@@ -98,8 +98,9 @@ func (x *createEffects) createNamed(ctx context.Context, pass *createPass, p cre
 // runtime stamped (stampAdoptedRuntime)
 // with the epoch the row holds: a lost CAS leaves the runtime with no session
 // ID and a token that is not the row's, which the comparator reads as
-// Unknown. A failure or a panic is logged and leaves the landed create
-// landed.
+// Unknown. All of it runs under the runtime's lease, taken without waiting
+// (I-LEASE): a busy name stamps nothing. A failure or a panic is logged and
+// leaves the landed create landed.
 func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, written session.Info) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -109,12 +110,17 @@ func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, writte
 	if pass.sp == nil {
 		return
 	}
-	if err := adoptLiveStamp(pass.sp, pass.store, p.Named.SessionName, written); err != nil {
+	if err := adoptLiveStamp(pass.sp, pass.store, x.host.cityPath, p.Named.SessionName, written); err != nil {
 		x.logf("allocator: named session %q adopted as %s, identity not stamped: %v\n", p.Named.Identity, written.ID, err)
 	}
 }
 
-func adoptLiveStamp(sp runtime.Provider, store beads.Store, name string, written session.Info) error {
+func adoptLiveStamp(sp runtime.Provider, store beads.Store, cityPath, name string, written session.Info) error {
+	lease, release, err := tryRuntimeLease(store, cityPath, name, written.ID, session.RuntimeLeaseTTL(2*fenceProbeTimeout))
+	if err != nil {
+		return fmt.Errorf("the runtime's lease: %w", err)
+	}
+	defer release()
 	leaf, _, known := runtime.ResolveBackend(sp, name)
 	if !known {
 		return errors.New("the runtime's backend is unknown")
@@ -134,7 +140,7 @@ func adoptLiveStamp(sp runtime.Provider, store beads.Store, name string, written
 		minted = session.NewInstanceToken()
 		token = minted
 	}
-	generation, err := recordRowToken(store, written, token)
+	generation, err := recordRowToken(store, lease, written, token)
 	if err != nil {
 		return err
 	}
@@ -146,9 +152,10 @@ const rowTokenAttempts = 3
 
 // recordRowToken writes token as the written row's instance_token by CAS at
 // the revision a live read sees, retrying a lost CAS while the premise holds:
-// the row is open, at the generation the create wrote, and carries the token
-// the create wrote. It never writes blind. It returns the row's generation.
-func recordRowToken(store beads.Store, written session.Info, token string) (string, error) {
+// the row is open, at the generation the create wrote, carries the token the
+// create wrote, and holds lease's record. It never writes blind. It returns
+// the row's generation.
+func recordRowToken(store beads.Store, lease *session.RuntimeLease, written session.Info, token string) (string, error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	switch {
 	case err != nil:
@@ -166,6 +173,8 @@ func recordRowToken(store beads.Store, written session.Info, token string) (stri
 		switch {
 		case row.Status == "closed" || generation != written.Generation:
 			return "", errors.New("recording instance_token: the row moved on after the create")
+		case lease != nil && !lease.HoldsMeta(row.Metadata):
+			return "", errors.New("recording instance_token: the row no longer holds the runtime's lease")
 		case current == token:
 			return generation, nil
 		case current != written.InstanceToken:
