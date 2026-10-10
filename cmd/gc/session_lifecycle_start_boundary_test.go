@@ -352,3 +352,47 @@ func TestExecutePreparedStartWaveDefersUnavailableWithoutRollbackOrWakeFailure(t
 		})
 	}
 }
+
+// TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease: a
+// bead-less legacy start runs its runtime-only handle under the candidate's
+// lease (the name's flock the start already holds), instead of taking that
+// flock a second time and failing on itself. Without the candidate's lease,
+// a flock another holder has defers the controller's start at once.
+func TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease(t *testing.T) {
+	cityPath := t.TempDir()
+	const name = "worker-1"
+	item := func(lease *sessionpkg.RuntimeLease) preparedStart {
+		return preparedStart{
+			candidate: startCandidate{
+				info:  sessionpkg.Info{SessionName: name, SessionNameMetadata: name},
+				tp:    TemplateParams{TemplateName: "worker"},
+				lease: lease,
+			},
+			cfg: runtime.Config{Command: "claude", WorkDir: t.TempDir()},
+		}
+	}
+	lease, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
+	if err != nil {
+		t.Fatalf("taking the candidate's flock: %v", err)
+	}
+	sp := runtime.NewFake()
+	began := time.Now()
+	if _, err := startPreparedStartCandidate(context.Background(), item(lease), cityPath, nil, sp, &config.City{}, nil, nil, nil); err != nil {
+		t.Fatalf("start under the candidate's lease = %v, want started", err)
+	}
+	if sp.CountCalls("Start", name) != 1 || time.Since(began) > 2*time.Second {
+		t.Fatalf("provider Starts = %d after %v, want one at once", sp.CountCalls("Start", name), time.Since(began))
+	}
+	if err := sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	began = time.Now()
+	_, err = startPreparedStartCandidate(context.Background(), item(nil), cityPath, nil, sp, &config.City{}, nil, nil, nil)
+	if !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || errors.Is(err, sessionpkg.ErrSessionStarting) || time.Since(began) > 2*time.Second {
+		t.Fatalf("start without the lease under another holder's flock = %v after %v, want ErrRuntimeLeaseBusy at once", err, time.Since(began))
+	}
+	if sp.CountCalls("Start", name) != 1 {
+		t.Fatal("the refused start reached the provider")
+	}
+	release()
+}
