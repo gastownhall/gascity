@@ -85,10 +85,9 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 // provider command plus any provider-owned settings file without applying
 // schema-managed defaults or explicit option overrides.
 //
-// Deferred agent-session creation uses this helper because option state is
-// stored separately in template_overrides and applied later at actual start
-// time, but the stored base command must still match the selected transport
-// and provider-owned settings semantics.
+// This is the unexpanded transport command, including provider settings.
+// Deferred agent-session creation instead uses BuildProviderLaunchCommand
+// with nil overrides so its persisted baseline matches the resolved template.
 func BuildProviderLaunchCommandWithoutOptions(cityPath string, resolved *ResolvedProvider, transport string) (ProviderLaunchCommand, error) {
 	if resolved == nil {
 		return ProviderLaunchCommand{}, fmt.Errorf("resolved provider is nil")
