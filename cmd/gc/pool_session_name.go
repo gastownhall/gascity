@@ -122,12 +122,17 @@ func boundSessionNameLength(name string) string {
 // routed through the session front door. Returns the IDs of session beads
 // that were closed.
 func GCSweepSessionBeads(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info) []string {
+	return gcSweepSessionBeadsAt(cityPath, store, rigStores, sessionInfos, time.Now())
+}
+
+// gcSweepSessionBeadsAt is GCSweepSessionBeads stamping its closes at now.
+func gcSweepSessionBeadsAt(cityPath string, store beads.Store, rigStores map[string]beads.Store, sessionInfos []session.Info, now time.Time) []string {
 	var closed []string
 	for _, info := range sessionInfos {
 		if info.Closed {
 			continue
 		}
-		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionInfoIfUnassigned(cityPath, store, rigStores, nil, info, "gc_swept", now.UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)

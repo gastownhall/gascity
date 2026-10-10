@@ -166,6 +166,13 @@ func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
 	}
 }
 
+// ClearWakeRequestPatch drops a pending wake request (CONTRACT v5.7 D7). Its
+// consumers write it in the CAS that satisfies the request, and `gc session
+// suspend` and `gc session kill` in their own write, as newer operator intent.
+func ClearWakeRequestPatch() MetadataPatch {
+	return MetadataPatch{"wake_request": "", "wake_requested_at": ""}
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
@@ -425,15 +432,6 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 		"drain_at":     now.UTC().Format(time.RFC3339),
 	}
 }
-
-// Row-bound drain-ack keys (reconciler v2, CONTRACT D5). `gc runtime
-// drain-ack` writes them by CAS in a v2 city only: DrainAckIncarnationKey
-// holds the row's generation as the CLI read it, DrainAckAtKey the RFC 3339
-// time of the ack. v2's PreWake clears both; legacy reads neither.
-const (
-	DrainAckIncarnationKey = "drain_ack_incarnation"
-	DrainAckAtKey          = "drain_ack_at"
-)
 
 // DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
 // running asynchronously and waiting for controller finalization.

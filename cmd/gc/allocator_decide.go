@@ -156,7 +156,6 @@ type decidePass struct {
 	snap *selectionSnapshot
 	obs  map[rowKey]rowObservation
 
-	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
 	// C2.11, C2.13).
 	none map[rowKey]string
@@ -248,7 +247,6 @@ func newDecidePass(in allocInputs) *decidePass {
 		selected: make(map[rowKey]*selection),
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
-		p.sessionsLeg = c.Legs[0].Ref
 		p.obs = observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)
 	}
 	return p
@@ -327,7 +325,7 @@ func (p *decidePass) classifyRows() {
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
 		switch {
-		case k.Leg != p.sessionsLeg:
+		case k.Leg != c.sessionsLeg():
 			p.none[k] = reasonCensusOnly
 		case row.UnknownState:
 			p.none[k] = reasonUnknownState
@@ -565,7 +563,7 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "")
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "", explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,

@@ -228,27 +228,39 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 	liveHash := runtime.LiveFingerprint(templateParamsToConfig(tp))
 	meta := syncCreateMetadata(tp, plan.SessionName, plan.Identity, liveHash, state, p.Token, 0, now)
 	meta["alias"] = plan.Identity
-	if err := checkCreateContext(ctx); err != nil {
+	if err := prog.beginWrite(ctx); err != nil {
 		return session.Info{}, err
 	}
-	prog.writing = true
 	info, err := sessionFrontDoor(store).CreateSessionInfo(session.CreateSpec{Title: plan.Identity, AgentName: plan.Identity, Metadata: meta})
 	if err != nil {
 		return session.Info{}, poolCreateWriteError{err: fmt.Errorf("creating named session %q: %w", plan.Identity, err)}
 	}
-	return info, nil
+	return info, prog.afterWrite(ctx, info.ID)
 }
 
 // reopenNamed reopens closed, the identity's closed canonical row, with
-// legacy's reopen batch in one write, conditional on the revision the fenced
-// read saw. A store that resolves no conditional writer refuses at the write,
-// after the fence checks: legacy's last-writer-wins transaction is never a v2
-// write (v5 C2, R3). The
+// legacy's reopen batch in one write, conditional on the revision of a live
+// Get of the row under the identifier locks. The fenced read is a List, and a
+// store need not publish a revision on a List row (the native store's carry
+// none), so the reopen re-reads the row, as legacy's reopen does, and writes
+// only if it is still the identity's closed row for the plan's session name;
+// a row that moved on is no reopen. A store that resolves no conditional
+// writer refuses at the write, after the fence checks: legacy's
+// last-writer-wins transaction is never a v2 write (v5 C2, R3). The
 // settlement names the row whatever the outcome; settle reads a refused
 // write (a lost fence, a writer that cannot fence) as no write.
 func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
 	plan := p.Named
 	prog.retarget = closed.ID
+	current, err := live.Get(closed.ID)
+	if err != nil {
+		return session.Info{}, fmt.Errorf("re-reading configured named session %q row %s: %w", plan.Identity, closed.ID, err)
+	}
+	if _, still := session.ClosedNamedSessionBeadIn([]beads.Bead{current}, plan.SessionName); !still {
+		return session.Info{}, fmt.Errorf("configured named session %q: row %s is no longer its closed row for session %q (status %q)",
+			plan.Identity, closed.ID, plan.SessionName, current.Status)
+	}
+	closed = current
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, err)
@@ -262,20 +274,20 @@ func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *
 	open := "open"
 	opts := beads.UpdateOpts{Status: &open, Metadata: batch}
 	reopened, err := reopenClosedConfiguredNamedSessionBeadLocked(live, cfg, plan.Identity, plan.SessionName, closed, batch, func() error {
-		if err := checkCreateContext(ctx); err != nil {
-			return err
-		}
 		if writer == nil {
 			prog.stage = createStageNoWriter
 			return errNoConditionalWriter
 		}
-		prog.writing, prog.rowID = true, closed.ID
+		if err := prog.beginWrite(ctx); err != nil {
+			return err
+		}
+		prog.rowID = closed.ID
 		return writer.UpdateIfMatch(closed.ID, closed.Revision, opts)
 	})
 	var written reopenWriteError
 	switch {
 	case err == nil:
-		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, nil
+		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, prog.afterWrite(ctx, reopened.ID)
 	case !errors.As(err, &written) || errors.Is(err, errCreateAbandoned) || errors.Is(err, errNoConditionalWriter):
 		return session.Info{}, err
 	}

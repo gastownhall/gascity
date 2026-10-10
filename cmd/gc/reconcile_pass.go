@@ -124,7 +124,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	}
 	var unregistered []intent
 	if p.effects != nil {
-		intents, unregistered = splitRegistered(intents, p.creates != nil)
+		intents, unregistered = splitRegistered(&w, intents, p.creates != nil)
 	}
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
@@ -151,9 +151,10 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	return passResult{Next: next, Counts: counts}
 }
 
-// newAllocSummary is the summary a pass at now publishes for C8's steps. Any
-// census leg error makes it partial, a hard one on a rig leg included
-// (Census.Partial counts only partial reads), so the release fails closed.
+// newAllocSummary is the summary a pass at now publishes for C8's steps. A
+// census that is not complete (a leg error, a hard one on a rig leg
+// included; Census.Partial counts only partial reads) makes it partial, so
+// the release fails closed.
 func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	v := w.Demand
 	s := &allocSummary{
@@ -161,8 +162,8 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 		AssignedWork: v.AssignedWork, AssignedStores: v.AssignedStores, AssignedStoreRefs: v.AssignedStoreRefs,
 		ReadyAssigned: v.ReadyAssigned, ReadyRouted: a.ReadyRouted, ReadyRoutedRefs: a.ReadyRoutedRefs,
 	}
-	for _, l := range w.Census.Legs {
-		s.Partial = s.Partial || l.Err != nil
+	if _, ok := w.Census.complete(); !ok {
+		s.Partial = true
 	}
 	for _, row := range w.Census.Canonical() {
 		s.OpenSessions = append(s.OpenSessions, row.Info)
@@ -170,15 +171,32 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	return s
 }
 
+// Rests causes, a deferral before admission like causeNoEffect.
+const (
+	causeRestsUnread  = "rests-unread"  // rests on a fresh fact its kind does not read
+	causeRestsMissing = "rests-missing" // a fresh kind's intent that records no rest
+)
+
 // splitRegistered splits off the intents whose kind has no registered
 // effect yet, and the creates when no create runner is wired, deferred with
 // cause no-effect before admission, so they take no cap, no token and no
 // backoff: the row is traced and the arm stays visible until its effect
-// lands.
-func splitRegistered(intents []intent, creates bool) (registered, unregistered []intent) {
+// lands. So, with cause rests-unread or rests-missing, are the intents whose
+// rests do not match what their kind reads fresh on w (ruling (c)): an arm
+// that rests on a fresh fact proposes a fresh kind, and a fresh kind's arm
+// records the facts it rests on.
+func splitRegistered(w *World, intents []intent, creates bool) (registered, unregistered []intent) {
 	for _, it := range intents {
-		if effectRegistry[it.Kind] == nil || (it.Kind == intentCreate && !creates) {
+		spec := effectSpecs[it.Kind]
+		switch reads := spec.reads(w, it); {
+		case !spec.runs() || (it.Kind == intentCreate && !creates):
 			it.Cause = causeNoEffect
+		case it.Rests&^reads != 0:
+			it.Cause = causeRestsUnread
+		case reads != 0 && it.Rests == 0:
+			it.Cause = causeRestsMissing
+		}
+		if it.Cause != "" {
 			unregistered = append(unregistered, it)
 			continue
 		}
@@ -198,15 +216,15 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 		return
 	}
 	pass := newEffectPass(w, a)
-	pass.creates = p.creates
+	pass.Clock, pass.held.creates, pass.seam = p.clock, p.creates, p.seam
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
 		if it.Kind == intentCreate {
-			if pass.create == nil {
-				pass.create = newCreatePass(w)
+			if pass.held.create == nil {
+				pass.held.create = newCreatePass(w)
 			}
 			it.CreatePlan.Token = session.NewInstanceToken()
-			e = createInflightEntry(it, w.SessionsLeg)
+			e = createInflightEntry(it, w.Census.sessionsLeg())
 		}
 		seq := p.inflight.add(e)
 		if seq == 0 {

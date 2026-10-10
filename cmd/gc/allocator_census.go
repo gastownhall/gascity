@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,6 +77,16 @@ type sessionCensus struct {
 
 	canonical []rowKey            // first-leg-wins rows, in leg order then bead ID
 	byName    map[string][]rowKey // canonical rows by runtime session name
+}
+
+// sessionsLeg is the sessions leg's ref, the census's first leg, or "" when
+// there is none: the one leg v2 reconciles, every other leg's rows being
+// AL1's None(census-only).
+func (c *sessionCensus) sessionsLeg() string {
+	if c == nil || len(c.Legs) == 0 {
+		return ""
+	}
+	return c.Legs[0].Ref
 }
 
 // readSessionCensus takes one census over legs, which
@@ -176,7 +187,11 @@ func (c *sessionCensus) Canonical() []censusRow {
 }
 
 // Partial reports whether some leg's read was partial: its rows are what the
-// read returned, so the pass retains (causeStoreQueryPartial).
+// read returned, so the pass retains (causeStoreQueryPartial). This is the
+// decide's retention trigger, not an absence test: a hard error on a
+// non-sessions leg leaves a census that is not complete (complete), so
+// nothing reads its rows closed, but it does not retain the whole pass
+// (S1-2, S1-9: its rows are census-only relics).
 func (c *sessionCensus) Partial() bool {
 	for _, l := range c.Legs {
 		if beads.IsPartialResult(l.Err) {
@@ -184,6 +199,51 @@ func (c *sessionCensus) Partial() bool {
 		}
 	}
 	return false
+}
+
+// completeCensus is a census every leg of which read cleanly: the only one
+// that may read a row it does not hold as closed (EFFECT-STRUCTURE §2.2). On
+// a partial or failed leg read an absent row is unknown, so nothing forgets
+// it on that read's strength. Only complete makes one; its zero value
+// closes nothing.
+type completeCensus struct{ c *sessionCensus }
+
+// complete returns c as a completeCensus, false when c is nil or any leg
+// read erred, partially or hard.
+func (c *sessionCensus) complete() (completeCensus, bool) {
+	if c == nil {
+		return completeCensus{}, false
+	}
+	for _, l := range c.Legs {
+		if l.Err != nil {
+			return completeCensus{}, false
+		}
+	}
+	return completeCensus{c: c}, true
+}
+
+// Closed reports that the census holds no open row k on a leg it read: a
+// row on a leg the census did not plan (a suspended or unbound rig) is not
+// closed.
+func (c completeCensus) Closed(k rowKey) bool {
+	if c.c == nil || !slices.ContainsFunc(c.c.Legs, func(l censusLeg) bool { return l.Ref == k.Leg }) {
+		return false
+	}
+	_, open := c.c.Rows[k]
+	return !open
+}
+
+// ClosedID reports that the census holds no open row with bead id on any leg.
+func (c completeCensus) ClosedID(id string) bool {
+	if c.c == nil {
+		return false
+	}
+	for k := range c.c.Rows {
+		if k.ID == id {
+			return false
+		}
+	}
+	return true
 }
 
 // RowsNamed returns the canonical rows whose runtime session name is name.

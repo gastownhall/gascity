@@ -253,7 +253,7 @@ type autocloseSweepResult struct {
 // an open or gone row is dropped, and an unreadable one, or one whose
 // autoclose did not finish, is retried next pass.
 func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepResult {
-	if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+	if cs.storesQuiescent() {
 		// The city is suspended with nothing running: its stores are not
 		// touched until it resumes.
 		return autocloseSweepResult{}
@@ -277,6 +277,13 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 
 	var res autocloseSweepResult
 	for _, id := range sweep.due(now) {
+		if cs.storesQuiescent() {
+			// The city went quiescent mid-pass: leave the rest for after
+			// resume rather than restart the pairs it just retired.
+			res.Retried++
+			sweep.deferID(id, now)
+			continue
+		}
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
 		storeRef := cs.autocloseStoreRefLocked(id)

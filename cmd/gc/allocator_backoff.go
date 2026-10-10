@@ -114,9 +114,11 @@ func (t *backoffTable) Succeed(k string) {
 // stays bounded: a create record reserved under a ConfigRev other than
 // configRev (config is fixed per revision, so this also drops an identity
 // config no longer holds), a work record for a bead not in demand, and a row
-// record whose row the census rows no longer hold. Bead IDs hold no "/", so
-// a row key splits at its last one.
-func (t *backoffTable) Prune(configRev string, rows map[rowKey]censusRow, demand map[string]bool) {
+// record whose row census, when complete, holds closed; with no complete
+// census every row record stays. Bead IDs hold no "/", so a row key splits
+// at its last one.
+func (t *backoffTable) Prune(configRev string, census *sessionCensus, demand map[string]bool) {
+	complete, _ := census.complete()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for k, r := range t.recs {
@@ -124,8 +126,7 @@ func (t *backoffTable) Prune(configRev string, rows map[rowKey]censusRow, demand
 		switch kind, rest, _ := strings.Cut(k, ":"); kind {
 		case "row":
 			i := strings.LastIndex(rest, "/")
-			_, open := rows[rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]}]
-			drop = !open
+			drop = complete.Closed(rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]})
 		case "work":
 			drop = !demand[rest]
 		default: // create and named
@@ -138,6 +139,13 @@ func (t *backoffTable) Prune(configRev string, rows map[rowKey]censusRow, demand
 }
 
 // Snapshot returns a copy of every record: the pass's Backoff view.
+// Record is k's record, zero when it has none.
+func (t *backoffTable) Record(k string) backoffRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.recs[k]
+}
+
 func (t *backoffTable) Snapshot() map[string]backoffRecord {
 	t.mu.Lock()
 	defer t.mu.Unlock()

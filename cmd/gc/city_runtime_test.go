@@ -100,6 +100,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -143,6 +144,7 @@ func TestSweepUndesiredPoolSessionBeads_DefersWhenLivenessUnavailable(t *testing
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		&sweepUnavailableLivenessProvider{Fake: runtime.NewFake()},
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 while runtime liveness is unavailable", closed)
@@ -283,6 +285,38 @@ func TestPoolSweepWouldDrain(t *testing.T) {
 	}
 }
 
+// Kills a sweep that reads the wall clock: a pending create the injected
+// clock still leases, a creating row it does not yet call stale, and a
+// just-started row it still protects are spared, and the close stamps the
+// injected clock's time.
+func TestSweepUndesiredPoolSessionBeads_StampsItsClock(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)}
+	row := func(name string, meta ...string) beads.Bead {
+		m := map[string]string{"session_name": name, "template": "worker", "agent_name": "worker", "pool_slot": "1", poolManagedMetadataKey: boolMetadata(true), "state": "asleep"}
+		for i := 0; i+1 < len(meta); i += 2 {
+			m[meta[i]] = meta[i+1]
+		}
+		b, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel, "agent:worker"}, Metadata: m})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return b
+	}
+	bead := row("worker-swept")
+	justNow := clk.Now().Add(-time.Second).Format(time.RFC3339)
+	leased := row("worker-leased", "pending_create_claim", "true", "pending_create_started_at", justNow)
+	creating := row("worker-creating", "state", "creating", "pending_create_started_at", justNow)
+	started := row("worker-started", "state", "active", "state_reason", "creation_complete", "creation_complete_at", justNow)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+	if closed := sweepUndesiredPoolSessionBeads("", beads.SessionStore{Store: store}, nil, newSessionBeadSnapshot([]beads.Bead{bead, leased, creating, started}), nil, cfg, runtime.NewFake(), false, clk); closed != 1 {
+		t.Fatalf("closed = %d, want 1 (the leased, creating and just-started rows spared)", closed)
+	}
+	if got, _ := store.Get(bead.ID); got.Metadata["closed_at"] != "2020-01-02T03:04:05Z" {
+		t.Fatalf("closed_at = %q, want the injected clock's 2020-01-02T03:04:05Z", got.Metadata["closed_at"])
+	}
+}
+
 func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -323,6 +357,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 		}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 when process-name liveness recovers IsRunning false negative", closed)
@@ -376,6 +411,7 @@ func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *tes
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -418,6 +454,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testin
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		&sweepLivenessProvider{Fake: runtime.NewFake(), running: map[string]bool{"worker-bd-observed": true}},
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 when runtime liveness reports the pool session as running", closed)
@@ -473,6 +510,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -2475,6 +2513,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsCreatingState(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — creating state must be preserved", closed)
@@ -2529,6 +2568,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentlyCreated(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — bead within staleCreatingStateTimeout window must survive", closed)
@@ -2578,6 +2618,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsStaleCreatingState(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — stale creating bead must be sweepable", closed)
@@ -2620,6 +2661,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — bead beyond postCreateProtectionTimeout must be sweepable", closed)
@@ -2660,6 +2702,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentCreationCompleteAfterWakeReco
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — bead within postCreateProtectionTimeout must survive even after wake bookkeeping lands", closed)
@@ -2702,6 +2745,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsActiveWithoutCreationCompleteAt(t 
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — bead without creation_complete_at must be sweepable", closed)
@@ -2750,6 +2794,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsAwakeStateInPreWakeWindow(t *testin
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — state=awake in pre-wake window must receive same protection as state=active", closed)
@@ -2800,6 +2845,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecoveredActiveBead(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — recovered active bead with fresh marker must survive pre-wake", closed)
@@ -2852,6 +2898,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsFreshRestartAfterPriorCrash(t *test
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — fresh restart after prior crash must survive the pre-wake window", closed)
@@ -2899,6 +2946,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — crashed bead with stale creation_complete_at must be swept", closed)
@@ -2936,6 +2984,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — pending_create_claim must be preserved", closed)
@@ -2987,6 +3036,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsExpiredPendingCreateClaimLease(t *
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — expired pending_create_claim lease must be reaped", closed)
@@ -3027,6 +3077,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingSta
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — fresh pending_create_started_at must keep old creating bead alive", closed)
@@ -3079,6 +3130,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1", closed)
@@ -3138,6 +3190,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesMissingOrStaleSessionName(t *testi
 				&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 				sp,
 				false,
+				clock.Real{},
 			)
 			if closed != 1 {
 				t.Fatalf("closed = %d, want 1 for unrecoverable pool session name", closed)
@@ -3185,6 +3238,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsAssignedSessionsOpen(t *testing.T) 
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -3229,6 +3283,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPartialAssignedSnapshot(t *testing.
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		true,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)

@@ -531,11 +531,14 @@ type DialogProvider interface {
 // presence in the roster as "running" therefore reports crashed agents as
 // idle.
 type SessionRosterProvider interface {
-	// SessionRoster returns attributes for every session currently known
-	// to the runtime, keyed by session name. A name absent from the
-	// result is not running, but the converse does not hold: a name
-	// present in the result is not necessarily running. See the
-	// interface doc.
+	// SessionRoster returns attributes for sessions known to the runtime,
+	// keyed by session name. A leaf runtime (tmux) reports every session it
+	// knows, so a name absent from its result is not running there; a
+	// composite merges only the backends that report a roster
+	// ([MergeSessionRosters]), so a name absent from its result proves
+	// nothing. In neither case is a name present in the result necessarily
+	// running. Callers must fall back to per-session reads for an absent
+	// name. See the interface doc.
 	SessionRoster() (map[string]SessionRosterEntry, error)
 }
 
@@ -709,6 +712,15 @@ type LiveRuntime struct {
 	// require it; a caller that only reports should not, because a runtime whose
 	// parent is not recognizable to the scan is still a live runtime.
 	ParentIsProviderInfrastructure bool
+	// StartIdentity is the root's start-time token as proctable.ProcessIdentity
+	// reads it (Linux /proc/<pid>/stat start ticks, darwin's kernel start
+	// time), or "" when unreadable. A caller that kills re-checks it at kill
+	// time, so a recycled PID is never signaled.
+	StartIdentity string
+	// StartedAt is the root's wall-clock start time, or zero when unreadable.
+	// On Linux it is derived from whole-second btime and USER_HZ ticks, so it
+	// can be off by about a second.
+	StartedAt time.Time
 	// Name is the process's command basename ("" when unreadable). Advisory: the
 	// agent process is often a DESCENDANT of the runtime root rather than the
 	// root itself (a pane's foreground can be a wrapper), so an empty or

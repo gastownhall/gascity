@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "closeorder",
@@ -37,4 +37,17 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "closeorder_test",
+    srcs = [
+        "closeorder_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        ":closeorder",
+        "//internal/beads",
+        "//internal/testenv",
+    ],
 )

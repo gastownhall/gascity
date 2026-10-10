@@ -61,7 +61,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		return
 	}
 
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.RLock()
 	if c.state != cacheLive && c.state != cachePartial {
 		c.mu.RUnlock()
@@ -277,7 +277,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				}
 			} else {
 				_, locallyMutated := c.beadSeq[patch.ID]
-				locallyMutated = locallyMutated || c.recentWriteLocked(patch.ID, time.Now())
+				locallyMutated = locallyMutated || c.recentWriteLocked(patch.ID, c.clockNow())
 				// A concurrent local write can land in the RUnlock->Lock window.
 				// beadChanged compares only the cached Bead, but DepAdd/DepRemove
 				// mutate c.deps and bump the mutation seq without touching
@@ -294,7 +294,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				// Re-check a genuine recent local write under the write lock to
 				// catch a write that landed between the read-lock verification
 				// and here; it wins unconditionally.
-				dropped := recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) &&
+				dropped := recentLocalMutation(c.localBeadAt[patch.ID], c.clockNow()) &&
 					(!verifiedRecentLocal || changedSinceVerify)
 				// For a bead flagged locally mutated only by a prior event,
 				// apply the conflict only if it was verified against the
@@ -331,7 +331,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			c.noteMutationLocked(b.ID)
 			// OC-3: absorb installs the row before updateEventDepsLocked, whose
 			// clearReadyProjectionLocked must observe the newly absorbed row.
-			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+			c.absorbFreshLocked(b.ID, b, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: !heldAtLock,
@@ -350,7 +350,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
-			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+			c.absorbFreshLocked(b.ID, b, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: !heldAtLock,
@@ -376,7 +376,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			c.updateStatsLocked()
 		}
 		// OC-3: absorb before updateEventDepsLocked (see bead.created).
-		c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
+		c.absorbFreshLocked(b.ID, b, c.clockNow(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
 			clearDirty: !heldAtLock,
@@ -401,7 +401,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	}
 
 	if mutated {
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 	}
 }
 
@@ -845,7 +845,7 @@ func (c *CachingStore) settleUnconfirmedEventLocked(id string, check eventCheck,
 		return
 	}
 	cached := c.beads[id]
-	now := time.Now()
+	now := c.clockNow()
 	opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
 	if check.depsRead {
 		opts.depsMode, opts.deps = depsExplicit, check.deps

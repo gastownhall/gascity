@@ -100,7 +100,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
 	t.Cleanup(proctable.SetScanRootForTesting(root))
 
-	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(sp.terminated) != 1 || sp.terminated[0] != agentPID {

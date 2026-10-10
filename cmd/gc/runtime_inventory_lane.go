@@ -241,9 +241,6 @@ func (cr *CityRuntime) initRuntimeInventoryLane() *runtimeInventoryLane {
 		return nil
 	}
 	cr.inventoryLane = newRuntimeInventoryLane(cfg.Daemon.PatrolIntervalDuration(), cr.stderr, cr.logPrefix)
-	if cr.cs != nil {
-		cr.cs.onDeathGate.Store(cr.inventoryLane.onDeath)
-	}
 	return cr.inventoryLane
 }
 
@@ -743,8 +740,13 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 // identityReadable reports whether leaf's identity env is cheap and local to
 // read: a batched environment read (tmux), or a local sidecar (acp,
 // subprocess). Other leaves' GetMeta reaches a pod, a host or a script, so
-// their identity is never read, and stays unknown.
+// their identity is never read, and stays unknown. A composite
+// ([runtime.Router]) is never a leaf: it forwards the batched read to a leaf
+// it routes to, so it is not identity-readable itself.
 func identityReadable(leaf runtime.Provider) bool {
+	if _, ok := leaf.(runtime.Router); ok {
+		return false
+	}
 	if _, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		return true
 	}
@@ -830,6 +832,9 @@ func readRuntimeIdentity(ctx context.Context, leaf runtime.Provider, name string
 // the row's token with no session ID). LL3 lists a subprocess runtime only
 // after its seed completes, so this needs a re-seed under a listed name.
 func readIdentityEnv(leaf runtime.Provider, name string) runtimeIdentity {
+	if !identityReadable(leaf) {
+		return runtimeIdentity{}
+	}
 	var v [len(identityEnvKeys)]string
 	if batch, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		vars, err := batch.GetAllEnvironment(name)
@@ -840,9 +845,6 @@ func readIdentityEnv(leaf runtime.Provider, name string) runtimeIdentity {
 			v[i] = strings.TrimSpace(vars[key])
 		}
 	} else {
-		if !identityReadable(leaf) {
-			return runtimeIdentity{}
-		}
 		first, ok := readSidecarIdentity(leaf, name)
 		if !ok {
 			return runtimeIdentity{}

@@ -88,6 +88,7 @@ go_test(
         "nudge_submit_confirm_test.go",
         "nudge_submit_key_sequence_integration_test.go",
         "nudge_submit_key_sequence_test.go",
+        "proctable_tracking_test.go",
         "runtime_inventory_test.go",
         "seam_conformance_test.go",
         "server_probe_test.go",
@@ -116,7 +117,11 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":tmux"],
+    # ~590 tests, ~90 s on one worker in the integration build
+    # (//test:integration_packages); 3 shards keep each under 40 s.
+    shard_count = 3,
     deps = [
+        "//internal/bazeltest",
         "//internal/citylayout",
         "//internal/runtime",
         "//internal/runtime/acp",

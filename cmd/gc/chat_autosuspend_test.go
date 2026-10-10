@@ -40,7 +40,7 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	sp.SetAttached(s2.SessionName, false)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions("", nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	// s1 should be suspended (idle 2h > 30m timeout).
 	got1, err := mgr.Get(s1.ID)
@@ -97,7 +97,7 @@ func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
 	sp.SetAttached(s1.SessionName, false)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions("", nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
 	sp.SetAttached(s1.SessionName, true)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions("", nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestAutoSuspendNilStore(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)}
 	var stdout, stderr bytes.Buffer
 	// Should not panic with nil store.
-	autoSuspendChatSessions(nil, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions("", nil, nil, sp, 30*time.Minute, clk, &stdout, &stderr)
 	if stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Errorf("unexpected output with nil store: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -167,7 +167,7 @@ func TestAutoSuspendHoldsOnAttachProbeError(t *testing.T) {
 	sp.AttachedErrors[s1.SessionName] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions("", nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {

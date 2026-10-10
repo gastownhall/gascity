@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The drain arms' tests (CONTRACT v5 D2; arms A19 and A20).
@@ -53,12 +54,18 @@ func TestResumeVoidsSuspendedDrain(t *testing.T) {
 	if it.Kind != intentDrainVoid || it.Reason != decideDrainVoid+drainSuspended {
 		t.Fatalf("resumed: %+v, want the void", it)
 	}
-	if s := effectRegistry[it.Kind](newEffectPass(w, a), it)(context.Background()); s.Outcome != settledLanded {
-		t.Fatalf("void settlement %+v, want landed", s)
+	s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil)
+	if want := (drainTransition{Name: w.Census.Rows[k].Info.SessionNameMetadata, Reason: drainSuspended, Transition: "cancel"}); s.Outcome != settledLanded || s.Facts.Transition == nil || *s.Facts.Transition != want {
+		t.Fatalf("void settlement %+v (transition %+v), want landed with legacy's %+v", s, s.Facts.Transition, want)
 	}
 	got, _ := store.Get(b.ID)
-	if got.Metadata[drainIntentReasonKey] != "" || got.Metadata[drainIntentIncarnationKey] != "" || got.Metadata["state"] != "active" {
+	if got.Metadata[session.DrainIntentReasonKey] != "" || got.Metadata[session.DrainIntentIncarnationKey] != "" || got.Metadata["state"] != "active" {
 		t.Fatalf("row after the void %v, want the request cleared and the state kept", got.Metadata)
+	}
+	// Run again, the request gone: it decides no void, and records no
+	// transition for a write it did not make.
+	if s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil); s.Outcome == settledLanded || s.Facts.Transition != nil {
+		t.Fatalf("a void with nothing to clear: settlement %+v, want no landing and no transition", s)
 	}
 }
 
@@ -163,7 +170,7 @@ func TestLostAuthorizationVoids(t *testing.T) {
 		{"wait-hold cleared", "wait-hold", sleep("")},
 	} {
 		it, _ := decideDrain(t, intentAt(c.reason, "3"), c.entry)
-		if it.Kind != intentDrainVoid || it.Reason != decideDrainVoid+c.reason || it.Patch[drainIntentReasonKey] != "" {
+		if it.Kind != intentDrainVoid || it.Reason != decideDrainVoid+c.reason || it.Patch[session.DrainIntentReasonKey] != "" {
 			t.Errorf("%s: %+v, want the void", c.name, it)
 		}
 	}

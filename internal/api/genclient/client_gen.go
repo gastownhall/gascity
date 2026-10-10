@@ -3776,15 +3776,27 @@ type SessionLifecyclePayload struct {
 type SessionMessageInputBody struct {
 	// Message Message text to send.
 	Message string `json:"message"`
+
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionMessageSucceededPayload defines model for SessionMessageSucceededPayload.
 type SessionMessageSucceededPayload struct {
+	// Queued True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
+	Queued bool `json:"queued"`
+
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
 
 	// SessionId Session ID that received the message.
 	SessionId string `json:"session_id"`
+
+	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
+	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
+
+	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	WillStart *bool `json:"will_start,omitempty"`
 }
 
 // SessionPatchBody defines model for SessionPatchBody.
@@ -4814,6 +4826,9 @@ type SessionSubmitInputBody struct {
 
 	// Message Message text to submit.
 	Message string `json:"message"`
+
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.
@@ -4829,6 +4844,12 @@ type SessionSubmitSucceededPayload struct {
 
 	// SessionId Session ID that received the submission.
 	SessionId string `json:"session_id"`
+
+	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
+	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
+
+	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	WillStart *bool `json:"will_start,omitempty"`
 }
 
 // SessionTranscriptConversationResponse defines model for SessionTranscriptConversationResponse.

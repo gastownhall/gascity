@@ -2547,6 +2547,7 @@
               "urn:gascity:error:transcript-cursor-invalidated",
               "urn:gascity:error:validation-failed",
               "urn:gascity:error:wait-not-found",
+              "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
               "urn:gascity:error:workflow-not-found"
             ],
@@ -2596,6 +2597,7 @@
               "urn:gascity:error:transcript-cursor-invalidated",
               "urn:gascity:error:validation-failed",
               "urn:gascity:error:wait-not-found",
+              "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
               "urn:gascity:error:workflow-not-found"
             ]
@@ -7874,6 +7876,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -7884,6 +7890,10 @@
       "SessionMessageSucceededPayload": {
         "additionalProperties": false,
         "properties": {
+          "queued": {
+            "description": "True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.",
+            "type": "boolean"
+          },
           "request_id": {
             "description": "Correlation ID from the 202 response.",
             "type": "string"
@@ -7891,11 +7901,20 @@
           "session_id": {
             "description": "Session ID that received the message.",
             "type": "string"
+          },
+          "will_not_start_reason": {
+            "description": "Why the controller will not start the session for a queued message, with the remedy.",
+            "type": "string"
+          },
+          "will_start": {
+            "description": "Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.",
+            "type": "boolean"
           }
         },
         "required": [
           "request_id",
-          "session_id"
+          "session_id",
+          "queued"
         ],
         "type": "object"
       },
@@ -11130,6 +11149,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -11155,6 +11178,14 @@
           "session_id": {
             "description": "Session ID that received the submission.",
             "type": "string"
+          },
+          "will_not_start_reason": {
+            "description": "Why the controller will not start the session for a queued message, with the remedy.",
+            "type": "string"
+          },
+          "will_start": {
+            "description": "Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -49008,6 +49039,7 @@
     },
     "/v0/city/{cityName}/session/{id}/wake": {
       "post": {
+        "description": "Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. `gc session wake` applies the same rules.",
         "operationId": "post-v0-city-by-city-name-session-by-id-wake",
         "parameters": [
           {

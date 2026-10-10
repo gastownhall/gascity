@@ -176,7 +176,7 @@ func TestCommitStartedIfCurrentBoundsALosingFence(t *testing.T) {
 	writes := 0
 	racing := &everyGetStore{Store: store, afterGet: func(id string) {
 		writes++
-		if err := store.SetMetadata(id, "nudge_seq", strconv.Itoa(writes)); err != nil {
+		if err := store.SetMetadata(id, "test_nudge_seq", strconv.Itoa(writes)); err != nil {
 			t.Errorf("unrelated write: %v", err)
 		}
 	}}

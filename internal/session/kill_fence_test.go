@@ -69,7 +69,8 @@ func TestManagerRefusesKillFencedSession(t *testing.T) {
 			return m.Attach(context.Background(), id, "claude --resume", runtime.Config{})
 		}},
 		{name: "send", call: func(m *Manager, id string) error {
-			return m.Send(context.Background(), id, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+			_, err := m.Send(context.Background(), id, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			return err
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

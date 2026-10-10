@@ -225,9 +225,9 @@ func doltProcessesUnder(t *testing.T, root string) []string {
 }
 
 // stopIfPairsRemain runs a best-effort gc stop of cityRoot when a bd proxy or
-// Dolt server still runs under any of roots. A test's last cleanup calls it
-// rather than stopping unconditionally: gc stop on an already-stopped proxied
-// city restarts its pairs only to find nothing to stop.
+// Dolt server still runs under any of roots. A test's last cleanup calls it to
+// retire a pair the city's own cleanups left behind; a city they stopped
+// cleanly costs no further gc invocation.
 func stopIfPairsRemain(t *testing.T, env *helpers.Env, cityRoot string, roots ...string) {
 	t.Helper()
 	for _, root := range append([]string{cityRoot}, roots...) {
@@ -752,9 +752,8 @@ type proxiedDefaultCity struct {
 // scope behind.
 //
 // The city harness's own cleanups (helpers.City.Init, StartWithSupervisor)
-// already stop a city that came up, and a `gc stop` on a stopped proxied city
-// still costs seconds, so this cleanup only stops the city itself when a
-// process is still alive under one of its roots.
+// already stop a city that came up, so this cleanup only stops the city
+// itself when a process is still alive under one of its roots.
 func newProxiedDefaultCity(t *testing.T, rigNames ...string) *proxiedDefaultCity {
 	t.Helper()
 	bdPath, doltPath := requireProxiedTooling(t)
@@ -1117,9 +1116,25 @@ func TestBeadsProxiedDefaultStart(t *testing.T) {
 
 	t.Run("stop-quiescent", func(t *testing.T) {
 		p.stopQuiescent(t, rigDir)
-		// Re-runnable: "there was nothing to stop" is success.
-		if out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot); err != nil {
+		// Re-runnable: "there was nothing to stop" is success, and it is a
+		// no-op. Any bd read of a proxied scope restarts its proxy and Dolt
+		// child, so a stop that looks for sessions in the store resurrects
+		// the processes the first stop retired (and costs seconds doing it).
+		p.bdCalls.Reset()
+		started := time.Now()
+		out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot)
+		wall := time.Since(started)
+		if err != nil {
 			t.Fatalf("second gc stop: %v\n%s", err, out)
+		}
+		t.Logf("second gc stop: %d bd fork(s), %s", p.bdCalls.Count(), wall.Round(time.Millisecond))
+		if forks := p.bdCalls.Count(); forks != 0 {
+			t.Errorf("gc stop on a stopped proxied city forked bd %d time(s), want 0:\n%s", forks, p.bdCalls.Describe())
+		}
+		for _, root := range []string{p.cityRoot, rigDir} {
+			if procs := doltProcessesUnder(t, root); len(procs) > 0 {
+				t.Errorf("gc stop on a stopped proxied city started a proxy or Dolt under %s:\n%s", root, strings.Join(procs, "\n"))
+			}
 		}
 	})
 }

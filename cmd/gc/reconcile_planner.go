@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // The v2 planner loop (architecture §1.3, §1.5): one goroutine that schedules
@@ -64,14 +65,20 @@ type settlement struct {
 	// createBackoffKey under its ConfigRev, set only when it landed or was
 	// refused at a stage.
 	BackoffKey, Fingerprint string
-	// Work is a create's worktree verdict, which backs off or resets the
-	// work item's record (C6.5(a)).
-	Work *workVerdict
-	// Event is recorded once the settlement is drained: a landed write's.
-	Event *events.Event
-	Err   error
-	At    time.Time
+	Facts                   effectFacts // applied once drained (applyFacts)
+	Err                     error
+	At                      time.Time
+	// Late marks what an effect returned after the executor settled it: the
+	// drain applies only its facts.
+	Late bool
+	// Closed marks an effect whose close section's close landed: what
+	// around reads to run a post-close cascade once, never for an earlier
+	// write or a row another writer closed.
+	Closed bool
 }
+
+// drainTransition is one RecordDrainTransition.
+type drainTransition struct{ Name, Reason, Transition string }
 
 // settleOutcome is how an effect ended (CONTRACT v5 S1, P5).
 type settleOutcome uint8
@@ -80,7 +87,7 @@ const (
 	settledLanded    settleOutcome = iota + 1
 	settledFailed                  // ran and failed; a panic or deadline included
 	settledRefused                 // refused before or instead of writing, with a cause
-	settledAmbiguous               // a create whose write call errored after the row may have landed
+	settledAmbiguous               // its write began and may have landed, or a create was abandoned
 	settledNoop                    // nothing to do: a start's already-running
 )
 
@@ -110,6 +117,7 @@ func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && 
 // publishes through out.
 type planner struct {
 	clock       plannerClock
+	seam        txSeamFunc           // every pass's (effectPass.seam): stagingSeam's, or a test's
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
 	pass        passFunc
 	stopEffects func(deadline time.Time) // the executor's stop
@@ -181,7 +189,7 @@ func (p *planner) postExecutionStalled(r executionStalledRequest) {
 }
 
 // executionStalled folds the posted requests into the planner's, newest per
-// row, forgets rows c no longer holds, and returns the pass's copy.
+// row, forgets rows a complete c holds closed, and returns the pass's copy.
 func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalledRequest {
 	p.stalledMu.Lock()
 	posted := p.stalledPosted
@@ -196,13 +204,10 @@ func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalled
 	if len(p.stalled) == 0 {
 		return nil
 	}
-	open := make(map[string]bool)
-	for _, row := range c.Canonical() {
-		open[row.Key.ID] = true
-	}
+	complete, ok := c.complete()
 	out := make(map[string]executionStalledRequest, len(p.stalled))
 	for id, r := range p.stalled {
-		if !open[id] {
+		if ok && complete.ClosedID(id) {
 			delete(p.stalled, id)
 			continue
 		}
@@ -291,26 +296,53 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 // drainSettlements applies the settlements posted so far, stamping a zero
 // At with now: first every one to the in-flight map, so no later step's
 // panic can leave a settled effect counted in flight; then to the backoff
-// table and the pass record's counters; then their events to the recorder,
-// each recovered alone.
+// table and the pass record's counters; then their facts (applyFacts). A
+// late settlement applies only its facts.
 func (p *planner) drainSettlements(now time.Time) {
 	items := p.settlements.drain()
 	for i := range items {
 		if items[i].At.IsZero() {
 			items[i].At = now
 		}
-		p.inflight.settle(items[i])
-	}
-	for _, s := range items {
-		p.backoffSettled(s)
-		p.observeSettlement(s)
-	}
-	for _, s := range items {
-		if s.Event != nil && p.rec != nil {
-			p.record(*s.Event)
+		if !items[i].Late {
+			p.inflight.settle(items[i])
 		}
 	}
+	for _, s := range items {
+		if !s.Late {
+			p.backoffSettled(s)
+			p.observeSettlement(s)
+		}
+	}
+	for _, s := range items {
+		p.applyFacts(s.Facts, s.At)
+	}
 }
+
+// applyFacts applies an effect's facts, on time or late alike: its events to
+// the recorder, each recovered alone; its drain transition to legacy's
+// telemetry; its worktree verdict to the work item's backoff record
+// (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+func (p *planner) applyFacts(f effectFacts, at time.Time) {
+	for _, ev := range f.Events {
+		if p.rec != nil {
+			p.record(ev)
+		}
+	}
+	if t := f.Transition; t != nil {
+		recordDrainTransition(context.Background(), t.Name, t.Reason, t.Transition)
+	}
+	switch {
+	case f.Work == nil:
+	case f.Work.Refused:
+		p.backoff.Refuse(workBackoffKey(f.Work.BeadID), at, time.Time{}, createStageWorktree, f.Work.Fingerprint)
+	default:
+		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
+	}
+}
+
+// recordDrainTransition is legacy's drain telemetry; a test reads it.
+var recordDrainTransition = telemetry.RecordDrainTransition
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
 // pass record; a panicking recorder is logged and skips this event only.
@@ -327,9 +359,8 @@ func (p *planner) record(ev events.Event) {
 }
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
-// resets its record; a refusal or failure backs it off with its cause,
-// except a swap pause. A create's worktree verdict backs off or resets the
-// work item's record.
+// resets its record; a refusal, failure or ambiguous outcome (an abandoned
+// write) backs it off with its cause, except a swap pause.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
@@ -339,15 +370,8 @@ func (p *planner) backoffSettled(s settlement) {
 	case key == "":
 	case s.Outcome == settledLanded || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed) && s.Cause != causeSwapPause:
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
-	}
-	switch {
-	case s.Work == nil:
-	case s.Work.Refused:
-		p.backoff.Refuse(workBackoffKey(s.Work.BeadID), s.At, time.Time{}, createStageWorktree, s.Work.Fingerprint)
-	default:
-		p.backoff.Succeed(workBackoffKey(s.Work.BeadID))
 	}
 }
 

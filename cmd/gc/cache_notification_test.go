@@ -349,8 +349,9 @@ func TestApplyBeadEventToStoresRevalidatesInferredCloses(t *testing.T) {
 
 // TestApplyBeadEventToStoresDefersAnUnconfirmableClose: an inferred close
 // whose row cannot be read drives nothing yet. The autoclose sweep re-reads
-// it, and once the read returns closed it records the fact and runs autoclose,
-// once: a later replay of the close repeats neither.
+// it, though an earlier close of the row left it marked handled, and once the
+// read returns closed it records the fact and runs autoclose, once: a later
+// replay of the close repeats neither.
 func TestApplyBeadEventToStoresDefersAnUnconfirmableClose(t *testing.T) {
 	prev := beadCloseAutocloseDispatch
 	beadCloseAutocloseDispatch = func(fn func()) { fn() }
@@ -367,6 +368,7 @@ func TestApplyBeadEventToStoresDefersAnUnconfirmableClose(t *testing.T) {
 	rec := events.NewFake()
 	// The graph store stays readable, so only the gate keeps the fact back.
 	cs := &controllerState{cityBeadStore: store, storageRoutes: splitRoutes(mem), eventProv: rec}
+	cs.autocloseSweepOf().noteRan(step.ID)
 	scanClose := events.Event{Type: events.BeadClosed, Actor: cacheReconcileActor, Subject: step.ID, Payload: payload}
 
 	cs.applyBeadEventToStores(scanClose)
