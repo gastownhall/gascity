@@ -49,3 +49,10 @@ when the context ends. Take the bound from the caller's own context.
   observes the same session must derive the key the same way, or the
   one-in-flight limit no longer holds. `cmd/gc` derives it in
   `postStartObservationKey`.
+
+## History identity
+
+`HistorySnapshot.GCSessionID` is the durable Gas City session bead ID. Native
+resume-key discovery must not replace it or a caller-supplied logical
+conversation ID. Provider identity belongs in `ProviderSessionID`; a late hook
+must not make an unchanged transcript appear to be a different stream.

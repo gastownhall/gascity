@@ -1358,7 +1358,7 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		// workdir cannot be mapped safely to a single transcript.
 		return "", TranscriptAmbiguous, nil
 	}
-	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, ""); path != "" {
+	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
 		return path, TranscriptFound, nil
 	}
 	return "", TranscriptAbsent, nil

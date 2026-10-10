@@ -102,14 +102,12 @@ func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot
 		return nil, ErrHistoryUnavailable
 	}
 
-	gcSessionID := strings.TrimSpace(info.SessionKey)
-	if gcSessionID == "" {
-		gcSessionID = info.ID
-	}
+	// Native resume keys can arrive asynchronously from provider hooks. They
+	// identify the harness session, not the durable Gas City conversation.
 	snapshot, err := h.adapter.LoadHistory(LoadRequest{
 		Provider:              h.historyProvider(info),
 		TranscriptPath:        path,
-		GCSessionID:           gcSessionID,
+		GCSessionID:           info.ID,
 		LogicalConversationID: strings.TrimSpace(req.LogicalID),
 		TailCompactions:       req.TailCompactions,
 		BeforeEntryID:         req.BeforeEntryID,
@@ -142,8 +140,6 @@ func (h *SessionHandle) maybePersistDerivedSessionKey(id string, info sessionpkg
 	if err := h.manager.PersistSessionKey(id, sessionKey); err != nil {
 		return
 	}
-	snapshot.GCSessionID = sessionKey
-	snapshot.LogicalConversationID = sessionKey
 }
 
 func (h *SessionHandle) mergeLoadedHistorySnapshot(current *HistorySnapshot) *HistorySnapshot {

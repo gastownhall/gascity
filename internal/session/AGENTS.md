@@ -66,3 +66,6 @@ evidence from tests, source, an issue, or a commit.
   Propagate that stale verdict to the provider-aware caller and clean up using
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
+
+When a persisted native conversation key is known, transcript discovery waits for
+that exact key. Another conversation in the same work directory is not a fallback.
