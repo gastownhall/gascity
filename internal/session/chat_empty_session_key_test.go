@@ -127,7 +127,7 @@ func TestEnsureRunning_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T) {
 	sp.commands = nil
 	sp.armed = true
 
-	if err := mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send should recover with a fresh start when session_key is empty, got: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestEnsureRunning_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *testi
 	sp.commands = nil
 	sp.armed = true
 
-	err := mgr.Send(context.Background(), info.ID, "hello", freshCmd, runtime.Config{WorkDir: "/tmp"})
+	_, err := mgr.Send(context.Background(), info.ID, "hello", freshCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
 	if err == nil {
 		t.Fatal("Send should fail when the start dies and there is no resume shape to strip")
 	}
@@ -259,7 +259,7 @@ func TestEnsureRunning_EmptySessionKeyStripsDivergedSessionIDAndStartsFresh(t *t
 	sp.commands = nil
 	sp.armed = true
 
-	if err := mgr.Send(context.Background(), info.ID, "hello", firstStartCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if _, err := mgr.Send(context.Background(), info.ID, "hello", firstStartCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send should strip the diverged session id and start fresh, got: %v", err)
 	}
 

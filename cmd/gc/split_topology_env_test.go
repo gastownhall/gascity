@@ -730,7 +730,7 @@ func TestSplitEnvClassStoreWrappingMatchesOpenStorageRoutes(t *testing.T) {
 		t.Fatalf("resolving the storage plan for a converged split city: %v", err)
 	}
 	target := mustResolveInfraTarget(t, root, cfg)
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg, root, nil)
 	if err != nil {
 		t.Fatalf("openStorageRoutes: %v", err)
 	}
@@ -857,7 +857,7 @@ func assertPrefixDisjoint(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	})
 	if err != nil {
 		t.Fatalf("create session bead in class store: %v", err)

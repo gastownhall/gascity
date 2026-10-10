@@ -66,7 +66,9 @@ bearer-token gateways).
 # Direct: your existing Claude login or ambient ANTHROPIC_API_KEY
 # agents/dev/agent.toml
 provider        = "claude"
-option_defaults = { model = "sonnet" }     # opus · sonnet · haiku · opus-4-7 · fable-5
+option_defaults = { model = "sonnet", effort = "high" }
+# model:  opus · sonnet · haiku · opus-4-7 · fable-5
+# effort: low · medium · high · xhigh · max (builtin default: max)
 ```
 
 ```toml

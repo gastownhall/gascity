@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
@@ -101,7 +102,7 @@ func newFakeState(t testing.TB) *fakeState {
 		cityMailProv: mp,
 		eventProv:    events.NewFake(),
 		cityName:     "test-city",
-		cityPath:     t.TempDir(),
+		cityPath:     beadstest.GuardedTempDir(t),
 		startedAt:    time.Now(),
 	}
 }

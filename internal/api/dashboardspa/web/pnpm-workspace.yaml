@@ -1,0 +1,16 @@
+# pnpm view of the npm workspaces in package.json. npm (package-lock.json)
+# drives local development; Bazel's rules_js reads pnpm-lock.yaml, which is
+# `pnpm import`'s translation of package-lock.json (`make dashboard-lock`).
+packages:
+  - shared
+  - frontend
+
+# The frontend depends on the shared workspace as "*", which npm resolves to
+# the workspace; pnpm does that only with this set.
+linkWorkspacePackages: true
+
+# No install scripts: esbuild's postinstall only re-checks the binary its
+# platform package already ships, and fsevents is macOS-only.
+allowBuilds:
+  esbuild: false
+  fsevents: false

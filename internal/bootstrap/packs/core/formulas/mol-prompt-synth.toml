@@ -144,14 +144,25 @@ completion signal:
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
 WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 gc bd update "$WORK_BEAD_ID" --append-notes "Synthesized: {{dest_path}}"
-gc bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID" --reason "Synthesized: {{dest_path}}"
 ```
 
-**4. Drain and exit:**
+**4. Close this step, drain, and exit.**
+
+`gc runtime drain-ack` gives back every claim this session still holds, so
+close this step first: acking with it still open hands it back to the pool
+and a fresh session runs it again, rewriting {{dest_path}} after `--wait`
+has already returned. `gc hook current` names the step you claimed; refuse
+to ack if it is not this one.
 ```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".write-and-close"))' >/dev/null || { echo "write-and-close: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
 gc runtime drain-ack
 exit
 ```
 
 **Exit criteria:** File exists at {{dest_path}} with the correct header
-and body, bead is closed, drain-ack signaled, session exited."""
+and body, bead is closed, this step is closed, drain-ack signaled, session
+exited."""

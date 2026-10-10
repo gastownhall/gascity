@@ -124,7 +124,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsKillFencedRow(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "s1", Status: "open", Metadata: meta}})
 
 	var stderr bytes.Buffer
-	if got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &clock.Fake{Time: now}, &stderr); got != 0 {
+	if got := cleanupDeadRuntimeSessionCorpses("", nil, nil, nil, snapshot, nil, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0: the dead pane is the kill in progress; stderr=%q", got, stderr.String())
 	}
 	if len(sp.stopped) != 0 {

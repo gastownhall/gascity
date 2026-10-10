@@ -14,12 +14,14 @@ go_test(
         "//cmd/gc",
         "//examples/bd",
         "//:go.mod",
-        "//:repo_source_tree",
+        "//examples/gastown:pack_files",
+        "//examples/swarm:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt for the dolt-backed acceptance shapes, same versions the go-test
         # CI installs via install-bd-archive.sh / install-dolt-archive.sh.
-        "@bd_bin_v1_3_1_rc_2//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+        "@bd_bin_v1_3_1//:bd",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
     deps = [
         "//internal/config",
@@ -41,6 +43,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

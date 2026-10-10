@@ -1,0 +1,125 @@
+{
+  "components": {
+    "schemas": {
+      "Event": {
+        "description": "Discriminated union of event envelopes. EventCustom admits every type the union does not name.",
+        "discriminator": {
+          "mapping": {
+            "widget.created": "#/components/schemas/EventWidgetCreated",
+            "widget.deleted": "#/components/schemas/EventWidgetDeleted"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/EventWidgetCreated"
+          },
+          {
+            "$ref": "#/components/schemas/EventWidgetDeleted"
+          },
+          {
+            "$ref": "#/components/schemas/EventCustom"
+          }
+        ]
+      },
+      "EventCustom": {
+        "additionalProperties": false,
+        "properties": {
+          "payload": {},
+          "type": {
+            "not": {
+              "enum": [
+                "widget.created",
+                "widget.deleted"
+              ]
+            },
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "EventWidgetCreated": {
+        "additionalProperties": false,
+        "properties": {
+          "payload": {
+            "type": "object"
+          },
+          "type": {
+            "const": "widget.created",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "EventWidgetDeleted": {
+        "additionalProperties": false,
+        "properties": {
+          "payload": {
+            "type": "object"
+          },
+          "type": {
+            "const": "widget.deleted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "fixture",
+    "version": "0.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v0/events/stream": {
+      "get": {
+        "operationId": "stream-events",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "properties": {
+                          "data": {
+                            "$ref": "#/components/schemas/Event"
+                          },
+                          "event": {
+                            "const": "event",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "data",
+                          "event"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        }
+      }
+    }
+  }
+}

@@ -21,15 +21,18 @@ func newPrimitiveTestStore() *CachingStore {
 	}
 }
 
-func TestEvictLockedRemovesAllSixMaps(t *testing.T) {
+func TestEvictLockedRemovesRowAndKeepsWriteFences(t *testing.T) {
 	c := newPrimitiveTestStore()
 	id := "gc-1"
+	at := time.Now()
 	c.beads[id] = Bead{ID: id}
 	c.deps[id] = []Dep{{IssueID: id, DependsOnID: "gc-2", Type: "blocks"}}
 	c.dirty[id] = struct{}{}
 	c.beadSeq[id] = 7
-	c.localBeadAt[id] = time.Now()
+	c.localBeadAt[id] = at
 	c.deletedSeq[id] = 3
+	c.writeSeq = map[string]uint64{id: 5}
+	c.writeAt = map[string]time.Time{id: at}
 	// Unrelated row must survive.
 	c.beads["gc-9"] = Bead{ID: "gc-9"}
 	c.beadSeq["gc-9"] = 4
@@ -37,6 +40,11 @@ func TestEvictLockedRemovesAllSixMaps(t *testing.T) {
 	c.evictLocked(id)
 
 	assertAbsent(t, c, id)
+	// The write fences outlive the row, for the reconcile to retain.
+	if c.deletedSeq[id] != 3 || c.writeSeq[id] != 5 || !c.writeAt[id].Equal(at) {
+		t.Fatalf("evictLocked left deletedSeq=%d writeSeq=%d writeAt=%v, want 3, 5 and %v",
+			c.deletedSeq[id], c.writeSeq[id], c.writeAt[id], at)
+	}
 	if _, ok := c.beads["gc-9"]; !ok {
 		t.Fatal("evictLocked removed an unrelated row")
 	}
@@ -267,8 +275,13 @@ func TestApplyEventSitesPreserveBeadSeqFence(t *testing.T) {
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("Prime: %v", err)
 		}
-		cache.ApplyEvent("bead.created", json.RawMessage(`{"id":"gc-created","status":"open","issue_type":"task"}`))
-		assertBeadSeqPresent(t, cache, "gc-created")
+		// The row lands out of band, so only its event brings it into the cache.
+		created, err := backing.Create(Bead{Title: "created", Status: "open", Type: "task"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		cache.ApplyEvent("bead.created", json.RawMessage(`{"id":"`+created.ID+`","status":"open","issue_type":"task"}`))
+		assertBeadSeqPresent(t, cache, created.ID)
 	})
 
 	t.Run("bead.updated", func(t *testing.T) {
@@ -328,7 +341,7 @@ func TestStaleSnapshotDoesNotClobberFencedEventRow(t *testing.T) {
 	}
 
 	cache.mu.RLock()
-	staleStartSeq := cache.mutationSeq
+	staleStartSeq, staleStartScan := cache.mutationSeq, cache.scanGen
 	cache.mu.RUnlock()
 
 	// The event advances the row past staleStartSeq and installs the beadSeq
@@ -348,7 +361,7 @@ func TestStaleSnapshotDoesNotClobberFencedEventRow(t *testing.T) {
 	}
 
 	staleItem := Bead{ID: bead.ID, Title: "before-event", Status: "open", Type: "task"}
-	refreshed := cache.refreshCachedBeads(ListQuery{Status: "open"}, staleStartSeq, []Bead{staleItem})
+	refreshed := cache.refreshCachedBeads(ListQuery{Status: "open"}, staleStartSeq, staleStartScan, []Bead{staleItem})
 
 	cache.mu.RLock()
 	cachedTitle := cache.beads[bead.ID].Title
@@ -388,6 +401,23 @@ func TestAbsorbSeqModeDivergenceAtEventPreState(t *testing.T) {
 	}
 }
 
+// projectedGetStore serves point reads with a projected IsBlocked verdict, as
+// a backing with the ready projection does.
+type projectedGetStore struct {
+	Store
+	gets int
+}
+
+func (s *projectedGetStore) Get(id string) (Bead, error) {
+	s.gets++
+	b, err := s.Store.Get(id)
+	if err == nil {
+		blocked := true
+		b.IsBlocked = &blocked
+	}
+	return b, err
+}
+
 // T6 — ApplyEvent OC-3 ordering: absorb installs the row BEFORE the
 // deps-overlay (updateEventDepsLocked → setEventDepsLocked →
 // clearReadyProjectionLocked), so the overlay observes the newly absorbed row.
@@ -396,21 +426,28 @@ func TestAbsorbSeqModeDivergenceAtEventPreState(t *testing.T) {
 func TestApplyEventAbsorbsBeforeDepsOverlay_OC3(t *testing.T) {
 	t.Parallel()
 
-	backing := NewMemStore()
-	blocker, err := backing.Create(Bead{Title: "blocker", Status: "open", Type: "task"})
+	mem := NewMemStore()
+	blocker, err := mem.Create(Bead{Title: "blocker", Status: "open", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create blocker: %v", err)
 	}
+	backing := &projectedGetStore{Store: mem}
 	cache := NewCachingStoreForTest(backing, nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
+	// The row lands out of band, so only its event brings it into the cache,
+	// through a backing read that carries a projected IsBlocked.
+	blocked, err := mem.Create(Bead{Title: "blocked", Status: "open", Type: "task", Needs: []string{blocker.ID}})
+	if err != nil {
+		t.Fatalf("Create blocked: %v", err)
+	}
 
-	// A created event that carries a projected IsBlocked AND dependency fields.
-	// EV1 absorbs the row (IsBlocked=true) then runs the deps overlay, which
-	// clears the projection now that authoritative deps are known.
+	// A created event that carries dependency fields. EV1 absorbs the row
+	// (IsBlocked=true) then runs the deps overlay, which clears the projection
+	// now that authoritative deps are known.
 	payload, err := json.Marshal(map[string]any{
-		"id":         "gc-blocked",
+		"id":         blocked.ID,
 		"status":     "open",
 		"issue_type": "task",
 		"is_blocked": true,
@@ -420,8 +457,11 @@ func TestApplyEventAbsorbsBeforeDepsOverlay_OC3(t *testing.T) {
 		t.Fatalf("marshal created event: %v", err)
 	}
 	cache.ApplyEvent("bead.created", payload)
+	if backing.gets == 0 {
+		t.Fatal("the created event installed without a backing read; the absorb is vacuous")
+	}
 
-	got, err := cache.Get("gc-blocked")
+	got, err := cache.Get(blocked.ID)
 	if err != nil {
 		t.Fatalf("Get after created event: %v", err)
 	}
@@ -430,7 +470,7 @@ func TestApplyEventAbsorbsBeforeDepsOverlay_OC3(t *testing.T) {
 	}
 
 	cache.mu.RLock()
-	_, hasDeps := cache.deps["gc-blocked"]
+	_, hasDeps := cache.deps[blocked.ID]
 	cache.mu.RUnlock()
 	if !hasDeps {
 		t.Fatal("expected the deps overlay to install authoritative deps for the absorbed row")
@@ -462,8 +502,5 @@ func assertAbsent(t *testing.T, c *CachingStore, id string) {
 	}
 	if _, ok := c.localBeadAt[id]; ok {
 		t.Fatalf("%s still in localBeadAt", id)
-	}
-	if _, ok := c.deletedSeq[id]; ok {
-		t.Fatalf("%s still in deletedSeq", id)
 	}
 }

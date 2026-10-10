@@ -123,7 +123,6 @@ var (
 	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
 	nudgePokeController                      = enqueueController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
-	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
@@ -1022,6 +1021,12 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		}
 		idleTicksSinceObserve = 0
 
+		// Observing reads the bead store, and on a stopped city that read
+		// restarts the bd and Dolt servers `gc stop` just retired (#6857).
+		if nudgePollCityStopped(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city controller and session %q are not running; exiting and leaving queued nudges for the next start\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
 		obs, err := nudgeObserveTarget(target, sessStore, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
@@ -1228,6 +1233,11 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if result.Undelivered == worker.NudgeQueuedHeld {
+		// The session is held and queued the nudge itself (CONTRACT v5.9 D8);
+		// a held wait-idle nudge (NudgeUndeliveredHeld) is queued below.
+		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
+	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
@@ -1288,17 +1298,21 @@ func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
 
 func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
-	if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
+	outcome, err := enqueueManagedNudgeThenWake(target, store, item)
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
+	var undelivered worker.NudgeUndeliveredReason
+	if outcome == session.WakeHeld {
+		undelivered = worker.NudgeQueuedHeld
+	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
 
-func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
+func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) (session.WakeRequestOutcome, error) {
 	// store is class-mixed here: the enqueue/rollback arms are nudge-class (wrap
 	// into the typed NudgesStore), while the wake arm reads the session bead and
 	// wakes it (sessions class), so it routes through the session coordination-class
@@ -1306,25 +1320,23 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	// rollback (nudgeFrontDoor) stay nudges.
 	nudges := beads.NudgesStore{Store: store}
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
-		return err
+		return 0, err
 	}
-	if err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
+	outcome, err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath))
+	if err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeFrontDoor(nudges), item, "managed wake failed: "+err.Error()); rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
+			return 0, errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
-		return err
+		return 0, err
 	}
-	return nil
+	return outcome, nil
 }
 
-// requestManagedNudgeWake wakes a managed session that owns queued nudges. The
-// sessFront param is the session coordination-class write front door:
-// WakeSession operates on the session bead plus its gc:wait beads (both
-// ClassSessions). Callers construct it at the root via cliSessionFrontDoor so a
-// [beads.classes.sessions] relocation reaches it. The one nudge op inside —
-// nudgeWithdrawQueuedWaitNudges — opens its own nudge store and stays on the
-// nudges class.
-func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error {
+// requestManagedNudgeWake asks the controller to wake a managed session that
+// owns queued nudges, never over an operator's hold (CONTRACT v5.9 D8): a
+// held row keeps its nudge queued until an operator resumes it. sessFront is
+// the session-class front door (cliSessionFrontDoor).
+func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) (session.WakeRequestOutcome, error) {
 	if !sessFront.Backed() || target.sessionID == "" {
 		// The item IS enqueued; what did not happen is the wake that gets a
 		// stopped session to drain it. Returning nil silently made those two
@@ -1337,21 +1349,9 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error
 				"gc session nudge: queued for %s but no managed wake was requested (%s); it is delivered when the session next runs\n",
 				target.agentKey(), managedNudgeWakeSkipReason(target, sessFront))
 		}
-		return nil
+		return 0, nil
 	}
-	res, err := sessFront.WakeSession(target.sessionID, time.Now().UTC(), session.WakeOpts{})
-	if err != nil {
-		return err
-	}
-	nudgeIDs := res.NudgeIDs
-	if len(nudgeIDs) > 0 {
-		if err := nudgeWithdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
-			if nudgeWarningWriter != nil {
-				fmt.Fprintf(nudgeWarningWriter, "gc session wake: warning: withdrawing queued wait nudges after managed wake: %v\n", err) //nolint:errcheck
-			}
-		}
-	}
-	return nil
+	return sessFront.RequestWakeUnlessHeld(target.sessionID, false, time.Now().UTC())
 }
 
 // managedNudgeWakeSkipReason names which precondition of the managed wake was
@@ -1433,6 +1433,7 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 			obs.Running = false
 			obs.Alive = false
 			obs.Attached = false
+			obs.AttachedErr = nil
 			obs.LastActivity = nil
 		}
 		return obs, nil
@@ -1537,6 +1538,8 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
 		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
+		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
 	default:
 		return ""
 	}
@@ -1617,8 +1620,9 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	}
 	if !obs.Running && canRequestManagedNudgeWake(target, store) {
 		item := newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, opts)
-		if err := enqueueManagedNudgeThenWake(target, store, item); err != nil {
-			return err
+		outcome, err := enqueueManagedNudgeThenWake(target, store, item)
+		if err != nil || outcome == session.WakeHeld {
+			return err // a held session keeps the nudge queued; no poke
 		}
 		if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 			if nudgeWarningWriter != nil {
@@ -1794,6 +1798,13 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if err != nil || !matches {
 		return false, err
 	}
+	// An operator's hold keeps queued delivery off the session too (CONTRACT
+	// v5.9 D8 7(a)), as a kill fence does in the dispatcher.
+	if sessStore != nil && target.sessionID != "" {
+		if info, err := sessionFrontDoor(sessStore).Get(target.sessionID); err == nil && session.HoldVerdictInfo(info, obs.Running, time.Now()) {
+			return false, nil
+		}
+	}
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
@@ -1849,6 +1860,16 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if len(blocked) > 0 {
 		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, blocked); termErr != nil {
 			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing blocked nudges: %w", termErr))
+		}
+	}
+	var staleMail []queuedNudge
+	items, staleMail, err = splitStaleMailQueuedNudges(target, deliveryMailProvider, deliverySessStore, items)
+	if err != nil && nudgeWarningWriter != nil {
+		fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: checking mail staleness for %s: %v\n", target.agentKey(), err) //nolint:errcheck
+	}
+	if len(staleMail) > 0 {
+		if termErr := terminalizeBlockedQueuedNudges(target.cityPath, map[string][]queuedNudge{"mail-already-read": staleMail}); termErr != nil {
+			bookkeepErr = errors.Join(bookkeepErr, fmt.Errorf("withdrawing stale mail nudges: %w", termErr))
 		}
 	}
 	if len(items) == 0 {
@@ -2174,6 +2195,71 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 	return nil
 }
 
+// targetHasUnreadMail reports whether target's own mailbox still has at
+// least one unread message. It re-verifies unread state at nudge-delivery
+// time for a deferred "you have mail" reminder: ga-vtxkj5 found the queue
+// replaying that reminder long after the mail had already been read, because
+// nothing re-checked unread state between enqueue and delivery.
+//
+// The check is deliberately coarse: it looks at aggregate unread count for
+// the target, not the specific message that produced the reminder, because
+// queued mail nudges carry no message ID to check individually. Treating
+// "still has unread mail" as the safe default (on ambiguity or error, report
+// unread) preserves the TestSendMailNotifyQueuesIndependentRemindersForEachMail
+// guarantee from PR #2968 that independent mail arrivals never get silently
+// dropped -- this only withdraws a reminder when unread count is truly zero.
+//
+// mp must read the messaging-class store (cliMailStore), not the nudges
+// store, so unread mail is visible when mail is routed separately. A nil mp
+// counts as unread, so the reminder is kept.
+func targetHasUnreadMail(target nudgeTarget, mp mail.Provider, sessStore beads.Store) (bool, error) {
+	if mp == nil || target.sessionID == "" {
+		return true, nil
+	}
+	resolved, err := resolveMailTargetsWithConfig(target.cityPath, target.cfg, sessStore, target.sessionID)
+	if err != nil {
+		return true, err
+	}
+	messages, err := collectMailMessages(mp.Check, resolved.recipients)
+	if err != nil {
+		return true, err
+	}
+	return len(messages) > 0, nil
+}
+
+// splitStaleMailQueuedNudges partitions items into ones that should still be
+// delivered (keep) and mail-sourced ones whose target has since read all
+// mail and so must be withdrawn instead of replayed as a stale reminder
+// (stale). Non-mail items always pass through into keep untouched.
+func splitStaleMailQueuedNudges(target nudgeTarget, mp mail.Provider, sessStore beads.Store, items []queuedNudge) (keep, stale []queuedNudge, err error) {
+	hasMailItem := false
+	for _, item := range items {
+		if item.Source == "mail" {
+			hasMailItem = true
+			break
+		}
+	}
+	if !hasMailItem {
+		return items, nil, nil
+	}
+	unread, err := targetHasUnreadMail(target, mp, sessStore)
+	if err != nil {
+		return items, nil, err
+	}
+	if unread {
+		return items, nil, nil
+	}
+	keep = make([]queuedNudge, 0, len(items))
+	for _, item := range items {
+		if item.Source == "mail" {
+			stale = append(stale, item)
+			continue
+		}
+		keep = append(keep, item)
+	}
+	return keep, stale, nil
+}
+
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, agentName)
 	return withNudgePollerPIDLock(pidPath, func() error {
@@ -2184,12 +2270,7 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
-		cmd.Env = os.Environ()
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		disableProductMetricsForChild(cmd)
+		cmd := newNudgePollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -2200,6 +2281,19 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+// newNudgePollerCommand builds the detached poller child over environ, without
+// the spawning session's identity (nudgepoller.ChildEnv), so the poller
+// never reads as that session's leaked process.
+func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
+	cmd.Env = nudgepoller.ChildEnv(environ)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	disableProductMetricsForChild(cmd)
+	return cmd
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {

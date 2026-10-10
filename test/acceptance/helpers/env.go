@@ -11,7 +11,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+// supervisorIsolatedHomeEnv is gc's opt-in (cmd/gc supervisorIsolatedHomeEnv)
+// for bare-starting its supervisor under a HOME that is not the passwd home.
+const supervisorIsolatedHomeEnv = "GC_SUPERVISOR_ISOLATED_HOME"
 
 // acceptanceGitConfig mirrors scripts/test-gitconfig-path. beads.role is the
 // load-bearing key: gc doctor errors without it and gc-beads-bd's
@@ -33,20 +39,22 @@ type Env struct {
 	// toolHome is the HOME every bd and dolt child of this Env gets in place
 	// of the real one. See tool_home.go.
 	toolHome string
+	// hostClaudeState lets the Claude state seeding write under the real user
+	// home. Only WithHostClaudeState sets it; see claude_state.go.
+	hostClaudeState bool
 }
 
 // NewEnv creates an isolated environment with the minimum inherited
 // variables (PATH, TMPDIR, locale, shell) plus test-specific overrides
-// for GC_HOME and XDG_RUNTIME_DIR.
+// for GC_HOME, HOME and XDG_RUNTIME_DIR.
 func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e := &Env{vars: make(map[string]string)}
 
-	// Inherit minimum from host. Keep the real HOME for gc: the platform
-	// supervisor path validates that HOME matches the OS user home and
-	// acceptance isolation for gc flows through GC_HOME instead. bd and dolt
-	// never see it — they get the tool home below (see tool_home.go).
+	// Inherit minimum from host. HOME is not inherited: gc gets an isolated
+	// one under GC_HOME (below), and bd and dolt the tool home (see
+	// tool_home.go).
 	for _, key := range []string{
-		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "HOME",
+		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
 		// The Makefile's TEST_ENV points these at scripts/test-gitconfig-path, a
 		// seeded writable global gitconfig carrying user.name, user.email and
@@ -118,22 +126,22 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	}
 	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
 
-	// Bazel's remote test runner points HOME at the per-action TEST_TMPDIR, and
-	// the platform supervisor refuses to start when HOME differs from the
-	// passwd entry. Only in exactly that case, swap HOME for the passwd home —
-	// everywhere else the host HOME passes through verbatim (the tool-home
-	// tests assert that contract with a canary). GC_HOME carries gc's
-	// isolation; bd/dolt never see HOME at all (tool home, above).
-	if envHome := e.vars["HOME"]; envHome != "" && envHome == os.Getenv("TEST_TMPDIR") {
-		if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
-			e.vars["HOME"] = lu.HomeDir
-		}
+	// gc gets a HOME of its own under GC_HOME, in every mode. Handing it the
+	// operator's home made results depend on the host: gc reads user-level
+	// state through HOME in-process (gc doctor's proxied-shared-server check
+	// reports on ~/.beads/shared-server), so a host running a bd shared server
+	// failed doctor-green while clean workers passed. The platform supervisor
+	// refuses a HOME that differs from the passwd entry, so the env opts into
+	// a bare-started supervisor under this HOME (GC_SUPERVISOR_ISOLATED_HOME);
+	// gc never installs a launchd/systemd unit from it. Being writable, it
+	// also holds the Claude state the tests seed (a CLAUDE_CONFIG_DIR from the
+	// host still wins: it carries the operator's credentials).
+	home := IsolatedHome(gcHome)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		panic(fmt.Sprintf("acceptance: creating isolated HOME under %s: %v", gcHome, err))
 	}
-	if e.vars["HOME"] == "" {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			e.vars["HOME"] = home
-		}
-	}
+	e.vars["HOME"] = home
+	e.vars[supervisorIsolatedHomeEnv] = "1"
 	e.vars["GC_HOME"] = gcHome
 
 	// gc carries its environment into every bd it forks, including ones that
@@ -149,15 +157,11 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// machine whose home never ran `dolt config --global`. Leaning on the host's
 	// ambient identity made that a coin flip: green on a developer box, red on a
 	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
-	// never writes host Dolt state -- the same pattern tier_c, tutorial_goldens
-	// and test/integration already use.
-	doltRoot := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltRoot, 0o755); err != nil {
-		panic(fmt.Sprintf("acceptance: creating dolt root under %s: %v", gcHome, err))
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltRoot, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		panic(fmt.Sprintf("acceptance: seeding dolt identity under %s: %v", doltRoot, err))
+	// never writes host Dolt state; test/integration seeds the same config. It
+	// also turns dolt's usage metrics off, so no dolt the suite runs calls
+	// eventsapi.dolthub.com.
+	if err := testutil.SeedDoltGlobalConfig(gcHome); err != nil {
+		panic(fmt.Sprintf("acceptance: %v", err))
 	}
 	e.vars["DOLT_ROOT_PATH"] = gcHome
 
@@ -219,7 +223,7 @@ func installServiceManagerShims(gcHome string) (string, error) {
 // package, and With mutates in place, so a test that needs its own PATH or
 // provider selection must take a copy rather than reach into the shared one.
 func (e *Env) Clone() *Env {
-	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome}
+	clone := &Env{vars: make(map[string]string, len(e.vars)), toolHome: e.toolHome, hostClaudeState: e.hostClaudeState}
 	for k, v := range e.vars {
 		clone.vars[k] = v
 	}
@@ -230,6 +234,42 @@ func (e *Env) Clone() *Env {
 func (e *Env) With(key, val string) *Env {
 	e.vars[key] = val
 	return e
+}
+
+// WithHostHome hands gc the operator's own HOME in place of the isolated one,
+// returning the Env for chaining. It is for the tiers that drive a real
+// provider CLI authenticated through that home (tier C, tutorial goldens,
+// worker inference); those runs are not hermetic, and no Bazel CI lane runs
+// them. bd and dolt children still get the tool home.
+func (e *Env) WithHostHome() *Env {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		lu, lookupErr := user.LookupId(strconv.Itoa(os.Getuid()))
+		if lookupErr != nil || strings.TrimSpace(lu.HomeDir) == "" {
+			panic(fmt.Sprintf("acceptance: resolving the host home: %v / %v", err, lookupErr))
+		}
+		home = lu.HomeDir
+	}
+	e.vars["HOME"] = home
+	return e
+}
+
+// WithHostClaudeState asks to let the harness seed Claude onboarding and
+// project trust into the real user home's ~/.claude.json, returning the Env
+// for chaining. It takes effect only where HostClaudeStateAllowed — a CI
+// runner's throwaway home, or an explicit GC_TEST_ALLOW_HOST_CLAUDE=1 — and
+// every other write under the real home is refused (claude_state.go). It is
+// for a tier that drives the operator's own Claude CLI through the host HOME
+// (tutorial goldens in host mode).
+func (e *Env) WithHostClaudeState() *Env {
+	e.hostClaudeState = true
+	return e
+}
+
+// IsolatedHome is the HOME NewEnv gives gc for gcHome. A tier that stages
+// provider credentials for gc's sessions stages them here.
+func IsolatedHome(gcHome string) string {
+	return filepath.Join(gcHome, "home")
 }
 
 // Without removes a variable.

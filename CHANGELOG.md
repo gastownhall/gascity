@@ -9,17 +9,265 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
-- **Upgrade Beads (`bd`) to v1.3.1-rc.2.** v1.5.0 pins and is tested against
-  bd v1.3.1-rc.2 (`deps.env` `BD_VERSION` and the go.mod library), which keeps
-  bd v1.3.0's schema. It is a prerelease, so Homebrew (`brew install beads`)
-  and beads' install scripts still install bd v1.3.0: download `bd` from the
-  [v1.3.1-rc.2 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1-rc.2)
-  or run `go install github.com/steveyegge/beads/cmd/bd@v1.3.1-rc.2`. A city
+- **New proxied scopes retire their proxy and Dolt child after 30 minutes
+  idle.** Before this release every scope gc created was pinned to never, so a
+  pair started by a stray read after `gc stop`, by `gc init --no-start`, or by
+  `gc rig add` on an unstarted city stayed resident for good (about 300 MB RSS
+  per scope). New scopes are now created with `[beads] proxied_idle_timeout`,
+  default `30m`. The next bd command restarts a retired pair transparently
+  (about half a second). One that arrives while the old pair is still shutting
+  down can wait several seconds. **Existing cities do not change.** bd cannot
+  yet change an initialized scope's idle timeout and gc does not edit bd's
+  sidecar, so scopes created before this release keep never. `gc doctor`'s
+  `proxied-idle-timeout` check reports the drift. Set `proxied_idle_timeout =
+  "0"` to keep new scopes resident. With a finite timeout the opt-in
+  `GC_BEADS_PROXIED_NATIVE` lane still serves short-lived reads natively, but
+  the controller's long-lived handles read through bd (verdict
+  `idle_policy_finite`) (#6561).
+
+- **The first `gc start` after a bd upgrade runs `bd recompute-blocked` once
+  per scope.** beads migration 0059 wrongly marks some beads blocked (beads#7037).
+  It hits any store that crossed 0059: one upgraded from bd v1.2.x or older,
+  or one that ever ran bd v1.3.0 or v1.3.1. Those beads drop out of
+  `bd ready` and gc stops dispatching them. gc repairs the city and each rig
+  it owns, logs `recomputed is_blocked for <scope> under bd <version>: N rows
+  corrected`, and emits `beads.blocked.recomputed` (a fresh city records one
+  0-row event per scope). `gc rig add` repairs the rig it adds the same way.
+  It does not touch external Dolt servers, complete storage bindings or non-bd
+  providers: run `bd recompute-blocked` in those scopes yourself. Scopes are
+  repaired four at a time before agents start: a city with three rigs and
+  5,000 beads per scope took about 1.5s. A failed repair only warns, and gc
+  retries it on the next start. If you upgrade bd while the supervisor is
+  running, the repair waits for the next `gc start`.
+- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
+  is gone.** Any city routing a session to ACP had process-table orphan
+  reaping off — for its ACP sessions, and in a city that mixes ACP with a
+  tmux or subprocess default, for every session including the tmux and
+  subprocess ones. It is on again. An ACP agent started by the previous binary
+  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
+  restarted no connection to it survives, so it reads untracked and the
+  pre-start orphan sweep terminates it. That is the intended verdict — its
+  owner's control socket died with the owner, so the agent could no longer be
+  driven — and it happens once, on the first restart, not on every one
+  (#6543).
+
+- **`[daemon] session_reconciler` is now a known key.** A city that still sets
+  the gc-enterprise spelling `"off"`, `"auto"` or `"require"` boots on the
+  legacy reconciler with a deprecation warning, including under strict mode;
+  remove the key. `"v2"` is reserved: a controller configured with it refuses
+  to start in this release, and `gc doctor` reports it as an error. An unknown
+  value also refuses controller start. Remove the key before rolling back to an
+  older gc, which rejects it under strict mode.
+
+- **`[beads] native_transport = "off"` and `GC_BEADS_FORCE_FALLBACK=1` refuse
+  a `[storage]` binding served by `beads-workspace`.** That provider opens the
+  native Dolt store, which "off" forbids. `gc start` refuses the binding before
+  it opens anything or records an outcome, and the error names the cause: the
+  city's setting or the process-wide variable. A deployment that sets
+  `GC_BEADS_FORCE_FALLBACK=1`, for example to keep `.beads/hooks` scripts
+  running, and binds a class to a beads workspace stops starting after the
+  upgrade. Unset the variable and set `native_transport = "off"` only in the
+  cities that need it, or remove the binding. `sqlite-beads` and the other
+  providers that never open the native store are unaffected (#7036).
+
+- **A command that opens a city's bead store fails when `city.toml` exists but
+  does not load.** It used to open the store with default settings, which would
+  ignore a `native_transport = "off"` in the file it failed to read. Fix the
+  reported error to proceed; setting `GC_BEADS_FORCE_FALLBACK=1` does not
+  bypass it. A directory with no `city.toml` is unaffected. A running
+  controller keeps the stores it holds open on the value it read at boot, but
+  the stores it opens for a single tick fail the same way. The `file` provider
+  and `exec:` providers other than the bundled `gc-beads-bd` script are
+  unaffected too, unless gc has to read the provider from a `city.toml` that
+  cannot be parsed: it then falls back to `bd`, and the command fails (#7036).
+
+- **An out-of-enum `[beads] conditional_writes`, `guarded_release` or
+  `native_transport` value fails config load.** These keys are now checked on
+  the composed config, so a bad value in `city.toml`, or in a fragment it
+  includes, fails the load with an error naming the key. Before, a city
+  with a bad `conditional_writes` or `guarded_release` value loaded, and its
+  controller warned and ran with that gate off. Correct the value before
+  upgrading (#7036).
+
+### Added
+
+- **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
+  proxy and Dolt child stay up with no connections.** bd retires the pair
+  after that much quiet and the next bd command restarts it. The value is a Go
+  duration; `"0"` means never, and a finite value must be at least `1m`. A rig
+  can override it with `beads_proxied_idle_timeout`, except a rig that shares
+  the city's proxy root, which always uses the city's value. The
+  `GC_BEADS_PROXIED_IDLE_TIMEOUT` environment variable overrides both, for
+  tests. gc applies the value where bd lets it: `gc init`, `gc rig add` and
+  `gc beads city migrate-proxied`. bd has no way yet to change the value of a
+  scope that already exists (#6561).
+
+- **`[beads] native_transport` chooses whether a city's bead stores may open
+  the native Dolt store.** `"auto"`, the default, keeps the current behavior:
+  native when preflight-eligible, the bd subprocess otherwise. `"off"` keeps
+  every store of the city on the bd subprocess, which a city needs while it
+  still depends on `.beads/hooks` scripts. A `[beads]` fragment that
+  `city.toml` includes keeps the city's value unless the fragment sets
+  `native_transport` itself. A running controller keeps the stores it holds
+  open on the value it read at boot until it restarts; `gc` commands, and the
+  stores it opens for a single tick, read the current value.
+  `GC_BEADS_FORCE_FALLBACK=1` still works as a deprecated alias for
+  `"off"`; it overrides every city in the process and logs a deprecation
+  warning once (#7036).
+
+- **`gc rig add --include <binding>=<source>` chooses the rig import's
+  binding.** Without it the binding is still the pack's name (its `[packs]` key
+  or the source's last path segment); `--include gc=<source>` writes
+  `[rigs.imports.gc]` instead. The left side must be letters, digits, `-` and
+  `_`, so a URL or path is never split. A binding that two `--include` flags
+  claim for different packs fails the add.
+
+### Changed
+
+- **A suspended rig or city is left cold.** gc no longer touches the bead
+  store of a suspended rig, or of any scope of a suspended city. That covers
+  cache scans, demand, order-tracking sweeps, the completions sweep,
+  convergence, `beads-health`, `/status` counts, the dashboard rig probe and
+  the core maintenance orders (reaper, jsonl-export, orphan-sweep, renudge).
+  Once a suspended scope's sessions have drained, gc stops its bd proxy and
+  Dolt child with `bd dolt stop`, the same step `gc stop` runs last, so a
+  suspended scope holds no memory. A suspended city with no running session
+  runs no controller tick and no order pass at all. `gc resume` / `gc rig
+  resume` let the next command restart the pair; if something restarts a
+  suspended scope's pair in the meantime, gc stops it again on its next tick.
+  `/status` work counts no longer include suspended rigs, and report how many
+  they left out in `work.suspended_rigs_excluded`. On a suspended city
+  `/status` reads no bead store at all and sets `stores_not_read`, so an open
+  dashboard does not restart the city's pair (#6561).
+
+- **`gc doctor`, `beads-health` and the dashboard understand a finite proxied
+  idle timeout.** A scope whose proxy retired on its idle timeout is idle, not
+  down. On a running city, doctor reads it, which wakes it for one more idle
+  period, instead of warning "store not running". `beads-health` and the
+  dashboard's per-rig probe count it as healthy and do not ping it. A stopped
+  city is still never started. A suspended rig or city is never woken: doctor
+  reports its store checks as "not checked: suspended", and `gc start` and
+  health leave it alone. The `proxied-idle-timeout` doctor check now compares
+  the configured value with the scope's sidecar and with the running proxy,
+  and reports drift as an advisory (#6561).
+
+- **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
+  that relocates classes to a `sqlite-beads` binding, that ledger's ready read
+  returned rows oldest-first (`created_at, id`). It now returns the canonical
+  `(priority, created_at, id)` order that `bd ready` and gc's cached ready
+  reads already use. When several ready beads in the ledger route to one pool
+  template, the bead a new session takes its trigger, worktree and pack from is
+  now the highest-priority one, oldest first within a priority; the order in
+  which sessions claim work does not change. `GET /v0/beads/ready` also returns
+  the relocated graph leg's rows in this order: the API concatenates its legs
+  without re-sorting them, so on a split city the graph rows at the end of the
+  response are now priority-ordered.
+
+- **`gc rig add --include` resolves a remote pack's version like
+  `gc import add`.** A non-bundled remote include used to be written with no
+  version and no `packs.lock` entry, so `gc import check` reported a missing
+  lock entry and the import floated. It now gets the constraint
+  `gc import add` would write (the constraint the city already holds for that
+  source, else the newest registry release, else the newest semver tag, else
+  the remote HEAD commit) and a `packs.lock` entry in the same add. That needs
+  network access to the source; if resolution fails, the add fails and
+  `city.toml` and `packs.lock` are untouched. Only explicit `--include` flags
+  changed: bundled packs, local paths, sources with an embedded `#ref`, and the
+  imports a new rig gets from `[defaults.rig.imports]` or `default_rig_includes`
+  are written as before.
+
+- **`gc import add` without `--version` keeps the constraint the city already
+  holds for a source.** `packs.lock` has one entry per source, so adding a
+  source the city already imports (in any scope) or locks now writes the
+  existing import's constraint, else one matching the source's `packs.lock`
+  entry, instead of the newest release's, which could conflict with the
+  existing constraint or move the lock entry every importer shares. A local
+  path inside a git worktree is still locked to its current commit. Adding a
+  pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
+  same way. Pass `--version` to choose another constraint.
+
+### Fixed
+
+- **A new scope directory over an existing current-era managed Dolt database
+  initializes instead of being refused as a legacy Dolt server workspace.**
+  `gc-beads-bd init` now stamps bd's version witness on a store that already
+  existed only when its `schema_migrations` table proves it current-era (an
+  adopted pre-1.0 store is still refused, #5294), never forces a reinit when
+  a schema probe does not answer, and resets a bootstrap that was interrupted
+  between a migration's DDL and its commit, only while it holds the
+  database's init lock exclusively. Behavior change: with bd 1.0.5 or later,
+  init on an already-initialized scope now runs `bd migrate schema`, and fails
+  with bd's message when that fails for any reason other than bd's
+  remote-migrate refusal (which is reported as a warning). An older bd has no
+  `bd migrate schema`, so init skips the step with a warning and bd applies
+  any pending migrations on its next write. With bd 1.3.0 or later the step is
+  also bd's consent to promote the schema of a database on a shared server
+  (gastownhall/beads#5920), which can lock out an older bd that uses the same
+  database; init writes what the step reports to its standard error, which gc
+  shows only when init fails. Init's migration steps also wait up to
+  `GC_DOLT_INIT_LOCK_TIMEOUT_MS` for a concurrent initializer's reset or
+  forced reinit to finish, and fail closed if it does not. That lock lives in
+  a per-user `gc-beads-bd-init-locks-<uid>` directory under `$TMPDIR` or
+  `/tmp` unless `GC_DOLT_INIT_LOCK_DIR` names another; where `flock` is
+  installed, init fails naming the lock file when it cannot create it.
+  Without `flock`, init refuses to reset an interrupted bootstrap and says
+  how to install it (#5926).
+
+- **Work hidden by beads migration 0059 is dispatched again.** On the first
+  start under a new bd version, `gc start` (and the supervisor, and
+  `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each
+  gc-owned, Dolt-backed bd scope and
+  records the bd version in the scope's own bd config
+  (`custom.gascity.blocked_repair_bd_version`), so later starts skip it. This
+  clears the `is_blocked` flags migration 0059 set across relates-to,
+  discovered-from and other non-blocking edges on any store that crossed it
+  (beads#7037).
+- **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
+  non-`GC_`-prefixed variables reach a spawned agent session, not only which
+  ones survive into the persisted service file.** The two allowlists used to
+  be independent: opting a variable into `GC_SUPERVISOR_ENV` widened the
+  systemd/launchd unit's environment, but `passthroughEnv`'s sweep still only
+  forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
+  persisted into the supervisor's own process and still never reach an agent.
+  One opt-in list now governs both, so declaring a variable once is enough.
+  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
+  also be forwarded into agent sessions.
+
+- **`gc mail send --from` can no longer forge another live session's
+  identity.** A session could previously claim `--from <name>` for any
+  other live, named session in the city with zero authentication — mail
+  would display as coming from a privileged coordinator role even though
+  it was actually sent by an unrelated worker. `--from` is now checked
+  against the calling session's own identity. A live agent session may only
+  send as itself — it can no longer claim another live session, the
+  operator's `human` identity, or `controller`. A caller with no
+  `GC_SESSION_ID`/`GC_ALIAS`/`GC_AGENT` set (an interactive terminal, or an
+  exec order running under the supervisor's environment) may still claim
+  any sender, which keeps scripted `--from controller` automation such as
+  the dolt compact quarantine alert working. A caller whose identity
+  variables are set but resolve to no live session is refused. This is a
+  spoofing guard, not authentication: those variables are caller-controlled.
+
+  **Upgrading:** scripts that pass `--from human` or `--from controller`
+  while running inside an agent session (or under a supervisor that
+  inherited one's `GC_*` session variables) now exit 1 with "does not match
+  this session's own identity".
+
+## [1.5.0] - 2026-10-05
+
+### Upgrading Notes
+
+- **Upgrade Beads (`bd`) to v1.3.1.** v1.5.0 pins and is tested against bd
+  v1.3.1 (`deps.env` `BD_VERSION` and the go.mod library), a stable release
+  that keeps bd v1.3.0's schema. Install it with `brew upgrade beads` (or
+  `brew install beads`), from the
+  [v1.3.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.1),
+  or with `go install github.com/steveyegge/beads/cmd/bd@v1.3.1`. A city
   that stays on bd v1.3.0 keeps working through the bd CLI, but gc refuses
   that bd for its native store (it is older than the linked library), and the
   proxied `bd backup` and closed-wisp `bd purge` steps of `mol-dog-backup` and
   `reaper` are reported as skipped. Read beads'
-  [v1.3.1-rc.2 upgrade notes](https://github.com/gastownhall/beads/blob/v1.3.1-rc.2/CHANGELOG.md#131-rc2---2026-09-29)
+  [v1.3.1 upgrade notes](https://github.com/gastownhall/beads/blob/v1.3.1/CHANGELOG.md#131---2026-09-30)
   before upgrading scripts that call bd directly. Do not move a city to a
   newer `bd` until a gc release pins it.
 - **`gc storage migrate` is experimental.** The command is new in v1.5.0 and
@@ -94,17 +342,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1.6, whose role prompts run `gc gc claim`, rename the key to `gc`;
   `gc doctor --fix` offers the rename (#6683). Do not add a second `gc` import
   next to the old key: that imports the pack twice (#4508).
-- **The first restart after upgrading reaps pre-upgrade ACP agents whose owner
-  is gone.** Any city routing a session to ACP had process-table orphan
-  reaping off — for its ACP sessions, and in a city that mixes ACP with a
-  tmux or subprocess default, for every session including the tmux and
-  subprocess ones. It is on again. An ACP agent started by the previous binary
-  carries no `GC_ACP_CONTROL_SOCKET` marker, and once its supervisor has
-  restarted no connection to it survives, so it reads untracked and the
-  pre-start orphan sweep terminates it. That is the intended verdict — its
-  owner's control socket died with the owner, so the agent could no longer be
-  driven — and it happens once, on the first restart, not on every one
-  (#6543).
 - **The `reaper`, `jsonl-export` and dolt `mol-dog-backup` orders now work
   through bd on every city topology.** Each bead scope (the city and every
   rig) is reached with `gc bd`, so bd-owned proxied, gc-managed and mixed
@@ -248,17 +485,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
-  non-`GC_`-prefixed variables reach a spawned agent session, not only which
-  ones survive into the persisted service file.** The two allowlists used to
-  be independent: opting a variable into `GC_SUPERVISOR_ENV` widened the
-  systemd/launchd unit's environment, but `passthroughEnv`'s sweep still only
-  forwarded `GC_`-prefixed keys into sessions, so a variable could be fully
-  persisted into the supervisor's own process and still never reach an agent.
-  One opt-in list now governs both, so declaring a variable once is enough.
-  Behavior change: variables already listed in `GC_SUPERVISOR_ENV` will now
-  also be forwarded into agent sessions.
-
 - **The reaper's stale-issue auto-close works again when an open bead
   depends on a wisp or external bead.** Such a dependency has no
   `depends_on_issue_id`, and that NULL emptied the active-dependency exclusion,
@@ -370,8 +596,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc bd show --watch` works on proxied cities.** bd v1.3.0 refuses watch
   mode under the default proxied beads transport, so `gc bd show <id> --watch`
   (also `view` and `--current`) now polls the bead every 2 seconds and redraws
-  it when it changes. Plain `bd show --watch` still refuses there until beads
-  fixes it upstream; use `gc bd show --watch` (#6681).
+  it when it changes. With the pinned bd v1.3.1, plain `bd show --watch` works
+  on proxied cities too (#6681).
 
 - **The tutorials match the `gc` pack binding.** Tutorial 01 and the
   quickstart now show `[imports.gc]`, as `gc init` writes it (#6676).

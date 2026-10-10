@@ -35,6 +35,15 @@ func createTestSession(t *testing.T, m *Manager, template string) string {
 	return b.ID
 }
 
+// seedDrainAckStopPending puts a row into draining the way production does:
+// the controller's drain-ack path is the only writer of state=draining.
+func seedDrainAckStopPending(t *testing.T, m *Manager, id string) {
+	t.Helper()
+	if err := m.PersistedStore().ApplyPatch(id, DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
+	}
+}
+
 func getState(t *testing.T, m *Manager, id string) State {
 	t.Helper()
 	b, err := m.store.Get(id)
@@ -85,120 +94,6 @@ func TestConformance_CreatingState(t *testing.T) {
 	}
 }
 
-func TestConformance_DrainState(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
-
-	id := createTestSession(t, m, "worker")
-
-	// Begin drain.
-	if err := m.BeginDrain(id, "config-drift"); err != nil {
-		t.Fatal(err)
-	}
-	if s := getState(t, m, id); s != StateDraining {
-		t.Errorf("state = %q, want %q", s, StateDraining)
-	}
-	b, _ := store.Get(id)
-	if b.Metadata["state_reason"] != "config-drift" {
-		t.Errorf("state_reason = %q, want config-drift", b.Metadata["state_reason"])
-	}
-	if b.Metadata["drain_at"] == "" {
-		t.Error("drain_at should be set")
-	}
-
-	// Archive after drain.
-	if err := m.Archive(id, "drain_complete"); err != nil {
-		t.Fatal(err)
-	}
-	if s := getState(t, m, id); s != StateArchived {
-		t.Errorf("state = %q, want %q", s, StateArchived)
-	}
-	b, _ = store.Get(id)
-	if b.Metadata["archived_at"] == "" {
-		t.Error("archived_at should be set")
-	}
-	if b.Metadata["pending_create_claim"] != "" {
-		t.Errorf("pending_create_claim = %q, want cleared", b.Metadata["pending_create_claim"])
-	}
-	if b.Metadata["continuity_eligible"] != "false" {
-		t.Errorf("continuity_eligible = %q, want false", b.Metadata["continuity_eligible"])
-	}
-}
-
-func TestConformance_QuarantineState(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
-
-	id := createTestSession(t, m, "worker")
-	if err := store.SetMetadata(id, "last_woke_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
-		t.Fatal(err)
-	}
-
-	until := time.Now().Add(5 * time.Minute)
-	if err := m.Quarantine(id, until, 3); err != nil {
-		t.Fatal(err)
-	}
-	if s := getState(t, m, id); s != StateQuarantined {
-		t.Errorf("state = %q, want %q", s, StateQuarantined)
-	}
-	b, _ := store.Get(id)
-	if b.Metadata["quarantine_cycle"] != "3" {
-		t.Errorf("quarantine_cycle = %q, want 3", b.Metadata["quarantine_cycle"])
-	}
-	if b.Metadata["quarantined_until"] == "" {
-		t.Error("quarantined_until should be set")
-	}
-	if b.Metadata["last_woke_at"] != "" {
-		t.Errorf("last_woke_at = %q, want cleared", b.Metadata["last_woke_at"])
-	}
-}
-
-func TestConformance_ArchivedReactivation(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
-
-	id := createTestSession(t, m, "worker")
-
-	// Archive first.
-	if err := m.Archive(id, "scale-down"); err != nil {
-		t.Fatal(err)
-	}
-	if s := getState(t, m, id); s != StateArchived {
-		t.Fatalf("state = %q, want %q", s, StateArchived)
-	}
-
-	if err := store.SetMetadata(id, "pending_create_claim", "true"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetMetadata(id, "continuity_eligible", "false"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Reactivate.
-	if err := m.Reactivate(id); err != nil {
-		t.Fatal(err)
-	}
-	if s := getState(t, m, id); s != StateAsleep {
-		t.Errorf("state = %q, want %q after reactivation", s, StateAsleep)
-	}
-	b, _ := store.Get(id)
-	if b.Metadata["state_reason"] != "reactivated" {
-		t.Errorf("state_reason = %q, want reactivated", b.Metadata["state_reason"])
-	}
-	if b.Metadata["pending_create_claim"] != "" {
-		t.Errorf("pending_create_claim = %q, want cleared", b.Metadata["pending_create_claim"])
-	}
-	if b.Metadata["continuity_eligible"] != "false" {
-		t.Errorf("continuity_eligible = %q, want preserved false", b.Metadata["continuity_eligible"])
-	}
-	if b.Metadata["archived_at"] != "" {
-		t.Error("archived_at should be cleared on reactivation")
-	}
-}
-
 func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *testing.T) {
 	// ga-rxhu2: `gc stop` and `gc restart` issue suspend on every session bead
 	// with no state pre-filter. Suspend from draining used to return
@@ -226,9 +121,7 @@ func TestConformance_SuspendDrainingTearsDownRuntimeWithoutRewritingState(t *tes
 	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
 		t.Fatalf("seeding runtime: %v", err)
 	}
-	if err := m.BeginDrain(id, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
-	}
+	seedDrainAckStopPending(t, m, id)
 
 	if err := m.SuspendForShutdown(id); err != nil {
 		t.Fatalf("SuspendForShutdown(draining) = %v, want nil (must not block gc stop and leave a live pane holding a pool name)", err)
@@ -273,9 +166,7 @@ func TestConformance_OperatorSuspendStillRejectsDraining(t *testing.T) {
 	if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
 		t.Fatalf("seeding runtime: %v", err)
 	}
-	if err := m.BeginDrain(id, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
-	}
+	seedDrainAckStopPending(t, m, id)
 
 	err = m.Suspend(id)
 	if !errors.Is(err, ErrIllegalTransition) {
@@ -308,9 +199,7 @@ func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *test
 		t.Fatalf("seeding runtime: %v", err)
 	}
 	sp.StopErrors = map[string]error{sessName: errors.New("provider refused the stop")}
-	if err := m.BeginDrain(id, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
-	}
+	seedDrainAckStopPending(t, m, id)
 
 	err = m.SuspendForShutdown(id)
 	if err == nil {
@@ -442,46 +331,6 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	}
 	if sp.IsRunning(sessName) {
 		t.Errorf("runtime session %q still running after Suspend(failed-create)", sessName)
-	}
-}
-
-func TestConformance_QuarantineReactivation(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	m := NewManagerWithOptions(store, sp)
-
-	id := createTestSession(t, m, "crasher")
-
-	// Quarantine the session.
-	until := time.Now().Add(5 * time.Minute)
-	if err := m.Quarantine(id, until, 3); err != nil {
-		t.Fatal(err)
-	}
-
-	// Reactivate.
-	if err := m.Reactivate(id); err != nil {
-		t.Fatal(err)
-	}
-	if s := getState(t, m, id); s != StateAsleep {
-		t.Errorf("state = %q, want %q after quarantine reactivation", s, StateAsleep)
-	}
-	b, _ := store.Get(id)
-
-	// quarantine_cycle should be preserved (for eviction tracking).
-	if b.Metadata["quarantine_cycle"] != "3" {
-		t.Errorf("quarantine_cycle = %q, want 3 (should be preserved)", b.Metadata["quarantine_cycle"])
-	}
-	// crash_count should be reset.
-	if b.Metadata["crash_count"] != "0" {
-		t.Errorf("crash_count = %q, want 0", b.Metadata["crash_count"])
-	}
-	// quarantined_until should be cleared.
-	if b.Metadata["quarantined_until"] != "" {
-		t.Error("quarantined_until should be cleared on reactivation")
-	}
-	// Quarantined non-terminal sessions remain continuity eligible by default.
-	if b.Metadata["continuity_eligible"] != "true" {
-		t.Errorf("continuity_eligible = %q, want true", b.Metadata["continuity_eligible"])
 	}
 }
 

@@ -1372,3 +1372,20 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
 	}
 }
+
+// LL6, I24: acp is already fresh-only. A held name returns ErrSessionExists
+// with FreshOnly set, and the holder is neither replaced nor stopped. Kills a
+// recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{})
+	holder := &sessionConn{done: make(chan struct{})}
+	p.conns["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.conns["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
+	}
+}

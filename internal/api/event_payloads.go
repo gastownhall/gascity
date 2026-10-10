@@ -88,8 +88,11 @@ func (SessionCreateSucceededPayload) IsEventPayload() {}
 
 // SessionMessageSucceededPayload is emitted on request.result.session.message.
 type SessionMessageSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the message."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the message."`
+	Queued             bool   `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.
@@ -97,10 +100,12 @@ func (SessionMessageSucceededPayload) IsEventPayload() {}
 
 // SessionSubmitSucceededPayload is emitted on request.result.session.submit.
 type SessionSubmitSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the submission."`
-	Queued    bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
-	Intent    string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the submission."`
+	Queued             bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
+	Intent             string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
@@ -634,6 +639,52 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// Reasons carried by SessionPendingClearedPayload.Reason.
+const (
+	// PendingClearedResolved: the session is still probed but no longer
+	// reports an interaction — it was answered (POST .../respond or at the
+	// terminal) or withdrawn by the session itself.
+	PendingClearedResolved = "resolved"
+	// PendingClearedReplaced: the session now reports a different request_id.
+	// A session.pending for the new interaction follows immediately.
+	PendingClearedReplaced = "replaced"
+	// PendingClearedSessionGone: the session left the probed set (closed,
+	// asleep, suspended, or otherwise no longer active).
+	PendingClearedSessionGone = "session_gone"
+)
+
+// SessionPendingPayload is the typed payload for session.pending: a session
+// gained a pending interaction. It carries the full interaction, the same
+// shape GET /v0/city/{cityName}/session/{id}/pending returns, so a client can
+// show the prompt and answer it with POST .../session/{id}/respond (passing
+// request_id) without another read.
+type SessionPendingPayload struct {
+	SessionID string            `json:"session_id" doc:"Session bead ID awaiting a decision."`
+	Template  string            `json:"template,omitempty" doc:"Session template, when known."`
+	Alias     string            `json:"alias,omitempty" doc:"Session alias, when set."`
+	RequestID string            `json:"request_id" doc:"Pending interaction request ID. Pass it to POST .../session/{id}/respond."`
+	Kind      string            `json:"kind" doc:"Interaction kind (e.g. approval)."`
+	Prompt    string            `json:"prompt,omitempty" doc:"Human-readable prompt."`
+	Options   []string          `json:"options,omitempty" doc:"Answer options as the session shows them."`
+	Metadata  map[string]string `json:"metadata,omitempty" doc:"Provider metadata (e.g. tool_name, source)."`
+}
+
+// IsEventPayload marks SessionPendingPayload as an events.Payload variant.
+func (SessionPendingPayload) IsEventPayload() {}
+
+// SessionPendingClearedPayload is the typed payload for
+// session.pending_cleared: the interaction a previous session.pending
+// announced is gone. SessionID and RequestID match that session.pending.
+type SessionPendingClearedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID from the matching session.pending."`
+	RequestID string `json:"request_id" doc:"Request ID from the matching session.pending."`
+	Kind      string `json:"kind" doc:"Interaction kind from the matching session.pending."`
+	Reason    string `json:"reason" enum:"resolved,replaced,session_gone" doc:"Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active)."`
+}
+
+// IsEventPayload marks SessionPendingClearedPayload as an events.Payload variant.
+func (SessionPendingClearedPayload) IsEventPayload() {}
+
 // SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
 // durable explicit wake request refused before the session reached a live
 // runtime (held, quarantined, or asleep past its idle-sleep window).
@@ -705,6 +756,8 @@ func init() {
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
+	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})

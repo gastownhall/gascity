@@ -12,9 +12,9 @@ import (
 // interfaces production callers type-assert — InteractionProvider (pending /
 // respond), TransportCapabilityProvider (SupportsTransport), SleepCapability,
 // IdleWaitProvider (WaitForIdle), IdleSnapshotProvider (SnapshotIdle),
-// SessionEventProvider (SubscribeSessionEvents), and ProcessTableScanner
-// (orphan reaping) — through to the underlying *Provider. The early cut-over
-// for the acp provider.
+// SessionEventProvider (SubscribeSessionEvents), ProcessTableScanner (orphan
+// reaping), LivenessObserverWithError and ListingAttestation — through to the
+// underlying *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
 	runtime.Provider
 	raw *Provider
@@ -29,6 +29,10 @@ var (
 	_ runtime.IdleSnapshotProvider        = (*seamBackedProvider)(nil)
 	_ runtime.SessionEventProvider        = (*seamBackedProvider)(nil)
 	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation          = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -90,4 +94,23 @@ func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveR
 // passthrough).
 func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	return s.raw.TerminateRuntime(r)
+}
+
+// ObserveLivenessWithError passes the underlying provider's three-outcome
+// liveness through (non-seam); the seams expose only a bool liveness read.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
+}
+
+// LocalIdentitySidecar passes the underlying provider's sidecar declaration
+// through; the seams route GetMeta to the same sidecar.
+func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
+
+// LivenessReadsFresh forwards [runtime.FreshByConstruction].
+func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessReadsFresh() }
+
+// ListRunningComplete passes the underlying provider's listing attestation
+// through; the seams route ListRunning to the same raw listing.
+func (s *seamBackedProvider) ListRunningComplete() bool {
+	return s.raw.ListRunningComplete()
 }
