@@ -351,6 +351,9 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, beadmailError("read", err)
 	}
+	if b.Type != messageBeadType {
+		return mail.Message{}, fmt.Errorf("beadmail read: bead %s is type %q, not message", id, b.Type)
+	}
 	if isRemovedMessageBead(b) {
 		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
 	}
@@ -373,6 +376,9 @@ func (p *Provider) MarkRead(id string) error {
 	if err != nil {
 		return beadmailError("mark-read", err)
 	}
+	if b.Type != messageBeadType {
+		return fmt.Errorf("beadmail mark-read: bead %s is type %q, not message", id, b.Type)
+	}
 	if isRemovedMessageBead(b) {
 		return beadmailError("mark-read", beads.ErrNotFound)
 	}
@@ -387,6 +393,9 @@ func (p *Provider) MarkUnread(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
 		return beadmailError("mark-unread", err)
+	}
+	if b.Type != messageBeadType {
+		return fmt.Errorf("beadmail mark-unread: bead %s is type %q, not message", id, b.Type)
 	}
 	if isRemovedMessageBead(b) {
 		return beadmailError("mark-unread", beads.ErrNotFound)
