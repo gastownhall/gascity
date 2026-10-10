@@ -401,8 +401,10 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return s.lane.cache },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			}}
 		},
 		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
 	}

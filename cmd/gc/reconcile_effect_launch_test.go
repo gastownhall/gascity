@@ -584,6 +584,55 @@ func TestEndpointTicketVerdicts(t *testing.T) {
 	}
 }
 
+// Kills a launch that starts an agent without its hooks and ACP route, that
+// installs them before PreWake lands or after the Start, and an install on
+// any verb but Launch: the row's resolved agent's side effects run once,
+// after PreWake landed and before the provider Start, and a no-op, an adopt
+// and a refused PreWake install nothing.
+func TestLaunchInstallsAgentSideEffectsBeforeStart(t *testing.T) {
+	agent := &config.Agent{Name: "worker"}
+	for _, c := range []struct {
+		name  string
+		kind  string
+		state string
+		setup func(*txKit)
+		want  []string
+	}{
+		{"launch", intentStart, "asleep", nil, []string{"install@generation=4", "start"}},
+		{"no-op over a committed runtime", intentStart, "active", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil},
+		{"adopt", intentAdopt, "creating", func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil},
+		{"PreWake refused", intentStart, "asleep", func(k *txKit) {
+			k.on(seamAfterReads, func() {})
+			k.on(seamAfterReads, func() { k.outside("held_until", gatherNow.Add(time.Hour).Format(time.RFC3339)) })
+		}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k, leaf := launchKit(t, c.state)
+			k.it.Kind = c.kind
+			var calls []string
+			row := k.p.World.Census.Rows[k.it.Key].Info
+			tp, _ := k.p.World.Templates.lookup(row)
+			k.p.World.Templates = &templateMemo{
+				entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row): {TP: tp.TP, Agent: agent}},
+				install: func(a *config.Agent, got TemplateParams) {
+					if a != agent || got.TemplateName != "worker" {
+						t.Errorf("installed for %v %q, want the row's agent and template", a, got.TemplateName)
+					}
+					calls = append(calls, "install@generation="+k.meta("generation"))
+				},
+			}
+			leaf.onStart = func(context.Context) { calls = append(calls, "start") }
+			if c.setup != nil {
+				c.setup(k)
+			}
+			k.runKind()
+			if !reflect.DeepEqual(calls, c.want) {
+				t.Fatalf("calls %v, want %v", calls, c.want)
+			}
+		})
+	}
+}
+
 // Kills prepare run without the PreWake's transcript state (S-1): a key
 // whose transcript the PreWake found present resumes the conversation.
 func TestLaunchResumesAPresentTranscript(t *testing.T) {
