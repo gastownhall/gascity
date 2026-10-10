@@ -33,6 +33,10 @@ type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	// TranscriptRoot is the directory receiving JSON-RPC capture transcripts
+	// (citylayout.ACPTranscriptsDir for a city). Empty disables capture. See
+	// capture.go for the file layout and format.
+	TranscriptRoot string
 	// StopGrace is how long Stop waits after SIGTERM before escalating to
 	// SIGKILL. Default runtime.ManagedProcessStopGrace.
 	StopGrace time.Duration
@@ -328,6 +332,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
 	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
+	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -347,6 +352,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// the stdout read end itself, so bytes still unread at that point are
 		// not guaranteed to be dispatched.
 		<-sc.readDone
+		sc.capture.close(captureCloseTimeout)
 		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
@@ -482,6 +488,34 @@ func acpHandshakeStartError(name string, hsErr error, exitCode int, stderr strin
 	return err
 }
 
+// openCapture opens the JSON-RPC capture transcript for one agent start, or
+// returns nil (capture disabled) when no transcript root is configured, the
+// session environment lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH, or the file
+// cannot be opened. Capture problems are reported on stderr and never fail
+// the session.
+func (p *Provider) openCapture(name string, env map[string]string, pid int) *transcriptCapture {
+	if p.cfg.TranscriptRoot == "" {
+		return nil
+	}
+	id := captureIdentity{
+		SessionID:         env["GC_SESSION_ID"],
+		SessionName:       name,
+		ContinuationEpoch: env["GC_CONTINUATION_EPOCH"],
+		RuntimeEpoch:      env["GC_RUNTIME_EPOCH"],
+		PID:               pid,
+	}
+	if id.SessionID == "" || id.ContinuationEpoch == "" {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: session env lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH\n", name)
+		return nil
+	}
+	c, err := openTranscriptCapture(p.cfg.TranscriptRoot, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: %v\n", name, err)
+		return nil
+	}
+	return c
+}
+
 func envWithoutKey(env []string, key string) []string {
 	prefix := key + "="
 	out := make([]string, 0, len(env))
@@ -522,7 +556,13 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 	// Step 3: Send "session/new" request.
 	newReq, _ := newSessionNewRequest(workDir, mcpServers)
-	ch, err = sc.sendRequest(newReq)
+	// session/new carries MCP server env, headers and URLs; the capture
+	// transcript gets a redacted copy.
+	redactedParams, err := redactedSessionNewParams(workDir, mcpServers)
+	if err != nil {
+		return fmt.Errorf("sending session/new: %w", err)
+	}
+	ch, err = sc.sendRequestRedacted(newReq, redactedParams)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
 	}

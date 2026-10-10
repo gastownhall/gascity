@@ -52,6 +52,11 @@ type Entry struct {
 	// Raw preserves the full JSON line for pass-through to API consumers.
 	Raw         json.RawMessage `json:"-"`
 	RawRecordID string          `json:"-"`
+
+	// Partial marks an entry the provider is still writing: a later read
+	// of the growing file may return it with more content under the same
+	// UUID.
+	Partial bool `json:"-"`
 }
 
 // SystemEvent carries provider-neutral system event metadata extracted from a
