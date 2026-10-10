@@ -1166,6 +1166,7 @@ func TestReconcileSessionBeads_PreserveNamedReconcilerAckStopDeferredWhenStoreQu
 // degraded store, so the partial-store guard must not swallow it.
 func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
@@ -1182,8 +1183,10 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	reconcileSessionBeads(
+	stops := &asyncStartTracker{}
+	reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -1191,6 +1194,7 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 		env.sp,
 		env.store,
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -1205,7 +1209,9 @@ func TestReconcileSessionBeads_AgentAckStopProceedsDespiteStoreQueryPartial(t *t
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	stops.wait(-1) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
@@ -5345,6 +5351,7 @@ func (s *failStopPendingStore) Update(id string, opts beads.UpdateOpts) error {
 
 func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
@@ -5355,8 +5362,10 @@ func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeads(
+	stops := &asyncStartTracker{}
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		env.city,
 		[]beads.Bead{session},
 		env.desiredState,
 		map[string]bool{"worker": true},
@@ -5364,6 +5373,7 @@ func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(
 		env.sp,
 		&failStopPendingStore{Store: env.store},
 		dops,
+		nil,
 		nil,
 		nil,
 		env.dt,
@@ -5378,7 +5388,9 @@ func TestReconcileSessionBeads_DrainAckStopPendingMetadataFailureLogsDiagnostic(
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	stops.wait(-1) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0", woken)
 	}
@@ -7519,6 +7531,7 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithReadyOpenAssignedWorkCancelsDra
 
 func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPending(t *testing.T) {
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -7564,9 +7577,10 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 		ackSet:     true,
 	})
 
+	stops := &asyncStartTracker{}
 	reconcileSessionBeadsAtPath(
 		context.Background(),
-		"",
+		env.city,
 		[]beads.Bead{session},
 		nil,
 		nil,
@@ -7589,7 +7603,9 @@ func TestReconcileSessionBeads_NoWakeDrainAckWithBlockedOpenAssignedWorkStopsPen
 		0,
 		&env.stdout,
 		&env.stderr,
+		withAsyncDrainAckStopTracker(stops),
 	)
+	stops.wait(-1) // the queued stop takes the city lease; it finishes before the checks and the TempDir cleanup
 
 	if len(dops.clearDrainCalls) != 0 {
 		t.Fatalf("clearDrain calls = %v, want no assigned-work cancellation for blocked open work", dops.clearDrainCalls)

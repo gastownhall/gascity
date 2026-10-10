@@ -353,7 +353,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := session.NewManagerWithOptions(m, runtime.NewFake()).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(t.TempDir())).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata

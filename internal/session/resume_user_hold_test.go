@@ -93,7 +93,7 @@ func TestOperatorResumeConsumesUserHold(t *testing.T) {
 					t.Errorf("hold consumed before the runtime started: %v", meta)
 				}
 			}
-			if err := resume(NewManagerWithOptions(store, sp), b.ID); err != nil {
+			if err := resume(NewManagerWithOptions(store, sp, WithCityPath(t.TempDir())), b.ID); err != nil {
 				t.Fatalf("resume: %v", err)
 			}
 			meta := heldKeys(t, store, b.ID)
@@ -131,7 +131,7 @@ func liveHeldSession(t *testing.T, state State) (*Manager, *runtime.Fake, beads.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.WaitForIdleErrors = map[string]error{}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -221,7 +221,7 @@ func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
 					t.Error(err)
 				}
 			}
-			err := NewManagerWithOptions(store, sp).Attach(context.Background(), b.ID, "claude", runtime.Config{})
+			err := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir())).Attach(context.Background(), b.ID, "claude", runtime.Config{})
 			if gotErr := err != nil; gotErr != tc.wantErr || (err != nil && !errors.Is(err, ErrStateSync)) {
 				t.Fatalf("Attach = %v, want error=%v (ErrStateSync)", err, tc.wantErr)
 			}

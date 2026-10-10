@@ -23,6 +23,7 @@ import (
 func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps) {
 	t.Helper()
 	env := newReconcilerTestEnv()
+	env.city = t.TempDir()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	b := env.createSessionBead("worker", "worker")
@@ -43,7 +44,7 @@ func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps)
 
 func (e *reconcilerTestEnv) userHoldTick(t *testing.T, id string, dops drainOps) {
 	t.Helper()
-	e.userHoldTickAt(t, "", id, dops)
+	e.userHoldTickAt(t, e.city, id, dops)
 }
 
 // userHoldTickAt is userHoldTick for a city at cityPath: the controller's
@@ -89,7 +90,7 @@ func (e *reconcilerTestEnv) assertResumedStaysUp(t *testing.T, id string, dops d
 
 func TestAttachAfterManagedSuspendStaysUp(t *testing.T) {
 	env, b, dops := heldDrainedSession(t)
-	mgr := session.NewManagerWithOptions(env.store, env.sp, session.WithClock(env.clk))
+	mgr := session.NewManagerWithOptions(env.store, env.sp, session.WithClock(env.clk), session.WithCityPath(env.city))
 	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 		}
 		dt := newDrainTracker()
 		dt.set(b.ID, &drainState{startedAt: now.Add(-time.Hour), deadline: now.Add(-time.Minute), reason: "user-hold", generation: 1, ackSet: true})
-		advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		advanceSessionDrainsWithSessionsTraced(t.TempDir(), dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got
 		}), map[string]wakeEvaluation{}, &config.City{}, &clock.Fake{Time: now}, nil)
@@ -155,7 +156,7 @@ func TestAttachAfterManagedSuspendSurvivesAMidResumeTick(t *testing.T) {
 			t.Errorf("mid-resume tick drain = %+v, want a user-hold drain (test premise)", ds)
 		}
 	}
-	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk))
+	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(env.city))
 	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

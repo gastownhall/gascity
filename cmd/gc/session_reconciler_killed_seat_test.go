@@ -155,7 +155,10 @@ func (e *killedSeatEnv) tick(t *testing.T, assigned []beads.Bead, opts ...startE
 	e.tickWith(t, e.reload(t, e.seat.ID), assigned, opts...)
 }
 
-// tickWith runs the pass over a given snapshot of the seat.
+// tickWith runs the pass over a given snapshot of the seat. Its async
+// drain-ack stops, which take the city's runtime lease, finish before it
+// returns, so the next tick never contends with them for the lease (a caller's
+// own tracker in opts takes precedence).
 func (e *killedSeatEnv) tickWith(t *testing.T, seat beads.Bead, assigned []beads.Bead, opts ...startExecutionOption) {
 	t.Helper()
 	ds := buildDesiredState("kill-town", e.city, e.now, e.cfg, e.sp, e.mem, io.Discard)
@@ -163,11 +166,13 @@ func (e *killedSeatEnv) tickWith(t *testing.T, seat beads.Bead, assigned []beads
 	if e.dops != nil {
 		dops = e.dops
 	}
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{seat}, ds.State, map[string]bool{e.cfg.Agents[0].QualifiedName(): true},
-		e.cfg, e.sp, e.store, dops, assigned, nil, e.dt, ds.PoolDesiredCounts, false, nil, "kill-town",
-		nil, e.clk, events.Discard, 0, 0, io.Discard, io.Discard, opts...,
+	stops := &asyncStartTracker{}
+	reconcileSessionBeadsAtPath(
+		context.Background(), e.city, []beads.Bead{seat}, ds.State, map[string]bool{e.cfg.Agents[0].QualifiedName(): true},
+		e.cfg, e.sp, e.store, dops, assigned, nil, nil, e.dt, ds.PoolDesiredCounts, false, nil, "kill-town",
+		nil, e.clk, events.Discard, 0, 0, io.Discard, io.Discard, append([]startExecutionOption{withAsyncDrainAckStopTracker(stops)}, opts...)...,
 	)
+	stops.wait(-1)
 }
 
 func (e *killedSeatEnv) reload(t *testing.T, id string) beads.Bead {
