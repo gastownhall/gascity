@@ -1,11 +1,13 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -96,7 +98,9 @@ func TestBazelNightlyFreshDecision(t *testing.T) {
 	wf := parseWorkflow(t, bazelNightlyWorkflow)
 	script := wf.Jobs["decide"].Steps[0].Run
 	const fp = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	week := strings.TrimSpace(mustRun(t, "date", "-u", "+%G-W%V"))
+	// date -u +%G-W%V, as the script computes it.
+	year, wk := time.Now().UTC().ISOWeek()
+	week := fmt.Sprintf("%d-W%02d", year, wk)
 	key := "fresh-" + fp + "-" + week
 
 	cases := []struct {
@@ -156,13 +160,4 @@ esac
 			}
 		})
 	}
-}
-
-func mustRun(t *testing.T, name string, args ...string) string {
-	t.Helper()
-	b, err := exec.Command(name, args...).Output()
-	if err != nil {
-		t.Fatalf("%s: %v", name, err)
-	}
-	return string(b)
 }

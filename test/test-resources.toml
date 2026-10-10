@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 746
-baseline_files = 224
+baseline_calls = 747
+baseline_files = 225
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 498
-baseline_files = 150
+baseline_calls = 499
+baseline_files = 151
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -458,6 +458,17 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner"
 resource_owner = "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestBazelNightlyFreshDecision"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the nightly fresh-on-drift decision proof is a checked Medium subprocess owner"
+resource_owner = "the bash subprocess per case is confined to TestBazelNightlyFreshDecision, which exists to run bazel-nightly.yml's decide step script against a PATH-injected stub gh (shadow mode, a covered week, a new fingerprint, a key prefix, a PR-scoped cache entry, a dispatch, no canary run, a malformed fingerprint): the decision is shell and gh, so only a real shell run can prove when the nightly re-executes every test and that it fails open to fresh"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
