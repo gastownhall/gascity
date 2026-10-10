@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -309,10 +310,21 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
 }
 
+// doltPortInUsePattern matches what dolt 2.3.3 prints when another listener
+// holds its port, "Port 17777 already in use." The word boundary keeps a name
+// that merely ends in "port" from counting.
+var doltPortInUsePattern = regexp.MustCompile(`(?i)\bport \d+ already in use`)
+
 // doltStartupPortInUse reports whether dolt's startup output says it could
-// not take its configured port.
+// not take its configured port. dolt says so two ways: the kernel's bind error
+// ("listen tcp 0.0.0.0:3307: bind: address already in use"), which appears
+// only when the bind itself fails, and, in 2.3.3, "Port 3307 already in use."
+// whenever another listener holds the port. Other "already in use" complaints,
+// such as a database held by another process, are not port conflicts and do
+// not match.
 func doltStartupPortInUse(output string) bool {
-	return strings.Contains(strings.ToLower(output), "address already in use")
+	return strings.Contains(strings.ToLower(output), "address already in use") ||
+		doltPortInUsePattern.MatchString(output)
 }
 
 // managedDoltLockReleaseTimeoutFn resolves the configured wait window for
@@ -329,7 +341,8 @@ var managedDoltStartAddressInUseRetryWindowFn = resolveManagedDoltStartAddressIn
 
 // resolveManagedDoltStartAddressInUseRetryWindow returns how long the managed-dolt
 // start path should wait on the originally requested port before falling back
-// to a higher port when bind fails with "address already in use". Reads
+// to a higher port when dolt reports the port in use (doltStartupPortInUse:
+// "address already in use" or "Port N already in use."). Reads
 // `[daemon].dolt_start_address_in_use_retry_window` from city.toml when available;
 // falls back to config.DefaultDoltStartAddressInUseRetryWindow when the config
 // cannot be loaded.
