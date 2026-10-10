@@ -47,14 +47,17 @@ ACCEPTANCE_ENV = {
 # table. A test may appear under several targets, each running a disjoint
 # share of its subtests (SOLO_SUBTESTS).
 SOLO_TESTS = {
+    "beads_proxied_default_init_test": "TestBeadsProxiedDefaultInit",
     "beads_proxied_default_restart_test": "TestBeadsProxiedDefaultRestart",
     "beads_proxied_default_rig_test": "TestBeadsProxiedDefaultRig",
     "beads_proxied_default_start_test": "TestBeadsProxiedDefaultStart",
+    "beads_proxied_ignores_user_level_shared_server_test": "TestBeadsProxiedIgnoresUserLevelSharedServer",
     "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
     "blocked_repair_on_proxied_city_and_rig_test": "TestBlockedRepairOnProxiedCityAndRig",
     "doctor_leaves_a_stopped_proxied_city_stopped_test": "TestDoctorLeavesAStoppedProxiedCityStopped",
+    "doctor_proxied_backup_coverage_leaves_a_stopped_city_stopped_test": "TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_native_lifecycle_test": "TestProxiedNativeLifecycle",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
