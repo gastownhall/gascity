@@ -28,6 +28,11 @@ hook that beads manages means adding its `.githooks` counterpart too —
 `TestGitHooksCoverEveryBeadsManagedHook` in `scripts/` fails otherwise. Hook
 ownership is explained in `CONTRIBUTING.md` ("Git hook ownership").
 
+The pre-push Go-change scan must consume the complete diff and fail if the
+comparison cannot be read. An early-exiting `grep -q` under `pipefail` can make
+a large diff look empty when Git receives SIGPIPE, silently skipping the suite.
+`githooks_pre_push_stdin_test.go` covers large diffs and unreadable comparisons.
+
 ## Make targets run Bazel; `-go` twins are the escape hatch
 
 `make test`, `check`, `check-all`, `check-docs`, `test-acceptance` and
