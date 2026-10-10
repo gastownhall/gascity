@@ -187,16 +187,16 @@ func (s *Store) ApplyPatchIfLifecycleUnchangedUnder(expected Info, patch Metadat
 }
 
 func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch, lease *RuntimeLease, attempts int) (bool, error) {
-	res, err := s.commitIf(expected.ID, patch, lease, attempts, func(b beads.Bead) bool {
+	res, err := s.commitIf(expected.ID, patch, lease, attempts, s.validatedBead, func(b beads.Bead) bool {
 		return sameLifecycleFacts(expected, infoFromPersistedBead(b))
 	})
 	return res == CommitLanded, err
 }
 
-// commitIf writes patch to row id while holds accepts a fresh read of it
+// commitIf writes patch to row id while holds accepts read's read of it
 // (and, with lease, the read still records the lease), fenced at that read's
 // revision; a fence lost to another writer re-reads, up to attempts times.
-func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, holds func(beads.Bead) bool) (CommitResult, error) {
+func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
 		return CommitMoved, nil
 	}
@@ -205,7 +205,7 @@ func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, at
 		return 0, fmt.Errorf("updating session %q: %w", id, err)
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		bead, err := s.validatedBead(id)
+		bead, err := read(id)
 		if err != nil {
 			return 0, err
 		}

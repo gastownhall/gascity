@@ -110,15 +110,16 @@ func (r CommitResult) String() string {
 }
 
 // Commit writes patch to d's row while the row still carries the facts d was
-// decided on: each attempt reads the row fresh, matches it, and writes fenced
-// at that read's revision, up to three attempts. A store without conditional
-// writes is read, matched and written, with the window between the read and
-// the write left open.
+// decided on: each attempt reads the row live (the backing store, never a
+// cache: a move another process wrote is seen whatever refreshed the cache),
+// matches it, and writes fenced at that read's revision, up to three
+// attempts. A store without conditional writes is read, matched and written,
+// with the window between the read and the write left open.
 func (s *Store) Commit(d Decided, patch MetadataPatch) (CommitResult, error) {
 	if d.info.ID == "" {
 		return 0, errors.New("session: commit of a zero decision")
 	}
-	return s.commitIf(d.info.ID, patch, nil, startCommitMaxAttempts, func(b beads.Bead) bool {
+	return s.commitIf(d.info.ID, patch, nil, startCommitMaxAttempts, s.freshBead, func(b beads.Bead) bool {
 		return d.Match(infoFromPersistedBead(b))
 	})
 }

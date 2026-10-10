@@ -18,6 +18,12 @@ import (
 // the drain read it.
 func heldDrainAckFixture(t *testing.T, tracked bool) (*reconcilerTestEnv, beads.Bead, beads.Bead, *fakeDrainOps) {
 	t.Helper()
+	return drainAckFixture(t, tracked, true)
+}
+
+// drainAckFixture is heldDrainAckFixture, the row held or not.
+func drainAckFixture(t *testing.T, tracked, held bool) (*reconcilerTestEnv, beads.Bead, beads.Bead, *fakeDrainOps) {
+	t.Helper()
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
@@ -25,7 +31,9 @@ func heldDrainAckFixture(t *testing.T, tracked bool) (*reconcilerTestEnv, beads.
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
-	env.setSessionMetadata(&session, map[string]string{"held_until": "2099-01-01T00:00:00Z", "sleep_intent": "user-hold"})
+	if held {
+		env.setSessionMetadata(&session, map[string]string{"held_until": "2099-01-01T00:00:00Z", "sleep_intent": "user-hold"})
+	}
 	blocker, err := env.store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
 	if err != nil {
 		t.Fatal(err)
@@ -270,5 +278,29 @@ func TestIdleDrainBasisIsTheStoredRow(t *testing.T) {
 	}
 	if holds, err := sessionFrontDoor(env.store).Holds(ds.basis); err != nil || !holds {
 		t.Fatalf("the idle drain's basis (sleep_intent %q) does not hold for its own row %v: %v", ds.basis.Info().SleepIntent, mustGetBead(t, env.store, session.ID).Metadata, err)
+	}
+}
+
+// TestDrainAckOverANewIncarnationIsRefused: a new incarnation started (its
+// pre-wake commit) between the tick's snapshot and the stop-pending mark is
+// not the row the drain decided on, whether the decision is the drain's basis
+// or the tick's snapshot: the mark does not land and nothing is stopped.
+func TestDrainAckOverANewIncarnationIsRefused(t *testing.T) {
+	for _, tracked := range []bool{true, false} {
+		env, snapshot, work, dops := drainAckFixture(t, tracked, false)
+		reconcileDrainAckTick(env, snapshot, work, dops) // the control: unmoved, it marks
+		if !isDrainAckStopPendingInfo(env.sessionInfo(snapshot.ID)) {
+			t.Fatalf("tracked %v: the unmoved row was not marked (test premise); stderr %q", tracked, env.stderr.String())
+		}
+
+		env, snapshot, work, dops = drainAckFixture(t, tracked, false)
+		newIncarnation := sessionpkg.PreWakePatch(sessionpkg.PreWakePatchInput{Generation: 2, InstanceToken: "tok-2", Now: env.clk.Now()})
+		if err := sessionFrontDoor(env.store).ApplyPatch(snapshot.ID, newIncarnation); err != nil {
+			t.Fatal(err)
+		}
+		reconcileDrainAckTick(env, snapshot, work, dops)
+		if isDrainAckStopPendingInfo(env.sessionInfo(snapshot.ID)) || env.sp.CountCalls("Stop", "worker") != 0 {
+			t.Fatalf("tracked %v: row %v, stops %d; want the new incarnation unmarked and unstopped", tracked, mustGetBead(t, env.store, snapshot.ID).Metadata, env.sp.CountCalls("Stop", "worker"))
+		}
 	}
 }

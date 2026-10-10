@@ -225,8 +225,10 @@ func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps,
 	now := clk.Now().UTC()
 	res, stop, err := act.MarkStopPending(d, now)
 	switch {
+	case errors.Is(err, errActDeferred):
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s %v\n", name, err) //nolint:errcheck
 	case err != nil:
-		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s deferred: %v\n", name, err) //nolint:errcheck
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
 	case res == sessionpkg.CommitLanded:
 		return info.ApplyPatch(sessionpkg.DrainAckStopPendingPatch(now)), stop, true
 	case res == sessionpkg.CommitMoved && tracked:

@@ -162,8 +162,10 @@ func TestCommitRefusesAStaleStopPendingOverAConsumedHold(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Commit: %v", err)
 			}
-			if res == CommitLanded {
-				t.Fatal("the stale stop-pending mark landed over a consumed hold")
+			// Moved, on a cached store too: Commit reads the row live, so a
+			// consume another process wrote is seen without a cache refresh.
+			if res != CommitMoved {
+				t.Fatalf("Commit = %v over a consumed hold, want moved", res)
 			}
 			got, err := backing.Get(created.ID)
 			if err != nil {
@@ -181,9 +183,6 @@ func TestCommitRefusesAStaleStopPendingOverAConsumedHold(t *testing.T) {
 func TestCommitResults(t *testing.T) {
 	patch := MetadataPatch{"drain_at": "x"}
 	for _, backend := range patchFenceBackends() {
-		if backend.staleCache {
-			continue // a stale cached revision refuses once; covered by the lifecycle fence tests
-		}
 		t.Run(backend.name, func(t *testing.T) {
 			store, backing := backend.open(t)
 			front := NewStore(beads.SessionStore{Store: store})

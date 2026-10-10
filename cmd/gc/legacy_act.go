@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -33,10 +35,14 @@ func (a legacyAct) Stop(d sessionpkg.Decided) error {
 	return controllerKillRowCtx(ctx, a.cityPath, a.store, a.sp, a.cfg, d.Info().ID)
 }
 
+// errActDeferred wraps the error of an act that did not run because its
+// runtime lease is busy or unreachable: a later tick decides again.
+var errActDeferred = errors.New("deferred")
+
 // MarkStopPending writes the drain-ack stop-pending transition at now while
 // d's row still carries d's facts. On CommitLanded it returns the decision
 // the stop executes against: d's row with the mark (FactsLegacyDrainStop).
-// An error is a busy lease or a failed read or write.
+// An error is a failed read or write, or errActDeferred.
 func (a legacyAct) MarkStopPending(d sessionpkg.Decided, now time.Time) (sessionpkg.CommitResult, sessionpkg.Decided, error) {
 	info := d.Info()
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -45,7 +51,7 @@ func (a legacyAct) MarkStopPending(d sessionpkg.Decided, now time.Time) (session
 	}
 	_, release, err := controllerStopLease(a.store, a.cityPath, name, info.ID, a.stderr)
 	if err != nil {
-		return 0, sessionpkg.Decided{}, err
+		return 0, sessionpkg.Decided{}, fmt.Errorf("%w: %w", errActDeferred, err)
 	}
 	defer release()
 	patch := sessionpkg.DrainAckStopPendingPatch(now)
