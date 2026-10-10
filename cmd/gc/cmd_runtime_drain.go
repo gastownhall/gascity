@@ -926,7 +926,7 @@ func releaseUnexecutedClaimsForSessionStore(
 	if rigStores != nil {
 		rigs = rigStores()
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
+	releaseUnexecutedClaimsOnDrainAck(workLegsFromCensus(cityPath, cfg, cityWorkStoreOf(store), rigs), sessionBead, budget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.

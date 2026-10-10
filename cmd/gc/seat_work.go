@@ -1,146 +1,230 @@
 package main
 
-// The seat work index: one read of every work leg per reconciler tick, which
-// the tick's "does this seat still hold work?" questions answer from in memory.
+// SeatWork: one read of every work leg, which "does this seat still hold
+// work?" questions answer from in memory.
 //
 // mc-3ixn3.16 put the city work store, bd over a remote database on
 // maintainer-city (seconds a call), into every gate's legs; a live probe per
-// identity, status and tier cost tens of seconds per decision. The index pays
-// each leg once per tick, and only on a tick that asks. Its answers:
+// identity, status and tier cost tens of seconds per decision. A SeatWork pays
+// each leg once, and only when a question is asked. Its answers:
 //
-//   - a hit is re-read live and counts only if the live bead still matches;
+//   - a hit is re-read live and counts only if the live bead still matches
+//     (match); a question whose answer only keeps a seat may take the row as
+//     read (snapshot);
 //   - a miss on a leg read completely is no work there (as of the read);
-//   - an unreadable leg is unknown: with no confirmed hit elsewhere the
-//     question fails closed, as assignedWorkScanComplete does.
+//   - an unreadable leg, or one past its budget, is unknown: with no confirmed
+//     hit elsewhere the question fails closed.
 //
-// The legs are assignedWorkSweepPlan's, the census's, so the index and the live
-// path agree on the stores. The minimal form of ARCH-RESTRUCTURE K-b.
+// It is an explicit value over a WorkLegs (work_location.go). The legacy tick
+// reads every assignee once per tick (newSeatWork) and hands it to every phase
+// that asks; a v2 effect or a one-shot command reads one seat's identities
+// live (seatWorkFor).
 
 import (
 	"errors"
+	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// workLegs is the city a seat's work is read across beside the store a caller
-// holds: assignedWorkSweepPlan adds the registered city work store, the serving
-// rigs and the bindings. The zero value reads that store alone. It carries the
-// city into the close cascade, which reached closeBead with a store and nothing
-// else.
-type workLegs struct {
-	cityPath string
-	cfg      *config.City
-	rigs     map[string]beads.Store
-}
-
-// seatWorkStatuses are the statuses a seat's work can hold: what the index reads.
+// seatWorkStatuses are the statuses a seat's work can hold: what a SeatWork reads.
 var seatWorkStatuses = []string{"open", "in_progress"}
 
-// seatWorkIndex is one tick's read of every work leg, keyed by assignee.
-type seatWorkIndex struct {
-	cityPath string
-	cfg      *config.City
-	leading  beads.Store
-	rigs     map[string]beads.Store
+// SeatWork is one read of every leg of a WorkLegs, keyed by assignee.
+type SeatWork struct {
+	legs WorkLegs
+	// ids, when set, is the one seat's read: only these assignees were listed,
+	// live. A question about any other identity is unknown. Nil reads every
+	// assignee.
+	ids map[string]bool
+	// budget bounds each leg's read; a leg still reading at the budget is
+	// unknown. Every leg starts at once, so one leg's latency never spends
+	// another's (SS-2). Zero waits for every leg.
+	budget time.Duration
 
 	once sync.Once
-	err  error // the leg set itself could not be resolved
-	legs []seatWorkLeg
+	read []seatWorkLeg
 }
 
 type seatWorkLeg struct {
 	store      beads.Store
-	err        error // the leg could not be read: whatever it holds is unknown
+	errs       map[string]error // by status: a list that failed leaves that status unknown on the leg
 	byAssignee map[string][]beads.Bead
 }
 
+// unread is why the leg cannot answer for statuses: a failed list of one of
+// them.
+func (l seatWorkLeg) unread(statuses []string) error {
+	var err error
+	for _, s := range statuses {
+		err = errors.Join(err, l.errs[s])
+	}
+	return err
+}
+
 // seatWorkQuery is one question about a seat's work: beads in one of statuses,
-// assigned to one of ids, that are not session or mail beads and that keep (when
-// set) accepts. keep sees the live bead and the store it lives in.
+// assigned to one of scope's identities, that are not session or mail beads and
+// that keep (when set) accepts. keep sees the live bead and the store it lives
+// in.
 type seatWorkQuery struct {
-	ids      []string
+	scope    workScope
 	statuses []string
 	keep     func(store beads.Store, b beads.Bead) (bool, error)
 }
 
-// seatWorkHit is a live-confirmed answer to a seatWorkQuery.
+// seatWorkHit is one answer to a seatWorkQuery: a bead and the leg it lives in.
 type seatWorkHit struct {
 	store beads.Store
 	bead  beads.Bead
 }
 
-func newSeatWorkIndex(cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store) *seatWorkIndex {
-	return &seatWorkIndex{cityPath: cityPath, cfg: cfg, leading: leading, rigs: rigs}
+// errSeatWorkBudget: a leg did not answer within its budget.
+var errSeatWorkBudget = errors.New("seat work leg did not answer within its budget")
+
+// newSeatWork is the tick's read: every assignee on every leg, read on the
+// first question.
+func newSeatWork(legs WorkLegs) *SeatWork {
+	return &SeatWork{legs: legs}
 }
 
-// read lists every leg once, concurrently: one live list per status, both tiers.
-func (x *seatWorkIndex) read() {
-	plan, err := assignedWorkSweepPlan(x.cityPath, x.cfg, x.leading, x.rigs, nil)
-	if err != nil {
-		x.err = err
-		return
-	}
-	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) { // residency:allow — enumerates assignedWorkSweepPlan's own legs to read each once
-		x.legs = append(x.legs, seatWorkLeg{store: leg.Store})
-	})
-	// Every (leg, status) list runs at once: on a remote store the index costs
-	// one list's latency per tick, not one per status and leg.
-	lists := make([][]beads.Bead, len(x.legs)*len(seatWorkStatuses))
-	errs := make([]error, len(lists))
-	var wg sync.WaitGroup
-	for i := range lists {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			defer recoverLeg(&errs[i], "seat work index leg", log.Writer())
-			leg, status := x.legs[i/len(seatWorkStatuses)], seatWorkStatuses[i%len(seatWorkStatuses)]
-			lists[i], errs[i] = leg.store.List(beads.ListQuery{Status: status, TierMode: beads.TierBoth, Live: true})
-		}(i)
-	}
-	wg.Wait()
-	for i := range lists {
-		leg := &x.legs[i/len(seatWorkStatuses)]
-		if leg.byAssignee == nil {
-			leg.byAssignee = make(map[string][]beads.Bead)
+// seatWorkFor is one seat's read: scope's identities only, listed live on
+// every leg, each leg within budget (zero: unbounded).
+func seatWorkFor(legs WorkLegs, scope workScope, budget time.Duration) *SeatWork {
+	ids := make(map[string]bool)
+	for _, id := range scope.scopeIDs() {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = true
 		}
-		if errs[i] != nil {
-			leg.err = errs[i]
-			continue
-		}
-		for _, b := range lists[i] {
-			if assignee := strings.TrimSpace(b.Assignee); assignee != "" {
-				leg.byAssignee[assignee] = append(leg.byAssignee[assignee], b)
+	}
+	return &SeatWork{legs: legs, ids: ids, budget: budget}
+}
+
+// fresh is one seat's read of sw's legs now, for a question a snapshot "no
+// work" must not answer.
+func (sw *SeatWork) fresh(scope workScope) *SeatWork {
+	if sw == nil {
+		return seatWorkFor(WorkLegs{}, scope, 0)
+	}
+	return seatWorkFor(sw.legs, scope, sw.budget)
+}
+
+// Legs is the leg set sw reads. A nil SeatWork reads the zero WorkLegs,
+// which answers every question unknown.
+func (sw *SeatWork) Legs() WorkLegs {
+	if sw == nil {
+		return WorkLegs{}
+	}
+	return sw.legs
+}
+
+// seatWorkList is one list a read makes, and the leg it fills.
+type seatWorkList struct {
+	leg int
+	q   beads.ListQuery
+}
+
+type seatWorkListResult struct {
+	at   int
+	rows []beads.Bead
+	err  error
+}
+
+// load lists every leg once, concurrently: one live list per status (per
+// identity on a seat's read), both tiers.
+func (sw *SeatWork) load() {
+	sw.legs.each(func(s beads.Store) { sw.read = append(sw.read, seatWorkLeg{store: s}) })
+	var lists []seatWorkList
+	for i := range sw.read {
+		sw.read[i].byAssignee = make(map[string][]beads.Bead)
+		sw.read[i].errs = make(map[string]error)
+		for _, status := range seatWorkStatuses {
+			if sw.ids == nil {
+				lists = append(lists, seatWorkList{leg: i, q: beads.ListQuery{Status: status, TierMode: beads.TierBoth, Live: true}})
+				continue
 			}
+			for id := range sw.ids {
+				lists = append(lists, seatWorkList{leg: i, q: beads.ListQuery{Assignee: id, Status: status, TierMode: beads.TierBoth, Live: true}})
+			}
+		}
+	}
+	// Every list runs at once: on a remote store a read costs one list's
+	// latency, not one per status and leg. Results come back on a channel, so
+	// a list past the budget leaves nothing behind when it ends.
+	results := make(chan seatWorkListResult, len(lists))
+	for at, l := range lists {
+		go func(at int, l seatWorkList) {
+			r := seatWorkListResult{at: at}
+			defer func() { results <- r }()
+			defer recoverLeg(&r.err, "seat work leg", log.Writer())
+			r.rows, r.err = sw.read[l.leg].store.List(l.q)
+		}(at, l)
+	}
+	var expired <-chan time.Time
+	if sw.budget > 0 {
+		timer := time.NewTimer(sw.budget)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	answered := make([]bool, len(lists))
+	for range lists {
+		select {
+		case r := <-results:
+			answered[r.at] = true
+			l := lists[r.at]
+			leg := &sw.read[l.leg]
+			if r.err != nil {
+				leg.errs[l.q.Status] = errors.Join(leg.errs[l.q.Status], r.err)
+				continue
+			}
+			for _, b := range r.rows {
+				if assignee := strings.TrimSpace(b.Assignee); assignee != "" {
+					leg.byAssignee[assignee] = append(leg.byAssignee[assignee], b)
+				}
+			}
+		case <-expired:
+			for at, ok := range answered {
+				if !ok {
+					l := lists[at]
+					leg := &sw.read[l.leg]
+					leg.errs[l.q.Status] = errors.Join(leg.errs[l.q.Status], fmt.Errorf("%w (%s)", errSeatWorkBudget, sw.budget))
+				}
+			}
+			return
 		}
 	}
 }
 
 // match answers q: every live-confirmed hit in leg order, or only the first when
 // first is set. Without a first hit, an unreadable leg is the error.
-func (x *seatWorkIndex) match(q seatWorkQuery, first bool) ([]seatWorkHit, error) {
-	return x.find(q, first, true)
+//
+// A RefuseScope question gates ending a live runtime, which a snapshot "no
+// work" never authorizes: on the tick's read it is answered by a fresh read
+// of the seat's identities instead.
+func (sw *SeatWork) match(q seatWorkQuery, first bool) ([]seatWorkHit, error) {
+	if _, refuse := q.scope.(RefuseScope); refuse && sw != nil && sw.ids == nil {
+		return sw.fresh(q.scope).match(q, first)
+	}
+	return sw.find(q, first, sw != nil && sw.ids == nil)
 }
 
-// snapshot is match on the rows the index read, without the live re-read. It
-// serves answers that are safe on a stale row: a started-work hit only keeps a
-// seat, and a release is fenced on the row's status and assignee at the write.
-func (x *seatWorkIndex) snapshot(q seatWorkQuery, first bool) ([]seatWorkHit, error) {
-	return x.find(q, first, false)
+// snapshot is match on the rows as read, without the live re-read. It serves
+// answers that are safe on a stale row: a started-work hit only keeps a seat,
+// and a release is fenced on the row's status and assignee at the write.
+func (sw *SeatWork) snapshot(q seatWorkQuery, first bool) ([]seatWorkHit, error) {
+	return sw.find(q, first, false)
 }
 
-// stores answers which legs hold a row for q, the pre-filter for questions the
-// index cannot answer itself (readiness): a leg with none holds no answer.
+// stores answers which legs hold a row for q, the pre-filter for questions a
+// SeatWork cannot answer itself (readiness): a leg with none holds no answer.
 // residency:allow — a subset of the plan's legs, in plan order; resolves nothing.
-func (x *seatWorkIndex) stores(q seatWorkQuery) ([]beads.Store, error) {
-	hits, err := x.find(q, false, false)
+func (sw *SeatWork) stores(q seatWorkQuery) ([]beads.Store, error) {
+	hits, err := sw.find(q, false, false)
 	var out []beads.Store
 	for _, hit := range hits {
 		if len(out) == 0 || out[len(out)-1] != hit.store {
@@ -150,28 +234,33 @@ func (x *seatWorkIndex) stores(q seatWorkQuery) ([]beads.Store, error) {
 	return out, err
 }
 
-func (x *seatWorkIndex) find(q seatWorkQuery, first, recheck bool) ([]seatWorkHit, error) {
-	x.once.Do(x.read)
-	if x.err != nil {
-		return nil, x.err
+func (sw *SeatWork) find(q seatWorkQuery, first, recheck bool) ([]seatWorkHit, error) {
+	if err := sw.Legs().unusable(); err != nil {
+		return nil, err
 	}
-	ids := make(map[string]bool, len(q.ids))
+	sw.once.Do(sw.load)
+	ids := make(map[string]bool)
 	var order []string
-	for _, id := range q.ids {
-		if id = strings.TrimSpace(id); id != "" && !ids[id] {
-			ids[id] = true
-			order = append(order, id)
+	var unknown error
+	for _, id := range q.scope.scopeIDs() {
+		if id = strings.TrimSpace(id); id == "" || ids[id] {
+			continue
 		}
+		if sw.ids != nil && !sw.ids[id] {
+			unknown = errors.Join(unknown, fmt.Errorf("seat work: %q was not read", id))
+			continue
+		}
+		ids[id] = true
+		order = append(order, id)
 	}
 	statuses := make(map[string]bool, len(q.statuses))
 	for _, s := range q.statuses {
 		statuses[s] = true
 	}
 	var hits []seatWorkHit
-	var unknown error
-	for _, leg := range x.legs {
-		if leg.err != nil {
-			unknown = errors.Join(unknown, leg.err)
+	for _, leg := range sw.read {
+		if err := leg.unread(q.statuses); err != nil {
+			unknown = errors.Join(unknown, err)
 			continue
 		}
 		seen := make(map[string]bool)
@@ -224,61 +313,8 @@ func (q seatWorkQuery) accepts(store beads.Store, b beads.Bead, ids, statuses ma
 	return q.keep(store, b)
 }
 
-// The index is installed for the duration of one legacy reconcile tick and
-// found by the city path plus the leading store the tick reads through, so a
-// caller handing a different store (the API, a one-shot command) keeps the live
-// path.
-var (
-	seatWorkIndexesMu sync.Mutex
-	seatWorkIndexes   map[string]*seatWorkIndex
-)
-
-// installSeatWorkIndex installs a lazy index for one tick of a controller
-// serving cityPath and returns its removal. A city no controller here serves
-// (tests, one-shot callers) gets none.
-//
-// An index already installed for the city stays: the controller installs one
-// for its whole tick (runTickPhases), and the reconcile pass inside it shares
-// that read.
-func installSeatWorkIndex(cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store) func() {
-	leading = unwrapClassStore(leading)
-	if _, ok := registeredResidencyEntry(cityPath); !ok || leading == nil || seatWorkIndexFor(cityPath, leading) != nil {
-		return func() {}
-	}
-	key := filepath.Clean(cityPath)
-	idx := newSeatWorkIndex(cityPath, cfg, leading, rigs)
-	seatWorkIndexesMu.Lock()
-	if seatWorkIndexes == nil {
-		seatWorkIndexes = make(map[string]*seatWorkIndex, 1)
-	}
-	seatWorkIndexes[key] = idx
-	seatWorkIndexesMu.Unlock()
-	return func() {
-		seatWorkIndexesMu.Lock()
-		if seatWorkIndexes[key] == idx {
-			delete(seatWorkIndexes, key)
-		}
-		seatWorkIndexesMu.Unlock()
-	}
-}
-
-// seatWorkIndexFor returns the installed index for cityPath when the caller
-// reads through the tick's own leading store, else nil.
-func seatWorkIndexFor(cityPath string, leading beads.Store) *seatWorkIndex {
-	if cityPath == "" {
-		return nil
-	}
-	seatWorkIndexesMu.Lock()
-	idx := seatWorkIndexes[filepath.Clean(cityPath)]
-	seatWorkIndexesMu.Unlock()
-	if idx == nil || idx.leading != unwrapClassStore(leading) {
-		return nil
-	}
-	return idx
-}
-
 // unwrapClassStore peels the typed class wrappers, which callers pass for the
-// same store the tick installed under.
+// same store.
 func unwrapClassStore(store beads.Store) beads.Store {
 	switch v := store.(type) {
 	case beads.SessionStore:
@@ -289,24 +325,17 @@ func unwrapClassStore(store beads.Store) beads.Store {
 	return store
 }
 
-// seatHasWork answers an existence gate from the tick's index when the caller
-// reads through it, else by its live probe.
-func seatHasWork(cityPath string, store beads.Store, q seatWorkQuery, live func() (bool, error)) (bool, error) {
-	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
-		hits, err := idx.match(q, true)
-		return len(hits) > 0, err
-	}
-	return live()
+// has answers an existence gate.
+func (sw *SeatWork) has(q seatWorkQuery) (bool, error) {
+	hits, err := sw.match(q, true)
+	return len(hits) > 0, err
 }
 
-// seatFirstWork is seatHasWork for the gates that name the bead they found.
-func seatFirstWork(cityPath string, store beads.Store, q seatWorkQuery, live func() (beads.Bead, bool, error)) (beads.Bead, bool, error) {
-	if idx := seatWorkIndexFor(cityPath, store); idx != nil {
-		hits, err := idx.match(q, true)
-		if len(hits) == 0 {
-			return beads.Bead{}, false, err
-		}
-		return hits[0].bead, true, nil
+// first is has for the gates that name the bead they found.
+func (sw *SeatWork) first(q seatWorkQuery) (beads.Bead, bool, error) {
+	hits, err := sw.match(q, true)
+	if len(hits) == 0 {
+		return beads.Bead{}, false, err
 	}
-	return live()
+	return hits[0].bead, true, nil
 }

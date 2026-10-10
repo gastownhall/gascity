@@ -1612,7 +1612,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		env.city, env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		env.city, env.cfg, env.sp, beads.SessionStore{Store: env.store}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: env.store}, nil), []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
@@ -1703,7 +1703,7 @@ func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testi
 	tracker := &asyncStartTracker{}
 	finalized := finalizeDrainAckStopPendingSessions(
 		env.city,
-		env.cfg, sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		env.cfg, sp, beads.SessionStore{Store: env.store}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: env.store}, nil), []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, tracker, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 0 {
@@ -2509,7 +2509,7 @@ func TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError(t *
 
 	store := depListErrStore{Store: env.store, err: errors.New("dependency read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+	recordDrainAckAssignedWorkEvent(testSeatWork("", env.cfg, store, nil), info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -2617,7 +2617,7 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStran
 
 	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+	recordDrainAckAssignedWorkEvent(testSeatWork("", env.cfg, store, nil), info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -2648,7 +2648,7 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError
 
 	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+	recordDrainAckAssignedWorkEvent(testSeatWork("", env.cfg, store, nil), info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -3711,10 +3711,7 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 		t.Fatalf("sessionFrontDoor.Get(%s): %v", session.ID, err)
 	}
 	emitSessionStrandedDiagnostic(
-		"",
-		nil,
-		store,
-		nil,
+		store, testSeatWork("", nil, store, nil),
 		info,
 		nil, // snapshot carrier not exercised here; ApplyOpenInfoPatch is nil-safe
 		"worker",
@@ -4306,7 +4303,7 @@ func TestCollectSessionAssignedWorkIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("Create wisp work: %v", err)
 	}
 
-	got, err := collectSessionAssignedWorkInfo("", nil, store, nil, sessionInfosFromBeads([]beads.Bead{session})[0])
+	got, err := collectSessionAssignedWorkInfo(testSeatWork("", nil, store, nil), sessionInfosFromBeads([]beads.Bead{session})[0])
 	if err != nil {
 		t.Fatalf("collectSessionAssignedWorkInfo: %v", err)
 	}
@@ -4375,7 +4372,7 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 	snap := newSessionBeadSnapshot([]beads.Bead{session})
 	emit := func() {
 		row := snap.OpenForReconcile()[0]
-		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, &env.stderr)
+		emitSessionStrandedDiagnostic(failingStore, testSeatWork("", env.cfg, failingStore, nil), row.Info, snap, "worker", rec, env.clk, &env.stderr)
 	}
 
 	// First emit — diagnostic fires AND the durable SetMarker fails on the throttle key.
@@ -4444,7 +4441,7 @@ func TestReconcileSessionBeads_StrandedCarrierThreadedThroughTick(t *testing.T) 
 		for i := 0; i < 2; i++ {
 			reconcileSessionBeadsTracedWithNamedDemand(
 				context.Background(), env.city, snap.OpenForReconcile(), carrier, env.desiredState, map[string]bool{"worker": true},
-				env.cfg, env.sp, beads.SessionStore{Store: failing}, newFakeDrainOps(), nil, nil, nil,
+				env.cfg, env.sp, beads.SessionStore{Store: failing}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: failing}, nil), newFakeDrainOps(), nil, nil, nil,
 				env.dt, nil, map[string]int{"worker": 1}, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 				&env.stdout, &env.stderr, nil, env.startOptions...,
 			)
@@ -4501,7 +4498,7 @@ func TestReconcileSessionBeads_Phase0HealVisibleOnSnapshot(t *testing.T) {
 	poolDesired := map[string]int{"worker": 1}
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), env.city, snap.OpenForReconcile(), snap, env.desiredState, map[string]bool{"worker": true},
-		env.cfg, env.sp, beads.SessionStore{Store: env.store}, newFakeDrainOps(), nil, nil, nil,
+		env.cfg, env.sp, beads.SessionStore{Store: env.store}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: env.store}, nil), newFakeDrainOps(), nil, nil, nil,
 		env.dt, nil, poolDesired, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 		&env.stdout, &env.stderr, nil, env.startOptions...,
 	)
@@ -4611,7 +4608,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		env.city, env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
+		env.cfg, failingStore, testSeatWork(env.city, env.cfg, failingStore, nil), env.sessionInfo(session.ID), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -4636,9 +4633,13 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 	}
 	session.Metadata = patch.Apply(session.Metadata)
 
+	// A split city: the race lands on the sessions binding, the local leg the
+	// close-time re-read reads live; the tick's read already listed it twice.
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
+	cityPath := t.TempDir()
+	registerWorkShapeWith(t, cityPath, "split", racingStore, beads.NewMemStore())
 	finalizeDrainAckStoppedSession(
-		env.city, env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
+		env.cfg, racingStore, testSeatWork(env.city, env.cfg, racingStore, nil), env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -6173,7 +6174,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	snap := newSessionBeadSnapshot(sessions)
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, snap.OpenForReconcile(), snap, dsResult.State, cfgNames, cfg, sp,
-		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
+		store, testSeatWork(cityPath, cfg, store, nil), nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.NamedSessionRoutedDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)

@@ -184,7 +184,7 @@ func (e *escalationEnv) finalize() {
 	e.t.Helper()
 	tracker := &asyncStartTracker{}
 	finalizeDrainAckStopPendingSessions(
-		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, testSeatWork(e.cityPath, e.cfg, beads.SessionStore{Store: e.store}, nil),
 		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 		e.clk, e.rec, e.out,
 	)
@@ -198,7 +198,7 @@ func (e *escalationEnv) finalizeOnTick() time.Duration {
 	tracker := &asyncStartTracker{}
 	start := time.Now()
 	finalizeDrainAckStopPendingSessions(
-		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, nil,
+		e.cityPath, e.cfg, e.sp, beads.SessionStore{Store: e.store}, testSeatWork(e.cityPath, e.cfg, beads.SessionStore{Store: e.store}, nil),
 		[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 		e.clk, e.rec, e.out,
 	)
@@ -446,7 +446,7 @@ func TestEscalationKillGateSeesAliasClaimedWork(t *testing.T) {
 		t.Fatalf("create work bead: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForEscalation(e.cityPath, e.cfg, e.store, nil, e.info())
+	has, err := sessionHasOpenAssignedWorkForEscalation(testSeatWork(e.cityPath, e.cfg, e.store, nil), e.info())
 	if err != nil {
 		t.Fatalf("escalation work probe: %v", err)
 	}
@@ -776,7 +776,7 @@ func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
 	}
 
 	handled := escalateWedgedDrainAckStopPending(
-		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
+		e.cityPath, e.cfg, e.sp, e.store, testSeatWork(e.cityPath, e.cfg, e.store, nil), e.info(), e.name, nil,
 		tracker, e.clk, e.rec, nil, e.out,
 	)
 	if handled {
@@ -984,7 +984,7 @@ func TestEscalationQuietHoldRefusesBeforeTheAssignedWorkFanOut(t *testing.T) {
 	probes := &callCounter{}
 
 	escalated := escalateWedgedDrainAckStopPending(
-		e.cityPath, e.cfg, e.sp, assignedWorkProbeStore{Store: e.store, probes: probes}, nil,
+		e.cityPath, e.cfg, e.sp, assignedWorkProbeStore{Store: e.store, probes: probes}, testSeatWork(e.cityPath, e.cfg, assignedWorkProbeStore{Store: e.store, probes: probes}, nil),
 		e.info(), e.name, nil, &asyncStartTracker{}, e.clk, e.rec, nil, e.out,
 	)
 
@@ -1011,7 +1011,7 @@ func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T)
 	tracker := &asyncStartTracker{}
 
 	if !escalateWedgedDrainAckStopPending(
-		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
+		e.cityPath, e.cfg, e.sp, e.store, testSeatWork(e.cityPath, e.cfg, e.store, nil), e.info(), e.name, nil,
 		tracker, e.clk, e.rec, nil, e.out,
 	) {
 		t.Fatal("the escalation was refused on the tick itself; the fixture does not reach the late hold")

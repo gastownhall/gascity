@@ -104,7 +104,7 @@ func TestSessionReconcilerTraceLifecycleRecordsTick(t *testing.T) {
 		},
 		ScaleCheckCounts: map[string]int{"repo/polecat": 1},
 	}
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, cycle, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, sessionBeads, cycle, false)
 	if err := cycle.End(TraceCompletionCompleted, traceRecordPayload{"phase": "tick"}); err != nil {
 		t.Fatalf("cycle.End: %v", err)
 	}
@@ -621,7 +621,7 @@ func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) 
 				stdout:              io.Discard,
 				stderr:              io.Discard,
 			})
-			cr.beadReconcileTick(context.Background(), dsResult, sessionBeads, cycle, false)
+			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), dsResult, sessionBeads, cycle, false)
 			if !cr.waitForAsyncStarts() {
 				t.Fatal("async starts did not finish")
 			}

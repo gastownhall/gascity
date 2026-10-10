@@ -5146,7 +5146,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
 	var syncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
+		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, beads.SessionStore{Store: store}, nil), dsResult.State,
 		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads, nil,
 	)
 
@@ -5246,8 +5246,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 	var firstSyncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath,
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, beads.SessionStore{Store: store}, nil),
 		firstTick.State,
 		sp,
 		configuredSessionNames(cfg, "", store),

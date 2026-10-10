@@ -203,7 +203,7 @@ func controllerClosePaths(now time.Time) []struct {
 		{
 			name: "closeBead",
 			close: func(store beads.Store, id string, stderr *bytes.Buffer) bool {
-				return closeBead(store, workLegs{}, decidedSessionInfo(store, id), "dead-runtime", now, stderr)
+				return closeBead(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, id), "dead-runtime", now, stderr)
 			},
 			want: session.ClosePatch(now, "dead-runtime"),
 		},
@@ -231,7 +231,7 @@ func TestControllerClosesRefuseAWakeAfterTheCallersDecision(t *testing.T) {
 		close func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool
 	}{
 		{name: "closeBead", close: func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool {
-			return closeBead(store, workLegs{}, decided, "dead-runtime", now, stderr)
+			return closeBead(store, testSeatWork("", nil, store, nil), decided, "dead-runtime", now, stderr)
 		}},
 		{name: "closeFailedCreateBead", close: func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool {
 			return closeFailedCreateBead(sessionFrontDoor(store), decided, now, stderr)
@@ -479,7 +479,7 @@ func TestCloseFailedCreateBeadLeavesAnAlreadyClosedRowRecordAlone(t *testing.T) 
 	}
 	created := createControllerCloseSession(t, store)
 	var stderr bytes.Buffer
-	if !closeBead(store, workLegs{}, decidedSessionInfo(store, created.ID), "orphaned", now, &stderr) {
+	if !closeBead(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, created.ID), "orphaned", now, &stderr) {
 		t.Fatalf("closeBead: %s", stderr.String())
 	}
 	before, err := store.Get(created.ID)

@@ -53,7 +53,7 @@ func TestSplitStoreCascade_DeadRuntimeReleasesTheGatesLegs(t *testing.T) {
 
 			var stderr bytes.Buffer
 			rigs := map[string]beads.Store{"riga": rig, "rigb": suspended}
-			if got := cleanupDeadRuntimeSessionCorpses(cityPath, sessions, rigs, cfg, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
+			if got := cleanupDeadRuntimeSessionCorpses(cityPath, sessions, testSeatWork(cityPath, cfg, sessions, rigs), snapshot, nil, sp, nil, nil, &stderr); got != 1 {
 				t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 			}
 
@@ -85,9 +85,8 @@ func TestSplitStoreCascade_DrainFinalizeReleasesTheOwnDrainStep(t *testing.T) {
 					t.Fatal(err)
 				}
 				step := createWork(t, work, "in_progress", seat.ID, map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain", beadmeta.RootBeadIDMetadataKey: root.ID})
-				useSeatWorkPath(t, path, cityPath, cfg, sessions, nil)
-
-				if !closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, sessions, nil, sessionInfosFromBeads([]beads.Bead{seat})[0], "drained", seatWorkNow, io.Discard, true) {
+				info := sessionInfosFromBeads([]beads.Bead{seat})[0]
+				if !closeSessionBeadIfReachableStoreUnassigned(sessions, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info, "drained", seatWorkNow, io.Discard, true) {
 					t.Fatal("the drain-finalize close refused over the seat's own drain step")
 				}
 				assertWork(t, work, step.ID, "open", "")

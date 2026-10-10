@@ -1257,6 +1257,10 @@ type tickPass struct {
 	sessionBeads *sessionBeadSnapshot
 	inv          *runtimeInventoryView
 	result       DesiredStateResult
+	// seatWork is the tick's one read of every work leg (seat_work.go), minted
+	// at the first session phase, after the config reload, so it reads this
+	// tick's legs. Every session phase answers its seat-work questions from it.
+	seatWork *SeatWork
 }
 
 func (p *tickPass) recordPhase(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
@@ -1319,18 +1323,12 @@ var legacyTickPhases = []tickPhase{
 // runTickPhases runs phases in order and reports whether the pass reached its
 // end. A session phase is skipped when legacySessionEntry refuses it.
 func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
-	uninstall, indexed := func() {}, false
-	defer func() { uninstall() }()
 	for _, phase := range phases {
 		if phase.session && cr.legacySessionEntry(phase.name) {
 			continue
 		}
-		if phase.session && !indexed {
-			// The session phases share one seat work index per tick (seat_work.go),
-			// installed at the first, after the config reload, so it reads this
-			// tick's legs. A nested pass finds it installed and keeps it.
-			indexed = true
-			uninstall = installSeatWorkIndex(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, cr.rigBeadStores()) // residency:allow — handed to assignedWorkSweepPlan, which plans the legs
+		if phase.session && p.seatWork == nil {
+			p.seatWork = newSeatWork(cr.workLegs())
 		}
 		if phase.run(cr, p) {
 			return false
@@ -1597,7 +1595,7 @@ func (cr *CityRuntime) tickLoadSessionSnapshot(p *tickPass) bool {
 // reconciler to read/write hashes during reconciliation.
 func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 	phaseStart := time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, clock.Real{}, cr.stderr)
+	cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, p.seatWork, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, clock.Real{}, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, p.inv.corpsePhaseFields())
 	return false
 }
@@ -1624,7 +1622,7 @@ func (cr *CityRuntime) tickSweepProcessTableOrphans(p *tickPass) bool {
 
 func (cr *CityRuntime) tickReapStaleSessionBeads(p *tickPass) bool {
 	phaseStart := time.Now()
-	reaped := cr.reapStaleSessionBeads()
+	reaped := cr.reapStaleSessionBeads(p.seatWork)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
@@ -1673,7 +1671,7 @@ func (cr *CityRuntime) tickFinalizeDrainAckStopPending(p *tickPass) bool {
 			cr.cfg,
 			cr.sp,
 			cr.sessionsBeadStore(),
-			cr.rigBeadStores(),
+			p.seatWork,
 			p.sessionBeads.OpenInfos(),
 			cr.dops,
 			cr.sessionDrains,
@@ -1709,7 +1707,7 @@ func (cr *CityRuntime) tickDemandDesiredStateAndSync(p *tickPass) bool {
 	p.result = cr.refreshDesiredState(p.result, p.sessionBeads)
 	p.recordPhase(TraceSiteDesiredStateBuild, "refresh_desired_state.before_sync", phaseStart, traceDesiredStateFields(p.result))
 	phaseStart = time.Now()
-	_ = cr.syncBeadsAndUpdateIndex(p.result.State, p.sessionBeads, p.recordPhase)
+	_ = cr.syncBeadsAndUpdateIndex(p.seatWork, p.result.State, p.sessionBeads, p.recordPhase)
 	p.recordPhase(TraceSiteSessionSync, "sync_beads_and_update_index", phaseStart, traceDesiredStateFields(p.result))
 	// Reload snapshot after sync so the reconciler sees metadata written
 	// by syncBeadsAndUpdateIndex (e.g., configured_named_session/mode
@@ -1766,7 +1764,7 @@ func (cr *CityRuntime) tickApplySoftReloadAcceptance(p *tickPass) bool {
 func (cr *CityRuntime) tickBeadReconcile(p *tickPass) bool {
 	if cr.sessionDrains != nil {
 		phaseStart := time.Now()
-		cr.beadReconcileTick(p.ctx, p.result, p.sessionBeads, p.trace, false)
+		cr.beadReconcileTick(p.ctx, p.seatWork, p.result, p.sessionBeads, p.trace, false)
 		p.recordPhase(TraceSiteControllerTickPhase, "bead_reconcile_tick", phaseStart, traceDesiredStateFields(p.result))
 	}
 	return false
@@ -1925,7 +1923,7 @@ func (cr *CityRuntime) startupSweepProcessTableOrphans(p *tickPass) bool {
 // before building desired state, so desired state does not reference
 // already-closed beads (#742).
 func (cr *CityRuntime) startupReapStaleSessionBeads(p *tickPass) bool {
-	if cr.reapStaleSessionBeads() > 0 {
+	if cr.reapStaleSessionBeads(p.seatWork) > 0 {
 		p.sessionBeads = cr.loadSessionBeadSnapshot()
 	}
 	return false
@@ -1935,14 +1933,14 @@ func (cr *CityRuntime) startupBuildDesiredStateAndSync(p *tickPass) bool {
 	p.result = cr.buildDesiredState(p.sessionBeads, p.trace)
 	p.sessionBeads = cr.loadSessionBeadSnapshot()
 	p.result = cr.refreshDesiredState(p.result, p.sessionBeads)
-	p.sessionBeads = cr.syncBeadsAndUpdateIndex(p.result.State, p.sessionBeads, nil)
+	p.sessionBeads = cr.syncBeadsAndUpdateIndex(p.seatWork, p.result.State, p.sessionBeads, nil)
 	p.result = cr.refreshDesiredState(p.result, p.sessionBeads)
 	return p.ctx.Err() != nil
 }
 
 func (cr *CityRuntime) startupBeadReconcile(p *tickPass) bool {
 	if cr.sessionDrains != nil {
-		cr.beadReconcileTick(p.ctx, p.result, p.sessionBeads, p.trace, true)
+		cr.beadReconcileTick(p.ctx, p.seatWork, p.result, p.sessionBeads, p.trace, true)
 	}
 	return false
 }
@@ -3093,7 +3091,7 @@ func (cr *CityRuntime) newWarmClaimTriggerResolver(servingRigs map[string]beads.
 // gastownhall/gascity#3288) and the usage lane's live transcript sweep (bounded
 // per-session file discovery and reads across every awake session at once). The
 // first steady-state tick performs both.
-func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
+func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, result DesiredStateResult, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle, bootReconcile bool) {
 	if cr.legacySessionEntry("bead_reconcile_tick") {
 		return
 	}
@@ -3223,9 +3221,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	} else {
 		phaseStart = time.Now()
 		if sweepUndesiredPoolSessionBeads(
-			cr.cityPath,
 			sessStore,
-			rigStores,
+			sw,
 			sessionBeads,
 			desiredState,
 			cr.cfg,
@@ -3318,7 +3315,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		reconcileStartOptions = append(reconcileStartOptions, withDeferSessionClosesOnBoot())
 	}
 	reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore,
+		ctx, cr.cityPath, sessionBeads.OpenForReconcile(), sessionBeads, desiredState, cfgNames, cr.cfg, cr.sp, sessStore, sw,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
 		poolDesired,
@@ -3712,8 +3709,8 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
 // endpoint capacity breaker holds.
-func (cr *CityRuntime) reapStaleSessionBeads() int {
-	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+func (cr *CityRuntime) reapStaleSessionBeads(sw *SeatWork) int {
+	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
@@ -3808,9 +3805,8 @@ func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[str
 }
 
 func sweepUndesiredPoolSessionBeads(
-	cityPath string,
 	store beads.SessionStore,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	sessionBeads *sessionBeadSnapshot,
 	desiredState map[string]TemplateParams,
 	cfg *config.City,
@@ -3919,7 +3915,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(gcSweepSessionBeadsAt(cityPath, cfg, store.Store, rigStores, candidates, sweepTime))
+	return len(gcSweepSessionBeadsAt(store.Store, sw, candidates, sweepTime))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
@@ -4042,6 +4038,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
 	}
+	sw := newSeatWork(cr.workLegs())
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into
@@ -4082,7 +4079,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
 		cr.cityPath,
 		cr.sessionsBeadStore(),
-		unwrapWorkStores(cr.workBeadStores()),
+		sw,
 		desiredState,
 		cr.sp,
 		cfgNames,
@@ -4130,6 +4127,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		filteredCfg,
 		cr.sp,
 		cr.sessionsBeadStore().Store,
+		sw,
 		cr.dops,
 		nil,
 		unwrapWorkStores(cr.workBeadStores()),
@@ -4203,11 +4201,11 @@ func ensureManagedDoltPublishedForRuntime(
 }
 
 // syncBeadsAndUpdateIndex runs syncSessionBeads.
-func (cr *CityRuntime) syncBeadsAndUpdateIndex(desiredState map[string]TemplateParams, sessionBeads *sessionBeadSnapshot, recordPhase func(TraceSiteCode, string, time.Time, map[string]any)) *sessionBeadSnapshot {
+func (cr *CityRuntime) syncBeadsAndUpdateIndex(sw *SeatWork, desiredState map[string]TemplateParams, sessionBeads *sessionBeadSnapshot, recordPhase func(TraceSiteCode, string, time.Time, map[string]any)) *sessionBeadSnapshot {
 	store := cr.sessionsBeadStore()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cr.cityName, sessionBeads)
 	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
-		cr.cityPath, store, cr.rigBeadStores(), desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads, recordPhase,
+		cr.cityPath, store, sw, desiredState, cr.sp, cfgNames, cr.cfg, clock.Real{}, cr.stderr, cr.sessionDrains != nil, sessionBeads, recordPhase,
 	)
 	return updated
 }

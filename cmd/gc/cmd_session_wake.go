@@ -173,7 +173,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			woken = info
 		}
 		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
-			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, workStore: deps.store, rigStores: rigStores,
+			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, work: cityWorkStoreOf(deps.store), rigStores: rigStores,
 		}, deps.now()); why != "" {
 			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
 			rejectStuck = true

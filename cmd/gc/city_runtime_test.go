@@ -92,9 +92,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -136,9 +134,7 @@ func TestSweepUndesiredPoolSessionBeads_DefersWhenLivenessUnavailable(t *testing
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		newSessionBeadSnapshot([]beads.Bead{bead}),
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -158,12 +154,11 @@ func TestSweepUndesiredPoolSessionBeads_DefersWhenLivenessUnavailable(t *testing
 	}
 }
 
-// wispBlockingStore blocks every wisp-tier read until unblocked, signaling each
-// attempt on hit. The undesired-pool-session sweep's per-candidate wisp probe
-// (sessionHasOpenAssignedWispWork -> List(TierWisps)) is the distinctive read it
-// makes; blocking only TierWisps isolates the sweep from the other boot-path
-// reads (which use TierIssues/Live), so we can prove the boot tick does NOT wait
-// on the sweep while the steady-state tick does.
+// wispBlockingStore blocks every read of the wisp tier until unblocked,
+// signaling each attempt on hit. The undesired-pool-session sweep's guard
+// reads the tick's SeatWork, whose read lists both tiers (TierBoth); the
+// other boot-path reads use TierIssues, so blocking the wisp tier proves the
+// boot tick does NOT wait on the sweep while the steady-state tick does.
 type wispBlockingStore struct {
 	beads.Store
 	block <-chan struct{}
@@ -171,7 +166,7 @@ type wispBlockingStore struct {
 }
 
 func (w *wispBlockingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if q.TierMode == beads.TierWisps {
+	if q.TierMode == beads.TierWisps || q.TierMode == beads.TierBoth {
 		select {
 		case w.hit <- struct{}{}:
 		default:
@@ -231,7 +226,10 @@ func TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep(t *testing.T) 
 
 	// Boot tick must NOT block on the wisp-tier sweep read.
 	bootDone := make(chan struct{})
-	go func() { cr.beadReconcileTick(context.Background(), result(), snap(), nil, true); close(bootDone) }()
+	go func() {
+		cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result(), snap(), nil, true)
+		close(bootDone)
+	}()
 	select {
 	case <-bootDone:
 	case <-store.hit:
@@ -241,7 +239,7 @@ func TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep(t *testing.T) 
 	}
 
 	// Steady-state tick MUST reach the wisp-tier sweep read.
-	go cr.beadReconcileTick(context.Background(), result(), snap(), nil, false)
+	go cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result(), snap(), nil, false)
 	select {
 	case <-store.hit:
 		// good: the steady-state tick ran the sweep and reached the wisp read.
@@ -309,7 +307,7 @@ func TestSweepUndesiredPoolSessionBeads_StampsItsClock(t *testing.T) {
 	creating := row("worker-creating", "state", "creating", "pending_create_started_at", justNow)
 	started := row("worker-started", "state", "active", "state_reason", "creation_complete", "creation_complete_at", justNow)
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
-	if closed := sweepUndesiredPoolSessionBeads("", beads.SessionStore{Store: store}, nil, newSessionBeadSnapshot([]beads.Bead{bead, leased, creating, started}), nil, cfg, runtime.NewFake(), false, clk); closed != 1 {
+	if closed := sweepUndesiredPoolSessionBeads(beads.SessionStore{Store: store}, testSeatWork("", cfg, store, nil), newSessionBeadSnapshot([]beads.Bead{bead, leased, creating, started}), nil, cfg, runtime.NewFake(), false, clk); closed != 1 {
 		t.Fatalf("closed = %d, want 1 (the leased, creating and just-started rows spared)", closed)
 	}
 	if got, _ := store.Get(bead.ID); got.Metadata["closed_at"] != "2020-01-02T03:04:05Z" {
@@ -344,9 +342,12 @@ func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			ProcessNames:      []string{"agent-cli"},
+		}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{
@@ -403,9 +404,7 @@ func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *tes
 	sp.SetActivity("worker-bd-running", time.Now())
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -446,9 +445,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testin
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		newSessionBeadSnapshot([]beads.Bead{bead}),
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -502,9 +499,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t
 	sp := runtime.NewFake()
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2532,9 +2527,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsCreatingState(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2587,9 +2580,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentlyCreated(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2637,9 +2628,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsStaleCreatingState(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2680,9 +2669,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2721,9 +2708,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentCreationCompleteAfterWakeReco
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2764,9 +2749,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsActiveWithoutCreationCompleteAt(t 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2813,9 +2796,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsAwakeStateInPreWakeWindow(t *testin
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2864,9 +2845,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecoveredActiveBead(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2917,9 +2896,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsFreshRestartAfterPriorCrash(t *test
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -2965,9 +2942,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3003,9 +2978,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3055,9 +3028,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsExpiredPendingCreateClaimLease(t *
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3096,9 +3067,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingSta
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3149,9 +3118,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3209,9 +3176,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesMissingOrStaleSessionName(t *testi
 			}
 
 			closed := sweepUndesiredPoolSessionBeads(
-				"",
-				beads.SessionStore{Store: store},
-				nil,
+				beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 				newSessionBeadSnapshot([]beads.Bead{bead}),
 				nil,
 				&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3257,9 +3222,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsAssignedSessionsOpen(t *testing.T) 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3302,9 +3265,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPartialAssignedSnapshot(t *testing.
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
@@ -3368,7 +3329,7 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 		ScaleCheckCounts:  map[string]int{"worker": 0},
 		StoreQueryPartial: true,
 	}
-	cr.beadReconcileTick(context.Background(), partialResult, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), partialResult, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
 
 	afterPartial, err := store.Get(session.ID)
 	if err != nil {
@@ -3388,7 +3349,7 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 			workBead("ga-live", "worker", "worker-bd-123", "in_progress", 5),
 		},
 	}
-	cr.beadReconcileTick(context.Background(), recoveredResult, cr.loadSessionBeadSnapshot(), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), recoveredResult, cr.loadSessionBeadSnapshot(), nil, false)
 
 	afterRecovered, err := store.Get(session.ID)
 	if err != nil {
@@ -3474,7 +3435,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 			workBead("w-idle", "worker", "", "open", 5),
 		},
 	}
-	cr.beadReconcileTick(context.Background(), result, cr.loadSessionBeadSnapshot(), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, cr.loadSessionBeadSnapshot(), nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -3599,7 +3560,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTri
 		stdout:              &stdout,
 		stderr:              io.Discard,
 	}
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	got, err := cityStore.Get(sessionBead.ID)
 	if err != nil {
@@ -3696,7 +3657,7 @@ func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSess
 	if !result.ScaleCheckPartialTemplates["worker"] || result.ScaleCheckPartialTemplates["helper"] {
 		t.Fatalf("ScaleCheckPartialTemplates = %v, want only worker", result.ScaleCheckPartialTemplates)
 	}
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
 		t.Fatalf("affected worker session was scheduled for drain: reason=%s", drain.reason)
@@ -3762,7 +3723,7 @@ func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialPreservesDormantAffectedP
 		t.Fatalf("affected dormant worker session not preserved in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
 	}
 
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
 		t.Fatalf("affected dormant worker session was scheduled for drain: reason=%s", drain.reason)
@@ -3815,7 +3776,7 @@ func TestCityRuntimeBeadReconcileTick_StoreQueryPartialDoesNotReleaseAssignedWor
 		stderr:              io.Discard,
 	}
 
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 		State:              map[string]TemplateParams{},
 		ScaleCheckCounts:   map[string]int{"worker": 0},
 		AssignedWorkBeads:  []beads.Bead{work},
@@ -3866,7 +3827,7 @@ func TestCityRuntimeBeadReconcileTick_SessionQueryPartialDoesNotReleaseAssignedW
 		stderr:              io.Discard,
 	}
 
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 		State:              map[string]TemplateParams{},
 		ScaleCheckCounts:   map[string]int{"worker": 0},
 		AssignedWorkBeads:  []beads.Bead{work},
@@ -4014,7 +3975,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, sessionBeads, nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -4087,7 +4048,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, sessionBeads, nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -7928,7 +7889,7 @@ func TestCityRuntimeReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 	ticket, _ := guard.Admit("upstream:broker", row.ID, "worker")
 	ticket.Resolve(verdictCapacity)
 
-	if n := cr.reapStaleSessionBeads(); n != 0 {
+	if n := cr.reapStaleSessionBeads(newSeatWork(cr.workLegs())); n != 0 {
 		t.Fatalf("reaped %d rows, want the row held while its endpoint refuses", n)
 	}
 }

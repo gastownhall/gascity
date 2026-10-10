@@ -152,7 +152,7 @@ func demandRowServable(b beads.Bead) bool {
 //
 // The reason is the answer, not a bare "not ready", because the two consumers —
 // classifyDemandTrigger and the drain-ack open arm
-// (firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers) — act differently on
+// (firstOpenClaimableAssignedWorkBeadForReachableStore) — act differently on
 // each cause: a deferral or a dispatch hold is PROOF of non-claimability, while
 // an unproven blockedness reading is only a question, to be settled against live
 // deps. Naming the cause here keeps that distinction in one place. Reconstructing

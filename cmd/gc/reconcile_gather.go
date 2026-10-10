@@ -46,7 +46,8 @@ type gatherEnv struct {
 	Recording  func() *externalReadsRecording // K1's latest; nil before the first
 	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
 	// Nudges and WorkStore are the nudges-class and city work stores C8's
-	// steps write through.
+	// steps write through. WorkStore is also the work leg of the pass's
+	// WorkLegs, which the live work read (L5) plans over.
 	Nudges       func() beads.NudgesStore
 	WorkStore    func() beads.Store
 	Observations func() *ObservationCache
@@ -108,6 +109,10 @@ type World struct {
 	// ref is Census.sessionsLeg().
 	SessionsStore beads.Store
 	RigStores     map[string]beads.Store
+	// WorkLegs are the city work legs the effects' live work read (L5) plans
+	// over: minted from the city work store, never the sessions store
+	// (NEW2-1). Effects reach them only as effectReads.
+	WorkLegs WorkLegs
 	// fresh is one row's fresh runtime read, which the fresh accessors read
 	// in its pass's stead (withRuntime): set only inside an effect.
 	fresh *freshRow
@@ -157,6 +162,9 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		w.ReadyWaits = e.ReadyWaits()
 	}
 	w.SessionsStore, w.RigStores = store, rigs
+	if e.WorkStore != nil { // without one, the zero WorkLegs answers every work read unknown
+		w.WorkLegs = workLegsFromCensus(e.CityPath, cfg, cityWorkStoreOf(e.WorkStore()), rigs)
+	}
 	w.LegStores = map[string]beads.Store{legs[0].ref: legs[0].store}
 	all := make(map[string]beads.Store, len(legs))
 	for _, l := range legs {

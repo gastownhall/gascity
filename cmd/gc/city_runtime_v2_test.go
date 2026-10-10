@@ -1377,8 +1377,8 @@ func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 func TestV2LegacySessionEntriesReportedInTrace(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, true)
 	attachTestV2(t, cr)
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false) // refused and counted
-	cr.controlDispatcherTick(context.Background())                                    // refused and counted
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{}, nil, nil, false) // refused and counted
+	cr.controlDispatcherTick(context.Background())                                                                // refused and counted
 	runFixtureTick(cr, "patrol")
 	recs := passRecords(closeTrace(t, cr))
 	if len(recs) != 1 {

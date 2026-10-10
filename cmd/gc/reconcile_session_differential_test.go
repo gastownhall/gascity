@@ -456,13 +456,15 @@ func (w *legacyWorld) list(t *testing.T) []beads.Bead {
 // reconcile is set, the session reconciler over the synced rows.
 func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	cfg, now := w.cfg, w.clk.Now()
+	// The tick's one read of the work legs, as runTickPhases mints it.
+	sw := testSeatWork(w.cityPath, cfg, w.store, w.rigs)
 	snap, err := loadSessionBeadSnapshot(w.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reconcile {
 		// tickFinalizeDrainAckStopPending runs before the demand build.
-		finalizeDrainAckStopPendingSessions(w.cityPath, cfg, w.sp, beads.SessionStore{Store: w.store}, w.rigs, snap.OpenInfos(), w.dops, w.dt, &w.stops, w.clk, w.rec, io.Discard)
+		finalizeDrainAckStopPendingSessions(w.cityPath, cfg, w.sp, beads.SessionStore{Store: w.store}, sw, snap.OpenInfos(), w.dops, w.dt, &w.stops, w.clk, w.rec, io.Discard)
 		w.stops.wg.Wait()
 		if snap, err = loadSessionBeadSnapshot(w.store); err != nil {
 			t.Fatal(err)
@@ -470,7 +472,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	}
 	result := buildDesiredStateWithSessionBeadsAt(cfg.Workspace.Name, w.cityPath, now, now, cfg, w.sp, w.store, w.rigs, snap, nil, io.Discard)
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cfg.Workspace.Name, snap)
-	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, w.rigs, result.State, w.sp, cfgNames, cfg, w.clk, io.Discard, true, snap, nil)
+	_, updated := syncSessionBeadsWithSnapshotAndRigStores(w.cityPath, beads.SessionStore{Store: w.store}, sw, result.State, w.sp, cfgNames, cfg, w.clk, io.Discard, true, snap, nil)
 	if !reconcile {
 		return
 	}
@@ -497,7 +499,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 		poolDesired = map[string]int{}
 	}
 	mergeNamedSessionDemand(poolDesired, result.NamedSessionDemand, cfg)
-	if sweepUndesiredPoolSessionBeads(w.cityPath, beads.SessionStore{Store: w.store}, w.rigs, updated, result.State, cfg, w.sp, result.snapshotQueryPartial(), w.clk) > 0 {
+	if sweepUndesiredPoolSessionBeads(beads.SessionStore{Store: w.store}, sw, updated, result.State, cfg, w.sp, result.snapshotQueryPartial(), w.clk) > 0 {
 		if updated, err = loadSessionBeadSnapshot(w.store); err != nil {
 			t.Fatal(err)
 		}
@@ -505,7 +507,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	}
 	gates := w.gateIdleProbes()
 	awake, awakeRefs, awakeStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, w.cityPath, w.store, open, assigned, refs, stores)
-	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store,
+	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store, sw,
 		w.dops, awake, w.rigs, nil, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
 		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, nil, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,

@@ -307,14 +307,8 @@ func poolSlotRetireAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []
 // mol-do-work drain step exactly as the drain-ack close gate does. It fails
 // closed on an unreadable leg (a smaller answer presented as authoritative
 // would read as "holds nothing", and this path acts on that).
-func poolSlotRetireHasAssignedWork(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, poolSlotRetireAssigneeIdentities(info, cfg))
+func poolSlotRetireHasAssignedWork(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return seatHasWorkForCloseGate(sw, RefuseScope{ids: poolSlotRetireAssigneeIdentities(info, sw.Legs().cfg)})
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
@@ -360,7 +354,7 @@ func retirePoolSlotAtDrainDeadline(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	template string,
 	processNames []string,
@@ -398,7 +392,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	hasAssignedWork, err := poolSlotRetireHasAssignedWork(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-deadline retire of %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
@@ -407,7 +401,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, dt, clk.Now(), stderr)
+	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, sw, info, name, processNames, dt, clk.Now(), stderr)
 	if !stopped {
 		return nil, false
 	}
@@ -437,7 +431,7 @@ func retirePoolSlotAtDrainDeadline(
 	now := clk.Now().UTC()
 	// Final fence: the stop above takes time, and the close must not land on a
 	// seat that claimed work while it was running.
-	stillAssigned, err := poolSlotRetireHasAssignedWork(cityPath, cfg, store, rigStores, info)
+	stillAssigned, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: re-checking assigned work before drain-deadline close of %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
@@ -453,7 +447,7 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, info, "drained", now, stderr, notOwnDrainStep) {
+	if !closeBeadUnlessLateWork(store, sw, info, "drained", now, stderr, notOwnDrainStep) {
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}
@@ -511,7 +505,7 @@ func poolSlotRuntimeStoppedForRetire(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
@@ -538,7 +532,7 @@ func poolSlotRuntimeStoppedForRetire(
 			return false, false
 		}
 	}
-	claimed, err := poolSlotRetireHasAssignedWork(cityPath, cfg, store, rigStores, info)
+	claimed, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: re-checking assigned work before drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
 		return false, false

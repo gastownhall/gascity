@@ -161,7 +161,7 @@ func TestDrainAckReleasesUnexecutedClaims(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck(cityPath, nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs(cityPath, nil, work, nil), drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	for _, tc := range []struct {
 		name  string
@@ -190,7 +190,7 @@ func TestDrainAckLeavesForeignClaimsAlone(t *testing.T) {
 	}, "in_progress", "worker-2")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, work, foreign.ID)
 	if status != "in_progress" || assignee != "worker-2" {
@@ -209,7 +209,7 @@ func TestDrainAckLeavesPreassignedOpenSiblingsAlone(t *testing.T) {
 	}, "open", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, work, sibling.ID)
 	if status != "open" || assignee != "worker-1" {
@@ -230,7 +230,7 @@ func TestDrainAckLeavesClosedWorkAlone(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	if status, _ := drainAckBeadStatus(t, work, done.ID); status != "closed" {
 		t.Fatalf("closed bead %s became status=%q after drain-ack, want it left closed", done.ID, status)
@@ -252,7 +252,7 @@ func TestDrainAckLeavesSessionAndMailBeadsAlone(t *testing.T) {
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), drainAckReleaseBudget, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), drainAckReleaseBudget, &stderr)
 
 	for _, id := range []string{sessionRow.ID, message.ID} {
 		status, assignee := drainAckBeadStatus(t, work, id)
@@ -278,7 +278,7 @@ func TestDrainAckReleaseHonorsItsBudget(t *testing.T) {
 
 	var stderr bytes.Buffer
 	// A budget that cannot admit even the first leg.
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), -time.Second, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), -time.Second, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, work, held.ID)
 	if status != "in_progress" || assignee != "worker-1" {
@@ -299,7 +299,7 @@ func TestDrainAckReleaseWithinBudgetStillReleases(t *testing.T) {
 	}, "in_progress", "worker-1")
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsOnDrainAck("", nil, work, nil, drainAckSessionBead(), time.Minute, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), time.Minute, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, work, held.ID)
 	if status != "open" || assignee != "" {

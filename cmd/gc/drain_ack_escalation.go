@@ -190,14 +190,8 @@ func drainAckAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []string
 // wedged exactly as it is today, while under-refusing ends a live agent's turn.
 // Erring toward "this session still holds work" is the only safe direction in
 // front of a kill.
-func sessionHasOpenAssignedWorkForEscalation(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, drainAckAssigneeIdentities(info, cfg))
+func sessionHasOpenAssignedWorkForEscalation(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return seatHasWorkForCloseGate(sw, refuseScope(info, sw.Legs().cfg))
 }
 
 // drainAckEscalationDue reports whether a wedged row has exceeded its bound, and
@@ -336,7 +330,7 @@ func escalateWedgedDrainAckStopPending(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
@@ -413,7 +407,7 @@ func escalateWedgedDrainAckStopPending(
 	// expensive probe, so it runs last, and it fails closed on an unreadable
 	// store: a smaller answer presented as authoritative reads as "holds
 	// nothing", which is exactly the error that authorizes a wrongful kill.
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForEscalation(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForEscalation(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: checking assigned work for %s: %v; not escalating\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		return false

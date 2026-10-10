@@ -167,7 +167,7 @@ func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, work idleLatchedHo
 	snap := newSessionBeadSnapshot(sessions)
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, snap.OpenForReconcile(), snap, dsResult.State, cfgNames, cfg, sp,
-		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
+		store, testSeatWork(cityPath, cfg, store, nil), nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.NamedSessionRoutedDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
