@@ -117,7 +117,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	}
 
 	// Find the most recent attempt.
-	attempt, err := findLatestAttempt(store, bead)
+	attempt, err := findLatestAttemptInView(store, bead, opts)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: finding latest %s: %w", bead.ID, strategy.subjectNoun, err)
 	}
@@ -162,10 +162,12 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if strategy.onPass != nil {
 			strategy.onPass(closeMetadata, attempt)
 		}
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		closed, err := closeWithMetadata(store, bead.ID, closeMetadata)
+		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
+		noteWrite(opts, bead.ID, closed)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -181,10 +183,12 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		closed, err := closeWithMetadata(store, bead.ID, closeMetadata)
+		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
+		noteWrite(opts, bead.ID, closed)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -393,13 +397,19 @@ func markControllerSpawnError(store beads.Store, beadID string, err error, opts 
 	if writeErr := store.SetMetadataBatch(beadID, metadata); writeErr != nil {
 		opts.tracef("controller-spawn-error bead=%s recording hard failure metadata failed err=%v", beadID, writeErr)
 	}
-	if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
-	}
-	// Reconcile any enclosing scope so a controller_error terminal closure
-	// does not leave the scope body stalled.
-	if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+	// Settle any enclosing scope before the bead closes so a controller_error
+	// terminal closure does not leave the scope body stalled: once the bead is
+	// closed nothing re-drives that settle.
+	if _, settleErr := closeScopedControl(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}, "", opts); settleErr != nil {
+		opts.tracef("controller-spawn-error bead=%s settling enclosing scope before close failed err=%v", beadID, settleErr)
+		// The hard error is terminal regardless: close the bead and reconcile
+		// the scope best-effort, as before the settle-first order.
+		if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
+		}
+		if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+		}
 	}
 	return false
 }
@@ -1110,10 +1120,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			formula.ApplyDrainControlMetadata(childMeta, child.Drain)
 			// A plain child (none of Retry/Ralph/Drain) reaches here with no
 			// gc.kind at all, unlike the root above which always gets one.
-			// Default it to task, mirroring rootMeta's unconditional stamp,
-			// so isWorkRecordGatedBead's (Type=="task" && gc.kind=="") test
-			// does not wrongly sweep it into the ADR-0009 work-record close
-			// gate. See gastownhall/gascity#5246.
+			// Default it to task, mirroring rootMeta's unconditional stamp, so
+			// its control-plane identity remains explicit and it stays out of
+			// the ADR-0009 work-record close gate. See gastownhall/gascity#5246.
 			if childMeta[beadmeta.KindMetadataKey] == "" {
 				childMeta[beadmeta.KindMetadataKey] = beadmeta.KindTask
 			}
@@ -1732,12 +1741,18 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 // matches the durable gc.control_for lineage stamp (with a legacy ref-string
 // fallback for pre-S38 molecules) and returns the max gc.attempt.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
+	return findLatestAttemptInView(store, control, ProcessOptions{})
+}
+
+// findLatestAttemptInView is findLatestAttempt answered from the invocation's
+// root view (rootViewMembers) when opts carries one.
+func findLatestAttemptInView(store beads.Store, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		rootID = control.ID
 	}
 
-	all, err := beads.DirectMembers(store, rootID)
+	all, err := rootViewMembers(store, rootID, opts)
 	if err == nil {
 		latest := latestAttemptFromCandidates(control, all)
 		if latest.ID != "" {
@@ -2049,21 +2064,38 @@ func copyNonGCMetadata(dst, src map[string]string) {
 }
 
 func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+	_, err := closeWithMetadata(store, beadID, metadata)
+	return err
+}
+
+// closeWithMetadata closes beadID with metadata in one update and returns the
+// closed row. The update reports the row it wrote where the store can
+// (beads.UpdateAndReadBack), so confirming the close costs no extra read. A
+// store that took the metadata but not the status gets an explicit Close.
+func closeWithMetadata(store beads.Store, beadID string, metadata map[string]string) (beads.UpdatedRow, error) {
 	status := "closed"
-	if err := store.Update(beadID, beads.UpdateOpts{
+	row, err := beads.UpdateAndReadBack(store, beadID, beads.UpdateOpts{
 		Status:   &status,
 		Metadata: metadata,
-	}); err != nil {
-		return err
-	}
-	bead, err := store.Get(beadID)
+	})
 	if err != nil {
-		return fmt.Errorf("verifying close of %s: %w", beadID, err)
+		return beads.UpdatedRow{}, err
 	}
-	if bead.Status == "closed" {
-		return nil
+	if row.Status == "closed" {
+		return row, nil
 	}
-	return store.Close(beadID)
+	if err := store.Close(beadID); err != nil {
+		return beads.UpdatedRow{}, err
+	}
+	row.Status = "closed"
+	return row, nil
+}
+
+// withWrittenRow is bead as it stands after a write that reported row.
+func withWrittenRow(bead beads.Bead, row beads.UpdatedRow) beads.Bead {
+	bead.Status = row.Status
+	bead.Metadata = row.Metadata
+	return bead
 }
 
 // Note: setOutcomeAndClose, propagateRetrySubjectMetadata,

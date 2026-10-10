@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -322,7 +323,7 @@ func TestReconcileSessionBeads_ConfigDriftDrainAckRuntimeUnavailablePreservesDra
 	)
 
 	afterDrain := env.dt.get(session.ID)
-	if afterDrain == nil || *afterDrain != drainBefore {
+	if afterDrain == nil || !reflect.DeepEqual(*afterDrain, drainBefore) {
 		livenessCalls, activityCalls := sp.counts()
 		t.Fatalf("runtime uncertainty mutated queued drain: before=%+v after=%+v liveness=%d activity=%d", drainBefore, afterDrain, livenessCalls, activityCalls)
 	}
@@ -374,17 +375,14 @@ func TestAdvanceSessionDrains_LivenessUnavailableAfterVerifiedStopDefersCompleti
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	ds := &drainState{
-		startedAt: now.Add(-time.Minute), deadline: now.Add(-10 * time.Second),
-		reason: "pool-excess", generation: 3, ackSet: true,
-	}
-	dt.set(b.ID, ds)
+	ds := beginDrainForTest(t, store, dt, b.ID, "pool-excess", now.Add(-time.Minute), now.Add(-10*time.Second))
+	ds.ackSet = true
 	before, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatalf("Get before drain advance: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+	advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
 	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)

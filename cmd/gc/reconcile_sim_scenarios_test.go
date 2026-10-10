@@ -446,10 +446,10 @@ func TestSimTxDecidesAgainInsideTheEffect(t *testing.T) {
 		healed    bool
 		attempts  int
 	}{
-		{"an unrelated write before the CAS", "note", seamBeforeCAS, true, 2},
-		{"an unrelated write after the fresh read", "note", seamAfterRowRead, true, 2},
+		{"an unrelated write before the CAS", "test_note", seamBeforeCAS, true, 2},
+		{"an unrelated write after the fresh read", "test_note", seamAfterRowRead, true, 2},
 		{"a re-hold before the CAS", "held_until", seamBeforeCAS, false, 1},
-		{"an unrelated write before the heal runs", "note", 0, true, 1},
+		{"an unrelated write before the heal runs", "test_note", 0, true, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := scripted(t, nil, heldRow())

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -485,4 +486,18 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 		flags[i] = readyAssigned[storeScopedBeadKey{StoreRef: storeRefs[i], ID: beadList[i].ID}]
 	}
 	return flags
+}
+
+// assignedOpenWorkHeld reports whether b is OPEN assigned work parked on a
+// canonical dispatch hold (beadmeta.HasDispatchHold). Such a row is never work
+// for its assignee — the hook's serve filter (isHeldHookCandidate) strips it
+// before claiming — so it must never be wake demand either: counting it wakes a
+// session whose hook immediately drain-acks no_work, and the controller re-wakes
+// it on the next tick, forever.
+//
+// Only OPEN rows qualify. An in_progress held bead is a claimed ownership fact
+// and stays hold-transparent for demand/liveness accounting (ga-5736js), so its
+// owner remains visible to crash recovery.
+func assignedOpenWorkHeld(b beads.Bead) bool {
+	return b.Status == "open" && beadmeta.HasDispatchHold(b.Labels)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,15 +16,15 @@ import (
 )
 
 // The simulator's invariant checks (D1a; CONTRACT v5 §10) beyond I8 and I10,
-// against ground truth: I1, I7, I15 and I23, which merged code can break, each
-// with a seeded mutant; and I2, I4, I5, I9, I14, I16, I17 and I24, whose
-// writers have not merged, each shown to report by TestSimChecksBite until its
-// PR adds a mutant.
+// against ground truth: I1, I7, I15, I23 and AL1's census-only rows, which
+// merged code can break, each with a seeded mutant; and I2, I4, I5, I9, I14,
+// I16, I17 and I24, whose writers have not merged, each shown to report by
+// TestSimChecksBite until its PR adds a mutant.
 
 func init() {
 	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead)
 	simWriteChecks = append(simWriteChecks, (*sim).checkWrite)
-	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized)
+	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly)
 	simQuietChecks = append(simQuietChecks, (*sim).checkDwell)
 	simMutants = append(simMutants, []struct {
 		name, inv string
@@ -50,6 +51,11 @@ func init() {
 		{"a stability clear inside 30s of the wake ends a live quarantine", "I15 ", simOpts{arms: mutateHeal(quarantineClear(func(r *rowFacts, stable bool) bool {
 			return committed(r.row.Info) && r.aliveProbed() && !stable
 		}))}},
+		{"an arm acts on a census-only row", "AL1 ", simOpts{arms: func(arms []rowArm) []rowArm {
+			return slices.DeleteFunc(arms, func(a rowArm) bool {
+				return reflect.ValueOf(a.decide).Pointer() == reflect.ValueOf(armCensusOnly).Pointer()
+			})
+		}}},
 	}...)
 }
 
@@ -178,10 +184,15 @@ var stopKeys = []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, 
 //   - I15 (I-STOP-3/4): no request survives a v2 PreWake, and no write
 //     rewrites what an operator holds dormant (dormantChange);
 //   - I4 (I-fence): no terminal write lands while the row's own runtime has a
-//     live pane, which C8.8 would have read.
+//     live pane, which C8.8 would have read;
+//   - AL1 (census-only): it writes no row off the sessions leg, which legacy
+//     never reconciles and a shared rig store fills with other cities' rows.
 func (s *sim) checkWrite(w simWrite) {
 	b, a := w.Before.Metadata, w.After.Metadata
 	id := w.Leg + "/" + w.After.ID
+	if w.Leg != simCityLeg {
+		s.failf("AL1 census-only", "v2 wrote %s, a census-only row", id)
+	}
 	if st := a["state"]; st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
 		s.failf("I7 I-legacy", "v2 wrote state %q on %s", st, id)
 	}
@@ -288,6 +299,16 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
 		}
 	}
+}
+
+// checkCensusOnly is AL1 (census-only) on what the planner admits: no
+// effect runs for a row off the sessions leg, which gather gives no writer,
+// so checkWrite alone would not see the arm that proposed it.
+func (s *sim) checkCensusOnly(e *simEffect) func(settlement) {
+	if e.it.Kind != intentCreate && s.legOf(e.it.Key.Leg) != s.legs[0] {
+		s.failf("AL1 census-only", "v2 admitted %s for %v, a census-only row", e.it.Kind, e.it.Key)
+	}
+	return func(settlement) {}
 }
 
 // legOf is the leg whose cache the census reads as ref.

@@ -137,9 +137,9 @@ test:ci --experimental_use_validation_aspect
 
 # --config=fresh: the nightly fresh-test-results lane (bazel-nightly.yml,
 # beads' precedent) appends this to every lane's cmd so a cached PASS is
-# never reused. worker-env (tools/rbe/worker-env) keys git and yq at major
-# version only, so a minor upgrade on the rbe-west workers moves neither the
-# pin nor any action key, and Bazel's test cache would never re-run a test
+# never reused. worker-env (rbe-worker's worker/worker-env) keys git and yq
+# at major version only, so a minor upgrade on the rbe-west workers moves
+# neither the pin nor any action key, and Bazel's test cache would never re-run a test
 # whose inputs and key are unchanged -- hiding a regression that minor
 # upgrade introduced behind every PR's and push's cached pass. Nightly
 # re-executes everything once a day instead. Like remote-exec, fork-cache and

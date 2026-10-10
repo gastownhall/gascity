@@ -3,7 +3,6 @@ package main
 import (
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -131,7 +130,7 @@ func driftResolvedOrDeferred(r *rowFacts) bool {
 	}
 	key := sessionConfigDriftKey(r.row.Info, r.w.Env.Cfg, res.TP)
 	return key == "" || r.w.Observed[r.k].Attached ||
-		recentlyDeferredSessionAttachedConfigDrift(r.row.Info, &clock.Fake{Time: r.w.Now}, key)
+		attachedConfigDriftDeferredAt(r.row.Info, r.w.Now, key)
 }
 
 // armDrainVoidCancel is A19, on a requested drain: a lens cancels it; one

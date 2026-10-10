@@ -283,6 +283,9 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 	if cr.v2 == nil {
 		return func() {}, cr.asyncStarts.waitLaunchedStarts(ctx, startup+startDeadlineSlack)
 	}
+	if r, refused := v2ProviderSwapRefusal(cfg, reconcilerModeLookupEnv); refused {
+		return func() {}, fmt.Errorf("v2 refuses the provider swap: %s", r)
+	}
 	cr.v2.planner.pauseStarts()
 	cr.v2.exec.closeStarts()
 	resume = func() {
@@ -293,6 +296,17 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 		return resume, err
 	}
 	return resume, ctx.Err()
+}
+
+// v2ProviderSwapRefusal is the latch's refusal of the session provider cfg
+// runs under lookupEnv: at boot (v2LatchRefusals), and on a reload's provider
+// swap, so a v2 city never swaps onto a runtime it would not start on.
+func v2ProviderSwapRefusal(cfg *config.City, lookupEnv func(string) (string, bool)) (latchRefusal, bool) {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil { // a pack runtime collision; config load already rejects it
+		reg = runtimeRegistry
+	}
+	return v2SessionRuntimeRefusal(cfg, reg, v2SessionRuntimeName(cfg, lookupEnv))
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake

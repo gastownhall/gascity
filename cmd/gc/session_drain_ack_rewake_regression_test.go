@@ -157,12 +157,12 @@ func TestDrainAckStopPendingPoolSeatWithOpenTriggerIsReplaced(t *testing.T) {
 			dops := newDrainOps(sp)
 			if tc.parked {
 				if err := store.SetMetadataBatch(seat.ID, map[string]string{
-					"state":                              "draining",
-					"state_reason":                       "drain-ack-stop-pending",
-					"drain_at":                           now.Add(-2 * time.Hour).Format(time.RFC3339),
-					"drain_ack_source":                   "agent",
-					"drain_ack_requester_session_id":     seat.ID,
-					"drain_ack_requester_instance_token": token,
+					"state":                               "draining",
+					"state_reason":                        "drain-ack-stop-pending",
+					"drain_at":                            now.Add(-2 * time.Hour).Format(time.RFC3339),
+					"test_drain_ack_source":               "agent",
+					"test_drain_ack_requester_session_id": seat.ID,
+					"test_drain_ack_requester_instance_token": token,
 				}); err != nil {
 					t.Fatalf("park seat: %v", err)
 				}
@@ -248,27 +248,27 @@ func TestDrainAckStopPendingNamedSeatRewakesOnDemand(t *testing.T) {
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{
-					"session_name":                       sessionName,
-					"alias":                              "mayor",
-					"template":                           "mayor",
-					"state":                              "draining",
-					"state_reason":                       "drain-ack-stop-pending",
-					"drain_at":                           now.Add(-2 * time.Hour).Format(time.RFC3339),
-					"generation":                         "2",
-					"instance_token":                     "tok-1",
-					"continuation_epoch":                 "1",
-					"drain_ack_source":                   "agent",
-					"drain_ack_requester_instance_token": "tok-1",
-					"gc.trigger_bead_id":                 "trigger-deleted-after-scope-finalized",
-					namedSessionMetadataKey:              "true",
-					namedSessionIdentityMetadata:         "mayor",
-					namedSessionModeMetadata:             "on_demand",
+					"session_name":          sessionName,
+					"alias":                 "mayor",
+					"template":              "mayor",
+					"state":                 "draining",
+					"state_reason":          "drain-ack-stop-pending",
+					"drain_at":              now.Add(-2 * time.Hour).Format(time.RFC3339),
+					"generation":            "2",
+					"instance_token":        "tok-1",
+					"continuation_epoch":    "1",
+					"test_drain_ack_source": "agent",
+					"test_drain_ack_requester_instance_token": "tok-1",
+					"gc.trigger_bead_id":                      "trigger-deleted-after-scope-finalized",
+					namedSessionMetadataKey:                   "true",
+					namedSessionIdentityMetadata:              "mayor",
+					namedSessionModeMetadata:                  "on_demand",
 				},
 			})
 			if err != nil {
 				t.Fatalf("create parked seat: %v", err)
 			}
-			if err := store.SetMetadata(seat.ID, "drain_ack_requester_session_id", seat.ID); err != nil {
+			if err := store.SetMetadata(seat.ID, "test_drain_ack_requester_session_id", seat.ID); err != nil {
 				t.Fatalf("stamp requester: %v", err)
 			}
 			dops := newDrainOps(sp)

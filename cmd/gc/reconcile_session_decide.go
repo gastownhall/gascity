@@ -81,11 +81,20 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 // event, and the time is w's. A hold or no action has no Kind; Reason names
 // the arm for the trace (R6). next is the row's earliest deadline, zero for
 // none. The pass skips rows with an effect in flight (R5).
+//
+//gc:pure
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
 	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
 	r.row, r.found = w.Census.Rows[k]
+	if f := w.fresh; f != nil && f.k == k {
+		r.fresh = f.rt
+	}
 	for i, arm := range rowArms {
+		r.rests = 0
 		if it, ok := arm.decide(r); ok {
+			if it.Kind != "" { // a hold has no effect to read anything
+				it.Rests = r.rests
+			}
 			if arm.name == "A6" && it.Kind != "" {
 				it.Patch = r.fold(it.Patch, rowArms[i+1:])
 			}
@@ -126,6 +135,26 @@ type rowFacts struct {
 	found bool
 	entry *selectionEntry
 	next  time.Time
+	rests rests      // what the arm deciding reads through the fresh accessors
+	fresh *txRuntime // the effect's fresh runtime read (World.withRuntime), else nil
+}
+
+// rests are the fresh facts a decision rests on (EFFECT-STRUCTURE §2.2;
+// ruling (c)). Only a fresh kind's arm records one, through a rest-recording
+// accessor (freshGone, freshOwnAlive); its effect reads the fact fresh and
+// decides again on it (withRuntime). A plain kind's arms read the pass's
+// facts and rest on none: they are advisory, and admission refuses a plain
+// intent that rests on a fact its kind does not read.
+type rests uint8
+
+const restRuntime rests = 1 << iota // the runtime's liveness and identity
+
+// reads are the rests s reads fresh for it, its needsFor's included.
+func (s effectSpec) reads(w *World, it intent) rests {
+	if s.needsOf(w, it).Runtime {
+		return restRuntime
+	}
+	return 0
 }
 
 // after records a deadline d from now, keeping the earliest; zero is none.
@@ -146,11 +175,12 @@ type rowArm struct {
 }
 
 // rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
-// (A6) takes one line per row. Later PRs insert their arms at their numbers:
-// A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline (C7c),
-// A10-A18, A20's begin (C6a2) and A21.
+// (A1, A6) takes one line per row. Later PRs insert their arms at their
+// numbers: A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline
+// (C7c), A10-A18, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
+	{"A1", armCensusOnly},
 	{"A2", armKillFence},
 	{"A3", armIdentity},
 	{"A5", armUnknownState},
@@ -172,6 +202,20 @@ const (
 	decideMislabelled = "mislabelled"
 	decideTimerHeal   = "timer-heal"
 )
+
+// armCensusOnly is A1's second row: a row on a leg other than the sessions
+// leg is AL1's None(census-only), ahead of every later arm (CONTRACT v5 §4 A6
+// item 4's rule, for every arm); a mislabelled one traces mislabelled first
+// (D-32). Legacy reconciles only the sessions store,
+// and a shared rig store holds other cities' rows, so no arm writes, rekeys,
+// drains or closes a row on another leg, and an effect admitted for one
+// re-decides on the fresh row and refuses.
+func armCensusOnly(r *rowFacts) (intent, bool) {
+	if r.k.Leg == r.w.Census.sessionsLeg() {
+		return intent{}, false
+	}
+	return intent{Reason: reasonCensusOnly}, true
+}
 
 // armNoRow is A1: no canonical census row, or a mislabelled one (no
 // template and no session name, CONTRACT v5 AL1), is None.

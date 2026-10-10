@@ -198,7 +198,7 @@ type cleanupTestingM struct {
 }
 
 func (m cleanupTestingM) Run() int {
-	code := m.m.Run()
+	code := sessionpkg.FailOnKeyViolations(m.m.Run(), os.Stderr) // a guard panic a recover() swallowed still fails
 	for _, path := range m.paths {
 		if path != "" {
 			_ = os.RemoveAll(path)
@@ -208,6 +208,7 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
 

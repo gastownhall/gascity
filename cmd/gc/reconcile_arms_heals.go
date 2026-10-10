@@ -15,7 +15,8 @@ import (
 // pass saw, instance_token included. The heals that move state on what the
 // runtime reads are the fresh kind: their effect re-proves the read under the
 // runtime name lock before it writes (reconcile_effect_heal.go). No arm here
-// runs for a row with an effect in flight: the pass skips it (R5).
+// runs for a row with an effect in flight: the pass skips it (R5), nor for a
+// census-only row, which legacy never reconciles (armCensusOnly).
 //
 // The asleep heals act only on a runtime the inventory reads gone. A dead
 // one (a corpse, or a live pane whose agent reads dead, which a booting agent
@@ -39,6 +40,47 @@ const (
 func (r *rowFacts) heal(kind, reason string, patch session.MetadataPatch) (intent, bool) {
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch}, true
+}
+
+// freshGone is gone for a fresh kind's arm: it rests the decision on the
+// runtime, and on the effect's fresh read it is that read's absence.
+func (r *rowFacts) freshGone() bool {
+	r.rests |= restRuntime
+	if r.fresh != nil {
+		return r.fresh.Class == rtAbsent
+	}
+	return r.gone()
+}
+
+// freshIdentity is the row's runtime identity for a fresh kind's arm (A3's
+// rekey): the inventory's read on the pass's facts; on the effect's fresh
+// read, the identity read on one object across its brackets, else unknown.
+func (r *rowFacts) freshIdentity() runtimeIdentity {
+	r.rests |= restRuntime
+	if r.fresh == nil {
+		return r.w.Observed[r.k].Identity
+	}
+	if !r.fresh.Same {
+		return runtimeIdentity{}
+	}
+	return r.fresh.Identity
+}
+
+// freshOwnAlive reports the row's own runtime alive, its identity Current
+// (O2), for a fresh kind's arm: on the pass's facts, alive with no failed
+// process probe and the inventory's identity read; on the effect's fresh
+// read, alive across its identity read and that identity.
+func (r *rowFacts) freshOwnAlive() bool {
+	r.rests |= restRuntime
+	info := r.row.Info
+	if r.fresh != nil {
+		return r.fresh.Alive() && compareIdentity(info, r.fresh.Identity) == identityCurrent
+	}
+	if !r.aliveProbed() || r.w.Obs == nil {
+		return false
+	}
+	obs, ok := r.w.Obs.Observation(strings.TrimSpace(info.SessionName), r.w.Now, r.w.ObsMaxAge)
+	return ok && compareIdentity(info, obs.Identity) == identityCurrent
 }
 
 // gone reports that the row's runtime reads gone; wake that the row is Wake.
@@ -83,7 +125,7 @@ func armClaimClear(r *rowFacts) (intent, bool) {
 // running, or one that just settled deferred with its runtime up.
 func armCreatingHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || !r.gone() || r.wake() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGone() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideCreatingHeal, asleepHealPatch(info))
@@ -91,9 +133,8 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 
 // armDeadRuntimeHeal is SESS-531, legacy's heal of a committed row whose
 // runtime is gone (v5.8e A6 item 4), for every sessions-leg row AL1 does not
-// Drain. A census-only rig-leg row is never healed: legacy reconciles only
-// the sessions store, and a shared rig store holds other cities' rows. A gone
-// row AL1 Drains is undesired, and A21's orphan close takes it (C5c1b). The
+// Drain (a census-only rig-leg row is armCensusOnly's). A gone row AL1
+// Drains is undesired, and A21's orphan close takes it (C5c1b). The
 // heal resets a continuation no deliberate sleep ended, so the relaunch A18
 // proposes for a Wake row does not resume the crashed conversation, and it
 // leaves a pool row AL1 wants asleep (quarantined, held, idle-suppressed)
@@ -104,7 +145,7 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // close the seat legacy respawns through its hold (SESS-602).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.k.Leg != r.w.SessionsLeg || !committed(info) || !r.gone() || r.entry.Desired == desireDrain || heartbeatHeld(info, r.w.Now) {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || heartbeatHeld(info, r.w.Now) || !r.freshGone() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, asleepHealPatch(info))
@@ -128,12 +169,7 @@ func heartbeatHeld(info session.Info, now time.Time) bool {
 // before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || !r.aliveProbed() || r.w.Obs == nil ||
-		operatorDormant(info, r.w.Now) {
-		return intent{}, false
-	}
-	obs, ok := r.w.Obs.Observation(strings.TrimSpace(info.SessionName), r.w.Now, r.w.ObsMaxAge)
-	if !ok || compareIdentity(info, obs.Identity) != identityCurrent {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || operatorDormant(info, r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})

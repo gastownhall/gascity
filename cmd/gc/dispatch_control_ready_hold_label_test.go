@@ -97,13 +97,14 @@ func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache is
-// ga-5736js end-to-end on the cache path: a routed_to-matching bead carrying a
-// beadmeta.DispatchHoldLabels value must not reach the control dispatcher's
-// queue when the answer is served from CachedReady(). The filter-level tests
-// above pin the rule; this one pins that the cache actually carries Labels far
-// enough for the rule to fire. (End-to-end coverage originates from PR #4787.)
-func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache(t *testing.T) {
+// TestTryControlReadyScanExcludesDispatchHoldLabelsOnFileLeg is
+// ga-5736js end-to-end on an in-process leg: a routed_to-matching bead carrying
+// a beadmeta.DispatchHoldLabels value must not reach the control dispatcher's
+// queue when the answer is served from a file leg's Ready read. The
+// filter-level tests above pin the rule; this one pins that the leg read
+// actually carries Labels far enough for the rule to fire. (End-to-end coverage
+// originates from PR #4787.)
+func TestTryControlReadyScanExcludesDispatchHoldLabelsOnFileLeg(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
 
@@ -130,12 +131,12 @@ func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache(t
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
+		t.Fatalf("tryControlReadyScan: handled = false, want true for a control-ready query")
 	}
 
 	var gotIDs []string
@@ -148,15 +149,15 @@ func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsFromCache(t
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsOnFallbackPath
-// is ga-5736js end-to-end on the fallback path: a routed_to-matching bead
-// carrying a beadmeta.DispatchHoldLabels value in the single batched
-// `bd ready --json` response must not reach the control dispatcher's queue,
-// matching the cache-path behavior above. The hold labels are spelled as
+// TestTryControlReadyScanExcludesDispatchHoldLabelsOnBdLeg is ga-5736js
+// end-to-end on a bd leg: a routed_to-matching bead carrying a
+// beadmeta.DispatchHoldLabels value in the leg's single `bd ready --json`
+// response must not reach the control dispatcher's queue, matching the file
+// leg above. The hold labels are spelled as
 // literal JSON in the fake bd script on purpose -- this test pins the wire
 // format bd emits, so substituting the Go constants here would defeat it.
 // (End-to-end coverage originates from PR #4787.)
-func TestTryControlReadyFromCacheOrFallbackExcludesDispatchHoldLabelsOnFallbackPath(t *testing.T) {
+func TestTryControlReadyScanExcludesDispatchHoldLabelsOnBdLeg(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -184,9 +185,9 @@ printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
 		t.Fatalf("handled = false, want true")

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -819,6 +820,9 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+	}
+	if err := session.ClearRuntimeLeaseForReopen(store, id); err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())

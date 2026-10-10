@@ -71,6 +71,10 @@ type settlement struct {
 	// Late marks what an effect returned after the executor settled it: the
 	// drain applies only its facts.
 	Late bool
+	// Closed marks an effect whose close section's close landed: what
+	// around reads to run a post-close cascade once, never for an earlier
+	// write or a row another writer closed.
+	Closed bool
 }
 
 // drainTransition is one RecordDrainTransition.
@@ -185,7 +189,7 @@ func (p *planner) postExecutionStalled(r executionStalledRequest) {
 }
 
 // executionStalled folds the posted requests into the planner's, newest per
-// row, forgets rows c no longer holds, and returns the pass's copy.
+// row, forgets rows a complete c holds closed, and returns the pass's copy.
 func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalledRequest {
 	p.stalledMu.Lock()
 	posted := p.stalledPosted
@@ -200,13 +204,10 @@ func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalled
 	if len(p.stalled) == 0 {
 		return nil
 	}
-	open := make(map[string]bool)
-	for _, row := range c.Canonical() {
-		open[row.Key.ID] = true
-	}
+	complete, ok := c.complete()
 	out := make(map[string]executionStalledRequest, len(p.stalled))
 	for id, r := range p.stalled {
-		if !open[id] {
+		if ok && complete.ClosedID(id) {
 			delete(p.stalled, id)
 			continue
 		}

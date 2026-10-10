@@ -1460,6 +1460,7 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 // facade commits the issue and every edge in one transaction, so a partial
 // create can no longer be observed and needs no compensation.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	return s.create(b, false)
 }
 
@@ -1602,6 +1603,7 @@ func nativeCreateRequestFromIssue(actor string, issue *beadslib.Issue) (issueops
 // "gc: update bead <id>" where the backing has one (see rewriteExternalParent);
 // without one, the edge roles record their own default labels.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -2271,6 +2273,9 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 // re-walking the whole input under the loop would report only what the
 // remaining chunks closed.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		noteSessionKeysByID(s.Get, id, metadata)
+	}
 	if err := s.readOnlyGuard(); err != nil {
 		return 0, err
 	}
@@ -2558,6 +2563,7 @@ func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
 // TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate and
 // TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	noteSessionKeysByID(s.Get, id, kvs)
 	if err := s.readOnlyGuard(); err != nil {
 		return err
 	}
@@ -2762,6 +2768,7 @@ type nativeDoltTx struct {
 }
 
 func (t *nativeDoltTx) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	return t.store.applyCreateInTx(t.ctx, t.tx, b)
 }
 
@@ -2773,11 +2780,26 @@ func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) > 0 && sessionKeyHook.Load() != nil {
+		issue, _ := t.tx.GetIssue(t.ctx, id) // read inside the transaction it writes in
+		noteNativeSessionKeys(issue, kvs)
+	}
 	return t.store.applySetMetadataBatchInTx(t.ctx, t.tx, id, kvs)
 }
 
 func (t *nativeDoltTx) Close(id string) error {
 	return t.store.applyCloseInTx(t.ctx, t.tx, id)
+}
+
+// noteNativeSessionKeys reports kvs when issue is a session row's, read where
+// the write already holds the row.
+func noteNativeSessionKeys(issue *beadslib.Issue, kvs map[string]string) {
+	if issue == nil || sessionKeyHook.Load() == nil {
+		return
+	}
+	if b, err := beadFromNativeIssue(issue); err == nil {
+		noteSessionKeys(b, kvs)
+	}
 }
 
 type nativeIssueGetter interface {
@@ -2821,6 +2843,7 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		if issue == nil {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
+		noteNativeSessionKeys(issue, opts.Metadata)
 		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)

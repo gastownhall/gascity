@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -147,9 +150,10 @@ func TestBackoffKeysAreIndependent(t *testing.T) {
 
 // Kills: memory growing with every key ever refused; or a prune that drops
 // a record still in force: an open row's, an in-demand bead's, or a create
-// record under the current ConfigRev. A row the census does not hold is
-// dropped whatever its leg's read, and a leg name holding "/" still prunes
-// by its own leg.
+// record under the current ConfigRev. A row record is dropped only when a
+// complete census holds its row closed: never with no census or an
+// incomplete one, nor for a row on a leg the census did not plan; and a leg
+// name holding "/" still prunes by its own leg.
 func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	b := newBackoffTable()
@@ -157,14 +161,19 @@ func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	closed := rowKey{Leg: "sessions", ID: "gc-closed"}
 	unread := rowKey{Leg: "rig", ID: "gc-r"}
 	slashed := rowKey{Leg: "rigs/a", ID: "gc-s"}
-	keep := []string{rowBackoffKey(open), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
-	drop := []string{rowBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
+	keep := []string{rowBackoffKey(open), rowBackoffKey(unread), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
+	drop := []string{rowBackoffKey(closed), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
 	for _, k := range []string{rowBackoffKey(open), rowBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-demand"), workBackoffKey("w-gone")} {
 		b.Refuse(k, now, time.Time{}, "c", "")
 	}
 	b.Refuse(createBackoffKey("worker/worker-1"), now, time.Time{}, createStageFence, "rev-2")
 	b.Refuse(createBackoffKey("worker/worker-2"), now, time.Time{}, createStageFence, "rev-1")
-	b.Prune("rev-2", map[rowKey]censusRow{open: {}}, map[string]bool{"w-demand": true})
+	b.Prune("rev-2", nil, map[string]bool{"w-demand": true})
+	b.Prune("rev-2", &sessionCensus{Legs: []censusLeg{{Ref: "sessions", Err: errors.New("down")}}}, map[string]bool{"w-demand": true})
+	if _, ok := b.Snapshot()[rowBackoffKey(closed)]; !ok {
+		t.Fatal("prune with no complete census dropped a row record")
+	}
+	b.Prune("rev-2", &sessionCensus{Legs: []censusLeg{{Ref: "sessions"}, {Ref: "rigs/a"}}, Rows: map[rowKey]censusRow{open: {}}}, map[string]bool{"w-demand": true})
 	snap := b.Snapshot()
 	for _, k := range keep {
 		if _, ok := snap[k]; !ok {
@@ -191,12 +200,12 @@ func TestBackoffNamedIdentityPrunedWhenUnconfigured(t *testing.T) {
 		t.Fatalf("named key = %q, want named:mayor (C5.11)", mayor)
 	}
 	b.Refuse(mayor, now, time.Time{}, createStageResolve, "rev-with-mayor")
-	b.Prune("rev-with-mayor", nil, nil)
+	b.Prune("rev-with-mayor", &sessionCensus{}, nil)
 	if _, ok := b.Snapshot()[mayor]; !ok {
 		t.Fatal("prune under the same ConfigRev dropped a configured identity's record")
 	}
 	b.Refuse(chat, now, time.Time{}, createStageLock, "rev-without-mayor")
-	b.Prune("rev-without-mayor", nil, nil)
+	b.Prune("rev-without-mayor", &sessionCensus{}, nil)
 	snap := b.Snapshot()
 	if _, ok := snap[mayor]; ok {
 		t.Fatal("the unconfigured identity's record survived the ConfigRev change")
@@ -217,5 +226,48 @@ func TestBackoffKeysFollowTheContract(t *testing.T) {
 	}, " ")
 	if want := "row:sessions/gc-1 create:worker/worker-1 named:worker work:w-1"; got != want {
 		t.Fatalf("keys = %q, want %q", got, want)
+	}
+}
+
+// Kills an absence read off a census that is not complete (EFFECT-STRUCTURE
+// §2.2's typed absence): a hard error on a rig leg, or a partial read of the
+// sessions leg, leaves no complete census; a clean read holds a missing row
+// closed and a held one open, by key and by bead ID.
+func TestCompleteCensusIsTheOnlyAbsenceTest(t *testing.T) {
+	open := rowKey{Leg: "sessions", ID: "gc-1"}
+	rows := map[rowKey]censusRow{open: {}}
+	for name, legs := range map[string][]censusLeg{
+		"a hard rig error":        {{Ref: "sessions"}, {Ref: "rig", Err: errors.New("rig down")}},
+		"a partial sessions read": {{Ref: "sessions", Err: &beads.PartialResultError{Op: "list", Err: errors.New("one page")}}},
+	} {
+		if _, ok := (&sessionCensus{Legs: legs, Rows: rows}).complete(); ok {
+			t.Errorf("%s: a complete census", name)
+		}
+	}
+	c, ok := (&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}, {Ref: "rig"}}, Rows: rows}).complete()
+	gone := rowKey{Leg: "sessions", ID: "gc-2"}
+	if !ok || c.Closed(open) || !c.Closed(gone) || c.ClosedID("gc-1") || !c.ClosedID("gc-2") {
+		t.Fatalf("complete %t: gc-1 closed %t/%t, gc-2 closed %t/%t; want gc-1 open, gc-2 closed", ok, c.Closed(open), c.ClosedID("gc-1"), c.Closed(gone), c.ClosedID("gc-2"))
+	}
+	if c.Closed(rowKey{Leg: "suspended-rig", ID: "gc-3"}) {
+		t.Error("a row on a leg the census did not plan read closed")
+	}
+	if (completeCensus{}).Closed(gone) || (completeCensus{}).ClosedID("gc-2") {
+		t.Error("the zero completeCensus closed a row")
+	}
+}
+
+// Kills an execution-stalled request forgotten on a partial read: a row the
+// census misses because a leg read erred keeps its request for A16; once a
+// complete census holds the row closed, the request goes.
+func TestExecutionStalledKeepsARowAPartialCensusMissed(t *testing.T) {
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	p.postExecutionStalled(executionStalledRequest{ID: "gc-1", Generation: "1"})
+	partial := &sessionCensus{Legs: []censusLeg{{Ref: "sessions"}, {Ref: "rig", Err: errors.New("rig down")}}, Rows: map[rowKey]censusRow{}}
+	if got := p.executionStalled(partial); len(got) != 1 {
+		t.Fatalf("after a partial census: %v, want gc-1's request kept", got)
+	}
+	if got := p.executionStalled(&sessionCensus{Legs: []censusLeg{{Ref: "sessions"}}, Rows: map[rowKey]censusRow{}}); len(got) != 0 {
+		t.Fatalf("after a complete census without gc-1: %v, want it forgotten", got)
 	}
 }

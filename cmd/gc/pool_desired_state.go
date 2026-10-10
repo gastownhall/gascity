@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -930,7 +929,7 @@ func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City,
 	if cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
-	return !pendingCreateLeaseExpiredForRollbackInfo(info, &clock.Fake{Time: decisionTime}, startupTimeout)
+	return !pendingCreateLeaseExpiredForRollbackAt(info, decisionTime, startupTimeout)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already

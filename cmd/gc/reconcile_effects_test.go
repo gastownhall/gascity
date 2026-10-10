@@ -265,6 +265,12 @@ func TestExecutorCausesCarryTheFinalizePrefix(t *testing.T) {
 			t.Fatalf("%s: cause %q, want %q", c.it.Key.ID, s.Cause, c.want)
 		}
 	}
+	// The effects above share the deadline's instant, and each stops its two
+	// timers only after it posts (its settlement timer) or after Run returns
+	// (its context's). Wait for that teardown, or the count below can match
+	// their stale timers before the next effect arms its own, and Advance
+	// then runs ahead of that effect's timers, which never fire.
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 0)
 	if err := x.submitIntent(&effectPass{}, finalize(intentStop, "deadline"), 9); err != nil {
 		t.Fatal(err)
 	}
@@ -402,8 +408,9 @@ func TestAbandonedRowWriteStillBacksOff(t *testing.T) {
 }
 
 // Kills an effect defined in a file the effect lint does not cover: the
-// transaction, and every Decide and body in effectSpecs, are defined in
-// reconcile_effect_*.go or reconcile_steps_*.go.
+// transaction, and every kind's body, around, needsFor, and each section's
+// Decide, Probe and Call, are defined in reconcile_effect_*.go or
+// reconcile_steps_*.go.
 func TestEffectSpecFuncsAreLinted(t *testing.T) {
 	linted := effectLintFiles(t)
 	check := func(kind string, fn any) {
@@ -415,12 +422,16 @@ func TestEffectSpecFuncsAreLinted(t *testing.T) {
 	check("every kind", runTx)
 	n := 0
 	for kind, spec := range effectSpecs {
-		if spec.body != nil {
-			check(kind, spec.body)
-			n++
+		for _, fn := range []any{spec.body, spec.around, spec.needsFor} {
+			if !reflect.ValueOf(fn).IsNil() {
+				check(kind, fn)
+				n++
+			}
 		}
 		for _, sec := range spec.sections {
-			check(kind, sec.Decide)
+			for _, fn := range append([]any{sec.Decide}, sec.defs...) {
+				check(kind, fn)
+			}
 			n++
 		}
 	}

@@ -67,6 +67,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -165,7 +166,7 @@ func newDetachedOrphanLane() *detachedOrphanLane {
 		pending:  map[string]struct{}{},
 		interval: detachedOrphanBackstopInterval,
 		retry:    detachedOrphanBackstopRetryInterval,
-		poll:     backstopPollInterval,
+		poll:     clock.Backstop(backstopPollInterval),
 		// Nothing has converged yet, so the first thing this lane does is scan.
 		forced:       true,
 		forcedReason: backstopReasonStartup,

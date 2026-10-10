@@ -29,17 +29,25 @@ jobs:
     name: "bazel (nightly: integration + coverage)"
     # A called workflow's jobs get at most the caller job's token
     # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
-    # write) and its lanes read worker-env drift issues (issues: read).
+    # write), its lanes read worker-env drift issues (issues: read) and its
+    # rrc-verify job opens an alert issue on a remote repo contents cache
+    # mismatch (issues: write; no other bazel.yml job asks for it).
     permissions:
       contents: read
       actions: write
-      issues: read
+      # bazel.yml's repo contents cache seed job requests id-token: write.
+      # GitHub validates a called workflow's permissions at startup even for
+      # jobs that skip, so the caller must grant it (startup_failure
+      # otherwise). The seed only runs on main pushes and the mint refuses
+      # any token that is not a main-push bazel.yml run.
+      id-token: write
+      issues: write
     uses: ./.github/workflows/bazel.yml
     with:
       # Re-execute every lane instead of reusing a cached PASS: worker-env
-      # (tools/rbe/worker-env) keys git and yq at major version only, so a
-      # minor upgrade on the rbe-west workers moves no action key and a
-      # regression it causes can hide behind every push's cached result
+      # (rbe-worker's worker/worker-env) keys git and yq at major version
+      # only, so a minor upgrade on the rbe-west workers moves no action key
+      # and a regression it causes can hide behind every push's cached result
       # (2026-10-07 worker-env outage review). Beads' nightly does the same
       # with --config=fresh (gastownhall/beads .bazelrc, bazel.yml). The
       # lanes still write the shared remote cache (--nocache_test_results

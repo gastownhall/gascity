@@ -1272,3 +1272,163 @@ func TestUUIDFactoryUsedOnlyForEnablement(t *testing.T) {
 		t.Fatalf("read-only operations requested entropy %d times", calls.Load())
 	}
 }
+
+// replaceConfigFixture installs state as a fresh config.toml incarnation with
+// the same atomic rename every state writer uses.
+func replaceConfigFixture(t *testing.T, root *storageRoot, state persistedState) {
+	t.Helper()
+	data, err := encodePersistedState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.writeFileAtomic(configFileName, data); err != nil {
+		t.Fatalf("replace config: %v", err)
+	}
+}
+
+// A lock-free config read can be torn by a writer's atomic replace at three
+// points. Each must surface errStorageRecordReplaced, joined to the unchanged
+// validation error, and lease nothing.
+func TestLockFreeConfigReadTornByReplaceIsTagged(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		wantText string
+		hooks    func(replace func()) storageTestHooks
+	}{
+		{
+			// The fd outlives its inode's last link: fstat reports nlink 0.
+			name:     "replace after open",
+			wantText: "has link count 0, want 1",
+			hooks: func(replace func()) storageTestHooks {
+				return storageTestHooks{afterFileOpen: func(path string) {
+					if filepath.Base(path) == configFileName {
+						replace()
+					}
+				}}
+			},
+		},
+		{
+			// The fd validated, then the name moved to a new inode.
+			name:     "replace after descriptor stat",
+			wantText: "changed after descriptor validation",
+			hooks: func(replace func()) storageTestHooks {
+				configStats := 0
+				return storageTestHooks{metadata: func(path string, metadata storageMetadata) storageMetadata {
+					if filepath.Base(path) == configFileName {
+						configStats++
+						if configStats == 2 { // 1 = by name before open, 2 = the fd
+							replace()
+						}
+					}
+					return metadata
+				}}
+			},
+		},
+		{
+			// The kernel resolved the name, then the inode lost its last link
+			// before stat read it. Real only as a race, so inject the value.
+			name:     "unlinked between lookup and stat",
+			wantText: "has link count 0, want 1",
+			hooks: func(func()) storageTestHooks {
+				configStats := 0
+				return storageTestHooks{metadata: func(path string, metadata storageMetadata) storageMetadata {
+					if filepath.Base(path) == configFileName {
+						configStats++
+						if configStats == 1 {
+							metadata.nlink = 0
+						}
+					}
+					return metadata
+				}}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := newMetricsTestHome(t)
+			writeStateFixture(t, home, enabledState(7, 1, testInstallationID, testSpoolGeneration))
+			service := mustOpenTestService(t, defaultTestServiceDependencies(home, 1))
+			replaced := false
+			replace := func() {
+				if replaced {
+					return
+				}
+				replaced = true
+				root := mustOpenMutableRoot(t, home)
+				defer func() { _ = root.Close() }()
+				replaceConfigFixture(t, root, enabledState(8, 1, testInstallationID, testSpoolGeneration))
+			}
+			loaded := service.readStateReadOnlyWithHooks(test.hooks(replace))
+			defer func() { _ = loaded.Close() }()
+			if loaded.err == nil || loaded.lease != nil {
+				t.Fatalf("torn read = (err %v, lease %v), want an error and no lease", loaded.err, loaded.lease)
+			}
+			if !errors.Is(loaded.err, errStorageRecordReplaced) {
+				t.Fatalf("torn read error = %v, want errStorageRecordReplaced", loaded.err)
+			}
+			if !strings.Contains(loaded.err.Error(), test.wantText) {
+				t.Fatalf("torn read error = %v, want the validation text %q kept", loaded.err, test.wantText)
+			}
+		})
+	}
+}
+
+// A stable hard-linked config is the shape nlink != 1 hardens against. It is
+// not a torn read: no tag, and disable keeps the hard error.
+func TestHardLinkedConfigStaysUnsafeNotStateConflict(t *testing.T) {
+	home := newMetricsTestHome(t)
+	writeStateFixture(t, home, enabledState(7, 1, testInstallationID, testSpoolGeneration))
+	configPath := filepath.Join(home.Root(), configFileName)
+	if err := os.Link(configPath, filepath.Join(filepath.Dir(home.Root()), "config-hardlink.toml")); err != nil {
+		t.Fatal(err)
+	}
+	service := mustOpenTestService(t, defaultTestServiceDependencies(home, 1))
+	loaded := service.readStateReadOnly()
+	_ = loaded.Close()
+	if !errors.Is(loaded.err, errStorageUnsafeRecordShape) || errors.Is(loaded.err, errStorageRecordReplaced) {
+		t.Fatalf("hard-linked read error = %v, want unsafe shape without errStorageRecordReplaced", loaded.err)
+	}
+	_, err := service.beginDisable(context.Background(), testStateVersion(7))
+	if err == nil || errors.Is(err, ErrStateChangedConcurrently) || !strings.Contains(err.Error(), "has link count 2, want 1") {
+		t.Fatalf("disable over a hard-linked config error = %v, want the link-count hard error", err)
+	}
+}
+
+// beginDisable binds its numeric expectation with a lock-free read. A writer
+// (holding state.lock) that replaces config.toml mid-read must make disable
+// lose the CAS with ErrStateChangedConcurrently and write nothing.
+func TestBeginDisableBindReadTornByReplaceIsStateConflict(t *testing.T) {
+	home := newMetricsTestHome(t)
+	writeStateFixture(t, home, enabledState(7, 1, testInstallationID, testSpoolGeneration))
+	deps := defaultTestServiceDependencies(home, 1)
+	deps.notice.version = 1
+	// Only the lock-free bind read runs before state.lock; a config open after
+	// the lock is the locked read, which no writer can tear.
+	stateLockTaken := false
+	deps.storageHooks.beforeStep = func(step storageStep) error {
+		if step == storageStepLock {
+			stateLockTaken = true
+		}
+		return nil
+	}
+	replaced := false
+	deps.storageHooks.afterFileOpen = func(path string) {
+		if replaced || stateLockTaken || filepath.Base(path) != configFileName {
+			return
+		}
+		replaced = true
+		root := mustOpenMutableRoot(t, home)
+		defer func() { _ = root.Close() }()
+		replaceConfigFixture(t, root, enabledState(8, 1, testInstallationID, testSpoolGeneration))
+	}
+	service := mustOpenTestService(t, deps)
+	_, err := service.beginDisable(context.Background(), testStateVersion(7))
+	if !replaced {
+		t.Fatalf("bind read never opened config.toml through the service storage hooks (disable error %v)", err)
+	}
+	if !errors.Is(err, ErrStateChangedConcurrently) || stateLockTaken {
+		t.Fatalf("disable over a torn bind read = (error %v, state.lock taken %v), want ErrStateChangedConcurrently before the lock", err, stateLockTaken)
+	}
+	if state := readStateFixture(t, home); state.StateGeneration != 8 || state.Preference != preferenceEnabled {
+		t.Fatalf("state after lost disable = generation %d preference %q, want the peer's generation 8 still enabled", state.StateGeneration, state.Preference)
+	}
+}

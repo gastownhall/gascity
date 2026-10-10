@@ -102,23 +102,54 @@ func testSuspendDeletedSocketAndDeadServer(t *testing.T, newProvider func(tmux.C
 		t.Fatalf("after the refused suspend: state = %q, err = %v; want the seat not suspended", got.State, err)
 	}
 
-	// Bring the socket back and stop the server for real.
+	// Bring the socket back and stop the server for real. KillServer reads
+	// "no server running" as success, so a kill-server that runs before the
+	// server has recreated its socket stops nothing: wait for the socket
+	// first, and for the server process to be gone after.
 	if err := syscall.Kill(serverPID, syscall.SIGUSR1); err != nil {
 		t.Fatalf("signal server to recreate its socket: %v", err)
 	}
-	killed := false
-	for attempt := 0; attempt < 100 && !killed; attempt++ {
-		killed = tm.KillServer() == nil
+	waitFor(t, "the server to recreate its socket", func() bool {
+		_, err := os.Stat(socketPath)
+		return err == nil
+	})
+	if err := tm.KillServer(); err != nil {
+		t.Fatalf("kill-server after SIGUSR1: %v", err)
 	}
-	if !killed {
-		t.Fatal("kill-server never reached the server after SIGUSR1")
-	}
+	waitFor(t, "the tmux server to exit", func() bool { return processGone(serverPID) })
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend against a dead server: %v", err)
 	}
 	if got, err := mgr.Get(info.ID); err != nil || got.State != StateSuspended {
 		t.Fatalf("after suspending against a dead server: state = %q, err = %v; want suspended", got.State, err)
 	}
+}
+
+// waitFor polls cond for up to 10s, failing the test with what it waited
+// for if cond never holds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(10 * time.Second)
+	for !cond() {
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+// processGone reports whether pid has exited: /proc no longer lists it, or
+// it is a zombie (a reaper in this sandbox may never collect it).
+func processGone(pid int) bool {
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return true
+	}
+	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+	return len(fields) > 0 && fields[0] == "Z"
 }
 
 // parentPID returns the parent of pid from /proc: a pane's parent is the tmux

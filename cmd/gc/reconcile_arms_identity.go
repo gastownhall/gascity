@@ -25,7 +25,7 @@ const (
 // which re-decides on the fresh row, re-checks it. No effect for the row is
 // in flight: the pass loop skips such rows (R5).
 func armIdentity(r *rowFacts) (intent, bool) {
-	rt := r.w.Observed[r.k].Identity
+	rt := r.freshIdentity()
 	switch v := compareIdentity(r.row.Info, rt); v {
 	case identityNewerSelf:
 		return intent{Reason: decideNewerSelf}, true

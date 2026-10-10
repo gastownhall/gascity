@@ -248,6 +248,18 @@ func laneFedRig(t *testing.T, f *gatherFixture) {
 	f.env.RigStores = func() map[string]beads.Store { return map[string]beads.Store{"rig-a": rig} }
 }
 
+// Kills a census-only row given a writer (AL1): with a rig leg in the census,
+// gather builds the sessions leg's store alone, so an effect on any other
+// leg's row refuses no-writer.
+func TestGatherBuildsOnlyTheSessionsLegsWriter(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	laneFedRig(t, f)
+	w := f.gather(t)
+	if len(w.Census.Legs) != 2 || len(w.LegStores) != 1 || w.LegStores[w.Census.sessionsLeg()] != beads.Store(f.cache) {
+		t.Fatalf("legs %v, leg stores %v, want two census legs and the sessions leg's store alone", w.Census.Legs, w.LegStores)
+	}
+}
+
 // Kills a K1 env that loses the sessions snapshot (the stamp step would run
 // inert) or the default scale_check target stores (their legs would go
 // unrecorded): the lane's env closure carries both, from the cached census.

@@ -171,6 +171,18 @@ func (r *Registry) Has(name string) bool {
 	return ok
 }
 
+// Prefixes returns the registered prefix selections, sorted.
+func (r *Registry) Prefixes() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	prefixes := make([]string, 0, len(r.prefixes))
+	for prefix := range r.prefixes {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+	return prefixes
+}
+
 // Names returns the registered exact selection names, sorted.
 func (r *Registry) Names() []string {
 	r.mu.RLock()

@@ -1748,12 +1748,16 @@ export const zSessionLifecyclePayload = z.object({
 });
 
 export const zSessionMessageInputBody = z.object({
-    message: z.string().min(1).regex(/\S/)
+    message: z.string().min(1).regex(/\S/),
+    resume: z.boolean().optional()
 });
 
 export const zSessionMessageSucceededPayload = z.object({
+    queued: z.boolean(),
     request_id: z.string(),
-    session_id: z.string()
+    session_id: z.string(),
+    will_not_start_reason: z.string().optional(),
+    will_start: z.boolean().optional()
 });
 
 export const zSessionPatchBody = z.object({
@@ -2783,7 +2787,9 @@ export const zSessionSubmitSucceededPayload = z.object({
     intent: z.string(),
     queued: z.boolean(),
     request_id: z.string(),
-    session_id: z.string()
+    session_id: z.string(),
+    will_not_start_reason: z.string().optional(),
+    will_start: z.boolean().optional()
 });
 
 export const zSessionTranscriptConversationResponse = z.object({
@@ -3162,7 +3168,8 @@ export const zSubmitIntent = z.enum([
 
 export const zSessionSubmitInputBody = z.object({
     intent: zSubmitIntent.optional(),
-    message: z.string().min(1).regex(/\S/)
+    message: z.string().min(1).regex(/\S/),
+    resume: z.boolean().optional()
 });
 
 export const zSupervisorCitiesOutputBody = z.object({

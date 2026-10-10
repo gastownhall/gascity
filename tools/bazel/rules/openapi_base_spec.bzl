@@ -7,7 +7,9 @@ can read, so this repository rule supplies it as an ordinary input:
   - GC_OPENAPI_BREAKING_BASE_SPEC set in the client environment (bazel.yml's
     unit lane on pull requests, `make openapi-breaking-check`): the file it
     names, written there with `git show <base>:internal/api/openapi.json`.
-    A set value naming no file fails the fetch.
+    A set value naming no file fails the fetch. The file is copied, not
+    linked: it is the client's, usually under /tmp, and the test sandbox's
+    private /tmp would leave a link to it dangling.
   - unset (pre-push, pushes to main, a plain `bazel test //...`): the
     committed spec itself, so the gate compares the spec with itself and
     passes. Those runs have no base to gate against.
@@ -26,7 +28,7 @@ def _openapi_base_spec_impl(rctx):
         if not spec.exists:
             fail("%s=%s: no such file" % (_ENV, path))
         rctx.watch(spec)
-        rctx.symlink(spec, "openapi.json")
+        rctx.file("openapi.json", rctx.read(spec), executable = False)
         rctx.file("source.txt", "%s=%s\n" % (_ENV, path))
     else:
         rctx.symlink(rctx.path(rctx.attr.revision), "openapi.json")

@@ -90,6 +90,22 @@ py_test(
     main = "tools/bazel/ci_analytics_extract_test.py",
 )
 
+# tools/bazel/rrc_verify.py: bazel-rrc-verify.yml's nightly check of the
+# remote repo contents cache against a cold fetch (ga-vnycm2.26). Its golden
+# keys come from Bazel 9.3.0's own writes; .bazelversion must name a release
+# it knows the cache GUID of.
+py_test(
+    name = "rrc_verify_test",
+    size = "small",
+    srcs = [
+        "tools/bazel/rrc_verify.py",
+        "tools/bazel/rrc_verify_test.py",
+    ],
+    data = [".bazelversion"],
+    imports = ["tools/bazel"],
+    main = "tools/bazel/rrc_verify_test.py",
+)
+
 py_test(
     name = "ci_suite_coverage_test",
     srcs = [
@@ -552,9 +568,11 @@ filegroup(
         "//tools/nogo/analyzers/internal/testunit:bazel_repo_srcs",
         "//tools/nogo/analyzers/misspell:bazel_repo_srcs",
         "//tools/nogo/analyzers/revive:bazel_repo_srcs",
+        "//tools/nogo/analyzers/runtimelease:bazel_repo_srcs",
         "//tools/nogo/analyzers/unconvert:bazel_repo_srcs",
         "//tools/nogo/analyzers/unparam:bazel_repo_srcs",
         "//tools/nogo/analyzers/unused:bazel_repo_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_repo_srcs",
         ":go.mod",
         ":Makefile",
         ":TESTING.md",
@@ -803,9 +821,11 @@ filegroup(
         "//tools/nogo/analyzers/internal/testunit:bazel_go_srcs",
         "//tools/nogo/analyzers/misspell:bazel_go_srcs",
         "//tools/nogo/analyzers/revive:bazel_go_srcs",
+        "//tools/nogo/analyzers/runtimelease:bazel_go_srcs",
         "//tools/nogo/analyzers/unconvert:bazel_go_srcs",
         "//tools/nogo/analyzers/unparam:bazel_go_srcs",
         "//tools/nogo/analyzers/unused:bazel_go_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_go_srcs",
         ":schemas_embed.go",
     ],
     visibility = ["//visibility:public"],
@@ -1051,9 +1071,11 @@ filegroup(
         "//tools/nogo/analyzers/internal/testunit:bazel_go_test_srcs",
         "//tools/nogo/analyzers/misspell:bazel_go_test_srcs",
         "//tools/nogo/analyzers/revive:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/runtimelease:bazel_go_test_srcs",
         "//tools/nogo/analyzers/unconvert:bazel_go_test_srcs",
         "//tools/nogo/analyzers/unparam:bazel_go_test_srcs",
         "//tools/nogo/analyzers/unused:bazel_go_test_srcs",
+        "//tools/nogo/analyzers/v2purity:bazel_go_test_srcs",
     ],
     visibility = ["//visibility:public"],
 )

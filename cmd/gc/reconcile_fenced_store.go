@@ -52,6 +52,33 @@ func (w fencedWriter) front() (*session.Store, error) {
 	return sessionFrontDoor(blindWriteRefusingStore{inner: w.store}), nil
 }
 
+// leaseFront is the session front door a runtime lease takes the row's
+// record through: the refusing store whose reads of the row go to the
+// backing (leaseRowStore), so the lease's own fresh reads see past the
+// leg's cache, or errNoConditionalWriter.
+func (w fencedWriter) leaseFront() (*session.Store, error) {
+	if _, err := w.front(); err != nil {
+		return nil, err
+	}
+	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
+		return sessionFrontDoor(leaseRowStore{freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}}), nil
+	}
+	return sessionFrontDoor(w.freshStore()), nil
+}
+
+// leaseRowStore is freshRowStore for the lease's own reads (its acquire,
+// Watch and Release): a refresh a newer write fenced reads the backing
+// instead, for the lease decides nothing a lost race would make stale.
+type leaseRowStore struct{ freshRowStore }
+
+func (s leaseRowStore) Get(id string) (beads.Bead, error) {
+	b, err := s.freshRowStore.Get(id)
+	if errors.Is(err, beads.ErrRowRefreshFenced) {
+		return s.cache.Backing().Get(id)
+	}
+	return b, err
+}
+
 // closeFront is front for a close verb: it also requires the atomic
 // conditional closer.
 func (w fencedWriter) closeFront() (*session.Store, error) {
@@ -89,11 +116,25 @@ func (w fencedWriter) casRow(id string, decide func(session.Info, session.Persis
 	if _, err := w.front(); err != nil {
 		return false, err
 	}
-	store := beads.Store(blindWriteRefusingStore{inner: w.store})
-	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
-		store = freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}
+	return sessionFrontDoor(w.freshStore()).UpdateMetadataFenced(id, 1, decide)
+}
+
+// closeRow is runTx's one close attempt: CloseWithMetadataIfMatch at the
+// revision of a row read as casRow reads it, the atomic conditional closer
+// required, with no fallback.
+func (w fencedWriter) closeRow(id string, decide func(session.Info, session.PersistedResponse) (session.MetadataPatch, bool)) (bool, error) {
+	if _, err := w.closeFront(); err != nil {
+		return false, err
 	}
-	return sessionFrontDoor(store).UpdateMetadataFenced(id, 1, decide)
+	return sessionFrontDoor(w.freshStore()).CloseWithMetadataIfMatch(id, decide)
+}
+
+// freshStore is the refusing store whose reads of a row go to the backing.
+func (w fencedWriter) freshStore() beads.Store {
+	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
+		return freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}
+	}
+	return blindWriteRefusingStore{inner: w.store}
 }
 
 // wroteRow is row as a landed CAS of patch left it: session.Info's fold
@@ -163,6 +204,11 @@ var (
 )
 
 func (s blindWriteRefusingStore) ConditionalWritesResolveTarget() beads.Store { return s.inner }
+
+// readOnlyStore is what Probes and Calls read through (capReadStores): a
+// blind-write-refusing store that, holding only beads.Store, resolves no
+// conditional writer either.
+type readOnlyStore struct{ beads.Store }
 
 func (s blindWriteRefusingStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
 	return beads.ConditionalWriterForTarget(s.inner)

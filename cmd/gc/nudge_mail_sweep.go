@@ -17,8 +17,15 @@ import (
 )
 
 const (
-	nudgeMailSweepDefaultNudgeTTL     = 10 * time.Minute
-	nudgeMailSweepDefaultMailTTL      = 60 * time.Minute
+	nudgeMailSweepDefaultNudgeTTL = 10 * time.Minute
+	nudgeMailSweepDefaultMailTTL  = 60 * time.Minute
+
+	// nudgeMailSweepDefaultUnreadMailTTL is the retention window for message
+	// beads that have never been marked "read". 0 = disabled: the unread-mail
+	// phase is opt-in via [mail] unread_retention_ttl or --unread-mail-ttl
+	// (gastownhall/gascity#5240).
+	nudgeMailSweepDefaultUnreadMailTTL time.Duration = 0
+
 	nudgeMailSweepCloseBudget         = 50
 	nudgeMailSweepWatchdogInterval    = 5 * time.Minute
 	nudgeMailSweepWatchdogCloseBudget = 500
@@ -32,6 +39,12 @@ const (
 	// direct-ID gate recognizes these beads as retention-swept (system-aged,
 	// still addressable until purge) rather than user-removed.
 	nudgeMailSweepMailCloseReason = beadmail.RetentionSweepCloseReason
+
+	// nudgeMailSweepUnreadMailCloseReason is the close_reason stamped on stale
+	// unread mail beads before close. It is
+	// beadmail.UnreadRetentionSweepCloseReason, the unread counterpart of
+	// nudgeMailSweepMailCloseReason, recognized by the same direct-ID gate.
+	nudgeMailSweepUnreadMailCloseReason = beadmail.UnreadRetentionSweepCloseReason
 )
 
 // nudgeMailSweepResult holds per-category close counts from sweepStaleNudgeMail.
@@ -81,6 +94,42 @@ func nudgeMailSweepMailTTLForCity(cityPath string, fallback time.Duration, stder
 	return nudgeMailSweepMailTTLForConfig(cfg, stderr)
 }
 
+// nudgeMailSweepUnreadMailTTLForConfig resolves the unread-mail-close TTL for
+// the controller watchdog and the sweep-nudge-mail order command from
+// cfg.Mail.UnreadRetentionTTL. The unread-mail phase is opt-in: an empty
+// (unset) value or "0" returns 0, which sweepStaleNudgeMail treats as "skip
+// the unread-mail phase". A malformed value also returns 0 (with a stderr
+// note) so a typo never closes unread mail on an unintended window.
+func nudgeMailSweepUnreadMailTTLForConfig(cfg *config.City, stderr io.Writer) time.Duration {
+	if cfg == nil || strings.TrimSpace(cfg.Mail.UnreadRetentionTTL) == "" {
+		return nudgeMailSweepDefaultUnreadMailTTL
+	}
+	d, err := cfg.Mail.UnreadRetentionTTLDuration()
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; unread-mail phase disabled\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return nudgeMailSweepDefaultUnreadMailTTL
+	}
+	return d
+}
+
+// nudgeMailSweepUnreadMailTTLForCity resolves the unread-mail-close TTL for
+// the sweep-nudge-mail order command by reading cityPath's city.toml,
+// returning fallback when that config cannot be loaded. Like
+// nudgeMailSweepMailTTLForCity, a missing city.toml stays silent while a
+// config that exists and will not parse gets a stderr note.
+func nudgeMailSweepUnreadMailTTLForCity(cityPath string, fallback time.Duration, stderr io.Writer) time.Duration {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		if stderr != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; using default unread-mail TTL %s\n", err, fallback) //nolint:errcheck // best-effort stderr
+		}
+		return fallback
+	}
+	return nudgeMailSweepUnreadMailTTLForConfig(cfg, stderr)
+}
+
 // sweepStaleNudgeMail closes stale consumed nudge beads and read mail beads.
 //
 // Nudge candidates are open beads with label gc:nudge created before now-nudgeTTL
@@ -92,15 +141,22 @@ func nudgeMailSweepMailTTLForCity(cityPath string, fallback time.Duration, stder
 // mailTTL <= 0 skips the mail-close phase entirely (rather than closing every
 // read mail bead immediately).
 //
-// limit caps total closes (nudge + mail combined). Pass 0 for no cap.
+// Unread mail candidates are open message beads WITHOUT label "read" created
+// before now-unreadMailTTL. Without this phase, mail nobody has read never
+// matches the read-mail candidate query and accumulates forever regardless of
+// age (gastownhall/gascity#5240). unreadMailTTL <= 0 skips the unread-mail
+// phase entirely; the phase is opt-in, and when enabled unreadMailTTL is
+// normally much longer than mailTTL.
+//
+// limit caps total closes (nudge + mail + unread mail combined). Pass 0 for no cap.
 // Per-bead errors do not abort the sweep; they are returned via errors.Join so
 // the caller can report them without treating the sweep as fatal.
 //
 // The nudge phase is sourced from the strongly-typed nudgeStore (the nudges
-// class); the mail phase from the strongly-typed mailStore (the messaging class).
-// Both wrap the same underlying work store until either class relocates, so
-// behavior is unchanged today.
-func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+// class); the mail and unread-mail phases from the strongly-typed mailStore
+// (the messaging class). Both wrap the same underlying work store until
+// either class relocates, so behavior is unchanged today.
+func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 	var beadErrs []error
 
@@ -152,15 +208,36 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		}
 	}
 
+	// Phase 3: close stale unread mail beads. Same shared-budget shape as
+	// Phase 2, on the unreadMailTTL cutoff. Opt-in: unreadMailTTL <= 0 skips it.
+	if unreadMailTTL > 0 {
+		unreadMailCutoff := now.Add(-unreadMailTTL)
+		remaining := limit - result.NudgeClosed - result.MailClosed
+		if limit == 0 || remaining > 0 {
+			unreadMailBudget := remaining
+			if limit == 0 {
+				unreadMailBudget = 0
+			}
+			unreadClosed, unreadCloseErrs, unreadListErr := beadmail.SweepUnreadMessagesBefore(mailStore, unreadMailCutoff, unreadMailBudget, nudgeMailSweepUnreadMailCloseReason)
+			if unreadListErr != nil {
+				return result, fmt.Errorf("nudge-mail-sweep: listing unread mail beads: %w", unreadListErr)
+			}
+			result.MailClosed += unreadClosed
+			beadErrs = append(beadErrs, unreadCloseErrs...)
+		}
+	}
+
 	return result, errors.Join(beadErrs...)
 }
 
 // countStaleNudgeMail returns what sweepStaleNudgeMail would close without
 // making any changes. Used by --dry-run to report candidate count without side
 // effects. The limit parameter caps the count the same way sweepStaleNudgeMail
-// caps closes; pass 0 for no cap. The nudge phase is counted from the typed
-// nudgeStore (nudges class); the mail phase from the typed mailStore (messaging class).
-func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+// caps closes; pass 0 for no cap. mailTTL <= 0 and unreadMailTTL <= 0 skip
+// their phases exactly as in the sweep. The nudge phase is counted from the typed
+// nudgeStore (nudges class); the mail and unread-mail phases from the typed
+// mailStore (messaging class).
+func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 
 	liveIDs := liveNudgeIDSet(nudgeState)
@@ -195,6 +272,22 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 				return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing read mail beads: %w", err)
 			}
 			result.MailClosed += mailCount
+		}
+	}
+
+	if unreadMailTTL > 0 {
+		unreadMailCutoff := now.Add(-unreadMailTTL)
+		remaining := limit - result.NudgeClosed - result.MailClosed
+		if limit == 0 || remaining > 0 {
+			unreadMailBudget := remaining
+			if limit == 0 {
+				unreadMailBudget = 0
+			}
+			unreadCount, err := beadmail.CountUnreadMessagesBefore(mailStore, unreadMailCutoff, unreadMailBudget)
+			if err != nil {
+				return result, fmt.Errorf("nudge-mail-sweep (dry-run): listing unread mail beads: %w", err)
+			}
+			result.MailClosed += unreadCount
 		}
 	}
 	return result, nil
