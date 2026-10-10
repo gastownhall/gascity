@@ -9731,7 +9731,7 @@ type PostV0CityByCityNameExtmsgBindParams struct {
 
 // GetV0CityByCityNameExtmsgBindingsParams defines parameters for GetV0CityByCityNameExtmsgBindings.
 type GetV0CityByCityNameExtmsgBindingsParams struct {
-	// SessionId Session ID to list bindings for.
+	// SessionId Session bead ID, session name, or alias. Returns 1:1 bindings and group-participant conversations the selector can publish into.
 	SessionId *string `form:"session_id,omitempty" json:"session_id,omitempty"`
 }
 

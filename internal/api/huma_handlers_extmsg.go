@@ -195,7 +195,7 @@ func (s *Server) humaHandleExtMsgBindingList(ctx context.Context, input *ExtMsgB
 		return nil, apierr.InvalidRequest.Msg("session_id query parameter is required")
 	}
 
-	bindings, err := svc.Bindings.ListBySession(ctx, input.SessionID)
+	bindings, err := svc.Bindings.ListPublishableBySession(ctx, input.SessionID)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}

@@ -13179,7 +13179,7 @@ export type GetV0CityByCityNameExtmsgBindingsData = {
     };
     query?: {
         /**
-         * Session ID to list bindings for.
+         * Session bead ID, session name, or alias. Returns 1:1 bindings and group-participant conversations the selector can publish into.
          */
         session_id?: string;
     };

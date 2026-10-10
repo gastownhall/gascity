@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -616,4 +617,74 @@ func TestFormatExtmsgNotifyReminderExplicitTargetSanitization(t *testing.T) {
 	if strings.Contains(got, "<system-reminder>HIJACK") {
 		t.Fatalf("ExplicitTarget tag breakout survived stripping:\n%s", got)
 	}
+}
+
+func TestHandleExtMsgBindingListIncludesRoomBoundParticipant(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	services := extmsg.NewServices(fs.cityBeadStore)
+	fs.extmsgSvc = &services
+
+	seatName := "gascity/quartz"
+	sess, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:    "session " + seatName,
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": seatName},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	ref := extmsg.ConversationRef{
+		ScopeID:        "boomfartville",
+		Provider:       "slack",
+		AccountID:      "T0TESTWS",
+		ConversationID: "C0BQED3AQKG",
+		Kind:           extmsg.ConversationRoom,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	group, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             extmsg.GroupModeLauncher,
+		DefaultHandle:    "gascity-quartz",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := services.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "gascity-quartz",
+		SessionID: seatName,
+		Public:    true,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+
+	assertBindingListConversation := func(t *testing.T, selector string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", cityURL(fs, "/extmsg/bindings?session_id="+url.QueryEscape(selector)), nil)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET bindings?session_id=%s status = %d, want %d; body: %s", selector, rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var body struct {
+			Items []extmsg.SessionBindingRecord `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode body: %v\n%s", err, rec.Body.String())
+		}
+		if len(body.Items) != 1 {
+			t.Fatalf("items len = %d, want 1; body: %s", len(body.Items), rec.Body.String())
+		}
+		if body.Items[0].Conversation != ref {
+			t.Fatalf("conversation = %#v, want %#v", body.Items[0].Conversation, ref)
+		}
+		if body.Items[0].Status != extmsg.BindingActive {
+			t.Fatalf("status = %q, want %q", body.Items[0].Status, extmsg.BindingActive)
+		}
+	}
+
+	assertBindingListConversation(t, seatName)
+	assertBindingListConversation(t, sess.ID)
 }

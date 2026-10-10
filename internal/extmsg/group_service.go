@@ -376,25 +376,101 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 		if !ok {
 			return &GroupRouteDecision{Match: GroupRouteNoMatch}, nil
 		}
-		return &GroupRouteDecision{
-			Match:           GroupRouteExplicitTarget,
-			TargetSessionID: target.SessionID,
-			UpdateCursor:    true,
-		}, nil
+		return s.decisionForParticipant(ctx, group.RootConversation, target, GroupRouteExplicitTarget, true)
 	}
 	if target, ok := byHandle[group.LastAddressedHandle]; ok {
-		return &GroupRouteDecision{
-			Match:           GroupRouteLastAddressed,
-			TargetSessionID: target.SessionID,
-		}, nil
+		return s.decisionForParticipant(ctx, group.RootConversation, target, GroupRouteLastAddressed, false)
 	}
 	if target, ok := byHandle[group.DefaultHandle]; ok {
-		return &GroupRouteDecision{
-			Match:           GroupRouteDefault,
-			TargetSessionID: target.SessionID,
-		}, nil
+		return s.decisionForParticipant(ctx, group.RootConversation, target, GroupRouteDefault, false)
 	}
 	return &GroupRouteDecision{Match: GroupRouteNoMatch}, nil
+}
+
+// decisionForParticipant routes to participant and records replay membership
+// for every identifier a later session may use to read the transcript.
+// bind-room stores the seat name (gascity/quartz) while the running session
+// reads by its bead ID. An asleep seat never receives the live nudge, so the
+// bead-id membership is the only way that inbound survives until wake (ga-tvs).
+func (s *groupService) decisionForParticipant(ctx context.Context, ref ConversationRef, participant ConversationGroupParticipant, match GroupRouteMatch, updateCursor bool) (*GroupRouteDecision, error) {
+	if err := s.ensureReplayMemberships(ctx, ref, participant); err != nil {
+		return nil, err
+	}
+	return &GroupRouteDecision{
+		Match:           match,
+		TargetSessionID: participant.SessionID,
+		UpdateCursor:    updateCursor,
+	}, nil
+}
+
+// ensureReplayMemberships grants group-owned replay to the stored session
+// selector, the stable session name, and the current live bead. Identifiers
+// that already have a membership are left as they are.
+func (s *groupService) ensureReplayMemberships(ctx context.Context, ref ConversationRef, participant ConversationGroupParticipant) error {
+	if s.transcript == nil {
+		return nil
+	}
+	ids, err := s.replaySessionIDs(participant)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.transcript.EnsureMembership(ctx, EnsureMembershipInput{
+			Caller:         groupTranscriptCaller(),
+			Conversation:   ref,
+			SessionID:      id,
+			BackfillPolicy: MembershipBackfillAll,
+			Owner:          MembershipOwnerGroup,
+			Now:            timeNow(),
+		}); err != nil {
+			return wrapTranscriptSyncError("ensure transcript membership for room-bound seat", err)
+		}
+	}
+	return nil
+}
+
+// replaySessionIDs lists the distinct session identifiers that must be able
+// to replay a room-bound inbound: the selector bind-room stored, the stable
+// session name, and the live bead that name currently resolves to. An asleep
+// bead is still the live owner of its name; a missing name is not an error.
+func (s *groupService) replaySessionIDs(participant ConversationGroupParticipant) ([]string, error) {
+	ids := []string{participant.SessionID, participant.SessionName}
+	name := strings.TrimSpace(participant.SessionName)
+	if name == "" {
+		name = strings.TrimSpace(participant.SessionID)
+	}
+	if name != "" && !nilAddressDirectory(s.sessions) {
+		info, err := resolveLiveSession(s.sessions, name)
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound):
+		case err != nil:
+			return nil, newSafeOperationError("resolve room-bound seat for transcript replay", err)
+		default:
+			liveID, err := resolvedLiveSessionID(info)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, liveID)
+		}
+	}
+	return uniqueSessionIDs(ids), nil
+}
+
+func uniqueSessionIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 // ResolveOutbound authorizes an outbound publish from sessionID against the
@@ -523,14 +599,7 @@ func (s *groupService) findGroupByRoot(ref ConversationRef) (*ConversationGroupR
 }
 
 func (s *groupService) getGroupByID(groupID string) (ConversationGroupRecord, error) {
-	item, err := s.store.Get(groupID)
-	if err != nil {
-		return ConversationGroupRecord{}, fmt.Errorf("get group %s: %w", groupID, err)
-	}
-	if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
-		return ConversationGroupRecord{}, ErrGroupNotFound
-	}
-	return decodeGroupBead(item)
+	return loadGroupRecord(s.store, groupID)
 }
 
 func (s *groupService) listParticipants(groupID string) ([]ConversationGroupParticipant, error) {

@@ -451,6 +451,191 @@ func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([
 	return out, nil
 }
 
+// ListPublishableBySession returns conversations the selector can publish into:
+// active 1:1 bindings plus synthetic records for group-participant rooms.
+// Selector may be a session bead ID, session name, or alias — bind-room
+// participants are often stored under the seat name, while publish looks up
+// the live session bead ID (ga-98z).
+func (s *bindingService) ListPublishableBySession(ctx context.Context, selector string) ([]SessionBindingRecord, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	candidates, err := s.publishableSelectorCandidates(selector)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	candidateSet := make(map[string]struct{}, len(candidates))
+	for _, cand := range candidates {
+		candidateSet[cand] = struct{}{}
+	}
+
+	seen := make(map[string]bool)
+	out := make([]SessionBindingRecord, 0)
+
+	for _, cand := range candidates {
+		if err := checkContext(ctx); err != nil {
+			return nil, err
+		}
+		for _, label := range []string{bindingSessionLabel(cand), bindingSessionNameLabel(cand)} {
+			items, err := s.store.List(beads.ListQuery{Label: label})
+			if err != nil {
+				return nil, fmt.Errorf("list publishable bindings by label: %w", err)
+			}
+			for _, item := range items {
+				if err := checkContext(ctx); err != nil {
+					return nil, err
+				}
+				if !hasLabel(item, "gc:extmsg-binding") {
+					continue
+				}
+				record, err := decodeBindingBead(item)
+				if err != nil {
+					return nil, err
+				}
+				key := conversationLockKey(record.Conversation)
+				if seen[key] {
+					continue
+				}
+				active, err := resolveActiveBinding(ctx, s.locks, s.store, s.delivery, s.transcript, record.Conversation, timeNow())
+				if err != nil {
+					return nil, err
+				}
+				if active == nil {
+					continue
+				}
+				if err := overlayLiveSession(s.sessions, active); err != nil {
+					return nil, err
+				}
+				if !bindingMatchesSelector(*active, candidateSet) {
+					continue
+				}
+				seen[key] = true
+				out = append(out, *active)
+			}
+		}
+	}
+
+	seenParticipants := make(map[string]bool)
+	for _, cand := range candidates {
+		if err := checkContext(ctx); err != nil {
+			return nil, err
+		}
+		for _, label := range []string{groupParticipantSessionLabel(cand), groupParticipantSessionNameLabel(cand)} {
+			items, err := s.store.List(beads.ListQuery{Label: label})
+			if err != nil {
+				return nil, fmt.Errorf("list publishable participants by label: %w", err)
+			}
+			for _, item := range items {
+				if err := checkContext(ctx); err != nil {
+					return nil, err
+				}
+				if !hasLabel(item, "gc:extmsg-participant") || item.Status == "closed" {
+					continue
+				}
+				if seenParticipants[item.ID] {
+					continue
+				}
+				seenParticipants[item.ID] = true
+				participant, err := decodeParticipantBead(item)
+				if err != nil {
+					return nil, err
+				}
+				if err := overlayLiveParticipantSessionID(s.sessions, &participant); err != nil {
+					return nil, newSafeOperationError("resolve publishable participant live session", err)
+				}
+				group, err := loadGroupRecord(s.store, participant.GroupID)
+				if err != nil {
+					if errors.Is(err, ErrGroupNotFound) {
+						continue
+					}
+					return nil, err
+				}
+				key := conversationLockKey(group.RootConversation)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, SessionBindingRecord{
+					ID:            participant.ID,
+					SchemaVersion: schemaVersion,
+					Conversation:  group.RootConversation,
+					SessionID:     participant.SessionID,
+					SessionName:   participant.SessionName,
+					Status:        BindingActive,
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *bindingService) publishableSelectorCandidates(selector string) ([]string, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{selector: {}}
+	out := []string{selector}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	name, err := sessionNameForSelector(s.sessions, selector)
+	if err != nil {
+		return nil, newSafeOperationError("resolve binding session address", err)
+	}
+	add(name)
+	if nilAddressDirectory(s.sessions) {
+		return out, nil
+	}
+	info, err := s.sessions.ResolveAddress(selector, true)
+	switch {
+	case errors.Is(err, session.ErrSessionNotFound):
+		return out, nil
+	case err != nil:
+		return nil, newSafeOperationError("resolve session selector", err)
+	default:
+		add(info.ID)
+		add(info.SessionNameMetadata)
+		add(info.Alias)
+		return out, nil
+	}
+}
+
+func bindingMatchesSelector(record SessionBindingRecord, candidates map[string]struct{}) bool {
+	for _, value := range []string{record.SessionID, record.SessionName, record.AgentName} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := candidates[value]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func loadGroupRecord(store beads.Store, groupID string) (ConversationGroupRecord, error) {
+	item, err := store.Get(groupID)
+	if err != nil {
+		return ConversationGroupRecord{}, fmt.Errorf("get group %s: %w", groupID, err)
+	}
+	if !hasLabel(item, "gc:extmsg-group") || item.Status == "closed" {
+		return ConversationGroupRecord{}, ErrGroupNotFound
+	}
+	return decodeGroupBead(item)
+}
+
 func (s *bindingService) Touch(ctx context.Context, caller Caller, bindingID string, now time.Time) error {
 	if err := checkContext(ctx); err != nil {
 		return err

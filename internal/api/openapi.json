@@ -34548,12 +34548,12 @@
             }
           },
           {
-            "description": "Session ID to list bindings for.",
+            "description": "Session bead ID, session name, or alias. Returns 1:1 bindings and group-participant conversations the selector can publish into.",
             "explode": false,
             "in": "query",
             "name": "session_id",
             "schema": {
-              "description": "Session ID to list bindings for.",
+              "description": "Session bead ID, session name, or alias. Returns 1:1 bindings and group-participant conversations the selector can publish into.",
               "type": "string"
             }
           }
