@@ -351,11 +351,14 @@ func (g *graph) collect(n ast.Node) bool {
 				g.nodes[p].bodies = append(g.nodes[p].bodies, n.Args[i])
 			}
 		}
+		_, exempt := g.c.Exempt[fn.Origin().FullName()] // an exempt body is never entered: its stored params never read
 		for _, i := range g.storedPs[fn.Origin()] {
 			if i < len(n.Args) {
 				p := fn.Origin().Type().(*types.Signature).Params().At(i)
 				g.nodes[p].bodies = append(g.nodes[p].bodies, n.Args[i])
-				g.deferred[n.Args[i]] = true
+				if g.storable(n.Args[i]) && !exempt {
+					g.deferred[n.Args[i]] = true
+				}
 			}
 		}
 	}
@@ -930,6 +933,8 @@ func typeutilCallee(info *types.Info, call *ast.CallExpr) types.Object {
 		return info.Uses[fun.Sel]
 	case *ast.IndexExpr:
 		return info.Uses[ident(fun.X)]
+	case *ast.IndexListExpr:
+		return info.Uses[ident(fun.X)]
 	}
 	return nil
 }
@@ -991,4 +996,25 @@ func funcName(d *ast.FuncDecl) string {
 		return id.Name + "." + d.Name.Name
 	}
 	return d.Name.Name
+}
+
+// storable reports e, an argument a //gc:stored-param defers: a function
+// literal, a named function, or another stored parameter. Anything else is
+// evaluated where it is passed.
+func (g *graph) storable(e ast.Expr) bool {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.FuncLit:
+		return true
+	case *ast.Ident, *ast.SelectorExpr:
+		if sel, ok := e.(*ast.SelectorExpr); ok && g.pass.TypesInfo.Selections[sel] != nil {
+			return false // a method value: its receiver is evaluated here
+		}
+		switch obj := g.pass.TypesInfo.Uses[ident(e)].(type) {
+		case *types.Func:
+			return true
+		case *types.Var:
+			return g.storedParam(obj)
+		}
+	}
+	return false
 }

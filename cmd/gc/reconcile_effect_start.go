@@ -40,7 +40,9 @@ var adoptSections = []section{probed(prepareAdoption, verbStep(true))}
 
 // prepareAdoption is the verb section's Probe: legacy's prepare of the
 // expected row, read-only, when the fresh read may commit it (a creating
-// row whose runtime is alive and Current), for the commit's hashes; nothing
+// row whose runtime is alive and Current), for the commit's hashes, with the
+// row's transcript probed as legacy's adoption reads it (SESS-542: a launch
+// that already created its conversation is no first start); nothing
 // otherwise.
 func prepareAdoption(_ context.Context, r effectReads, v txView) (*preparedStart, error) {
 	if v.RT == nil || !v.RT.Alive() || !creating(v.Row) || compareIdentity(v.Row, v.RT.Identity) != identityCurrent {
@@ -50,7 +52,37 @@ func prepareAdoption(_ context.Context, r effectReads, v txView) (*preparedStart
 	if !ok || res.Err != nil {
 		return nil, errTemplateUnresolved
 	}
-	return prepareRow(r, v.World, v.Row, res.TP, sessTranscriptUnknown)
+	return prepareRow(r, v.World, v.Row, res.TP, transcriptOf(r, v.World, v.Row, res.TP))
+}
+
+// transcriptOf is the state of row's session key's transcript in the work
+// dir its launch runs in (S-1), read-only: unknown with no key, no work dir
+// or no probe.
+func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) sessTranscriptState {
+	sk := strings.TrimSpace(row.SessionKey)
+	dir := launchWorkDir(r, w, row, tp)
+	if sk == "" || dir == "" {
+		return sessTranscriptUnknown
+	}
+	switch present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
+	case !probeable:
+		return sessTranscriptUnknown
+	case present:
+		return sessTranscriptPresent
+	}
+	return sessTranscriptAbsent
+}
+
+// launchWorkDir is the work dir prepare launches row in: the task's, the
+// row's, the template's.
+func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
+	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
+		return dir
+	}
+	if dir := preparedStartSessionWorkDir(row); dir != "" {
+		return resolveWorkDirAgainstCity(w.CityPath, dir)
+	}
+	return tp.WorkDir
 }
 
 // errTemplateUnresolved: the pass's memo holds no template for the row.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The start effect's verb section and the adopt (CONTRACT v5 S1, S2, O1, O4;
@@ -100,15 +103,98 @@ func TestStartResolutionTable(t *testing.T) {
 // whose runtime is alive with its token commits active with the start's
 // hashes, notes the read at its since, and records no event.
 func TestAdoptCommitsAliveCurrentUncommittedRow(t *testing.T) {
-	k := startKit(t, intentAdopt, "creating", "pending_create_claim", "true")
+	k := startKit(t, intentAdopt, "creating", "pending_create_claim", "true", "sleep_reason", "idle")
 	k.runtimeAs("gc-1", "tok", nil)
+	k.p.Clock.(*fakePlannerClock).Advance(7 * time.Second) // the read's since is not the pass's
 	since := k.p.Clock.Now()
 	s := k.runKind()
 	if s.Outcome != settledLanded || len(s.Facts.Events) != 0 || s.Facts.Noted == nil || !s.Facts.Noted.At.Equal(since) {
 		t.Fatalf("settlement %+v, want landed, noted at the read's since, with no event", s)
 	}
-	if k.meta("state") != "active" || k.meta("pending_create_claim") != "" || k.meta("started_config_hash") == "" || k.meta("instance_token") != "tok" {
-		t.Fatalf("row after the adopt: state %q claim %q hash %q token %q", k.meta("state"), k.meta("pending_create_claim"), k.meta("started_config_hash"), k.meta("instance_token"))
+	if k.meta("state") != "active" || k.meta("pending_create_claim") != "" || k.meta("started_config_hash") == "" || k.meta("instance_token") != "tok" || k.meta("sleep_reason") != "" {
+		t.Fatalf("row after the adopt: state %q claim %q hash %q token %q sleep_reason %q", k.meta("state"), k.meta("pending_create_claim"), k.meta("started_config_hash"), k.meta("instance_token"), k.meta("sleep_reason"))
+	}
+}
+
+// Kills the committed-row no-op decided before the identity verdict, a
+// committed row read as active only, a failed prepare settled as a no-op,
+// and a Note stamped at the pass's time (the C5a1-1 max review): over
+// committed rows, S1's identity verdicts refuse; a Current one is a no-op
+// noted at the attempt's since; a creating one whose prepare failed fails.
+func TestVerbStepJudgesCommittedRowsByIdentityFirst(t *testing.T) {
+	k := startKit(t, intentAdopt, "creating")
+	row := k.p.World.Census.Rows[k.it.Key].Info
+	current := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}
+	since := k.p.World.Now.Add(7 * time.Second)
+	prepErr := errors.New("prepare failed")
+	for _, c := range []struct {
+		name     string
+		adopt    bool
+		state    string
+		id       runtimeIdentity
+		prepared *preparedStart
+		refuse   string
+		fail     string
+		done     bool
+	}{
+		{"active, stale self", false, "active", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "old"}, &preparedStart{}, causeTokenDrift, "", false},
+		{"active, newer self", true, "active", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "9", Token: "new"}, &preparedStart{}, causeNewerSelf, "", false},
+		{"awake, foreign", false, "awake", runtimeIdentity{Known: true, SessionID: "gc-2", Token: "theirs"}, &preparedStart{}, causeOccupied, "", false},
+		{"active, ownerless", true, "active", runtimeIdentity{Known: true}, &preparedStart{}, causeAttribution, "", false},
+		{"awake, current", true, "awake", current, &preparedStart{}, "", "", true},
+		{"creating, current, prepare failed", true, "creating", current, nil, "", causePrepare, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := row
+			r.MetadataState = c.state
+			v := txView{World: k.p.World, RT: &txRuntime{Class: rtAlive, Same: true, Identity: c.id}, Now: since, Row: r}
+			var err error
+			if c.prepared == nil {
+				err = prepErr
+			}
+			step := verbStep(c.adopt)(v, c.prepared, err)
+			if step.Refuse != c.refuse || step.Fail != c.fail || step.Done != c.done || len(step.Write) > 0 {
+				t.Fatalf("step %+v, want refuse %q fail %q done %v and no write", step, c.refuse, c.fail, c.done)
+			}
+			if c.done && (step.Facts.Noted == nil || !step.Facts.Noted.At.Equal(since)) {
+				t.Fatalf("noted %+v, want the attempt's since %v", step.Facts.Noted, since)
+			}
+		})
+	}
+}
+
+// Kills an adopt that reads every adoption as a first start (SESS-542): its
+// prepare probes the key's transcript read-only, so a launch that already
+// created its conversation is adopted with no priming stamp, and only one
+// whose transcript is gone is primed.
+func TestAdoptProbesTheTranscript(t *testing.T) {
+	for _, present := range []bool{true, false} {
+		stubTranscript(t, present)
+		k := startKit(t, intentAdopt, "creating", "session_key", "k-1")
+		k.runtimeAs("gc-1", "tok", nil)
+		row := k.p.World.Census.Rows[k.it.Key]
+		tp := TemplateParams{
+			TemplateName: "worker", Command: "agent", Prompt: "hello", WorkDir: t.TempDir(),
+			ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id", ResumeFlag: "--resume", ResumeStyle: "flag", PromptMode: "arg"},
+		}
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		if s := k.runKind(); s.Outcome != settledLanded {
+			t.Fatalf("transcript present %t: settlement %+v, want landed", present, s)
+		}
+		if primed := k.meta(session.PrimedAtMetadataKey) != ""; primed == present {
+			t.Errorf("transcript present %t: primed_at %q; want priming only on a first start", present, k.meta(session.PrimedAtMetadataKey))
+		}
+	}
+}
+
+// Kills Note's wiring dropped from the host (O4): bindHost hands the planner
+// the host's observation cache.
+func TestBindHostWiresTheNoteCache(t *testing.T) {
+	cache := NewObservationCache(&clock.Fake{Time: gatherNow}, time.Minute, "e1")
+	rt := newDefaultPlanner(io.Discard)
+	rt.bindHost(plannerHost{gather: gatherEnv{CityPath: t.TempDir(), Observations: func() *ObservationCache { return cache }}})
+	if rt.planner.observations == nil || rt.planner.observations() != cache {
+		t.Fatal("bindHost dropped the observation cache the planner notes on")
 	}
 }
 
@@ -408,4 +494,12 @@ func TestAdoptPrepareWritesNothing(t *testing.T) {
 	if got := k.meta(beadmeta.WorkDirMetadataKey); got != templateDir {
 		t.Fatalf("work_dir %q, want the adopt to leave it", got)
 	}
+}
+
+// stubTranscript makes every keyed transcript present or absent.
+func stubTranscript(t *testing.T, present bool) {
+	t.Helper()
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return present, true }
+	t.Cleanup(func() { staleResumeKeyProbe = old })
 }

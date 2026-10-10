@@ -17,7 +17,10 @@ go_library(
 
 go_test(
     name = "v2purity_test",
-    srcs = ["v2purity_test.go"],
+    srcs = [
+        "stored_param_test.go",
+        "v2purity_test.go",
+    ],
     deps = [
         ":v2purity",
         "//tools/nogo/analyzers/internal/analyzertest",
