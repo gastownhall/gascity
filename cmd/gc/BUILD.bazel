@@ -1868,7 +1868,6 @@ go_test(
     ]) + [
         "//:go.mod",
         "//:go_work_files",
-        "//:repo_go_srcs",
         "//:schemas/hook/result.schema.json",
         "//:schemas/wait/inspect/result.schema.json",
         "//:schemas/wait/list/result.schema.json",
@@ -1912,8 +1911,8 @@ go_test(
     # the shard count. At 15 the unit lane's slowest shard ran 40-67 s after
     # the ~90 s compile-and-link chain; 20 brought it to ~33 s. The
     # integration build's shards ran 15-48 s at 20, above the slowest solo
-    # test (~42 s); 24 brings them under it.
-    shard_count = 24,
+    # test (~42 s); 24 brought them under 38 s; 28 brings them down to ~32 s.
+    shard_count = 28,
     deps = [
         "//:gascity",
         "//examples/bd",

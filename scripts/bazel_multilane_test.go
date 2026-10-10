@@ -502,11 +502,11 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	if lane.Strategy.FailFast == nil || *lane.Strategy.FailFast {
 		t.Errorf("lane strategy: want fail-fast: false")
 	}
-	// Unit and acceptance run on 8 vCPU, every other lane on 4: a remote
-	// lane's client-side loading and analysis is CPU-bound (ga-vnycm2.8:
-	// 23-34 s on 4 vCPU, 15-19 s on 8), and every other mode executes here,
-	// or may (a fork lane's fallback to the read-only cache).
-	if want := "${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+	// Every gating lane runs on 8 vCPU: a remote lane's client-side loading and
+	// analysis is CPU-bound (ga-vnycm2.8: 23-34 s on 4 vCPU, 15-19 s on 8).
+	// With integration-packages (165.7 s) and integration-smoke (140 s) setting
+	// the gating critical path, 8 vCPU saves ~7-10 s directly off the longest pole.
+	if want := "blacksmith-8vcpu-ubuntu-2404"; lane.RunsOn != want {
 		t.Errorf("lane runs-on = %q, want %q", lane.RunsOn, want)
 	}
 

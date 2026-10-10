@@ -50,6 +50,7 @@ SOLO_TESTS = {
     "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
+    "blocked_repair_on_proxied_city_and_rig_test": "TestBlockedRepairOnProxiedCityAndRig",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",

@@ -1568,8 +1568,9 @@ gives `acceptance_test` the pinned `bd` and `dolt` (first on `PATH`, so every
 `dolt sql-server` the rows start is a loopback child of the test on the remote
 worker), `GC_ACCEPTANCE_TOPOLOGY_MATRIX=1` and
 `GC_REQUIRE_ACCEPTANCE_TOOLING=1`. The few rows that wait out minutes of real
-Dolt lifecycle (the topology matrix's M1 and M5 shapes, the proxied idle
-timeout, the two suspension-quiescence rows) are its `SOLO_TESTS`: each runs
+Dolt lifecycle (the topology matrix's M1 and M5 shapes, blocked repair
+on a proxied city and rig, the proxied idle timeout, the two
+suspension-quiescence rows) are its `SOLO_TESTS`: each runs
 alone in a target of its own, and `acceptance_test` skips them.
 
 The same switch covers a row's own precondition. The lane runs
