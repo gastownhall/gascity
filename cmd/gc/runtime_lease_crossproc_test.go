@@ -68,7 +68,7 @@ func (p stdinGatedProvider) Start(ctx context.Context, name string, cfg runtime.
 //   - legacy-start: the controller's legacy start of the row.
 //
 // Either blocks inside its provider Start, holding the lease, until a line
-// arrives on stdin.
+// arrives on stdin. GC_TEST_LEASE_NOW, when set, is the legacy start's clock.
 func TestRuntimeLeaseCLIStartRole(t *testing.T) {
 	role := os.Getenv(cliStartRoleEnv)
 	if role != "cli-start" && role != "legacy-start" {
@@ -88,6 +88,9 @@ func TestRuntimeLeaseCLIStartRole(t *testing.T) {
 	}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 	clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
+	if at, err := time.Parse(time.RFC3339, os.Getenv("GC_TEST_LEASE_NOW")); err == nil {
+		clk.Time = at
+	}
 	woken := executePlannedStartsTraced(context.Background(), []startCandidate{{info: sessiontest.SeedBead(t, bead), tp: tp}},
 		&config.City{Agents: []config.Agent{{Name: "worker"}}}, map[string]TemplateParams{"worker": tp}, sp, store,
 		"test-city", city, clk, events.Discard, time.Minute, io.Discard, io.Discard, nil)
@@ -99,12 +102,14 @@ func TestRuntimeLeaseCLIStartRole(t *testing.T) {
 // is mid-start holds the lease, and the other defers (the legacy start) or
 // fails retryably (the CLI) without writing, then starts under a newer epoch.
 func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
-	// spawn runs role as a second process over f's store and city.
-	spawn := func(t *testing.T, f *leaseStartFixture, storeDir, role string) (expect func(string), proceed func()) {
+	// spawn runs role as a second process over f's store and city; crash
+	// kills it by its PID, as a crash mid-start would end it.
+	spawn := func(t *testing.T, f *leaseStartFixture, storeDir, role string, env ...string) (expect func(string), proceed, crash func()) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestRuntimeLeaseCLIStartRole$", "-test.count=1")
 		cmd.Env = append(unshardedEnv(), cliStartRoleEnv+"="+role, "GC_TEST_LEASE_STORE="+storeDir,
 			"GC_TEST_LEASE_CITY="+f.city, "GC_TEST_LEASE_ID="+f.cand.info.ID)
+		cmd.Env = append(cmd.Env, env...)
 		out, err := cmd.StdoutPipe()
 		if err != nil {
 			t.Fatal(err)
@@ -146,13 +151,17 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return expect, proceed
+		crash = func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		return expect, proceed, crash
 	}
 
 	t.Run("CLI mid-start, legacy start defers", func(t *testing.T) {
 		storeDir := t.TempDir()
 		f := newLeaseStartFixture(t, openRequireSQLite(t, storeDir))
-		expect, proceed := spawn(t, f, storeDir, "cli-start")
+		expect, proceed, _ := spawn(t, f, storeDir, "cli-start")
 		expect("starting")
 		if got := f.run(); got != 0 || !strings.Contains(f.log.String(), "outcome=deferred_by_runtime_lease") {
 			t.Fatalf("legacy start while the CLI starts = %d, log %q; want deferred", got, f.log.String())
@@ -174,7 +183,7 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 		defer sessionpkg.SetOperatorLeaseWaitForTest(500 * time.Millisecond)()
 		storeDir := t.TempDir()
 		f := newLeaseStartFixture(t, openRequireSQLite(t, storeDir))
-		expect, proceed := spawn(t, f, storeDir, "legacy-start")
+		expect, proceed, _ := spawn(t, f, storeDir, "legacy-start")
 		expect("starting")
 		mgr := sessionpkg.NewManagerWithOptions(f.store, runtime.NewFake(), sessionpkg.WithCityPath(f.city), sessionpkg.WithRuntimeLeaseTTL(time.Minute))
 		if err := mgr.Start(context.Background(), f.cand.info.ID, "worker", runtime.Config{}, sessionpkg.ResumeOperator); !errors.Is(err, sessionpkg.ErrSessionStarting) {
@@ -189,4 +198,69 @@ func TestRuntimeLeaseCLIVsLegacyStart(t *testing.T) {
 			t.Fatalf("record after the controller's start = %v, want released", meta)
 		}
 	})
+
+	// mc-5a1ma (J35 D): a controller killed between its PreWake and its
+	// provider Start leaves the row creating with a fresh last_woke_at and its
+	// dead holder's record. The next controller relaunches the start with a
+	// fresh token under its own lease, whenever it boots: no start_in_flight
+	// for a start nobody runs, no churn for a runtime that never ran, and no
+	// stuck-creating reap of a row the reconciler recovers (CONTRACT S7, §12.5).
+	for _, c := range []struct {
+		name    string
+		claimed bool          // a pending create (gc session new) or a restart of a committed row
+		bootAt  time.Duration // the next controller's first pass, after PreWake
+	}{
+		{"restart, the next boot inside the start window", false, 25 * time.Second},
+		{"restart, the next boot in the churn band", false, 40 * time.Second},
+		{"restart, the next boot past the stale-creating reap", false, 3 * time.Minute},
+		{"pending create, the next boot inside the start window", true, 25 * time.Second},
+	} {
+		t.Run("controller crashes mid-start, "+c.name, func(t *testing.T) {
+			storeDir := t.TempDir()
+			f := newLeaseStartFixture(t, openRequireSQLite(t, storeDir))
+			id := f.cand.info.ID
+			// An operator's session (gc session new), as J35 D's was.
+			setup := map[string]string{"session_origin": "manual"}
+			if !c.claimed {
+				setup["pending_create_claim"], setup["state"] = "", "asleep"
+			}
+			if err := f.store.SetMetadataBatch(id, setup); err != nil {
+				t.Fatal(err)
+			}
+			// The crashed start's PreWake lands 16s after the row's creation,
+			// as J35 D's did, so the reap's CreatedAt fallback is live.
+			created := mustGetBead(t, f.store, id).CreatedAt
+			expect, _, crash := spawn(t, f, storeDir, "legacy-start", "GC_TEST_LEASE_NOW="+created.Add(16*time.Second).UTC().Format(time.RFC3339))
+			expect("starting")
+			crash()
+			abandoned := mustGetBead(t, f.store, id).Metadata
+			if abandoned["state"] != "creating" || abandoned["generation"] != "2" || abandoned[sessionpkg.RuntimeLeaseHolderKey] == "" {
+				t.Fatalf("row after the crash = %v, want PreWake's creating generation 2 under the dead holder's record", abandoned)
+			}
+			prewake, err := time.Parse(time.RFC3339, abandoned["last_woke_at"])
+			if err != nil {
+				t.Fatalf("last_woke_at after the crash = %q: %v", abandoned["last_woke_at"], err)
+			}
+
+			clk := &clock.Fake{Time: prewake.Add(c.bootAt)}
+			sp, dt := runtime.NewFake(), newDrainTracker()
+			if n := reapStaleSessionBeads(f.city, f.store, sp, dt, nil, clk, &f.log); n != 0 {
+				t.Fatalf("the boot's stuck-creating reap closed %d row(s), want the abandoned start kept for its relaunch; log %q", n, f.log.String())
+			}
+			cfgNames := configuredSessionNames(f.cfg, "", f.store)
+			woken := reconcileSessionBeadsAtPath(context.Background(), f.city, []beads.Bead{mustGetBead(t, f.store, id)}, f.desired, cfgNames,
+				f.cfg, sp, f.store, nil, nil, nil, nil, dt, map[string]int{"worker": 1}, false, nil, "", nil, clk, events.Discard, 0, 0,
+				io.Discard, &f.log, withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
+			meta := mustGetBead(t, f.store, id).Metadata
+			if woken != 1 || !sp.IsRunning("worker") {
+				t.Fatalf("the next controller's pass woke %d, running %v; want the abandoned start relaunched\nrow %v\nlog %q", woken, sp.IsRunning("worker"), meta, f.log.String())
+			}
+			if meta["generation"] != "3" || meta["instance_token"] == abandoned["instance_token"] || meta["state"] != "active" {
+				t.Fatalf("row after the relaunch = %v, want generation 3 committed under a fresh token (S7)", meta)
+			}
+			if meta["churn_count"] != "" || meta["wake_attempts"] != "" || meta[sessionpkg.RuntimeLeaseHolderKey] != "" {
+				t.Fatalf("row after the relaunch = %v, want no churn or wake failure accrued and the record released", meta)
+			}
+		})
+	}
 }

@@ -3293,6 +3293,15 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The start in flight holds the row's runtime lease, as every start does
+	// from before its PreWake through its commit (mc-5a1ma).
+	city := t.TempDir()
+	inFlight, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(store), sessionpkg.RuntimeLeaseRequest{City: city, Name: "worker", ID: session.ID, TTL: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Release()
+	session = mustGetBead(t, store, session.ID)
 	sp := newGatedStartProvider()
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
@@ -3304,7 +3313,7 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 	}
 	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
-		t.TempDir(),
+		city,
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		configuredSessionNames(cfg, "", store),
