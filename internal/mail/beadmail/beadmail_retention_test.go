@@ -272,6 +272,156 @@ func TestCountReadMessagesBefore_LimitCapsCount(t *testing.T) {
 	}
 }
 
+// unreadMailSeed builds an open message bead without the "read" label.
+func unreadMailSeed(id string, createdAt time.Time) beads.Bead {
+	return readMailSeed(id, createdAt, func(b *beads.Bead) { b.Labels = nil })
+}
+
+func TestCountUnreadMessagesBefore_CountsWithoutMutating(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+	fresh := now.Add(time.Minute)
+
+	seed := []beads.Bead{
+		unreadMailSeed("old-1", old),
+		unreadMailSeed("old-2", old),
+		unreadMailSeed("fresh", fresh),
+		readMailSeed("read", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+
+	// No mutation: every seeded bead is still open.
+	for _, id := range []string{"old-1", "old-2", "fresh", "read"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "open" {
+			t.Errorf("%s status = %q, count must not mutate", id, b.Status)
+		}
+	}
+}
+
+func TestCountUnreadMessagesBefore_LimitCapsCount(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+	seed := []beads.Bead{
+		unreadMailSeed("old-1", old),
+		unreadMailSeed("old-2", old),
+		unreadMailSeed("old-3", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2 (limit)", count)
+	}
+}
+
+func TestSweepUnreadMessagesBefore_PerBeadCloseErrorIsCollected(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Minute)
+
+	// good is older so the created_asc sweep visits it first; both are aged.
+	seed := []beads.Bead{
+		unreadMailSeed("good", old.Add(-time.Minute)),
+		unreadMailSeed("bad", old),
+	}
+	base := beads.NewMemStoreFrom(100, seed, nil)
+	store := closeErrStore{MemStore: base, failClose: map[string]error{"bad": errors.New("close boom")}}
+	mailStore := beads.MailStore{Store: store}
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 0, UnreadRetentionSweepCloseReason)
+	if listErr != nil {
+		t.Fatalf("unexpected list error: %v", listErr)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 (good only)", closed)
+	}
+	if len(closeErrs) != 1 {
+		t.Fatalf("closeErrs = %v, want exactly one", closeErrs)
+	}
+	if got := closeErrs[0].Error(); !strings.Contains(got, "bad") || !strings.Contains(got, "close boom") {
+		t.Fatalf("closeErrs[0] = %q, want it to name the bead and the close failure", got)
+	}
+}
+
+func TestSweepUnreadMessagesBefore_ListErrorIsFatal(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store := listErrStore{MemStore: beads.NewMemStore(), err: errors.New("store down")}
+	mailStore := beads.MailStore{Store: store}
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 0, UnreadRetentionSweepCloseReason)
+	if listErr == nil {
+		t.Fatal("expected fatal list error")
+	}
+	if closed != 0 || len(closeErrs) != 0 {
+		t.Fatalf("closed=%d closeErrs=%v, want zero on list failure", closed, closeErrs)
+	}
+}
+
+// TestSweepUnreadMessagesBefore_OlderReadBeadsDoNotStarveUnread guards the
+// candidate query against applying limit before the in-memory "read"
+// exclusion: three aged open read beads older than the only aged unread bead
+// must not fill a limit=3 fetch window and hide the unread bead from the sweep.
+func TestSweepUnreadMessagesBefore_OlderReadBeadsDoNotStarveUnread(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-time.Hour)
+	seed := []beads.Bead{
+		readMailSeed("read-1", old.Add(-3*time.Minute)),
+		readMailSeed("read-2", old.Add(-2*time.Minute)),
+		readMailSeed("read-3", old.Add(-time.Minute)),
+		unreadMailSeed("unread", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	mailStore := beads.MailStore{Store: store}
+
+	count, err := CountUnreadMessagesBefore(mailStore, now, 3)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count = %d, want 1 (unread bead must not be starved)", count)
+	}
+
+	closed, closeErrs, listErr := SweepUnreadMessagesBefore(mailStore, now, 3, UnreadRetentionSweepCloseReason)
+	if listErr != nil || len(closeErrs) != 0 {
+		t.Fatalf("sweep listErr=%v closeErrs=%v", listErr, closeErrs)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	got, err := store.Get("unread")
+	if err != nil {
+		t.Fatalf("Get(unread): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("unread status = %q, want closed", got.Status)
+	}
+	for _, id := range []string{"read-1", "read-2", "read-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Status != "open" {
+			t.Errorf("%s status = %q, unread sweep must not close read mail", id, b.Status)
+		}
+	}
+}
+
 func TestPurgeReadMessageWisps_DeletesAgedReadWisps(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.Add(-time.Hour)

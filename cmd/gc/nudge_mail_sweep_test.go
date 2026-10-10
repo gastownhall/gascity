@@ -989,24 +989,190 @@ func TestNudgeMailSweepMailTTLForCity_ConfiguredValueUsed(t *testing.T) {
 
 func TestValidateNudgeMailSweepFlags(t *testing.T) {
 	cases := []struct {
-		name            string
-		nudgeTTL        time.Duration
-		mailTTL         time.Duration
-		mailTTLExplicit bool
-		wantErr         bool
+		name                  string
+		nudgeTTL              time.Duration
+		mailTTL               time.Duration
+		unreadMailTTL         time.Duration
+		mailTTLExplicit       bool
+		unreadMailTTLExplicit bool
+		wantErr               bool
 	}{
-		{"defaults ok", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, false, false},
-		{"nudge-ttl zero rejected", 0, nudgeMailSweepDefaultMailTTL, false, true},
-		{"nudge-ttl negative rejected", -time.Minute, nudgeMailSweepDefaultMailTTL, false, true},
-		{"explicit mail-ttl zero accepted", nudgeMailSweepDefaultNudgeTTL, 0, true, false},
-		{"explicit mail-ttl negative rejected", nudgeMailSweepDefaultNudgeTTL, -time.Minute, true, true},
-		{"unset mail-ttl zero not validated here", nudgeMailSweepDefaultNudgeTTL, 0, false, false},
+		{"defaults ok", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, false, false},
+		{"nudge-ttl zero rejected", 0, nudgeMailSweepDefaultMailTTL, 0, false, false, true},
+		{"nudge-ttl negative rejected", -time.Minute, nudgeMailSweepDefaultMailTTL, 0, false, false, true},
+		{"explicit mail-ttl zero accepted", nudgeMailSweepDefaultNudgeTTL, 0, 0, true, false, false},
+		{"explicit mail-ttl negative rejected", nudgeMailSweepDefaultNudgeTTL, -time.Minute, 0, true, false, true},
+		{"unset mail-ttl zero not validated here", nudgeMailSweepDefaultNudgeTTL, 0, 0, false, false, false},
+		{"explicit unread-mail-ttl zero accepted", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 0, false, true, false},
+		{"explicit unread-mail-ttl positive accepted", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 7 * 24 * time.Hour, false, true, false},
+		{"explicit unread-mail-ttl negative rejected", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, -time.Minute, false, true, true},
+		{"unset unread-mail-ttl not validated here", nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, -time.Minute, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateNudgeMailSweepFlags(tc.nudgeTTL, tc.mailTTL, nudgeMailSweepDefaultUnreadMailTTL, tc.mailTTLExplicit)
+			err := validateNudgeMailSweepFlags(tc.nudgeTTL, tc.mailTTL, tc.unreadMailTTL, tc.mailTTLExplicit, tc.unreadMailTTLExplicit)
 			if (err != nil) != tc.wantErr {
-				t.Errorf("validateNudgeMailSweepFlags(%s, %s, %v) err = %v, wantErr %v", tc.nudgeTTL, tc.mailTTL, tc.mailTTLExplicit, err, tc.wantErr)
+				t.Errorf("validateNudgeMailSweepFlags(%s, %s, %s, %v, %v) err = %v, wantErr %v", tc.nudgeTTL, tc.mailTTL, tc.unreadMailTTL, tc.mailTTLExplicit, tc.unreadMailTTLExplicit, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// --- #5240: opt-in unread-mail phase ---
+
+func TestSweepStaleNudgeMail_ZeroUnreadMailTTLSkipsUnreadPhase(t *testing.T) {
+	// unreadMailTTL <= 0 must skip the unread-mail phase entirely rather than
+	// being treated as a zero-length window (which would close every unread
+	// mail bead immediately, regardless of age).
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	nudgeTTL := nudgeMailSweepDefaultNudgeTTL
+	seed := []beads.Bead{
+		nudgeSeed("n1", "nudge-1", now.Add(-nudgeTTL-time.Second)),
+		unreadMailSeed("unread-old", now.Add(-30*24*time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeTTL, nudgeMailSweepDefaultMailTTL, 0, 0)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.NudgeClosed != 1 {
+		t.Errorf("NudgeClosed = %d, want 1 (unread-mail-ttl=0 must not affect the nudge phase)", result.NudgeClosed)
+	}
+	if result.MailClosed != 0 {
+		t.Errorf("MailClosed = %d, want 0 (unread-mail-ttl=0 must skip the unread phase)", result.MailClosed)
+	}
+	got, err := store.Get("unread-old")
+	if err != nil {
+		t.Fatalf("Get(unread-old): %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("unread-old status = %q, want open", got.Status)
+	}
+}
+
+func TestCountStaleNudgeMail_ZeroUnreadMailTTLSkipsUnreadPhase(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		unreadMailSeed("unread-old", now.Add(-30*24*time.Hour)),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	counts, err := countStaleNudgeMail(beads.NudgesStore{Store: store}, beads.MailStore{Store: store}, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, 0, 0)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts.MailClosed != 0 {
+		t.Errorf("MailClosed = %d, want 0 with unread-mail-ttl=0", counts.MailClosed)
+	}
+	got, err := store.Get("unread-old")
+	if err != nil {
+		t.Fatalf("Get(unread-old): %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("unread-old status = %q, want open", got.Status)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_UnsetDisables(t *testing.T) {
+	// The unread-mail phase is opt-in: a city that has never touched
+	// [mail] unread_retention_ttl must not close unread mail.
+	if got := nudgeMailSweepUnreadMailTTLForConfig(&config.City{}, io.Discard); got != 0 {
+		t.Errorf("got %s, want 0 (disabled)", got)
+	}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(nil, io.Discard); got != 0 {
+		t.Errorf("nil cfg: got %s, want 0 (disabled)", got)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_CustomDurationUsed(t *testing.T) {
+	cfg := &config.City{Mail: config.MailConfig{UnreadRetentionTTL: "168h"}}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(cfg, io.Discard); got != 168*time.Hour {
+		t.Errorf("got %s, want 168h", got)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_ExplicitZeroDisables(t *testing.T) {
+	cfg := &config.City{Mail: config.MailConfig{UnreadRetentionTTL: "0"}}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(cfg, io.Discard); got != 0 {
+		t.Errorf("got %s, want 0 (disabled)", got)
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForConfig_InvalidDisablesWithNote(t *testing.T) {
+	var stderr bytes.Buffer
+	cfg := &config.City{Mail: config.MailConfig{UnreadRetentionTTL: "not-a-duration"}}
+	if got := nudgeMailSweepUnreadMailTTLForConfig(cfg, &stderr); got != 0 {
+		t.Errorf("got %s, want 0 (disabled) on invalid config", got)
+	}
+	if !strings.Contains(stderr.String(), "not-a-duration") {
+		t.Errorf("expected stderr note about the invalid value, got: %q", stderr.String())
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForCity_MissingConfigIsSilent(t *testing.T) {
+	var stderr bytes.Buffer
+	got := nudgeMailSweepUnreadMailTTLForCity(t.TempDir(), nudgeMailSweepDefaultUnreadMailTTL, &stderr)
+	if got != 0 {
+		t.Errorf("got %s, want fallback 0", got)
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr note for a missing city.toml, got: %q", stderr.String())
+	}
+}
+
+func TestNudgeMailSweepUnreadMailTTLForCity_ConfiguredValueUsed(t *testing.T) {
+	cityPath := t.TempDir()
+	cityTOML := "[workspace]\nname = \"test-city\"\n\n[mail]\nunread_retention_ttl = \"168h\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := nudgeMailSweepUnreadMailTTLForCity(cityPath, nudgeMailSweepDefaultUnreadMailTTL, &stderr)
+	if got != 168*time.Hour {
+		t.Errorf("got %s, want 168h from [mail] unread_retention_ttl", got)
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected no stderr note for a valid config, got: %q", stderr.String())
+	}
+}
+
+func TestRunNudgeMailSweepWatchdog_UnreadMailOptIn(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		unreadTTL  string
+		wantStatus string
+	}{
+		{"unset leaves unread mail open", "", "open"},
+		{"configured closes aged unread mail", "168h", "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed := []beads.Bead{
+				unreadMailSeed("unread-old", now.Add(-30*24*time.Hour)),
+			}
+			store := beads.NewMemStoreFrom(100, seed, nil)
+
+			cr := &CityRuntime{
+				cityName: "test-city",
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Mail:      config.MailConfig{UnreadRetentionTTL: tc.unreadTTL},
+				},
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			cr.runNudgeMailSweepWatchdog(cr.cfg, now)
+
+			got, err := store.Get("unread-old")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("unread-old status = %s, want %s", got.Status, tc.wantStatus)
 			}
 		})
 	}

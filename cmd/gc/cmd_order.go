@@ -2102,9 +2102,10 @@ func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale delivered nudge beads and read mail beads.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
-closed. Read mail beads past --mail-ttl are closed. Unread mail beads past the
-far longer --unread-mail-ttl are also closed, so mail nobody ever reads still
-ages out instead of accumulating forever. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
+closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
+opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
+mail beads past it are also closed, so mail nobody ever reads ages out instead
+of accumulating forever. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -2112,7 +2113,8 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			mailTTLExplicit := cmd.Flags().Changed("mail-ttl")
-			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
+			unreadMailTTLExplicit := cmd.Flags().Changed("unread-mail-ttl")
+			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, unreadMailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2120,7 +2122,7 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 	}
 	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
 	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
-	cmd.Flags().DurationVar(&unreadMailTTL, "unread-mail-ttl", nudgeMailSweepDefaultUnreadMailTTL, "min age before an unread mail bead is GC'd")
+	cmd.Flags().DurationVar(&unreadMailTTL, "unread-mail-ttl", nudgeMailSweepDefaultUnreadMailTTL, "min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
@@ -2132,21 +2134,24 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 // to disable the mail-close phase (see nudgeMailSweepMailTTLForConfig /
 // sweepStaleNudgeMail) -- but a negative value is rejected either way, and an
 // unset flag is left for config resolution rather than validated here.
-func validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit bool) error {
+// --unread-mail-ttl follows the same rule: an explicit 0 disables the opt-in
+// unread-mail phase, a negative value is rejected, and an unset flag is left
+// for config resolution.
+func validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, unreadMailTTLExplicit bool) error {
 	if nudgeTTL <= 0 {
 		return fmt.Errorf("--nudge-ttl must be positive")
 	}
 	if mailTTLExplicit && mailTTL < 0 {
 		return fmt.Errorf("--mail-ttl must not be negative")
 	}
-	if unreadMailTTL <= 0 {
-		return fmt.Errorf("--unread-mail-ttl must be positive")
+	if unreadMailTTLExplicit && unreadMailTTL < 0 {
+		return fmt.Errorf("--unread-mail-ttl must not be negative")
 	}
 	return nil
 }
 
-func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
-	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit); err != nil {
+func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, unreadMailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
+	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, unreadMailTTLExplicit); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2179,6 +2184,9 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mail
 		// already loaded the city config through loadCityConfig, but it does not
 		// hand that config back to this caller, so the value is read again here.
 		mailTTL = nudgeMailSweepMailTTLForCity(cityPath, mailTTL, stderr)
+	}
+	if !unreadMailTTLExplicit {
+		unreadMailTTL = nudgeMailSweepUnreadMailTTLForCity(cityPath, unreadMailTTL, stderr)
 	}
 
 	now := time.Now()

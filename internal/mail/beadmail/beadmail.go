@@ -1016,17 +1016,15 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 // before `before`, oldest first — the candidate set for the stale-unread-mail
 // retention sweep (gastownhall/gascity#5240). Unlike readMessagesBefore, the
 // store cannot filter on label *absence*, so the "read" exclusion is applied
-// in memory after the query rather than in the query itself. limit still caps
-// the number of candidates FETCHED before that in-memory filter, the same
-// documented tradeoff [nudgequeue.Store.StaleShadowsBefore] makes for its own
-// post-query live-ID exclusion: a caller relying on an exact count under a
-// tight limit may see fewer results than limit even when more unread mail
-// exists, and must not treat that as "no more stale mail."
-func unreadMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads.Bead, error) {
+// in memory after the query rather than in the query itself. For that reason
+// the query is deliberately unbounded: capping it would let the oldest aged
+// read beads (e.g. while the read-mail phase is disabled or its closes keep
+// failing) fill the fetch window and starve the unread sweep on every run.
+// Callers enforce their own close/count limit over the returned slice.
+func unreadMessagesBefore(store beads.Store, before time.Time) ([]beads.Bead, error) {
 	candidates, err := store.List(beads.ListQuery{
 		Type:          messageBeadType,
 		CreatedBefore: before,
-		Limit:         limit,
 		Sort:          beads.SortCreatedAsc,
 		TierMode:      beads.TierBoth,
 	})
@@ -1044,10 +1042,10 @@ func unreadMessagesBefore(store beads.Store, before time.Time, limit int) ([]bea
 
 // UnreadRetentionSweepCloseReason is the canonical close_reason the
 // unread-mail retention sweep stamps on a message bead before closing it.
-// Unread mail is given a much longer TTL than read mail (the nudge-mail
-// watchdog's default is 7 days vs. 60 minutes for read mail) so a recipient
-// who has not yet checked their inbox still sees it, but without this sweep
-// it never matches readMessagesBefore's Label:"read" filter and accumulates
+// The unread sweep is opt-in ([mail] unread_retention_ttl); when enabled it
+// is normally given a much longer TTL than read mail so a recipient who has
+// not yet checked their inbox still sees it, but without this sweep unread
+// mail never matches readMessagesBefore's Label:"read" filter and accumulates
 // forever (gastownhall/gascity#5240). Like [RetentionSweepCloseReason], this
 // marks the bead as system-aged rather than user-removed; isRemovedMessageBead
 // recognizes both reasons. The 20-character floor satisfies
@@ -1067,17 +1065,18 @@ const UnreadRetentionSweepCloseReason = "mail gc-swept: unread mail bead past gc
 // shape but selecting on label absence via unreadMessagesBefore instead of
 // the "read" label.
 //
-// limit caps the number of beads closed (pass 0 for no cap); it bounds both
-// the candidate query and the loop so a caller sharing a cross-phase close
-// budget (see the nudge+mail sweep) honors it exactly. Beads that are no
-// longer open when revisited are skipped without consuming the limit.
+// limit caps the number of beads closed (pass 0 for no cap); the close loop
+// enforces it over the full unbounded candidate set (see unreadMessagesBefore)
+// so a caller sharing a cross-phase close budget (see the nudge+mail sweep)
+// honors it exactly. Beads that are no longer open when revisited are skipped
+// without consuming the limit.
 //
 // Errors are split by severity the same way SweepReadMessagesBefore's are:
 // listErr is the fatal candidate-listing failure (no beads were swept), while
 // closeErrs holds the per-bead metadata/close failures that do not abort the
 // sweep. Returns the number of beads closed.
 func SweepUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int, closeReason string) (closed int, closeErrs []error, listErr error) {
-	candidates, err := unreadMessagesBefore(store.Store, cutoff, limit)
+	candidates, err := unreadMessagesBefore(store.Store, cutoff)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1106,7 +1105,7 @@ func SweepUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit in
 // without mutating any bead. It is the dry-run twin of the sweep and shares
 // its candidate query and limit semantics so the two stay in lockstep.
 func CountUnreadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int) (int, error) {
-	candidates, err := unreadMessagesBefore(store.Store, cutoff, limit)
+	candidates, err := unreadMessagesBefore(store.Store, cutoff)
 	if err != nil {
 		return 0, err
 	}
