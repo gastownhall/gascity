@@ -168,8 +168,9 @@ var (
 	legacyCreate  = legacy(srcBeads, "syncCreateMetadata")
 	waitHold      = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
 	sleepPolicy   = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
-	leaseAcquire  = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord").pending("mc-x9ygp",
-		"L1b's starters, legacy and v2, take the lease (until then nothing in a mode calls it)")
+	// leaseAcquire is the record's one writer, in session; legacy's starters
+	// and stoppers (L1b) and v2's leased effects (runTx, B-a4) call it.
+	leaseAcquire = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord")
 )
 
 // with adds site to the writers (asClear false) or the clears of keys.
@@ -241,6 +242,7 @@ var observed = []struct {
 	{op("internal/session/store.go", "Store.SetState"), false, []string{"state", "state_reason"}},
 	{op(srcWaitStore, "Store.wakeSessionFromBead"), false, []string{"churn_count", "held_until", "quarantined_until", "sleep_intent", "wait_hold", "wake_attempts", "wake_refused_event_at"}},
 	{v2("cmd/gc/allocator_create_named.go", "reopenNamed"), true, []string{RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey}},
+	{v2("cmd/gc/reconcile_fenced_store.go", "fencedWriter.closeRow"), true, []string{RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey}},
 }
 
 func withObserved(fields []Field) []Field {

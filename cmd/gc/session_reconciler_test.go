@@ -1255,16 +1255,17 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	// Two trackers are two cities' controllers: their runtime names are
-	// locked per city.
-	queueDrainAckAsyncStop("city-a", store, first, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, firstTracker, nil, &stderr)
+	// Two trackers are two controllers. They share one store and row here,
+	// so they run without a city (no runtime lease): the dedup under test is
+	// the tracker's.
+	queueDrainAckAsyncStop("", store, first, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, firstTracker, nil, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("city-b", store, second, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, secondTracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, second, &config.City{}, drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), "worker", nil, secondTracker, nil, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):

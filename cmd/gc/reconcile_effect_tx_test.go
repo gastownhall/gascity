@@ -75,13 +75,6 @@ func (o *lockObserver) holds(id string) bool {
 	return o.held[id] > 0
 }
 
-// nameLocked reports whether city's runtime name lock on name is held.
-func nameLocked(city, name string) bool {
-	runtimeNames.mu.Lock()
-	defer runtimeNames.mu.Unlock()
-	return runtimeNames.held[runtimeNameKey{city, name}]
-}
-
 // txKit is the kit: row gc-1, runtime name s-gc-1, the pass, its runtime
 // (the simulator's cache-aware provider behind a recording leaf), and the
 // outside operations queued per seam, each run once, in order.
@@ -205,7 +198,7 @@ func TestTxLockScope(t *testing.T) {
 	k := newTxKit(t)
 	var problems []string
 	expect := func(where string, row bool) {
-		if k.locks.holds(k.it.Key.ID) != row || !nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if k.locks.holds(k.it.Key.ID) != row || !nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			problems = append(problems, where)
 		}
 	}
@@ -242,7 +235,7 @@ func TestTxLockScope(t *testing.T) {
 	if len(problems) > 0 || !slices.Equal(k.seen, want) || k.meta(txKeyA) != "1" || k.meta(txKeyB) != "1" {
 		t.Fatalf("problems %v, seams %v, a=%q b=%q; want both locks in each section, the name lock alone over the call, both writes", problems, k.seen, k.meta(txKeyA), k.meta(txKeyB))
 	}
-	if nameLocked(k.p.World.CityPath, "s-gc-1") || k.locks.holds(k.it.Key.ID) {
+	if nameHeld(k.t, k.p.World.CityPath, "s-gc-1") || k.locks.holds(k.it.Key.ID) {
 		t.Fatal("a lock outlived the transaction")
 	}
 	k = newTxKit(t) // the first run moved the row to creating
@@ -250,8 +243,7 @@ func TestTxLockScope(t *testing.T) {
 	if s := k.run(context.Background(), spec); s.Outcome != settledFailed || s.Cause != causeCallError || !errors.Is(s.Err, callErr) {
 		t.Fatalf("last call failed: settlement %+v, want failed with cause %q", s, causeCallError)
 	}
-	unlock := runtimeNames.tryLock(k.p.World.CityPath, "s-gc-1")
-	defer unlock()
+	holdName(t, k.p.World.CityPath, "s-gc-1")
 	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeNameBusy {
 		t.Fatalf("busy name: settlement %+v, want refused with cause %q", s, causeNameBusy)
 	}
@@ -481,7 +473,7 @@ func TestTxProbe(t *testing.T) {
 	var got string
 	var gotErr error
 	sec := probed(func(_ context.Context, _ effectReads, v txView) (string, error) {
-		if !k.locks.holds(k.it.Key.ID) || !nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if !k.locks.holds(k.it.Key.ID) || !nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			t.Error("the probe ran outside a lock")
 		}
 		return v.Row.SessionName, nil
@@ -746,7 +738,7 @@ func TestTxAroundRunsTheEffectAtMostOnce(t *testing.T) {
 	spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: mark(txKeyA)}}}
 	var second settlement
 	spec.around = func(_ context.Context, _ aroundCaps, run func() settlement) settlement {
-		if k.locks.holds(k.it.Key.ID) || nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if k.locks.holds(k.it.Key.ID) || nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			t.Error("around ran inside a lock")
 		}
 		first := run()

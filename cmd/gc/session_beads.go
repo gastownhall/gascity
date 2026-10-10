@@ -3876,7 +3876,7 @@ func reapRuntimesBoundToClosedBeads(
 	return reaped
 }
 
-// stopStillBoundClosedRuntime is the closed-bead reap's Stop. A v2 start can
+// stopStillBoundClosedRuntimeLeased is the closed-bead reap's Stop. A v2 start can
 // put a fresh runtime under name while the reaper's reads run. Under the name
 // lock, which the start holds across its provider Start, it re-reads the
 // binding and stops only a runtime still bound to the closed bead liveID (P4
@@ -3889,12 +3889,8 @@ func reapRuntimesBoundToClosedBeads(
 // missing tmux server included — with runtime.IsSessionGone itself instead of
 // having runtime.StopForCleanup turn it into success. The unlock is deferred,
 // so a provider panic cannot leave the name locked.
-func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provider, listed bool) (bool, error) {
-	return stopStillBoundClosedRuntimeLeased(nil, cityPath, name, "", liveID, sp, listed, io.Discard)
-}
-
-// stopStillBoundClosedRuntimeLeased is stopStillBoundClosedRuntime under the
-// runtime lease (R-a): the in-process lock and the name's flock, plus the
+//
+// It runs under the runtime lease (R-a): the name's flock, plus the
 // record on ownerID, the open row that owns name now, if any, so a start of
 // that row on another host is excluded too. Another host's start with no open
 // row yet is not; the Stop's identity re-read and object kills bound it. A
