@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // --- Duration reasonableness check ---
@@ -237,7 +238,7 @@ func (c *WorktreeDiskSizeCheck) Name() string { return "worktree-disk-size" }
 // exceeding the configured warn or error thresholds.
 func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
@@ -417,7 +418,7 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.findings = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -411,6 +411,24 @@ func TestWorktreeDiskSizeCheck_NoWorktreesDir(t *testing.T) {
 	}
 }
 
+func TestWorktreeDiskSizeCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := t.TempDir()
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	rig := filepath.Join(configuredRoot, "huge")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &WorktreeDiskSizeCheck{
+		cfg:        config.DoctorConfig{WorktreeRigWarnSize: "1GB", WorktreeRigErrorSize: "2GB"},
+		measureDir: fakeMeasure(map[string]int64{rig: 3 * 1024 * 1024 * 1024}, nil),
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error from configured root; msg=%s", r.Status, r.Message)
+	}
+}
+
 func TestWorktreeDiskSizeCheck_AllUnderThreshold(t *testing.T) {
 	dir := t.TempDir()
 	rigA := filepath.Join(dir, ".gc", "worktrees", "rig-a")

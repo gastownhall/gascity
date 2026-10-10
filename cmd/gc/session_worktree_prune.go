@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // gitProbe is the slice of internal/git.Git used by the worker-dir
@@ -80,7 +81,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
 		return false
 	}
@@ -156,7 +157,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	if !pathutil.PathWithin(wtRoot, workerDir) || pathutil.SamePath(wtRoot, workerDir) {
 		return
 	}

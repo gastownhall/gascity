@@ -2898,6 +2898,24 @@ func TestWorktreeCheckAllValid(t *testing.T) {
 	}
 }
 
+func TestWorktreeCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	wtDir := filepath.Join(configuredRoot, "myrig", "agent1")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /nonexistent/configured-target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := (&WorktreeCheck{}).Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error from configured root; msg=%s", r.Status, r.Message)
+	}
+}
+
 func TestWorktreeCheckBroken(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 

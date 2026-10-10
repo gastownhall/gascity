@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -1761,7 +1762,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
 
-	wtRoot := filepath.Join(ctx.CityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(ctx.CityPath)
 	rigEntries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		if os.IsNotExist(err) {

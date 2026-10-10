@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 const worktreeStaleFileName = ".worktree-stale"
@@ -69,7 +70,7 @@ func cleanupClosedBeadAgentHomeWorktrees(
 		}
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 	cleaned := 0
 
 	for rigName, store := range rigStores {
