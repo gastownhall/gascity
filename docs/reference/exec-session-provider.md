@@ -221,8 +221,12 @@ in the middle of a turn. A runtime that declares all three must:
 Each capture is a full round trip to the box, so the orchestrator gives one
 idle check 5 s, not the 1 s a local tmux session gets. Two captures and the
 pause between them fit in 5 s when each capture finishes in under about
-2.4 s. A slower check fails closed: the session stays awake, and the check
-runs again on the next orchestrator tick.
+2.4 s. A check in a process that has not yet remembered the session's ready
+prompt (see below) first reads it from the box within the same 5 s, so that
+check needs three round trips, each under about 1.6 s. Every check needs the
+read while `GC_READY_PROMPT_PREFIX` is absent from the session. A slower check
+fails closed: the session stays awake, and the check runs again on the next
+orchestrator tick.
 
 Once the agent's tmux session exists, the orchestrator stores the session's
 `ready_prompt_prefix` in that session's environment as

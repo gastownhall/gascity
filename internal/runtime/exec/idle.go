@@ -19,8 +19,11 @@ var execIdlePollInterval = 200 * time.Millisecond
 // execIdleProbeBudget is the WaitForIdle timeout one idle proof needs on a
 // pack with an idle boundary (see IdleProbeBudget). Each pane observation is
 // a full round trip to the box, so two observations plus the poll interval fit
-// whenever a capture takes under about 2.4s. A package variable so tests can
-// change it.
+// whenever a capture takes under about 2.4s. A wait in a process that has not
+// remembered the session's ready prompt first reads it within the same
+// timeout, so that wait needs three round trips of about 1.6s each; every wait
+// needs the read while GC_READY_PROMPT_PREFIX is absent. A package variable so
+// tests can change it.
 var execIdleProbeBudget = 5 * time.Second
 
 // execIdleRequiredObservations is how many consecutive idle pane observations
