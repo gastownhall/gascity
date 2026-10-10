@@ -1944,3 +1944,54 @@ func TestEndpointCapacity_KeepsEndpointsSessionsStillUse(t *testing.T) {
 		})
 	}
 }
+
+// tickingRefuser is a launcher whose endpoint refuses for capacity (exit 75)
+// only after the controller's next tick ran: the tick lands while the start
+// still waits for the agent's readiness, past the stability window, as J32's
+// did on a slow-start provider.
+type tickingRefuser struct {
+	*runtime.Fake
+	t  *testing.T
+	e  *capacityEnv
+	id string
+}
+
+func (p *tickingRefuser) Start(_ context.Context, name string, _ runtime.Config) error {
+	p.e.clk.Advance(stabilityThreshold + time.Second)
+	p.e.reconcileTraced(p.e.bead(p.t, p.id))
+	return capacityRefusal(name, "")
+}
+
+// TestCapacityRefusal_TickDuringTheStartAccruesNoChurn is mc-pxtbw (J32): a
+// tick that reads a refused start's row while the start runs sees no runtime
+// yet. That start has not committed, so the tick counts no churn: three
+// refused boots leave the seat unquarantined, with nothing accrued (CONTRACT
+// S3 capacity row), and it starts once the endpoint serves again.
+func TestCapacityRefusal_TickDuringTheStartAccruesNoChurn(t *testing.T) {
+	e := newCapacityEnv(t, true, "s")
+	c := asleepSession(t, e, nil)
+	refuser := &tickingRefuser{Fake: e.sp, t: t, e: e, id: c.info.ID}
+	for boot := 1; boot <= defaultMaxChurnCycles; boot++ {
+		c = e.refreshed(c)
+		if woken := executePlannedStartsTraced(context.Background(), []startCandidate{c}, e.cfg, e.desiredState, refuser, e.store, "", e.city,
+			e.clk, e.rec, 0, &e.log, &e.log, e.trace, e.startOptions...); woken != 0 {
+			t.Fatalf("refused boot %d woke %d, want 0", boot, woken)
+		}
+		got := e.bead(t, c.info.ID)
+		if got.Metadata["churn_count"] != "" || got.Metadata["wake_attempts"] != "" || got.Metadata["quarantined_until"] != "" {
+			t.Fatalf("after refused boot %d: churn_count=%q wake_attempts=%q quarantined_until=%q, want nothing accrued for a capacity refusal\nlog %q",
+				boot, got.Metadata["churn_count"], got.Metadata["wake_attempts"], got.Metadata["quarantined_until"], e.log.String())
+		}
+		if got.Status != "open" || got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "idle" || got.Metadata["last_woke_at"] != "" {
+			t.Fatalf("after refused boot %d: status=%q state=%q sleep_reason=%q last_woke_at=%q, want the open row's pre-wake state restored",
+				boot, got.Status, got.Metadata["state"], got.Metadata["sleep_reason"], got.Metadata["last_woke_at"])
+		}
+		e.makeProbeDue()
+	}
+	if n := startupHealthCount(t, e.store, "s"); n != 0 {
+		t.Fatalf("startup-health count = %d, want 0", n)
+	}
+	if woken := e.start(context.Background(), e.refreshed(c)); woken != 1 || !e.sp.IsRunning("s") {
+		t.Fatalf("the start after the refusal lifts woke %d, running %v; want the seat back\nlog %q", woken, e.sp.IsRunning("s"), e.log.String())
+	}
+}

@@ -584,6 +584,7 @@ func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt
 		DrainPending:               dt != nil && dt.get(info.ID) != nil,
 		PendingCreateClaim:         info.PendingCreateClaim,
 		PendingCreateStartInFlight: pendingCreateStartInFlightInfo(info, clk, startupTimeout),
+		StartUncommitted:           strings.TrimSpace(info.PendingCreateStartedAt) != "",
 		SleepReason:                info.SleepReason,
 		LastWokeAt:                 info.LastWokeAt,
 		Now:                        clk.Now(),

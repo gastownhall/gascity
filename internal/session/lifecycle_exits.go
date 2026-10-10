@@ -24,7 +24,10 @@ import (
 // sleep_reason; the churn lane respects both. That asymmetry is inherited
 // reconciler behavior: an expired-lease pending create must retry its wake
 // (not accrue churn), while a genuine rapid crash counts even when a stale
-// claim is still set.
+// claim is still set. The churn lane also skips a start that never committed:
+// no runtime of that incarnation was confirmed running, so its absence is a
+// start in flight, or one a crashed controller abandoned, which the
+// reconciler relaunches (CONTRACT S7; mc-5a1ma).
 
 // ScreenFact is the tri-state provider-screen fact. It is Unknown until the
 // caller has peeked the session's terminal content for a rate-limit screen.
@@ -72,6 +75,10 @@ type ExitFacts struct {
 	// PendingCreateStartInFlight reports the create lease is still live, so
 	// the death is startup noise rather than a crash.
 	PendingCreateStartInFlight bool
+	// StartUncommitted reports the row carries pending_create_started_at,
+	// which PreWake stamps and the start's commit clears: the start has not
+	// committed. Suppresses churn only.
+	StartUncommitted bool
 	// SleepReason is the bead's sleep_reason metadata. Deliberate reasons
 	// suppress churn only.
 	SleepReason string
@@ -114,7 +121,7 @@ func DecideSessionExit(f ExitFacts) ExitOutcome {
 	if crashCandidate && f.Now.Sub(woke) < f.StabilityThreshold {
 		return ExitRapidCrash
 	}
-	if f.PendingCreateClaim || f.SubprocessProvider || f.DrainPending ||
+	if f.PendingCreateClaim || f.StartUncommitted || f.SubprocessProvider || f.DrainPending ||
 		IsDeliberateSleepReason(f.SleepReason) || !wokeValid {
 		return ExitNone
 	}
