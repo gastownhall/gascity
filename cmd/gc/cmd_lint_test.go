@@ -761,6 +761,88 @@ prompt = "do work"
 	}
 }
 
+// writeLintHookSettings writes settingsJSON as a .claude/settings.json overlay
+// inside an otherwise valid pack and returns the pack directory.
+func writeLintHookSettings(t *testing.T, settingsJSON string) string {
+	t.Helper()
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "matchers", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(packDir, "overlays", "default", ".claude", "settings.json"), settingsJSON)
+	return packDir
+}
+
+func TestLintRejectsPermissionSyntaxHookMatcher(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"PreToolUse":[{"matcher":"Bash(*bd mol pour*patrol*)","hooks":[{"type":"command","command":"true"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint = 0, want a permission-syntax hook matcher to fail the pack\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	wantLoc := filepath.Join(".claude", "settings.json") + ": hooks.PreToolUse[0] matcher"
+	if !strings.Contains(stderr.String(), wantLoc) {
+		t.Errorf("stderr missing %q:\n%s", wantLoc, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "permission-rule syntax") {
+		t.Errorf("stderr missing the permission-syntax message:\n%s", stderr.String())
+	}
+}
+
+func TestLintWarnsOnUnknownToolHookMatcherWithoutFailing(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"PreToolUse":[{"matcher":"^Frobnicate$","hooks":[{"type":"command","command":"true"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a matcher naming no known tool only warns)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	wantLoc := filepath.Join(".claude", "settings.json") + ": warning: hooks.PreToolUse[0] matcher"
+	if !strings.Contains(stderr.String(), wantLoc) {
+		t.Errorf("stderr missing %q:\n%s", wantLoc, stderr.String())
+	}
+}
+
+// A JavaScript-only escape such as \u0042 is valid in Claude Code but does not
+// compile under Go RE2; lint must warn, not fail the pack.
+func TestLintWarnsOnJavaScriptOnlyHookMatcherWithoutFailing(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"PreToolUse":[{"matcher":"^\\u0042ash$","hooks":[{"type":"command","command":"true"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a JavaScript-only matcher only warns)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	wantLoc := filepath.Join(".claude", "settings.json") + ": warning: hooks.PreToolUse[0] matcher"
+	if !strings.Contains(stderr.String(), wantLoc) {
+		t.Errorf("stderr missing %q:\n%s", wantLoc, stderr.String())
+	}
+}
+
+// The matchers this city and its packs ship today must keep linting clean: the
+// anchored ^Bash$ guard, the empty all-tools matcher, and SessionStart's
+// "startup" source matcher.
+func TestLintAcceptsShippedHookMatchers(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{
+		"SessionStart":[
+			{"matcher":"startup","hooks":[{"type":"command","command":"true"}]},
+			{"matcher":"","hooks":[{"type":"command","command":"true"}]}
+		],
+		"PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"true"}]}],
+		"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"true"}]}],
+		"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"true"}]}]
+	}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func validateLintJSONSchema(t *testing.T, data []byte) {
 	t.Helper()
 	rawSchema, err := readBuiltinSchema([]string{"lint"}, jsonSchemaResultRole)
