@@ -531,13 +531,13 @@ The v2 compiler must emit a flat, topologically ordered graph:
   terminal. Steps carrying `gc.scope_role = "teardown"` are excluded from
   the sink set: teardown runs after the workflow settles (section 3.5), so
   gating settlement on it would deadlock the run.
-- **The root blocks on the finalize step.** The workflow root bead is made
-  to depend on `workflow-finalize` (or, when a recipe has no finalize step,
-  on every step whose `gc.kind` is not one of the generated `run`, `check`,
-  `retry-run`, `retry-eval`, or `spec` kinds).
-  Consequence: the root is never Ready-visible while the workflow runs and
-  only surfaces when the workflow completes. Step beads — not the root —
-  are the Ready-visible work that wakes agents and pools.
+- **The root tracks the finalize step.** The workflow root reaches
+  `workflow-finalize` through an informational `tracks` edge. A blocking edge
+  would prevent the finalizer from closing the root while it is still open.
+  When a recipe has no finalize step, the root instead depends on every step
+  whose `gc.kind` is not one of the generated `run`, `check`, `retry-run`,
+  `retry-eval`, or `spec` kinds. The root is controller-owned; step beads are
+  the work that wakes agents and pools.
 - **Non-blocking `tracks` edges to the root.** Batch instantiation connects
   every non-root node to the root with a `tracks` edge so cascade deletion
   from the root discovers all workflow beads without making the root a
@@ -580,10 +580,40 @@ children (section 3.5).
 **Dispatch routing intent.** A step's `gc.run_target` metadata is
 compile-time routing intent: at dispatch the router resolves it into
 `gc.routed_to`, the sole persisted routing key, overriding the convoy-wide
-default for that step. Per-dispatch provider options ride `opt_*` step
-metadata (for example `opt_model`), validated against the provider's
-options schema at spawn; `gc.model` is a deprecated spelling that the
-`gc doctor` check `work-option-metadata-migration` migrates to `opt_model`.
+default for that step. Per-dispatch provider options ride `opt_<key>` step
+metadata, where `<key>` is any key of the provider's options schema (for
+example `opt_model`, `opt_effort`). They are validated against that schema,
+and invalid values are skipped per key. They apply when a session is
+launched, from the first of these cases that holds:
+
+1. The session holds a claimed (in-progress) bead in the store its session
+   bead lives in. A claimed bead with `opt_*` metadata supplies the options;
+   if none has any, the launch keeps its default options and the trigger
+   bead is not consulted.
+2. The session's trigger bead (the bead it was spawned for — the routed
+   demand a pool slot starts on) is not claimed yet, and the session holds a
+   claimed bead in any store it can claim from, other than a suspended rig's
+   store, which is not read. The trigger is ignored and the launch keeps its
+   default options.
+3. Otherwise the trigger bead supplies the options while it is still the
+   session's step (not closed, and unassigned or assigned to the session),
+   including when the session has already claimed it. A trigger the session
+   has claimed skips the check of other stores, so a session holding several
+   claims launches with the options of one claimed bead.
+
+An explicit session `template_overrides` value wins per key. Options are
+launch flags: a warm session reused for a later step keeps the flags it
+launched with, and a pool slot keeps the options it launched with even if it
+later claims a different ready bead. `gc.model` is a deprecated spelling that
+the `gc doctor` check `work-option-metadata-migration` migrates to
+`opt_model`.
+
+**Role target aliases.** In the *value* of `gc.run_target`, `gc.<role>` is a
+semantic role alias used by imported role packs. The resolver first treats the
+complete value as an exact configured agent identity; this preserves an agent
+actually named or bound as `gc.<role>`. Only when that exact identity is absent
+does it retry the bare `<role>` within the workflow's rig context. This value
+alias does not change the separate reservation of `gc.*` *metadata keys*.
 
 **Gates and waits_for.** A `[steps.gate]` table synthesizes a sibling gate
 bead (type `gate`, title `Gate: <type> <id>`) and a `blocks` edge from the
@@ -677,9 +707,11 @@ participates.
 ### 3.1. Check
 
 `[steps.check]` wraps a step in an inline run/check verification loop:
-after each iteration closes, the orchestrator runs the configured script;
-pass closes the step, fail with budget left spawns the next iteration,
-exhaustion closes the step as failed.
+after each iteration closes, the orchestrator runs the configured script.
+Exit 0 closes the step; an infrastructure outcome — exit 75, or the narrow
+stderr fallback described below — re-runs the script without spending an
+attempt; any other nonzero exit is a "not yet" verdict that spawns the next
+iteration while budget remains, and exhaustion closes the step as failed.
 
 | Key | Purpose |
 |---|---|
@@ -729,6 +761,70 @@ The step `timeout` applies as a general bound on the check script; a
 
 `check` must not be combined with `loop`, `on_complete`, `gate`, `expand`,
 `assignee`, or `retry`.
+
+**Infrastructure outcomes — exit 75.** A check script reports two different
+things with a nonzero exit: "the thing I verify is not true yet" (a verdict),
+and "I could not reach the infrastructure I need in order to tell" (a blind
+read). Only the first should cost an attempt. A blind read that is counted as
+a verdict spends the step's budget on a question the script never answered.
+
+Exit status **75** is the script's opt-in way to declare the second. It is
+`EX_TEMPFAIL` from `sysexits.h` — the same convention
+`scripts/push-gate-lock-lib.sh` already uses — and the orchestrator records
+that run as an infrastructure outcome rather than a verdict:
+
+| Exit status | Meaning | Consumes a `max_attempts` attempt |
+|---|---|---|
+| `0` | Pass — the step closes | n/a |
+| `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
+| any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| any other nonzero | Fail — the verdict is "not yet" | Yes |
+| none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
+
+Attempt-free re-runs are themselves bounded by a separate infrastructure
+budget, so a script that exits 75 forever still terminates; it just does not
+burn the semantic budget on the way there. No Go code inspects what the check
+was verifying — exit 75 is the signal a script declares deliberately, and the
+one to write against. It is not the only route to an infrastructure outcome,
+though: the stderr fallback below can reclassify a nonzero exit from a script
+that never exits 75.
+
+As a fallback for check scripts that only propagate a `gc`/`bd` failure and
+its bare exit status, the orchestrator also recognizes a small fixed set of
+typed infrastructure error strings on **stderr**
+(`internal/convergence/gate_infra.go`). That table is deliberately narrow, is
+matched only against stderr, and is not a stable interface — a script that
+needs this behavior should exit 75.
+
+Scope (non-normative for other lanes): this reclassification is applied by
+the ralph check lane described in this section. The other condition
+consumers — trigger conditions, hybrid dispatch, and `gc converge` — still
+read a nonzero gate as a genuine verdict. Each lane opts in separately,
+because "re-run without cost" only means something where there is an attempt
+budget to protect.
+
+**A check that cannot be launched.** When `check.path` names a script that is
+missing, is not a regular file, or is not executable, the orchestrator never
+runs it, so there is no exit status to read. The step stays open rather than
+failing: the fix is out of band (ship the script, `chmod +x` it), and closing
+the step would release the steps that need it. The orchestrator re-checks the
+step every sweep; once the script can run, the step resumes and spends attempts
+normally. If the script is still unlaunchable when the stall budget elapses (15
+minutes by default), the orchestrator emits a single `control.stalled` event
+with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+A script that is missing because the step's working directory was removed, and
+that exists nowhere else, is held open the same way. Restoring the directory
+heals it; shipping a copy under the city or store root does not. The script
+always runs inside the step's working directory, so a copy found elsewhere still
+cannot start there. A failed start is not held open: it spends an attempt each
+time, and the step closes failed once its attempts run out.
+
+A `check.path` refused on safety grounds is not in this lane: one that escapes
+the trusted roots, climbs out with `../`, or follows a symlink outside the city
+or store. Such a step is refused and closed failed. A symlink whose target does
+not exist yet is the exception: where it leads is checked only once the target
+exists, so until then it is held open as missing. Once the target appears, a
+target outside the city or store is refused.
 
 ### 3.2. Retry
 

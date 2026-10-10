@@ -36,6 +36,14 @@ type LifecycleHandle interface {
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error
 	Stop(context.Context) error
+	// StopForShutdown is Stop with CITY-SHUTDOWN intent, for the `gc stop` /
+	// `gc restart` sweep only. It carries latitude on lifecycle states that have
+	// no live turn to suspend (notably draining), which a targeted operator Stop
+	// must keep rejecting.
+	StopForShutdown(context.Context) error
+	// StopIdle is Stop for the chat idle auto-suspend: the operator's
+	// transition rules, no operator hold.
+	StopIdle(context.Context) error
 	Kill(context.Context) error
 	Close(context.Context) error
 	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)
@@ -60,6 +68,7 @@ type TranscriptHandle interface {
 	HistoryHandle
 	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
 	TranscriptPath(context.Context) (string, error)
+	TranscriptRecords(context.Context) ([]json.RawMessage, error)
 	AgentMappings(context.Context) ([]AgentMapping, error)
 	AgentTranscript(context.Context, string) (*AgentTranscriptResult, error)
 }
@@ -139,11 +148,16 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	// Resume says whether the turn may resume a held session (CONTRACT v5.9
+	// D8); the zero value queues it there.
+	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
 	Queued bool `json:"queued"`
+	// Deferred: the resume policy queued it (session.SubmitOutcome.Deferred).
+	Deferred bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -177,6 +191,9 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// Resume is the resume policy a nudge that may wake runs under; the zero
+	// value never consumes a hold (CONTRACT v5.9 D8).
+	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -203,6 +220,13 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredHeld means the session is held, which a nudge does not
+	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
+	// must queue it (a wait-idle nudge).
+	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
+	// NudgeQueuedHeld means the session is held, or (ResumeViaController) not
+	// running, and queued the nudge itself; the caller must not queue it again.
+	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.

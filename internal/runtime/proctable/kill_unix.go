@@ -28,15 +28,100 @@ func KillByPID(pid int) error {
 	// exists and falls back to ps elsewhere, so it is empty only when neither
 	// mechanism can answer, in which case runLive falls back to plain liveness
 	// — current behavior preserved.
-	startTime, _ := pidutil.StartTime(pid)
+	termLive, runLive := killLivenessFuncsForPID(pid)
 	return killByPID(
 		pid,
 		syscall.Kill,
-		pidAlive,
-		func(p int) bool { return pidutil.AliveWithStartTime(p, startTime) },
+		termLive,
+		runLive,
 		runtime.ManagedProcessStopGrace,
 		runtime.ManagedProcessReapGrace,
 	)
+}
+
+// KillByPIDIdentity is KillByPID bound to the process a scan reported: it
+// signals only while pid's start identity (ProcessIdentity) still equals
+// identity, so a PID recycled since the scan is never signaled. A changed
+// identity means the scanned process is gone, which is success, as is a pid
+// that no longer exists ([runtime.ProcessTableScanner.TerminateRuntime]); an
+// identity that cannot be read is an error. An empty identity falls back to
+// KillByPID's own capture.
+//
+// The liveness probes are bound before the identity check, so a recycle
+// between the check and a signal reads as the target's death and sends nothing.
+func KillByPIDIdentity(pid int, identity string) error {
+	if identity == "" {
+		return KillByPID(pid)
+	}
+	return killByPIDIdentity(pid, identity, ProcessIdentity, syscall.Kill)
+}
+
+// killByPIDIdentity is KillByPIDIdentity with its identity read and signal
+// injected, so the refusal can be tested without signaling anything.
+func killByPIDIdentity(pid int, identity string, readIdentity func(int) (string, error), kill func(int, syscall.Signal) error) error {
+	termLive, runLive := killLivenessFuncsForPID(pid)
+	current, err := readIdentity(pid)
+	switch {
+	case errors.Is(err, ErrProcessGone):
+		return nil
+	case err != nil:
+		return fmt.Errorf("proctable: re-reading start identity of PID %d: %w", pid, err)
+	case current != identity:
+		// The PID was recycled: the scanned process is gone.
+		return nil
+	}
+	return killByPID(
+		pid,
+		kill,
+		termLive,
+		runLive,
+		runtime.ManagedProcessStopGrace,
+		runtime.ManagedProcessReapGrace,
+	)
+}
+
+// killLivenessFuncsForPID builds the two liveness probes KillByPID signals
+// against, both bound to the target's start-time identity captured up front.
+//
+// Extracted so the IDENTITY BINDING itself is testable: both probes must report
+// false for a different live PID, which is what stops a recycled PID from
+// receiving a process-group SIGKILL. A version that returns bare existence
+// checks passes every process-level test and still ships the bug.
+func killLivenessFuncsForPID(pid int) (termLive, runLive func(int) bool) {
+	startTime, _ := pidutil.StartTime(pid)
+	return func(p int) bool { return pidAliveWithIdentity(p, startTime) },
+		func(p int) bool { return pidutil.AliveWithStartTime(p, startTime) }
+}
+
+// pidAliveWithIdentity is the cheap kill(0) liveness used across the SIGTERM
+// grace, plus recycled-PID protection.
+//
+// The bare kill(0) form was pure existence with zero identity, and it is what
+// gates the SIGKILL wave: a target that answered SIGTERM and was reaped, whose
+// PID was then recycled by an unrelated process before the grace expired, still
+// read as "alive" — so SIGKILL was sent to it. signalPIDWith tries kill(-pid)
+// first, so if the recycled PID happens to lead a process group (every tmux pane
+// command and every Setpgid'd daemon does) the entire unrelated group dies and
+// the call returns success. Validating the start-time identity on every poll
+// means a recycled PID reads as dead, waitUntil succeeds, and no second wave is
+// ever sent.
+//
+// Zombie semantics are preserved deliberately: this keeps kill(0)'s view, in
+// which a zombie still counts as live, matching the pre-existing SIGTERM-grace
+// behavior. Only the identity check is added. An unreadable or absent start time
+// keeps the conservative "still alive" answer rather than inventing a death.
+func pidAliveWithIdentity(pid int, startTime string) bool {
+	if !pidAlive(pid) {
+		return false
+	}
+	if startTime == "" {
+		return true
+	}
+	current, err := pidutil.StartTime(pid)
+	if err != nil {
+		return true
+	}
+	return current == startTime
 }
 
 // killByPID is the signal/confirm core with its syscalls injected so the
@@ -63,6 +148,14 @@ func killByPID(
 		return fmt.Errorf("signal PID %d with SIGTERM: %w", pid, err)
 	}
 	if waitUntil(func() bool { return !termLive(pid) }, grace) {
+		return nil
+	}
+	// Re-validate identity immediately before the second wave. waitUntil's last
+	// poll already implies this, but the check is written out because it is a
+	// contract, not an optimization: every signal wave is preceded by a fresh
+	// identity read, so a PID reaped and recycled between the poll and the signal
+	// cannot receive a process-group SIGKILL.
+	if !termLive(pid) {
 		return nil
 	}
 	if err := signalPIDWith(pid, syscall.SIGKILL, kill); err != nil {

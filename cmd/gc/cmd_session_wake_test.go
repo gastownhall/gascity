@@ -12,7 +12,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -177,9 +180,12 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 			calls = append(calls, "managed")
 			return true
 		},
-		pokeController: func(cityPath string) error {
+		pokeController: func(cityPath string, key reconcilekey.Key) error {
 			if cityPath != "/city" {
 				t.Fatalf("poke cityPath = %q, want /city", cityPath)
+			}
+			if want := reconcilekey.Session(sessionBead.ID); key != want {
+				t.Fatalf("poke key = %v, want %v", key, want)
 			}
 			updated, getErr := store.Get(sessionBead.ID)
 			if getErr != nil {
@@ -250,7 +256,7 @@ func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
 		cityUsesManagedReconciler: func(string) bool {
 			return false
 		},
-		pokeController: func(string) error {
+		pokeController: func(string, reconcilekey.Key) error {
 			poked = true
 			return nil
 		},
@@ -291,7 +297,7 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 		cityUsesManagedReconciler: func(string) bool {
 			return true
 		},
-		pokeController: func(string) error {
+		pokeController: func(string, reconcilekey.Key) error {
 			return errors.New("dial failed")
 		},
 	}
@@ -471,9 +477,12 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 			}
 			deps := sessionWakeDeps{store: store, cfg: cfg, cityPath: "/city", now: time.Now}
 
+			// The wake is recorded (and a stale create healed), but no agent
+			// runs the template: the shared will-not-start predicate says so
+			// and the CLI exits 1, as the API answers 409.
 			var stdout, stderr bytes.Buffer
-			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 {
-				t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 || !strings.Contains(stderr.String(), "no configured agent runs its template") {
+				t.Fatalf("doSessionWake() = %d, want 1 naming the missing template; stderr=%s", code, stderr.String())
 			}
 
 			updated, err := store.Get(b.ID)
@@ -494,6 +503,130 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 			}
 			if got := updated.Metadata["pending_create_started_at"]; got != tt.startedAt {
 				t.Fatalf("pending_create_started_at = %q, want %q (healthy in-flight create must keep its lease)", got, tt.startedAt)
+			}
+		})
+	}
+}
+
+// TestDoSessionWake_SuspendedRigRejectsWake pins the fix for gastownhall/gascity#5785:
+// waking a session whose owning rig is suspended must fail loudly with a
+// rig-resume hint instead of printing the generic "wake requested" success
+// line, since no reconciler will ever act on the wake. The non-suspended
+// case is the regression guard -- the same session/agent/rig shape must
+// still wake normally when the rig isn't suspended.
+//
+// Both legs of EffectiveRigSuspended are covered: the authored
+// suspended_on_start default, and the runtime override `gc rig
+// suspend`/`gc rig resume` writes to .gc/runtime/suspension-state.json,
+// which must win over the authored default in either direction.
+func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
+	suspendOverride, resumeOverride := true, false
+	tests := []struct {
+		name string
+		// rigSuspended is the rig's authored suspended_on_start.
+		rigSuspended bool
+		// runtimeOverride, when non-nil, is seeded into the runtime
+		// suspension state as an explicit `gc rig suspend`/`gc rig
+		// resume` choice, which must beat rigSuspended.
+		runtimeOverride  *bool
+		wantCode         int
+		wantStderrSubstr string
+	}{
+		{
+			name:             "suspended rig rejects wake",
+			rigSuspended:     true,
+			wantCode:         1,
+			wantStderrSubstr: `rig "frontend" is suspended`,
+		},
+		{
+			name:         "non-suspended rig wakes normally",
+			rigSuspended: false,
+			wantCode:     0,
+		},
+		{
+			name:             "runtime suspend beats authored default",
+			rigSuspended:     false,
+			runtimeOverride:  &suspendOverride,
+			wantCode:         1,
+			wantStderrSubstr: `rig "frontend" is suspended`,
+		},
+		{
+			name:            "runtime resume beats authored default",
+			rigSuspended:    true,
+			runtimeOverride: &resumeOverride,
+			wantCode:        0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "rig-scoped wake session",
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession},
+				Metadata: map[string]string{
+					"session_name": "s-gc-frontend-worker",
+					"template":     "frontend/worker",
+					"state":        "suspended",
+					"held_until":   future,
+					"sleep_reason": "user-hold",
+				},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(session bead): %v", err)
+			}
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "worker", Dir: "frontend"}},
+				Rigs:   []config.Rig{{Name: "frontend", SuspendedOnStart: tt.rigSuspended}},
+			}
+			cityPath := "/city"
+			if tt.runtimeOverride != nil {
+				cityPath = t.TempDir()
+				st := suspensionstate.State{}
+				suspensionstate.SetRig(&st, "frontend", tt.runtimeOverride)
+				if err := saveSuspensionState(fsys.OSFS{}, cityPath, st); err != nil {
+					t.Fatalf("saveSuspensionState: %v", err)
+				}
+			}
+			deps := sessionWakeDeps{
+				store:        store,
+				cfg:          cfg,
+				cityPath:     cityPath,
+				cityResolved: true,
+				now:          time.Now,
+				withdrawQueuedWaitNudges: func(string, []string) error {
+					return nil
+				},
+				cityUsesManagedReconciler: func(string) bool {
+					return false
+				},
+				pokeController: func(string, reconcilekey.Key) error {
+					return nil
+				},
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doSessionWake(sessionBead.ID, &stdout, &stderr, false, deps)
+			if code != tt.wantCode {
+				t.Fatalf("doSessionWake() = %d, want %d; stdout=%s stderr=%s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			if tt.wantStderrSubstr != "" {
+				if got := stderr.String(); !strings.Contains(got, tt.wantStderrSubstr) {
+					t.Fatalf("stderr = %q, want substring %q", got, tt.wantStderrSubstr)
+				}
+				if got := stderr.String(); !strings.Contains(got, "gc rig resume frontend") {
+					t.Fatalf("stderr = %q, want rig-resume hint", got)
+				}
+				if got := stdout.String(); strings.Contains(got, "wake requested") {
+					t.Fatalf("stdout = %q, must not report success for a dropped wake", got)
+				}
+				return
+			}
+			if got := stdout.String(); !strings.Contains(got, "wake requested") {
+				t.Fatalf("stdout = %q, want wake requested", got)
 			}
 		})
 	}
@@ -591,7 +724,9 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n"}
+	// The wake carries its session key (a key-aware controller acks it, so
+	// no plain "poke" fallback follows).
+	wantCommands := []string{"ping\n", keyedPokeCommand(reconcilekey.Session(sessionID)) + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
@@ -731,5 +866,29 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	}
 	if got := updated.Metadata["wake_request"]; got != "explicit" {
 		t.Fatalf("wake_request = %q, want explicit", got)
+	}
+}
+
+// TestDoSessionWake_JudgesThePostWakeRow: an explicit wake of a drained pool
+// seat moves it to asleep, so the shared will-not-start predicate, reading
+// the row after the wake, does not report it as a drained seat. Kills a
+// predicate fed the pre-wake row.
+func TestDoSessionWake_JudgesThePostWakeRow(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "drained", "pool_managed": "true", "session_origin": "ephemeral",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := sessionWakeDeps{
+		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+		cityUsesManagedReconciler: func(string) bool { return false },
+		pokeController:            func(string, reconcilekey.Key) error { return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 || strings.Contains(stderr.String(), "drained pool seat") {
+		t.Fatalf("doSessionWake() = %d, stderr=%s; want the woken (asleep) seat not refused as drained", code, stderr.String())
 	}
 }

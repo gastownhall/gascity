@@ -152,7 +152,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// binding BEFORE the launch. The launch below blocks for seconds (shell
 	// readiness + herdr's TUI detection), and reconcile ticks that fire in
 	// that window read both stores: the pending-create ownership check
-	// (runningSessionMatchesPendingCreateInfo) reads GC_SESSION_ID /
+	// (attributePendingCreateRuntime) reads GC_SESSION_ID /
 	// GC_INSTANCE_TOKEN via GetMeta — with an unseeded sidecar it misreads
 	// the fresh runtime as "live runtime belongs to another session" and
 	// rolls it back mid-boot — and liveness reads the pane binding. tmux gets
@@ -179,6 +179,10 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.RemoveMeta(name, metaStartupUnconfirmed); err != nil {
 		fmt.Fprintf(os.Stderr, "herdr: clearing prior-life startup marker for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
 	}
+	startupText, err := p.prepareStartupTurn(name, &spec, startupDeliveryText(cfg))
+	if err != nil {
+		return err
+	}
 	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
 	// canonical executable into the shell pane and blocks until the TUI is
 	// detected (native claude-detection); commands that aren't a clean kind
@@ -195,7 +199,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		p.waitPaneShellReady(ctx, paneID)
 		for attempt := 0; ; attempt++ {
 			info, adopted, err = p.startAgentAdopting(ctx, name, spec.Kind, paneID, spec.Args)
-			if err == nil || herdrErrorCode(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
+			if err == nil || herdrCodeAnyShape(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
 				break
 			}
 			// Back off before re-probing: herdr's own shell-prompt detection
@@ -263,7 +267,6 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// holder: it is a live, already-primed agent whose winning Start already ran
 	// session_setup and delivered its prime; re-running here would double
 	// session_setup and inject the startup prime into a working session.
-	startupText := startupDeliveryText(cfg)
 	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening; a paste or submit delivered in that window is
@@ -506,7 +509,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	var out bytes.Buffer
 	w := mon.Writer(&out)
 	c.Stdout, c.Stderr = w, w
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps run before
 	// the forced kill; the grace doubles as the pipe-closing WaitDelay
 	// (mirrors tmux's runSetupCommand).
@@ -817,7 +820,7 @@ func livenessFromAgent(info agentInfo, present bool, err error) runtime.Liveness
 // and non-destructive) is the acceptable direction to err. The terminal set is
 // validated against live herdr output during rollout; extend it there.
 func agentAliveFromStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
+	switch normalizeAgentState(status) {
 	case "exited", "stopped", "dead", "gone", "terminated", "closed", "crashed":
 		return false
 	default:
@@ -832,7 +835,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if err != nil || pid == "" {
 		return runtime.ErrSessionNotFound
 	}
-	return p.c.deliverNudge(ctx, pid, runtime.FlattenText(content))
+	text, err := p.claudeSafeNudge(name, runtime.FlattenText(content))
+	if err != nil {
+		return err
+	}
+	return p.c.deliverNudge(ctx, pid, text)
 }
 
 // Peek reads the current rendered screen ("visible") — the liveness/fingerprint

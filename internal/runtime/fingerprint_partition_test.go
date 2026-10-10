@@ -19,6 +19,7 @@ var partitionHalfCases = []struct {
 	{"Command", "launch", func(c *Config) { c.Command += " --changed" }},
 	{"Lifecycle", "launch", func(c *Config) { c.Lifecycle = Lifecycle("persistent") }},
 	{"Upstream", "launch", func(c *Config) { c.Upstream = "bedrock" }},
+	{"OperatorEnv", "launch", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "OPERATOR_KEY", "different") }},
 	{"MCPServers", "launch", func(c *Config) {
 		c.MCPServers = []MCPServerConfig{{Name: "mail", Transport: MCPTransport("stdio"), Command: "different-mcp"}}
 	}},
@@ -95,6 +96,7 @@ var coreFieldHalf = map[string]string{
 	"Command":              "launch",
 	"Lifecycle":            "launch",
 	"Upstream":             "launch",
+	"OperatorEnv":          "launch",
 	"MCPServers":           "launch",
 	"AcceptStartupDialogs": "launch",
 	"MouseOn":              "launch",
@@ -123,6 +125,7 @@ var excludedFromCore = map[string]string{
 	"PackOverlayDirs":        "additive pack file staging, not hashed",
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
+	"FreshOnly":              "per-call Start mode (LL6), not config identity",
 }
 
 // TestFingerprintPartitionAccountsForEveryConfigField is the FP-1/GAP-6
@@ -211,4 +214,30 @@ func envWith(base map[string]string, key, val string) map[string]string {
 	}
 	m[key] = val
 	return m
+}
+
+// LL6: FreshOnly is a per-call Start mode, so setting it moves no fingerprint
+// and no v6 hash in production changes. Kills hashing FreshOnly into any half.
+func TestFreshOnlyExcludedFromCoreFingerprint(t *testing.T) {
+	for name, base := range goldenFixtures() {
+		fresh := base
+		fresh.FreshOnly = true
+		for _, fp := range []struct {
+			name string
+			fn   func(Config) string
+		}{
+			{"ConfigFingerprint", ConfigFingerprint},
+			{"CoreFingerprint", CoreFingerprint},
+			{"LiveFingerprint", LiveFingerprint},
+			{"ProvisionFingerprint", ProvisionFingerprint},
+			{"LaunchFingerprint", LaunchFingerprint},
+		} {
+			if got, want := fp.fn(fresh), fp.fn(base); got != want {
+				t.Errorf("%s/%s moved with FreshOnly: %q, want %q", name, fp.name, got, want)
+			}
+		}
+		if got, want := CoreFingerprintBreakdown(fresh), CoreFingerprintBreakdown(base); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s/CoreFingerprintBreakdown moved with FreshOnly", name)
+		}
+	}
 }

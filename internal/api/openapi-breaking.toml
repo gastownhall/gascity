@@ -1,0 +1,62 @@
+# OpenAPI breaking-change policy for internal/api/openapi.json.
+#
+# `make openapi-breaking-check` (part of `make spec-ci`) diffs the committed
+# spec against the merge base with the pinned oasdiff binary
+# (cmd/openapi-breaking). Any ERR-level change fails the gate unless a
+# [[waiver]] below acknowledges it.
+#
+# [[severity]] rows re-level oasdiff checks for this API's compatibility
+# policy. Levels: err, warn, info, none.
+#
+# [[waiver]] rows acknowledge one intentional breaking change each. The gate
+# prints a ready-to-paste stanza for every unwaived finding. Every field is
+# required:
+#
+#   fingerprint  oasdiff change fingerprint (stable across commits)
+#   check        oasdiff rule id, or a gate-native id such as
+#                problem-type-removed
+#   target       "METHOD /path" for operation changes, or the spec section
+#                (e.g. "components") for spec-wide changes
+#   reason       why breaking existing clients is acceptable
+#   pr           the PR that makes the change (URL or #N)
+#
+# Waivers that no longer match a change are reported but do not fail. Prune
+# them once the change has merged: fingerprints are stable across commits, so
+# a stale waiver would also waive a later identical change.
+
+# Generated clients (internal/api/genclient, the dashboard's TypeScript
+# client) bind to named component schemas; deleting one breaks their builds.
+[[severity]]
+check = "api-schema-removed"
+level = "err"
+reason = "generated clients bind to named component schemas"
+
+# Huma marks most response fields optional (omitempty), so oasdiff's default
+# INFO level would let any response field disappear silently. Clients read
+# these fields; removing one is a wire break.
+[[severity]]
+check = "response-optional-property-removed"
+level = "err"
+reason = "most response fields are optional under Huma; removal is still a client break"
+
+# The typed event union grows with every new event type. Its catch-all
+# variant excludes known types via a `not: {enum: [...]}` list, so each new
+# event type adds an enum value and a oneOf branch. The event vocabulary is
+# an open set by design (consumers must tolerate unknown types).
+#
+# Both overrides are global, not scoped to the event union: oasdiff applies
+# a severity level to its check id across the whole spec. A new value on
+# any response property enum (e.g. RigCreateResponseBody.status, a closed
+# union in the generated TypeScript client) or a new branch on any response
+# property oneOf also passes as INFO. oasdiff severity levels have no path
+# scope, so narrowing these to the event-stream schemas needs a gate-side
+# filter (ga-vbm3ps).
+[[severity]]
+check = "response-property-enum-value-added"
+level = "info"
+reason = "the event-type vocabulary is an open set; new event types are additive"
+
+[[severity]]
+check = "response-property-one-of-added"
+level = "info"
+reason = "new typed event variants are additive"

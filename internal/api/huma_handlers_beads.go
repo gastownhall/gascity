@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -492,12 +495,10 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
-//   - Within a leg: whatever order that leg's own Ready reader emits. That is
-//     the canonical (priority ASC, created_at ASC, id ASC) for a work store —
-//     CachingStore.Ready sorts with sortBeadsReadyOrder — but NOT for the graph
-//     leg: the canonical relocated binding is beads.SQLiteStore, whose
-//     sqliteReadySQL orders by (created_at ASC, id ASC) with no priority term at
-//     all. Per-leg order is therefore deterministic, not canonical.
+//   - Within a leg: whatever order that leg's own Ready reader emits. For a
+//     work store (CachingStore.Ready) and for the canonical relocated binding
+//     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
+//     created_at ASC, id ASC) order, so each leg is sorted on its own.
 //   - Dedupe: first leg to return an id wins. The graph leg runs last, so a bead
 //     co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where the migration preserves ids and never
@@ -506,9 +507,9 @@ func readyFederationQuery() beads.ReadyQuery {
 //     re-sort would change the bytes a multi-rig single-store city already
 //     serves, and the graph leg must be free for such a city. Both sides are
 //     therefore compared after normalizing with beads.SortBeadsReadyOrder. That
-//     normalization is load-bearing rather than cosmetic, precisely because the
-//     graph leg is not priority-ordered; it is well-defined because
-//     SortBeadsReadyOrder is a total order over the merged set.
+//     normalization is load-bearing rather than cosmetic, because a
+//     concatenation of sorted legs is not itself sorted; it is well-defined
+//     because SortBeadsReadyOrder is a total order over the merged set.
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.
@@ -752,13 +753,53 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 }
 
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
-func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (*OKResponse, error) {
+//
+// An optional {"reason": "..."} body records why the bead was closed. The
+// reason is stamped as metadata.close_reason before the close, the convention
+// every store's close honors: BdStore and NativeDoltStore forward it as the
+// close reason (bd close --reason), and the whole-row stores record it, so it
+// comes back as the bead's close_reason on GET and on bead.closed.
+func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
 		return nil, err
 	}
+	var submitted map[string]string
+	reason := ""
+	if input.Body != nil {
+		reason = strings.TrimSpace(input.Body.Reason)
+	}
+	if reason != "" {
+		submitted = map[string]string{"close_reason": reason}
+	}
+	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
+		return nil, err
+	}
+	// Only a close that happens stamps a reason. On a bead that is not closed,
+	// a recorded close_reason is left over from an earlier close (bd's reopen
+	// clears its close_reason column but not the metadata), so this close
+	// replaces it with its own reason, or with none. On a bead already closed,
+	// Close is a no-op that keeps the reason its close recorded, so no other
+	// reason is stamped beside it.
+	priorReason := current.Metadata["close_reason"]
+	stampReason := current.Status != "closed" && (reason != "" || strings.TrimSpace(priorReason) != "")
+	if stampReason {
+		if err := store.SetMetadata(id, "close_reason", reason); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+	}
 	if err := store.Close(id); err != nil {
+		if stampReason && !errors.Is(err, beads.ErrNotFound) {
+			// The bead stays open, so it must not keep the reason stamped
+			// for a close that did not happen.
+			if restoreErr := store.SetMetadata(id, "close_reason", priorReason); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring close_reason after failed close: %w", restoreErr))
+			}
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
@@ -779,6 +820,9 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
+	}
+	if err := session.ClearRuntimeLeaseForReopen(store, id); err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -863,6 +907,14 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if opts.Status != nil {
 		waitStatus = *opts.Status
 	}
+	if closesStatus(opts.Status) {
+		// This spelling closes the bead, so it answers to the same contract as
+		// the close route. body.Metadata rides along because the documented
+		// atomic close stamps the work record in this very request.
+		if err := s.gateWorkRecordClose(ctx, id, store, current, body.Metadata); err != nil {
+			return nil, err
+		}
+	}
 	// Once Get succeeded in the resolved store, treat Update-ErrNotFound as a
 	// concurrent-delete race (409) rather than resolving again — otherwise a
 	// delete racing with update silently applies the mutation to a different
@@ -892,6 +944,25 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // It is implemented as a soft-delete (store.Close) — see the `"closed"`
 // status field for honest wire-contract semantics. Hard-delete is not
 // exposed through the API.
+//
+// The work-record close gate deliberately does not apply here. Delete says
+// "this bead should not exist", not "this work completed", so demanding a work
+// record would make an unwanted bead undeletable under enforcement; the CLI
+// plane draws the same line, gating `bd close` and `bd update --status closed`
+// but not `bd delete`.
+//
+// The same exclusion covers bulk teardown: the paths that close a whole
+// workflow root or scope at once through beads.Store.CloseAll rather than
+// through a per-bead route — run cancel and workflow delete/purge here, and the
+// convoy-cleanup and scope-abort paths on the CLI and dispatch side. They select
+// the subtree by gc.root_bead_id with no gc.kind filter, so they do close beads
+// this contract otherwise covers, and they are ungated symmetrically on both
+// planes rather than leaking on one. That is deliberate: they stamp the disjoint
+// control-plane gc.outcome vocabulary (canceled, skipped) precisely because the
+// close does not assert completion — see skipScopeMembers in internal/dispatch —
+// and requiring a work record would make a run uncancellable and a workflow
+// impossible to tear down under enforcement. None is an escape hatch for a
+// refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
 	store, _, err := s.resolveBeadOwner(id)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -32,14 +33,25 @@ type FactoryConfig struct {
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
 	// session package production timer.
 	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	// RuntimeLeaseTTL is the lifetime of the manager's runtime lease records,
+	// session.RuntimeLeaseTTL of the city's startup timeout. Zero uses the
+	// default startup timeout's.
+	RuntimeLeaseTTL time.Duration
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+	// ActivityMemo is shared by every adapter and handle the factory builds. A
+	// caller that builds a Factory per request (the API server) holds one memo
+	// for its lifetime and passes it here, so an unchanged mirror is parsed
+	// once across requests rather than once per request. Nil gives the factory
+	// a private memo.
+	ActivityMemo *DerivedActivityMemo
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
 // the API server and gc CLI.
 type Factory struct {
+	cityPath              string
 	manager               *sessionpkg.Manager
 	store                 beads.Store
 	provider              runtime.Provider
@@ -48,47 +60,62 @@ type Factory struct {
 	usageSink             usage.Sink
 	resolveSessionRuntime SessionRuntimeResolver
 	pricing               *pricing.Registry
+	// activityMemo is shared by every adapter and handle this factory builds —
+	// and, when the caller injected it, by every other factory that caller
+	// builds — so per-request handles do not each re-derive an unchanged
+	// mirror's activity.
+	activityMemo *DerivedActivityMemo
 }
 
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	opts := make([]sessionpkg.ManagerOption, 0, 4)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
 	}
+	if cfg.RuntimeLeaseTTL > 0 {
+		opts = append(opts, sessionpkg.WithRuntimeLeaseTTL(cfg.RuntimeLeaseTTL))
+	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
-	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.UsageSink, cfg.ResolveSessionRuntime, cfg.Pricing)
+	return newFactory(manager, cfg)
 }
 
 // NewFactoryFromManager wraps an already-constructed session manager behind the
 // worker boundary. Primarily useful in tests.
 func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*Factory, error) {
-	return newFactory(manager, nil, nil, searchPaths, nil, nil, nil, nil)
+	return newFactory(manager, FactoryConfig{SearchPaths: searchPaths})
 }
 
-func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, recorder events.Recorder, usageSink usage.Sink, resolveRuntime SessionRuntimeResolver, registry *pricing.Registry) (*Factory, error) {
+func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
 	}
+	usageSink := cfg.UsageSink
 	if usageSink == nil {
 		usageSink = usage.Discard
 	}
+	memo := cfg.ActivityMemo
+	if memo == nil {
+		memo = NewDerivedActivityMemo()
+	}
 	return &Factory{
+		cityPath:              cfg.CityPath,
 		manager:               manager,
-		store:                 store,
-		provider:              provider,
-		searchPaths:           append([]string(nil), searchPaths...),
-		recorder:              recorder,
+		store:                 cfg.Store,
+		provider:              cfg.Provider,
+		searchPaths:           append([]string(nil), cfg.SearchPaths...),
+		recorder:              cfg.Recorder,
 		usageSink:             usageSink,
-		resolveSessionRuntime: resolveRuntime,
-		pricing:               registry,
+		resolveSessionRuntime: cfg.ResolveSessionRuntime,
+		pricing:               cfg.Pricing,
+		activityMemo:          memo,
 	}, nil
 }
 
@@ -113,6 +140,7 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 	return NewSessionHandle(SessionHandleConfig{
 		Manager:     f.manager,
 		SearchPaths: append([]string(nil), f.searchPaths...),
+		Adapter:     f.Adapter(),
 		Recorder:    f.recorder,
 		UsageSink:   f.usageSink,
 		Session:     spec,
@@ -229,6 +257,7 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 		return nil, sessionpkg.ErrSessionNotFound
 	}
 	return NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     f.cityPath,
 		Provider:     f.provider,
 		SessionName:  sessionName,
 		ProviderName: providerName,
@@ -241,7 +270,7 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 // Adapter returns a transcript adapter configured with the factory's search
 // paths for callers that need transcript reads outside a session handle.
 func (f *Factory) Adapter() SessionLogAdapter {
-	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...)}
+	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), activity: f.activityMemo}
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.

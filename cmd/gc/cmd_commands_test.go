@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/spf13/cobra"
 )
@@ -186,6 +187,110 @@ func TestRunDiscoveredCommand_FailsClosedWhenInvokingExecutableCannotBeResolved(
 	}
 }
 
+// supervisorURLScriptEntry writes a pack command that prints the supervisor
+// URL it was handed and returns its discovered entry.
+func supervisorURLScriptEntry(t *testing.T, dir string) config.DiscoveredCommand {
+	t.Helper()
+	scriptPath := filepath.Join(dir, "print-supervisor-url.sh")
+	script := "#!/bin/sh\necho \"supervisor=${GC_SUPERVISOR_URL-<unset>}\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return config.DiscoveredCommand{
+		BindingName: "test",
+		PackName:    "mypack",
+		Command:     []string{"url"},
+		RunScript:   scriptPath,
+		SourceDir:   dir,
+	}
+}
+
+// TestRunDiscoveredCommand_SupervisorURL pins GC_SUPERVISOR_URL: a pack
+// command running in a supervisor-registered city gets the loopback base URL
+// the CLI itself would use for the supervisor API, and nothing otherwise. An
+// ambient value never leaks through.
+func TestRunDiscoveredCommand_SupervisorURL(t *testing.T) {
+	cases := []struct {
+		name          string
+		register      bool
+		supervisorCfg string // "" leaves supervisor.toml absent
+		want          string
+		wantStderr    string
+	}{
+		{
+			name:          "registered city on default bind",
+			register:      true,
+			supervisorCfg: "[supervisor]\nport = 18561\n",
+			want:          "supervisor=http://127.0.0.1:18561",
+		},
+		{
+			name:          "wildcard bind maps to loopback like the CLI",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"0.0.0.0\"\nport = 18562\n",
+			want:          "supervisor=http://127.0.0.1:18562",
+		},
+		{
+			name:          "IPv6 loopback bind",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"::1\"\nport = 18563\n",
+			want:          "supervisor=http://[::1]:18563",
+		},
+		{
+			name:          "non-loopback bind is not exported",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"192.0.2.10\"\nport = 18564\n",
+			want:          "supervisor=<unset>",
+		},
+		{
+			name:          "city not registered with a supervisor",
+			register:      false,
+			supervisorCfg: "[supervisor]\nport = 18565\n",
+			want:          "supervisor=<unset>",
+		},
+		{
+			name:          "unreadable supervisor config warns and is not exported",
+			register:      true,
+			supervisorCfg: "[supervisor\n",
+			want:          "supervisor=<unset>",
+			wantStderr:    "not setting GC_SUPERVISOR_URL",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("GC_SUPERVISOR_URL", "http://stale.example:1")
+			if tc.supervisorCfg != "" {
+				if err := os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(tc.supervisorCfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cityDir := t.TempDir()
+			if tc.register {
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "testcity"); err != nil {
+					t.Fatalf("register city: %v", err)
+				}
+			}
+			entry := supervisorURLScriptEntry(t, t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := runDiscoveredCommand(entry, cityDir, "testcity", nil, strings.NewReader(""), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if got := strings.TrimSpace(stdout.String()); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+			if tc.wantStderr == "" && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+}
+
 const packCommandProcessHelperArg = "pack-command-process-helper"
 
 type packCommandProcessInvocation struct {
@@ -312,18 +417,31 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripTmuxLeakGuardNoise(stderr.String())}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String())}
 }
 
-// stripTmuxLeakGuardNoise removes the tmux leak guard's own diagnostic lines
-// (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
-// writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
-// from captured subprocess stderr. TestMain re-runs in every re-exec'd
-// subprocess, so its startup sweep or teardown leak check can emit these
-// lines nondeterministically depending on unrelated concurrent sibling
-// suites' teardown timing — real CLI stderr assertions must not depend on
-// that timing.
-func stripTmuxLeakGuardNoise(s string) string {
+// stripLeakGuardNoise removes BOTH test leak guards' own diagnostic lines from
+// captured subprocess stderr:
+//
+//   - the tmux guard (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
+//     writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
+//   - the dolt guard (cmd/gc/path_helpers_test.go: sweepStaleCmdGCTestDoltProcesses,
+//     reapDoltProcessesUnderRoot, sweepOrphanDoltStoreDirs, writeDoltLeakReport,
+//     and doltLeakGuardedTestingM's teardown scan)
+//
+// TestMain wraps m in both (newDoltLeakGuardedTestingM inside,
+// newTmuxLeakGuardedTestingM outside) and re-runs in every re-exec'd
+// subprocess, so either guard's startup sweep or teardown leak check can emit
+// lines nondeterministically depending on unrelated concurrent sibling suites'
+// teardown timing — real CLI stderr assertions must not depend on that timing.
+//
+// Both guards' per-process detail lines share the "  pid=" prefix, so a single
+// case covers them. Only the header prefixes differ, and omitting the dolt one
+// is what made main CI red for ~26h (ga-vqhh23): the eager side reaped a stale
+// dolt server and announced it while the lazy side had nothing left to reap, so
+// TestPackCommandCobraHelpAndUnknownParity's stderr-equality assertion failed on
+// a difference that had nothing to do with cobra dispatch.
+func stripLeakGuardNoise(s string) string {
 	if s == "" {
 		return s
 	}
@@ -337,6 +455,7 @@ func stripTmuxLeakGuardNoise(s string) string {
 	for _, line := range lines {
 		switch {
 		case strings.HasPrefix(line, "cmd/gc tmux leak guard: "):
+		case strings.HasPrefix(line, "cmd/gc test dolt leak guard: "):
 		case strings.HasPrefix(line, "  pid="):
 		case strings.HasPrefix(line, "  socket="):
 		default:
@@ -353,18 +472,25 @@ func stripTmuxLeakGuardNoise(s string) string {
 	return out
 }
 
-// TestStripTmuxLeakGuardNoise expresses the acceptance criteria for isolating
-// captured subprocess stderr from the tmux leak guard's own harness-level
-// diagnostics (cmd/gc/tmux_leak_guard_test.go): stripTmuxLeakGuardNoise must
-// remove exactly the guard's startup-sweep and teardown-leak lines, in any
-// position, while leaving real CLI stderr output (and its line order)
-// untouched. Without this, TestPackCommandCobraHelpAndUnknownParity's
-// eager/lazy stderr-equality assertion — and the several exact-empty-stderr
-// assertions elsewhere in this file — are vulnerable to a concurrent sibling
-// suite's teardown racing exactly one of the two subprocess launches' startup
-// sweep (ga-5pe5xv gate evidence: "a concurrent tmux leak-guard stderr line
-// captured by one parity side only").
-func TestStripTmuxLeakGuardNoise(t *testing.T) {
+// TestStripLeakGuardNoise expresses the acceptance criteria for isolating
+// captured subprocess stderr from BOTH test leak guards' harness-level
+// diagnostics (cmd/gc/tmux_leak_guard_test.go and cmd/gc/path_helpers_test.go):
+// stripLeakGuardNoise must remove exactly those guards' startup-sweep and
+// teardown-leak lines, in any position, while leaving real CLI stderr output
+// (and its line order) untouched. Without this,
+// TestPackCommandCobraHelpAndUnknownParity's eager/lazy stderr-equality
+// assertion — and the several exact-empty-stderr assertions elsewhere in this
+// file — are vulnerable to a concurrent sibling suite's teardown racing exactly
+// one of the two subprocess launches' startup sweep (ga-5pe5xv gate evidence:
+// "a concurrent tmux leak-guard stderr line captured by one parity side only";
+// ga-vqhh23: the same failure via the dolt guard, which kept main CI red ~26h).
+//
+// Coverage rule for whoever adds the NEXT guard to TestMain: a guard that
+// writes to os.Stderr from TestMain is captured by every re-exec'd subprocess
+// assertion in this file, so it must gain a case here in the same change. The
+// dolt guard did not, and the gap stayed invisible until a stale server
+// happened to exist during exactly one of two subprocess launches.
+func TestStripLeakGuardNoise(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -403,11 +529,46 @@ func TestStripTmuxLeakGuardNoise(t *testing.T) {
 				"  gc backstage repo\n",
 			want: "Usage:\n  gc backstage repo\n",
 		},
+		{
+			// The dolt leak guard is the tmux guard's sibling in TestMain
+			// (newDoltLeakGuardedTestingM wraps m; newTmuxLeakGuardedTestingM
+			// wraps that) and re-runs in every re-exec'd subprocess with the
+			// same nondeterminism, so its lines must be stripped for the same
+			// reason. Verbatim from the ga-vqhh23 CI failure (job 102498944987).
+			name: "strips the dolt guard's startup stale-sweep block",
+			in: "cmd/gc test dolt leak guard: startup sweep reaping 1 stale cmd/gc test dolt sql-server process(es)\n" +
+				"  pid=4242 argv=\"dolt sql-server --config /tmp/x/hq/.beads/config.yaml\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips the dolt guard's teardown leak block",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc test dolt leak guard: leaked 1 dolt sql-server process(es) under /tmp/gct-1-a\n" +
+				"  pid=4243 argv=\"dolt sql-server --config /tmp/gct-1-a/r001/.beads/config.yaml\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips the dolt guard's orphan-store-dir and scan-error lines",
+			in: "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir /tmp/tmp.abc\n" +
+				"cmd/gc test dolt leak guard: startup sweep error: permission denied\n" +
+				"Usage:\n",
+			want: "Usage:\n",
+		},
+		{
+			// The actual ga-vqhh23 regression: the eager side reaped a stale
+			// server and announced it, the lazy side had nothing left to reap.
+			// After stripping, both sides must compare equal.
+			name: "eager-with-dolt-noise and lazy-empty normalize to equal",
+			in: "cmd/gc test dolt leak guard: startup sweep reaping 1 stale cmd/gc test dolt sql-server process(es)\n" +
+				"  pid=4242 argv=\"dolt sql-server --config /tmp/x/hq/.beads/config.yaml\"\n",
+			want: "",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := stripTmuxLeakGuardNoise(test.in); got != test.want {
-				t.Fatalf("stripTmuxLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
+			if got := stripLeakGuardNoise(test.in); got != test.want {
+				t.Fatalf("stripLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
 			}
 		})
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -41,6 +42,12 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// command can handle, not as a signal that kills gc mid-write. The claim
 	// path's delivery unwind depends on surviving that write.
 	ignoreSIGPIPE()
+	// Also before dispatch: every MySQL connection config copies the driver
+	// logger when it is built (mysql_driver_log.go).
+	installMySQLDriverLogger()
+	// A test-only cadence hook (internal/clock.BackstopSpeedupEnv) announces
+	// itself before anything else runs, active or ignored.
+	clock.AnnounceBackstopSpeedup(stderr)
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
@@ -1402,13 +1409,11 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 	return openCityRecorderAt(cityPath, stderr)
 }
 
+// openCityRecorderAt is openCityRecorder for an already-resolved city. The
+// recorder is a secondary writer that never rotates: the city's controller
+// owns rotation (see newSecondaryFileEventsRecorder).
 func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
-	eventsCfg := config.EventsConfig{}
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		eventsCfg = cfg.Events
-	}
-	rec, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+	rec, err := openCityEventsLog(cityPath, stderr)
 	if err != nil {
 		return events.Discard
 	}
@@ -1476,6 +1481,14 @@ func openCityStoreAt(cityPath string) (beads.Store, error) {
 	return result.Store, nil
 }
 
+// openCityStoreAtWithConfig is openCityStoreAt for a one-shot caller that has
+// already loaded this city's config in the same invocation: the open reuses cfg
+// instead of reloading city.toml and every pack include. A nil cfg loads, like
+// openCityStoreAt. Long-lived callers must keep openCityStoreAt.
+func openCityStoreAtWithConfig(cityPath string, cfg *config.City) (beads.Store, error) {
+	return openOneShotStoreAtForCityWithConfig(cityPath, cityPath, cfg)
+}
+
 func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
 	return openStoreResultAtForCity(cityPath, cityPath)
 }
@@ -1501,14 +1514,71 @@ func ensureScopedFileStoreLayout(cityPath string) error {
 	return os.WriteFile(fileStoreLayoutMarkerPath(cityPath), []byte(fileStoreLayoutScopedV1+"\n"), 0o644)
 }
 
+// openScopeLocalFileStore opens the file store at scopeRoot without a known
+// city, resolving the owning city from ambient context. Callers that already
+// hold the city path must use openScopeLocalFileStoreForCity instead: ambient
+// resolution misses whenever the process is not pointed at that city (a
+// supervisor serving several cities, --city-url/--context, an unrelated cwd),
+// and a miss silently falls back to the default "gc" prefix.
 func openScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+	return openScopeLocalFileStoreForCity(scopeRoot, "")
+}
+
+// openScopeLocalFileStoreForCity opens the file store at scopeRoot as a scope
+// of cityPath, so the store mints ids under that scope's configured prefix. A
+// blank cityPath falls back to ambient city resolution.
+func openScopeLocalFileStoreForCity(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
-	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath)
+	store, err := beads.OpenFileStore(fsys.OSFS{}, beadsPath, fileStoreIDPrefixOpts(scopeRoot, cityPath)...)
 	if err != nil {
 		return nil, err
 	}
 	store.SetLocker(beads.NewFileFlock(beadsPath + ".lock"))
 	return store, nil
+}
+
+// fileStoreIDPrefixOpts resolves the bead-ID prefix a file store at scopeRoot
+// should mint under, so a multi-rig file-backed city does not collide on gc-N
+// across stores (bd/dolt/exec stores already carry their scope's prefix; the
+// file store was the only path that didn't). Returns no option — leaving the
+// default "gc" — when the city config can't be resolved, matching prior
+// behavior for single-scope callers and tests.
+func fileStoreIDPrefixOpts(scopeRoot, cityPath string) []beads.FileStoreOption {
+	if prefix := effectiveFileStorePrefix(scopeRoot, cityPath); prefix != "" {
+		return []beads.FileStoreOption{beads.WithFileStoreIDPrefix(prefix)}
+	}
+	return nil
+}
+
+// effectiveFileStorePrefix maps a store scope root to its configured prefix:
+// the owning rig's EffectivePrefix, or the city HQ prefix for the city store.
+// cityPath names the city that owns the scope; a blank one is resolved from
+// ambient context. Empty when config is unavailable (e.g. tests that open a
+// bare dir).
+func effectiveFileStorePrefix(scopeRoot, cityPath string) string {
+	if strings.TrimSpace(cityPath) == "" {
+		var err error
+		if cityPath, err = resolveCity(); err != nil {
+			return ""
+		}
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return ""
+	}
+	for i := range cfg.Rigs {
+		rig := cfg.Rigs[i]
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		if samePath(resolveStoreScopeRoot(cityPath, rig.Path), scopeRoot) {
+			return rig.EffectivePrefix()
+		}
+	}
+	if samePath(resolveStoreScopeRoot(cityPath, cityPath), scopeRoot) {
+		return config.EffectiveHQPrefix(cfg)
+	}
+	return ""
 }
 
 func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
@@ -1524,23 +1594,23 @@ func ensurePersistedScopeLocalFileStore(scopeRoot string) error {
 	return os.WriteFile(beadsPath, []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644)
 }
 
-func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error) {
+func openExistingScopeLocalFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	beadsPath := filepath.Join(scopeRoot, ".gc", "beads.json")
 	if _, err := os.Stat(beadsPath); err != nil {
 		return nil, err
 	}
-	return openScopeLocalFileStore(scopeRoot)
+	return openScopeLocalFileStoreForCity(scopeRoot, cityPath)
 }
 
 func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
 	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
 	if fileStoreUsesScopedRoots(cityPath) {
-		return openExistingScopeLocalFileStore(scopeRoot)
+		return openExistingScopeLocalFileStore(scopeRoot, cityPath)
 	}
-	return openScopeLocalFileStore(cityPath)
+	return openScopeLocalFileStoreForCity(cityPath, cityPath)
 }
 
 func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
@@ -1553,7 +1623,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 // builtin-cache readiness and pack expansion included — again inside the open.
 // A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
 func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false)
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1565,7 +1635,7 @@ func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, e
 }
 
 func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative bool) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative)
+	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1573,7 +1643,7 @@ func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative b
 }
 
 func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false)
+	return openStoreResultAtForCityWithMode(storePath, cityPath, gate.ModeUnset, false, false, nil)
 }
 
 // openStoreResultAtForCityWithMode is openStoreResultAtForCity with the
@@ -1582,35 +1652,90 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 // boot-latched mode: re-resolving from disk on a reload would flip the city
 // store's write discipline mid-process while rig stores keep the boot mode —
 // exactly the mixed-writer state the process latch exists to prevent.
-func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false)
+//
+// nativeOverride is the analogous boot latch for beads.native_transport: nil
+// means "resolve from cfg" (the default, best-effort behavior every other
+// caller gets); a non-nil value is the controller's frozen boot-time value,
+// carried the same way modeOverride is, for the same reopen-must-not-flip
+// reason.
+func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride gate.Mode, haveMode, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithAuthority(storePath, cityPath, modeOverride, haveMode, false, longLived, nativeOverride)
 }
 
-func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative)
+func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative, longLived, nativeOverride)
 }
 
 // openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
 // with the city config supplied by a caller that already loaded it. A nil
 // config is loaded here, which is what every caller outside the bd scope
 // resolution path passes.
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+//
+// longLived marks a store the caller keeps open for the process lifetime (the
+// controller's city store). Those keep the beads library's daemon-sized
+// project pool; every other open is a one-shot CLI open and takes the
+// single-connection cap from nativeDoltOneShotOpenEnvForScope.
+// openStoreFactoryForCity is the beads store factory, behind a seam.
+//
+// The seam exists so the WIRING is assertable: which openers this composition
+// root supplies, and whether it threads the long-lived shape, decides whether a
+// proxied city gets the native read lane at all — and every other way of
+// checking that needs a real Dolt server, which a unit test cannot have. The
+// variable is never reassigned in production.
+var openStoreFactoryForCity = beads.OpenStoreAtForCity
+
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false, nativeOverride)
+}
+
+// openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
+// one-shot CLI invocation whose cfg it loaded itself moments ago. On top of
+// the shared path's reuse it also skips the bd provider's city-scope reload
+// (issue prefix, store options): that reload stays on the shared path because
+// the shared path is what every caller NOT converted to a one-shot entry point
+// still uses, and it must stay safe for the long-lived ones among them (the
+// order dispatcher from the controller tick and the API webhook handler), which
+// pass a cfg that can be stale, or an empty stand-in. The rest of that
+// population is one-shot and keeps paying the reload: gc bd's store-scope probe
+// and its two direct opens, plus the gc bd close work-record gate. Converting
+// those is deliberately out of scope here, so do not read the shared path's
+// remaining callers as long-lived-only.
+// Nothing enforces that cfg is fresh; the one-shot entry points
+// (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
+func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+// openStoreResultAtForCityScoped is the shared open body. oneShotConfig
+// reports that cfg is this one-shot invocation's own fresh load, which lets
+// the bd city-scope open reuse it; see openOneShotStoreAtForCityWithConfig.
+func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool, nativeOverride *beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
+	// The provider comes from env and raw city.toml reads, not from cfg, so it
+	// is known before the load below and can decide what a load error costs.
+	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
+	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	if authoritative {
+		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
+	}
 	if cfg == nil {
-		cfg, _ = loadCityConfig(runtimeCityPath, io.Discard)
+		loaded, err := loadCityConfigForStoreOpen(runtimeCityPath, provider, nativeOverride)
+		if err != nil {
+			return beads.StoreOpenResult{}, err
+		}
+		cfg = loaded
 	} else {
 		// Loading the config would have run the builtin-cache readiness pass.
 		// Reusing one must not skip that self-heal for a city this process has
 		// never readied.
 		_ = ensureBuiltinRuntimeAssetsForSuppliedConfig(runtimeCityPath, io.Discard)
-	}
-	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
-	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
-	if authoritative {
-		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	}
 	switch strings.TrimSpace(provider) {
 	case "sqlite", "sqlite-cgo", "coordstore":
@@ -1623,13 +1748,31 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	if haveMode {
 		mode = modeOverride
 	}
-	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+	nativeTransport := resolvedNativeTransportMode(cfg)
+	if nativeOverride != nil {
+		nativeTransport = *nativeOverride
+	}
+	// One bd opener, used twice: as the factory's fallback store and as the
+	// WRITE leaf of the proxied split store. They must be the same store, or a
+	// demotion would silently change which store is doing the writing.
+	openBd := func() (beads.Store, error) {
+		if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
+			return nil, err
+		}
+		if oneShotConfig {
+			return openOneShotBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
+		}
+		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
+	}
+	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:         scopeRoot,
 		CityPath:          runtimeCityPath,
 		Provider:          provider,
-		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
+		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
 		Logger:            slog.Default(),
 		ConditionalWrites: mode,
+		NativeTransport:   nativeTransport,
+		LongLived:         longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
 			return lazyConditionalWritesDegradeEmitter(
@@ -1638,12 +1781,12 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
-		OpenBdStore: func() (beads.Store, error) {
-			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
-				return nil, err
-			}
-			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
-		},
+		OpenBdStore: openBd,
+		// The proxied-native lane. The factory consults this ONLY for a
+		// persisted proxied-server topology with GC_BEADS_PROXIED_NATIVE on, so
+		// wiring it here changes nothing for any other scope or for a binary
+		// with the flag off.
+		OpenProxiedStore: proxiedNativeStoreOpenerForScope(runtimeCityPath, scopeRoot, cfg, openBd),
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
@@ -1653,7 +1796,13 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			// pack expansion included, for the same city at the same moment.
 			// The reopen hook below deliberately keeps re-loading: it fires long
 			// after this open, where re-reading current state is the point.
-			env, err := nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			var env map[string]string
+			var err error
+			if longLived {
+				env, err = nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			} else {
+				env, err = nativeDoltOneShotOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
@@ -1666,8 +1815,20 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			// the port per command — then re-open against the live server via the
 			// direct native path (which bypasses the factory preflight/identity
 			// gate, so an absent scope project_id cannot block the reconnect).
+			// This reopen passes a nil config, so the fresh env re-reads the
+			// city's current beads.allow_schema_behind_migrate decision rather
+			// than keeping the one in force at open, and the reconnect does not
+			// re-run the preflight's version_compat gate. The controller's
+			// rig-store reopen (api_state.go) instead reuses the config it
+			// opened with.
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
-				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				var freshEnv map[string]string
+				var rerr error
+				if longLived {
+					freshEnv, rerr = nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				} else {
+					freshEnv, rerr = nativeDoltOneShotOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+				}
 				if rerr != nil {
 					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
 				}
@@ -1681,6 +1842,33 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// loadCityConfigForStoreOpen loads the city config for a store open that was
+// handed none. A missing city.toml is not an error: most opens through the
+// shared body are not city-scoped, and they proceed on a nil config. Any other
+// load error fails the open when no boot-latched value is in hand and the
+// provider reaches the native_transport decision: an unread "off" must not
+// open as "auto". Every other open proceeds on a nil config, best-effort,
+// because the load error cannot change it. The deprecated
+// GC_BEADS_FORCE_FALLBACK alias overrides the city's value but does not excuse
+// the error: excusing it would let a command that works under the alias start
+// failing once the alias is removed.
+//
+// The cost is availability, and it is deliberate: a pack include can set
+// native_transport itself, so while one does not load, every nil-cfg open of
+// the city's bd-contract store fails here, gc order's and the controller's
+// per-tick sweep and standalone opens among them. gc hook adds no new stop: it
+// loads the city config itself and exits on the same error before any open.
+func loadCityConfigForStoreOpen(cityPath, provider string, nativeOverride *beads.NativeTransportMode) (*config.City, error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err == nil || nativeOverride != nil || !beads.ProviderConsultsNativeTransport(provider) {
+		return cfg, nil
+	}
+	if _, missing := missingRootCityTOML(err, cityPath); missing {
+		return cfg, nil
+	}
+	return nil, fmt.Errorf("opening store for city %q: loading city.toml: %w", cityPath, err)
 }
 
 // requireBdBinaryForCity verifies that the logical bd command has either an
@@ -1764,15 +1952,39 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 }
 
 // openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
-// A caller that already holds this city's config passes it to avoid reloading
-// it; a nil config is loaded here.
-func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+// A rig scope reuses a supplied cfg (a nil config is loaded here). The city
+// scope always reloads config from disk for the issue prefix and store
+// options: this is the shared open path, taken by every caller not converted
+// to a one-shot entry point, and its long-lived callers (order dispatch, API)
+// can hand it a stale or empty cfg. Unconverted one-shot callers are on it too
+// and still pay that reload — gc bd's store-scope probe and its two direct
+// opens, and the gc bd close work-record gate — and converting them is out of
+// scope here. CONVERTED one-shot callers go through
+// openOneShotBdStoreAtWithConfig instead.
+//
+// nativeTransport is this call's resolved beads.native_transport value. Under
+// "off", or with the deprecated GC_BEADS_FORCE_FALLBACK alias set, the
+// GC_NATIVE_DOLTLITE_BEADS read optimization is refused; see
+// openBdStoreAtScoped.
+func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
+	return openBdStoreAtScoped(storePath, cityPath, cfg, false, nativeTransport)
+}
+
+// openOneShotBdStoreAtWithConfig is openBdStoreAtWithConfig for a one-shot
+// invocation's fresh cfg: the city scope reuses it instead of reloading.
+func openOneShotBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
+	return openBdStoreAtScoped(storePath, cityPath, cfg, true, nativeTransport)
+}
+
+func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotConfig bool, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		store := bdStoreForCity(storePath, cityPath)
-		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
-			return optimized, nil
+		var store *beads.BdStore
+		if oneShotConfig {
+			store = bdStoreForCityWithConfig(storePath, cityPath, cfg)
+		} else {
+			store = bdStoreForCity(storePath, cityPath)
 		}
-		return store, nil
+		return withDoltliteReadOptimization(storePath, store, nativeTransport), nil
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfig(cityPath, io.Discard)
@@ -1782,8 +1994,28 @@ func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (bead
 		cfg = loaded
 	}
 	store := bdStoreForRig(storePath, cityPath, cfg)
-	if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
-		return optimized, nil
+	return withDoltliteReadOptimization(storePath, store, nativeTransport), nil
+}
+
+// openDoltliteReadOptimization is openOptimizedDoltliteStore, held in a
+// variable so a test in the default build, where the optimization does not
+// exist, can see whether a bd store open consults it. Production never
+// reassigns it.
+var openDoltliteReadOptimization = openOptimizedDoltliteStore
+
+// withDoltliteReadOptimization returns store, or the GC_NATIVE_DOLTLITE_BEADS
+// read optimization over it when that optimization is built in and enabled.
+// The optimization serves GET and LIST by direct SQL against the doltlite
+// index file, bypassing the bd subprocess. "off", per city or through the
+// deprecated process-wide GC_BEADS_FORCE_FALLBACK alias, promises every read
+// goes through bd, so it gets the plain BdStore and the optimization is never
+// consulted.
+func withDoltliteReadOptimization(storePath string, store *beads.BdStore, nativeTransport beads.NativeTransportMode) beads.Store {
+	if nativeTransport == beads.NativeTransportOff || beads.ForceNativeFallbackActive() {
+		return store
 	}
-	return store, nil
+	if optimized, ok := openDoltliteReadOptimization(storePath, store); ok {
+		return optimized
+	}
+	return store
 }

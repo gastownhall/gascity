@@ -1278,3 +1278,100 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 		t.Fatalf("prompt missing per-agent append fragment: %q", tp.Prompt)
 	}
 }
+
+// installRecordingGitForTemplate puts a fake git first on PATH that logs every
+// invocation and answers `git symbolic-ref` with refs/remotes/origin/<head>.
+func installRecordingGitForTemplate(t *testing.T, originHead string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"if [ \"$1\" = symbolic-ref ]; then echo refs/remotes/origin/" + originHead + "; fi\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readTemplateGitCalls(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read fake git log: %v", err)
+	}
+	return string(data)
+}
+
+// An agent without a prompt_template renders no prompt, so nothing consumes
+// PromptContext.DefaultBranch; with no template MCP servers either, resolving
+// its start template must not fork git to probe the default branch.
+func TestResolveTemplatePromptlessAgentSkipsDefaultBranchProbe(t *testing.T) {
+	cityPath := t.TempDir()
+	gitLog := installRecordingGitForTemplate(t, "trunk")
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "scripted", StartCommand: "true", WorkDir: cityPath}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Command != "true" {
+		t.Fatalf("Command = %q, want true", tp.Command)
+	}
+	if calls := readTemplateGitCalls(t, gitLog); calls != "" {
+		t.Fatalf("prompt-less template resolution probed git:\n%s", calls)
+	}
+}
+
+func TestResolveTemplatePromptTemplateStillRendersProbedDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	gitLog := installRecordingGitForTemplate(t, "trunk")
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "worker.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
+	if err := fakeFS.WriteFile(promptPath, []byte("land on {{.DefaultBranch}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:         fakeFS,
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		StartCommand:   "true",
+		WorkDir:        cityPath,
+		PromptTemplate: "prompts/worker.template.md",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "land on trunk") {
+		t.Fatalf("Prompt = %q, want probed default branch rendered", tp.Prompt)
+	}
+	if calls := readTemplateGitCalls(t, gitLog); !strings.Contains(calls, "symbolic-ref") {
+		t.Fatalf("git calls = %q, want a default-branch probe for the prompt template", calls)
+	}
+}

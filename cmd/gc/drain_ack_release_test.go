@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -12,7 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -69,6 +68,72 @@ func drainAckBeadStatus(t *testing.T, store beads.Store, id string) (status, ass
 		t.Fatalf("reading %s back: %v", id, err)
 	}
 	return got.Status, got.Assignee
+}
+
+// TestDrainAckResolvesRuntimeNameToSessionBeadID covers pool sessions whose
+// tmux name is metadata on a ci-wisp-* session bead rather than the bead ID.
+// The runtime command receives the tmux name, so the release path must resolve
+// that name before it can discover the identities holding work.
+func TestDrainAckResolvesRuntimeNameToSessionBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	const runtimeName = "city--worker-3-pool"
+
+	sessionBead := mustCreateDrainAckBead(t, store, beads.Bead{
+		ID:    "ci-wisp-session-3",
+		Title: "city/worker-3",
+		Type:  session.BeadType,
+		Metadata: map[string]string{
+			"session_name": runtimeName,
+			"template":     "worker",
+		},
+	}, "", "")
+	held := mustCreateDrainAckBead(t, store, beads.Bead{
+		Title: "claimed after the session's last executable turn",
+		Type:  "task",
+	}, "in_progress", runtimeName)
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+
+	if sessionBead.ID == runtimeName {
+		t.Fatalf("fixture session ID %q unexpectedly equals runtime name", sessionBead.ID)
+	}
+	status, assignee := drainAckBeadStatus(t, store, held.ID)
+	if status != "open" || assignee != "" {
+		t.Fatalf("held work is status=%q assignee=%q after drain-ack release, want open and unassigned; stderr=%s", status, assignee, stderr.String())
+	}
+}
+
+// TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName is the control for the
+// case above: the non-pool shape, where the bead ID and the runtime name are the
+// same string, must still release. The wrapper is now the only entry to both
+// shapes, and resolution applies an IsSessionBeadOrRepairable acceptance check
+// the old direct Get did not.
+func TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName(t *testing.T) {
+	store := beads.NewMemStore()
+	const runtimeName = "worker-1"
+
+	mustCreateDrainAckBead(t, store, beads.Bead{
+		ID:    runtimeName,
+		Title: "city/worker-1",
+		Type:  session.BeadType,
+		Metadata: map[string]string{
+			"session_name": runtimeName,
+			"template":     "worker",
+		},
+	}, "", "")
+	held := mustCreateDrainAckBead(t, store, beads.Bead{
+		Title: "claimed after the session's last executable turn",
+		Type:  "task",
+	}, "in_progress", runtimeName)
+
+	var stderr bytes.Buffer
+	releaseUnexecutedClaimsForSessionStore("", nil, store, nil, runtimeName, drainAckReleaseBudget, &stderr)
+
+	status, assignee := drainAckBeadStatus(t, store, held.ID)
+	if status != "open" || assignee != "" {
+		t.Fatalf("held work is status=%q assignee=%q after drain-ack release, want open and unassigned; stderr=%s", status, assignee, stderr.String())
+	}
 }
 
 // TestDrainAckReleasesUnexecutedClaims pins F-D: drain-ack means "I am done and
@@ -252,7 +317,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 		drainAckReleaseHeldClaims = originalRelease
 		drainAckPokeController = originalPoke
 	})
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 
 	dops := newFakeDrainOps()
 	releaseRan := false
@@ -267,7 +332,7 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", false, &stdout, &stderr); code != 0 {
+	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doRuntimeDrainAck = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !releaseRan {
@@ -292,8 +357,8 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 	drainAckReleaseHeldClaims = func(string, string, io.Writer) { released = true }
 
 	var stdout, stderr bytes.Buffer
-	doRuntimeRequestRestart(context.Background(), newFakeDrainOps(), runtime.NewFake(), nil, false,
-		events.Discard, "worker-1", "worker-1", time.Millisecond, 50*time.Millisecond, &stdout, &stderr)
+	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,
+		events.Discard, "worker-1", "worker-1", "", &stdout, &stderr)
 
 	if released {
 		t.Fatal("gc runtime request-restart released the session's claims; only drain-ack may")

@@ -1,19 +1,23 @@
 package proctable
 
-// ProcessRecord is one process in a host-wide snapshot used for descendant
-// liveness matching.
+// ProcessRecord is one process in a host-wide snapshot. PGID and StartTime
+// make the same record usable for identity-fenced teardown as well as
+// descendant liveness matching.
 type ProcessRecord struct {
 	PID       int
 	PPID      int
+	PGID      int
+	StartTime string // opaque host-local process-start identity
 	Name      string // basename of the process's command
 	SessionID string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)
 }
 
-// SnapshotProcesses returns a host-wide process snapshot (pid, ppid, command
-// basename) for descendant-liveness matching. Unlike ScanBySessionID, this is
-// a plain read of the process table with no GC_SESSION_ID filtering and no
-// liveScanGuard: it powers read-only liveness checks (e.g. a runtime
-// provider's ProcessAlive), not the orphan sweep that guard protects against.
+// SnapshotProcesses returns one host-wide process snapshot. Each record
+// includes pid, ppid, process group, start identity, command basename, and any
+// readable GC_SESSION_ID. Unlike ScanBySessionID, this is a plain read of the
+// process table with no GC_SESSION_ID filtering and no liveScanGuard: it powers
+// read-only liveness checks and identity-fenced teardown, not the orphan sweep
+// that guard protects against.
 func SnapshotProcesses() ([]ProcessRecord, error) {
 	return snapshotProcesses()
 }

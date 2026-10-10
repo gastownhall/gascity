@@ -17,65 +17,59 @@ expressed — as beads composed into formulas — was powerful enough to abstrac
 roles into configuration. Gas City extracts that insight into an SDK where Gas
 Town becomes one configuration among many.
 
-## Current integration mission
+This file holds only what applies everywhere. Rules for a specific area live
+next to that code; read the matching file before changing it.
 
-This fork is integrating **Gas City + T3 Code + a DoltLite-backed beads
-store**. The target is not a permanent divergence from upstream Gas City.
-The target is a maintainable integration branch whose useful changes can
-track upstream easily and whose fork-specific behavior is isolated behind
-small, obvious ownership boundaries.
+## Read first
 
-When working here, assume three codebases matter:
+| When you touch | Read first |
+|---|---|
+| `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
+| `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
+| `internal/session/` | `internal/session/AGENTS.md` |
+| `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
+| Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
+| `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
+| `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
+| Any test | `TESTING.md` |
+| Anything under `docs/` | `.claude/skills/gascity-docs/SKILL.md` |
+| New SDK surface or a new primitive | `engdocs/contributors/primitive-test.md` |
+| A controller or session reconciler incident | `engdocs/contributors/reconciler-debugging.md` (use `gc trace`) |
+| Worktree isolation or worker cleanup | `engdocs/archive/backlogs/worktree-roadmap.md` (lifecycle analysis and cleanup-bug lessons) |
+| A `release-gates/*.md` deploy gate | `engdocs/contributors/release-gate-criteria-conventions.md` |
+| Bazel builds | `engdocs/bazel-quickstart.md` |
+| Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
+| What is planned | `ROADMAP.md` |
 
-- **This repo** (`/data/projects/gascity`): the Gas City SDK and the fork
-  integration layer.
-- **T3 Code** (`/data/projects/t3code` when present): the UI/runtime that
-  hosts visible agent threads through the `t3bridge` runtime provider.
-- **Beads / bd with DoltLite**: the work ledger backend. Gas City should use
-  the normal beads abstractions and keep DoltLite-specific read/write behavior
-  contained in beads/provider boundaries.
+## How work flows here
 
-### Upstream alignment rules
+- **GitHub Issues is the public tracker; use an issue when it adds
+  context.** Open or link one for a user-visible bug, a behavior or design
+  change that needs discussion, or work that spans several pull requests:
+  the issue carries the reproduction, impact, and evidence for a bug, or the
+  motivation, risk, and verification plan for a change. A small,
+  self-explanatory fix (a typo, a flake, a refactor, a CI or docs tweak) can
+  go straight to a pull request whose description covers the why. Every pull
+  request shows end-to-end evidence that the change works; when an issue
+  exists, the pull request says `Closes #<issue>`. See `CONTRIBUTING.md`.
+- **Agents:** when you do file an issue, use the bug or feature form fields,
+  fill each from evidence, and answer `NOT_ENOUGH_INFO` where the evidence
+  runs out.
+- Branch from `main` (`fix/*`, `feat/*`, `refactor/*`, `docs/*`), use
+  Conventional Commits, and push to your branch — never to `main`.
+- A fix that changes an invariant or boundary updates the owning `AGENTS.md`
+  in the same pull request.
+- Maintainers also keep an internal bd ledger; it is optional and never
+  required for contributions. See
+  `engdocs/contributors/maintainer-environment.md`.
 
-- Keep `upstream/main` easy to merge. Prefer new files, small adapters,
-  and fork-owned packages over broad edits to upstream-owned code.
-- If upstream code must change, make the patch minimal and idiomatic so it
-  can be rebased, dropped, or proposed upstream cleanly.
-- Do not bury T3 Code or DoltLite assumptions in generic SDK paths. Put
-  provider-specific behavior behind the existing runtime, config, or beads
-  backend boundaries.
-- Before rebuilding a missing feature from scratch, search history. This
-  fork has repeatedly lost working code during branch churn; older branches
-  and commits often already contain the fix.
-- Treat archived plans and audits as evidence, not gospel. Confirm against
-  current code and current upstream before porting.
+## Where new capability belongs
 
-### Feature archaeology workflow
-
-Use git history deliberately when a feature appears missing or regressed:
-
-```bash
-git remote -v
-git fetch upstream
-git log --all --oneline --decorate --grep '<keyword>'
-git log --all --oneline --decorate -- <path>
-git show <commit>:<path>
-git diff upstream/main...HEAD -- <path>
-git range-diff upstream/main...HEAD
-```
-
-Useful search targets:
-
-- T3 bridge/runtime: `t3bridge`, `T3Bridge`, `internal/runtime/t3bridge`,
-  `cmd/gc/template_resolve_t3bridge.go`
-- DoltLite/beads backend: `doltlite`, `DoltLite`, `internal/beads`,
-  `providers.go`, `beads_provider_lifecycle`
-- Prior parity work: `engdocs/archive/analysis/gastown-upstream-audit.md`,
-  `engdocs/archive/analysis/feature-parity.md`,
-  `engdocs/contributors/dolt-regression-audit.md`
-
-If history contains working code, prefer porting the smallest proven slice
-instead of inventing a parallel mechanism.
+Prefer the lowest rung that works: a prompt or template change → pack
+configuration (agents, formulas, orders) → composing existing formula and
+order machinery → an adapter behind an existing provider interface → new SDK
+surface. New SDK surface must pass the Primitive Test
+(`engdocs/contributors/primitive-test.md`).
 
 ## Development approach
 
@@ -85,6 +79,12 @@ infrastructure (tmux, filesystem) go in `test/` with build tags.
 
 **The architecture docs are a reference, not a blueprint.** When the DX
 conflicts with the docs, DX wins. We update the docs to match.
+
+**Search history before rebuilding.** If a feature looks missing or
+regressed, check `git log -S <symbol>` / `git log --all --grep <keyword>`
+first; working code is often already in history, and a removal may have been
+deliberate. Treat archived plans and audits as evidence, not gospel — confirm
+against current code.
 
 ## Architecture
 
@@ -102,81 +102,18 @@ keeps the fleet alive.
 **This orchestration is composed from primitives, with ZERO hardcoded
 roles.** Beads are the universal persistence substrate — work survives
 sessions — and every orchestration mechanism is provably composable from the
-five primitives. That composability is what lets the same SDK be configured
-as Gas Town, Ralph, or any other pack; no role name appears in Go. (A single
-agent running a formula's steps in sequence in the user's own session —
-formula v1 — is still supported as a peer shape, but graph orchestration is
-why Gas City exists.)
+six primitives (**Agent** = WHO, **Bead** = WHAT, **Formula** = HOW,
+**Rig** = WHERE, **Pack** = CONFIGURES, **Event** = OBSERVE), defined in
+`docs/getting-started/how-gas-city-works.md`. That composability is what lets
+the same SDK be configured as Gas Town, Ralph, or any other pack; no role
+name appears in Go. (A single agent running a formula's steps in sequence in
+the user's own session — formula v1 — is still supported as a peer shape,
+but graph orchestration is why Gas City exists.)
 
-### Code-layering view (implements the six primitives)
-
-> **Authoritative user model:** `docs/getting-started/how-gas-city-works.md` defines the
-> six primitives (**Agent** = WHO, **Bead** = WHAT, **Formula** = HOW,
-> **Rig** = WHERE, **Pack** = CONFIGURES, **Event** = OBSERVE). That is the
-> canonical conceptual model. The view below is the *code-layering lens*: it
-> decomposes the Go substrate by layer so contributors can reason about
-> imports, side-effect confinement, and the CI invariants below. It is a
-> finer-grained projection of the same six primitives, not a competing
-> taxonomy.
-
-How the code substrate maps onto the six user-facing primitives:
-
-| Code substrate (this view)                          | User-facing primitive |
-| --------------------------------------------------- | --------------------- |
-| Session + Prompt Templates                          | **Agent** (WHO)       |
-| Task Store (Beads)                                  | **Bead** (WHAT)       |
-| Formulas + Molecules + Dispatch (Sling) + Orders + Health Patrol | **Formula** (HOW) |
-| Rigs (project/repo registered with the city)        | **Rig** (WHERE)       |
-| Config (`pack.toml` / `city.toml`; the City is the local (root) pack — it imports shared packs) | **Pack** (CONFIGURES) |
-| Event Bus                                            | **Event** (OBSERVE)   |
-
-**Layer 0-1 substrate:**
-
-1. **Session** — start/stop/prompt/observe sessions regardless of
-   provider. Identity (via `agent.SessionNameFor`), pools, sandboxes,
-   resume, crash adoption. Lifecycle is a bead-backed projection
-   (`internal/session/lifecycle_projection.go`). Runtime providers
-   (tmux, subprocess, exec, k8s, fake) plus routing layers (acp,
-   auto, hybrid) live under `internal/runtime/` and plug in behind
-   the Session surface. (Under the **Agent** primitive.)
-2. **Task Store (Beads)** — CRUD + Hook + Dependencies + Labels + Query
-   over work units. Everything is a bead: tasks, mail, convoy members.
-   (The **Bead** primitive.)
-3. **Event Bus** — append-only pub/sub log of all system activity. Two
-   tiers: critical (bounded queue) and optional (fire-and-forget).
-   Events are fired by activity as outbound notifications so humans and
-   agents can watch; the bus is the delivery machinery. (Under the
-   **Event** primitive.)
-4. **Config** — TOML parsing with progressive activation (Levels 0-8 from
-   section presence) and multi-layer override resolution. This is the
-   machinery beneath the **Pack** primitive: `pack.toml`/`city.toml`
-   declare agents, formulas, and orders, and the City is the local (root)
-   pack that imports shared packs.
-5. **Prompt Templates** — Go `text/template` in Markdown defining what
-   each role does. The behavioral specification, supplied by a Pack and
-   rendered into a running Agent.
-
-**Layer 2-4 substrate:**
-
-6. **Messaging** — Mail = `TaskStore.Create(bead{type:"message"})`.
-   Nudge = a session-layer operation implemented via
-   `runtime.Provider.Nudge()` (and exposed through
-   `worker.Handle.Nudge()` at the worker boundary). No new
-   primitive needed.
-7. **Formulas** — a Formula is the reusable method (TOML parsed by
-   Config) applied *over* a convoy of beads, looping/fanning each to an
-   Agent. (When a formula runs, it materializes as a molecule — a root
-   bead plus child step beads in the Task Store; wisps are the ephemeral
-   variant. That materialization is a v1 implementation detail, not part
-   of what a formula *is*.) Orders = formulas with gate conditions on the
-   Event Bus that automate *when* a formula runs (Health Patrol is one
-   kind of order). All of this is the **Formula** primitive.
-8. **Dispatch (Sling)** — composed: find/spawn agent → select formula →
-   materialize work as beads → hook to agent → nudge → create convoy →
-   fire event. (Under the **Formula** primitive.)
-9. **Health Patrol** — probe sessions (Session), compare thresholds
-   (Config), publish stalls (Event Bus), restart with backoff. (One kind
-   of order, under the **Formula** primitive.)
+The code-layering view — how sessions, the bead store, the event bus,
+config, prompt templates, and the dispatch/health machinery implement the
+six primitives, plus the progressive capability levels — is
+`engdocs/architecture/nine-concepts.md`.
 
 ### Layering invariants
 
@@ -189,105 +126,32 @@ How the code substrate maps onto the six user-facing primitives:
 6. **The controller drives all SDK infrastructure operations.**
    No SDK mechanism may require a specific user-configured agent role.
 
-### Progressive capability model
+### Invariants enforced by CI
 
-Capabilities activate progressively via config presence.
+Violating any fails the build. Details live in the linked files.
 
-| Level | Adds                   |
-| ----- | ---------------------- |
-| 0-1   | Session + tasks        |
-| 2     | Task loop              |
-| 3     | Multiple agents + pool |
-| 4     | Messaging              |
-| 5     | Formulas               |
-| 6     | Health monitoring      |
-| 7     | Orders                 |
-| 8     | Full orchestration     |
+- **Object model at the center.** The CLI (`cmd/gc/`) and the HTTP+SSE API
+  (`internal/api/`) are projections over the domain packages; neither
+  re-implements domain logic (`internal/api/AGENTS.md`).
+- **Typed wire and typed events.** No hand-written JSON or untyped wire
+  types; the OpenAPI spec is generated (`TestOpenAPISpecInSync`); every
+  event type has a registered payload
+  (`TestEveryKnownEventTypeHasRegisteredPayload`).
+- **Vendor-neutral hosted-service wire.** Commercial policy is never a wire
+  field (`internal/cliauth/AGENTS.md`, `scripts/check-core-boundary.sh`).
+- **Worker boundary (active migration).** Production `cmd/gc` code reaches
+  sessions through `worker.Handle`
+  (`TestGCNonTestFilesStayOnWorkerBoundary`; `internal/worker/AGENTS.md`).
+- **Agent config field sync.** A new `config.Agent` field is wired in every
+  copy and merge site (`TestAgentFieldSync` and siblings;
+  `internal/config/AGENTS.md`).
 
-## Architecture docs
-
-Read **`engdocs/architecture/api-control-plane.md`** and
-**`engdocs/contributors/huma-usage.md`** before touching:
-
-- `internal/api/` (HTTP + SSE API layer)
-- `cmd/gc/` (CLI) — especially anything that constructs events,
-  calls `apiroute.go:apiClient()`, or uses
-  `internal/api/genclient`
-- `internal/events/` (event bus, registry)
-- `internal/extmsg/` (external-messaging emitters)
-- Anything that affects `internal/api/openapi.json`,
-  `docs/reference/schema/openapi.json`, or the generated TS types under
-  `internal/api/dashboardspa/web/shared/src/generated/`
-
-Load-bearing invariants enforced by CI (violating any fails the
-build; full rationale is in the architecture docs):
-
-- **Object model at the center.** `internal/{beads, mail, convoy,
-  formula, events, session, worker, sling, ...}` is the canonical
-  domain. The CLI (`cmd/gc/`) and the HTTP+SSE API
-  (`internal/api/`) are projections over it. Neither re-implements
-  domain logic. `internal/agent/` is a small helper package
-  (session-name utilities, startup hints) — not a primitive.
-- **Typed wire.** No hand-written JSON on any HTTP or SSE wire
-  path; no `map[string]any` or `json.RawMessage` on wire types
-  (documented exceptions live in the API control-plane doc). All
-  endpoints are Huma-registered; the OpenAPI spec is generated,
-  never hand-written (`TestOpenAPISpecInSync`).
-- **Typed events.** Every constant in `events.KnownEventTypes`
-  must have a registered payload via
-  `events.RegisterPayload(constant, sample)`. Use
-  `events.NoPayload` for events whose envelope fields alone
-  capture the semantics. Enforced by
-  `TestEveryKnownEventTypeHasRegisteredPayload`.
-- **Vendor-neutral hosted-service wire.** The OSS client of a hosted
-  Gas City service (`internal/cliauth`, `internal/serviceproto`, the
-  `gc login`/`gc whoami` commands) speaks a generic, published protocol
-  (`docs/reference/specs/service-protocol-v0.md`) and holds an **opaque
-  bearer** it never parses. Account/commercial policy — trial, billing,
-  credit, plan, quota, org/tenant identity — must **never** be a wire
-  field; it travels only in the opaque server-authored `message`/`links`
-  fields the CLI prints verbatim (spec §5). Default endpoint URLs (e.g.
-  `defaultServiceURL = "https://gascity.com"`) are **configuration data,
-  not commercial code** — sanctioned exactly like the pack-registry
-  default. Enforced by `scripts/check-core-boundary.sh` check (f) and the
-  `internal/cliauth` wire golden test; all provisioning/billing/trial
-  logic lives server-side in the private hosted repos.
-
-## Active migrations
-
-These migrations are in flight. New code on affected paths must take
-the canonical route, not the legacy route.
-
-- **Worker boundary (started `12a0a848` on Apr 17 2026, in progress).**
-  `internal/worker/handle.go` is the canonical boundary for session
-  creation and lifecycle operations. Production `cmd/gc/*.go` files
-  must route through `worker.Handle` — enforced by
-  `TestGCNonTestFilesStayOnWorkerBoundary` in
-  `cmd/gc/worker_boundary_import_test.go`, which forbids non-test
-  files from importing `session.NewManagerWithOptions(`,
-  `worker.SessionHandle`, `sessionlog`, and similar bypass paths in
-  `cmd/gc`. The remaining manager-construction/direct-create bypasses
-  are split by category: `internal/api/session_manager.go` constructs
-  `session.Manager` values for API handlers.
-  (`internal/api/session_resolution.go`'s named-session create was
-  converted to the worker boundary — it now routes through
-  `worker.Handle.Create(ctx, worker.CreateModeStarted)` via
-  `newResolvedWorkerSessionHandle`, no longer calling
-  `mgr.CreateSession(...)` directly.) Session creation goes through the
-  single `Manager.CreateSession(ctx, session.CreateOptions{...})` entry
-  point (`NewManagerWithOptions` is the sole Manager constructor). This
-  list is not a sessionlog read-site inventory; stream and transcript
-  readers in `internal/api/` and `internal/session/` still read
-  session logs directly. Package-internal helpers in `internal/session/`
-  may construct and use `session.Manager`; tests may construct it
-  directly. Do not add new non-test direct `session.Manager.CreateSession`
-  call sites outside the worker boundary.
-- **Session-first (completed `dd90ac0a` on Mar 8 2026).** The former
-  Agent Protocol primitive was removed; responsibilities moved to
-  `internal/session/` (lifecycle) and `internal/runtime/` (providers).
-  `internal/agent/` is now a helper package with session-name utilities
-  and startup hints — not a primitive. Do not reconstruct the
-  `Agent` / `Handle` interfaces.
+**Session-first (completed `dd90ac0a` on Mar 8 2026).** The former Agent
+Protocol primitive was removed; responsibilities moved to
+`internal/session/` (lifecycle) and `internal/runtime/` (providers).
+`internal/agent/` is now a helper package with session-name utilities and
+startup hints — not a primitive. Do not reconstruct the `Agent` / `Handle`
+interfaces.
 
 ## Design decisions (settled)
 
@@ -305,18 +169,6 @@ These decisions are final. Do not revisit them.
   Everything is private to the `gc` binary until the API stabilizes.
 - **ZERO hardcoded roles.** Roles are pure configuration. No role name
   appears in Go source code.
-
-## Decision frameworks
-
-- **`engdocs/contributors/primitive-test.md`** — The Primitive Test: three necessary
-  conditions (Atomicity + becomes more useful as models improve + keeps
-  judgment out of Go) for whether a capability belongs in the SDK vs the
-  consumer layer. Apply this before adding any new primitive.
-- **`engdocs/archive/backlogs/worktree-roadmap.md`** — Worktree isolation roadmap, polecat
-  lifecycle analysis, and Gas Town cleanup bug lessons.
-- **`engdocs/contributors/release-gate-criteria-conventions.md`** — What the
-  "Tests pass" criterion in a `release-gates/*.md` file must cite. Apply this
-  before signing off that criterion on any deploy gate.
 
 ## Key design principles
 
@@ -369,6 +221,9 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - Atomic file writes: temp file → `os.Rename`
 - No panics in library code — return errors
 - Error messages include context: `fmt.Errorf("adding rig %q: %w", name, err)`
+- Don't swallow errors: no silently filled-in defaults, masked decode
+  failures, or ignored timeouts.
+- Comments describe current behavior; don't narrate removed functionality.
 - Role names never appear in Go code. If you're writing `if role == "mayor"`,
   it's a design error.
 - **Tmux safety:** Never run bare `tmux kill-server` as cleanup. Never kill the
@@ -383,228 +238,66 @@ becoming more useful as models improve — it becomes LESS useful instead.
   work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
   To check something out, use your own worktree or a disposable
   `git worktree add`.
-- **Adding agent config fields:** When adding a field to `config.Agent`,
-  also add it to `AgentPatch` and `AgentOverride`, wire it into the shared
-  merge body `applyAgentMutation` (in `internal/config/patch.go`) — and, for
-  the rig-override path, copy it in `AgentOverride.toAgentPatch` — and, if the
-  field is a slice/map/pointer, deep-copy it in `Agent.Clone`
-  (`internal/config/config.go`). All four are test-guarded, so a missed field
-  fails the build: `TestAgentFieldSync` (struct field sets),
-  `TestApplyAgentPatchCoversAllFields` / `TestApplyAgentOverrideCoversAllFields`
-  (merge + `toAgentPatch` completeness), and `TestAgentCloneIsDeep` (clone
-  deepness). Both patch and rig override share `applyAgentMutation`, and both
-  the pack-load cache (`deepCopyAgents`) and pool expansion
-  (`cmd/gc/pool.go` `deepCopyAgent`) share `Agent.Clone`.
-- **Adding rig config fields:** When adding a field to `config.Rig`, also
-  add the corresponding optional field to `RigPatch` and wire the merge
-  into `applyRigPatch` so layered configs (fragments, patches) can
-  override it. No field-sync test exists for Rig today; the patch path
-  must be checked manually.
+- **Non-interactive shell:** `cp`, `mv`, and `rm` may be aliased to `-i` and
+  hang an agent; use `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Use
+  `-o BatchMode=yes` for `ssh`/`scp`, `-y` for `apt-get`, and
+  `HOMEBREW_NO_AUTO_UPDATE=1` for `brew`.
 
-- `TESTING.md` — testing philosophy, tier boundaries, and sharded local
-  runners. Read before writing any test. For broad local sweeps, prefer the
-  documented shard targets (`make test-fast-parallel`,
-  `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
-  `make test-local-full-parallel`) over raw `go test`.
+## Build and test
 
-## Build Cache Conventions
+**Bazel is the build and test system; `bazel test` is what CI gates on**
+(`.github/workflows/bazel.yml`). Plain `go test` is a quick inner-loop
+convenience only: it skips nogo lint/vet, formatting, generated-artifact
+and policy targets, and a green `go test` is not evidence a change passes CI.
 
-**Hard ban: never run `go clean -cache`** in any script, hook, or agent session.
+| Tier | Command (`make` alias) |
+|---|---|
+| Unit + nogo + format + generated + policy | `bazel test //...` (`make test`) |
+| One package while iterating | `bazel test //internal/config:config_test` |
+| Acceptance (Tier A) | `bazel test --config=acceptance //test/acceptance:acceptance_test` (`make test-acceptance`) |
+| Integration-tagged packages (gating) | `bazel test --config=integration //test:integration_packages` |
+| `test/integration` (evidence-only in CI) | `bazel test --config=integration //test/integration:integration_test` |
+| Docs sync | `bazel test //test/docsync:docsync_test` (`make check-docs`) |
 
-Running `go clean -cache` against a shared `GOCACHE` (the default when
-`$GOCACHE` is not overridden) corrupts the fleet-wide build cache for every
-concurrent executor. Each executor that hits a missing cache entry then runs a
-full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
-the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
-~10 cascading cache-miss errors across the executor pool.
-
-**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
-shim already routes the default `GOCACHE` to a shared **on-disk** cache
-(`~/.cache/go-build`) and pins compile/link temp to disk
-(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
-corrupted by a normal build.
-
-**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
-RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
-tool-output capture dir. A bare `mktemp -d` (no `-p` dir) resolves against the
-unset `$TMPDIR`, which defaults to `/tmp` — one cold cache built there is
-2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent
-on the host (incident gm-tkz1r / ga-x9k9b9, 2026-07). The shim deliberately
-does **not** relocate a `GOCACHE` you set explicitly, so an explicit `/tmp` path
-defeats it.
-
-**If you truly need an isolated cold build** (a from-scratch compile without
-`go clean -cache`), put the throwaway cache **on disk** and remove it
-unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
-linker's own scratch also stays off tmpfs:
-
-```bash
-tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
-GOCACHE="$tmp" TMPDIR="$tmp" go build ./cmd/gc/
-```
-
-**Exception:** `go clean -testcache` is explicitly allowed. It clears only the
-test-result cache, not the compiled-object cache, and does not corrupt
-concurrent builds.
+- **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
+  plain `bazel test` executes remotely; never run whole-repo `go test`
+  fan-out on shared hosts. Contributors use `--config=fork-cache` (anonymous
+  read-only cache, local execution of misses); maintainers with an rbe-west
+  client certificate use `--config=remote-exec` (ask your human before
+  adding either to `.bazelrc.local`). Details: TESTING.md
+  "Bazel cache tiers" and `engdocs/bazel-quickstart.md`.
+- **BUILD files.** After changing imports or adding packages or files, run
+  `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
+  fails otherwise. Never commit machine-specific endpoints; they belong in
+  `.bazelrc.local`.
+- **Go-native twins** (`make test-go`, `make check-go`, `make
+  test-acceptance-go`, `make test-integration-go`, `make test-fast-parallel`)
+  exist for offline work and hosts Bazel does not serve (macOS jobs).
+- **Never run `go clean -cache`** — it corrupts shared build caches.
+  `go clean -testcache` is fine. Maintainers on the shared build hosts: read
+  `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
+  or `TMPDIR`.
+- **Git hooks:** `make setup` installs `.githooks` as `core.hooksPath`;
+  `make check-hooks` verifies it. Pre-commit runs nogo on staged packages;
+  pre-push runs `bazel test //...` and says loudly when it falls back to
+  `go test`. Beads' installer can silently take the path over and skip every
+  gate — see "Git hook ownership" in `CONTRIBUTING.md`.
 
 ## Code quality gates
 
 Before considering any task complete:
 
-- Fast unit baseline passes (`make test`, or `make test-fast-parallel` on
-  machines where sharding is useful)
-- Broader process/integration coverage uses the sharded targets documented in
-  `TESTING.md` instead of one monolithic `go test ./...` sweep
-- `go vet ./...` clean
-- `.githooks/pre-commit` is active locally (`git config core.hooksPath`
-  prints `.githooks`) and has run for the staged change
-- `make dashboard-ci` passes for any change touching `internal/api/`,
-  `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `internal/api/dashboardspa/`, or generated dashboard types
-- The dashboard starts locally and serves the app for dashboard/API-schema
-  changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `internal/api/dashboardspa/web` after `make dashboard-ci`
+- `make check` passes (`bazel test //...` plus the shell guards; nogo is
+  lint and vet)
+- Acceptance or integration behavior changed: the matching `--config` tier
+  above passes
+- `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
+  and has run for the staged change
+- `make dashboard-check` passes (the dashboard's Bazel targets: typecheck,
+  Vitest, build, and drift checks, which `bazel test //...` also runs) and the
+  dashboard serves locally (a manual `npm run preview` step) for any change
+  touching the API, the OpenAPI spec, or the dashboard
+  (`internal/api/AGENTS.md`)
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
-
-## Non-Interactive Shell Commands
-
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
-
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
-
-**Use these forms instead:**
-
-```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
-
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
-```
-
-**Other commands that may prompt:**
-
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
-
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
-
-## Beads Issue Tracker
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-- For controller or session reconciler incidents, use `gc trace` and follow `engdocs/contributors/reconciler-debugging.md` for the artifact collection workflow.
-- When a bead needs to pause on a specific actor or condition, only `hold:mayor` and `hold:external` are canonical (set via `bd set-state <id> hold=mayor|external --reason "..."`) — never invent a new ad hoc hold/blocked label. See `engdocs/contributors/hold-label-conventions.md`.
-
-## Session Completion
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-   NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
-   `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
-   a doomed `origin` remote (ga-9wsri). Use `git push` only.
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
-
-## Architecture Best Practices
-
-These apply to all code in this project — frontend and server:
-
-- **TDD (Test-Driven Development)** - write the tests first; the implementation
-  code isn't done until the tests pass.
-- **Consider First Principles** to assess your current architecture against the
-  one you'd use if you started over from scratch.
-- **Leverage Types** using statically typed languages (TypeScript, Rust, etc) so
-  that we can leverage the power of the compiler as guardrails and immediate
-  feedback on our code at build-time instead of waiting until run-time.
-- **DRY (Don't Repeat Yourself)** – eliminate duplicated logic by extracting
-  shared utilities and modules.
-- **Separation of Concerns** – each module should handle one distinct
-  responsibility.
-- **Single Responsibility Principle (SRP)** – every class/module/function/file
-  should have exactly one reason to change.
-- **Clear Abstractions & Contracts** – expose intent through small, stable
-  interfaces and hide implementation details.
-- **Low Coupling, High Cohesion** – keep modules self-contained, minimize
-  cross-dependencies.
-- **Scalability & Statelessness** – design components to scale horizontally and
-  prefer stateless services when possible.
-- **Observability & Testability** – build in logging, metrics, tracing, and
-  ensure components can be unit/integration tested.
-- **KISS (Keep It Simple, Sir)** - keep solutions as simple as possible.
-- **YAGNI (You're Not Gonna Need It)** – avoid speculative complexity or
-  over-engineering.
-- **Don't Swallow Errors** by catching exceptions, silently filling in required
-  but missing values, masking deserialization with nulls or empty lists, or
-  ignoring timeouts when something hangs. All of those are errors (client-side
-  and server-side) and must be tracked in a centralized log so it can be used to
-  improve the app over time. Also, inform the user as appropriate so that they
-  can take necessary action.
-- **No Placeholder Code** - we're building production code here, not toys.
-- **No Comments for Removed Functionality** - the source is not the place to
-  keep history of what's changed; it's the place to implement the current
-  requirements only.
-- **Layered Architecture** - organize code into clear tiers where each layer
-  depends only on the one(s) below it, keeping logic cleanly separated.
-- **Use Non-Nullable Variables** when possible; use nullability only when there
-  is NO other possibility.
-- **Use Async Notifications** when possible over inefficient polling.
-- **Eliminate Race Conditions** that might cause dropped or corrupted data
-- **Write for Maintainability** so that the code is clear and readable and easy
-  to maintain by future developers.
-- **Arrange Project Idiomatically** for the language and framework being used,
-  including recommended lints, static analysis tools, folder structure and
-  gitignore entries.
-- **Keep Serialization/Deserialization At The Edges** to make full use of
-  type-safe objects in the app itself and to centralize error handling for
-  type-system translation. Do NOT allow untyped data with known shapes to flow
-  through the system and subvert the type system.
-- **Prefer Well-Known, High Quality OSS Libraries** instead of hand-rolling your
-  own behavior to get more robust, better maintained and better tested results.
-- **Treat Static Warnings And Info As Errors To Be Fixed**. The whole point of
-  static checking (linting, compilers, etc) is that they surface issues at
-  build-time so that they can be fixed now instead of lead to errors at runtime.
-  Take advantage of that feedback to fix those errors!
-- **Use Centralized Semantic Constant Values** using enums and constants instead
-  of spreading magic numbers throughout the code.

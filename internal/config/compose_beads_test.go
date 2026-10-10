@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -252,5 +253,85 @@ func TestGuardedReleaseParseAndValidate(t *testing.T) {
 	// an out-of-enum value fails load (a typo must never silently mean off).
 	if _, err := Parse([]byte("[beads]\nguarded_release = \"requre\"\n")); err == nil {
 		t.Fatalf("expected an error for an out-of-enum guarded_release value")
+	}
+}
+
+// TestBeadsModesRejectedOnBothLoadPaths pins validateBeadsModes, the single
+// list of [beads] mode fields that both Parse (one layer) and LoadWithIncludes
+// (the composed root) validate: an out-of-enum value in each field must fail
+// both paths with that field's own error.
+func TestBeadsModesRejectedOnBothLoadPaths(t *testing.T) {
+	for _, field := range []string{"conditional_writes", "guarded_release", "native_transport"} {
+		t.Run(field, func(t *testing.T) {
+			layer := "[beads]\n" + field + " = \"requre\"\n"
+			if _, err := Parse([]byte(layer)); err == nil || !strings.Contains(err.Error(), "beads."+field) {
+				t.Fatalf("Parse: err = %v, want the beads.%s validation error", err, field)
+			}
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test\"\n\n" + layer)
+			if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err == nil || !strings.Contains(err.Error(), "beads."+field) {
+				t.Fatalf("LoadWithIncludes: err = %v, want the beads.%s validation error", err, field)
+			}
+		})
+	}
+}
+
+// TestLoadWithIncludesPreservesAllowSchemaBehindMigrateAcrossBeadsFragment is
+// the load-bearing regression for the schema-behind opt-in: an included
+// fragment that defines an unrelated [beads] key must NOT reset the root's
+// explicit allow_schema_behind_migrate, or the city's opt-in is silently off
+// and the behind-schema FAIL tells the operator to set a field they already
+// set.
+func TestLoadWithIncludesPreservesAllowSchemaBehindMigrateAcrossBeadsFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+allow_schema_behind_migrate = true
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+conditional_writes = "auto"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if !cfg.Beads.AllowSchemaBehindMigrateEnabled() {
+		t.Fatalf("AllowSchemaBehindMigrateEnabled = false, want the root opt-in to survive a [beads] fragment")
+	}
+	if got := cfg.Beads.NormalizedConditionalWrites(); got != "auto" {
+		t.Fatalf("NormalizedConditionalWrites = %q, want the fragment's auto", got)
+	}
+}
+
+// TestLoadWithIncludesFragmentOverridesAllowSchemaBehindMigrate is the
+// companion: a fragment that DOES set allow_schema_behind_migrate must win
+// (LWW), so the preservation branch can't drift into "base value always wins."
+func TestLoadWithIncludesFragmentOverridesAllowSchemaBehindMigrate(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+allow_schema_behind_migrate = true
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+allow_schema_behind_migrate = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Beads.AllowSchemaBehindMigrateEnabled() {
+		t.Fatalf("AllowSchemaBehindMigrateEnabled = true, want the fragment's false to win")
 	}
 }

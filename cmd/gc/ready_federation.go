@@ -20,10 +20,8 @@ package main
 //   - Legs, in order: the city store, then the rigs by name ascending, then the
 //     relocated graph store LAST.
 //   - Within a leg: whatever order that leg's own Ready reader emits. That is
-//     canonical (priority, created_at, id) for a caching-wrapped work store, but
-//     NOT for the graph leg — the canonical relocated binding is a
-//     beads.SQLiteStore whose ready SQL orders by (created_at, id) with no
-//     priority term. Per-leg order is deterministic, not canonical.
+//     canonical (priority, created_at, id) for a caching-wrapped work store and
+//     for the canonical relocated binding (beads.SQLiteStore) alike.
 //   - Dedupe: the FIRST leg to return an id wins. The graph leg runs last, so a
 //     bead co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where `gc storage migrate` preserves ids and
@@ -227,7 +225,7 @@ func readyLegLabel(ref storeref.StoreRef) string {
 // already happened by here, so reporting one and discarding the rest would throw
 // away diagnosis already paid for.
 func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Store, error) {
-	stores, failures := openStandaloneRigStores(cfg, cityPath)
+	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
 	if len(failures) == 0 {
 		return stores, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -25,8 +27,10 @@ import (
 // is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
 // transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
 // green PR (maintainer-city incident: 3 attempts burned in one outage). The
-// bound guarantees a gate that can never run (a missing script, a perpetual
-// timeout) still terminates the workflow instead of pending forever. The
+// bound guarantees a gate that launches but never yields a verdict (a
+// perpetual timeout, exit 75 forever) still terminates the workflow instead of
+// pending forever; an unlaunchable script never reaches this budget and is
+// held open on the drift-pending lane instead (see runRalphCheck). The
 // counter is cloned into each next attempt, so this is the ralph loop's total
 // infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
 // outage.
@@ -53,6 +57,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if logicalID == "" {
 		return ControlResult{}, fmt.Errorf("%s: could not resolve logical bead ID", bead.ID)
 	}
+	// The terminal branches below settle the logical bead before closing this
+	// check, so an open check over a closed logical bead is a settle that was
+	// interrupted between those two writes. Finish it without re-running the
+	// gate: the verdict is already durable on the logical bead, and a second
+	// run could disagree with it.
+	logical, err := store.Get(logicalID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
+	}
+	if logical.Status == "closed" {
+		if err := setOutcomeAndClose(store, bead.ID, logical.Metadata[beadmeta.OutcomeMetadataKey]); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing check of settled logical bead %s: %w", bead.ID, logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "logical-settled"}, nil
+	}
 
 	subjectID, err := resolveBlockingSubjectID(store, bead.ID)
 	if err != nil {
@@ -67,10 +86,20 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if err != nil {
 		return ControlResult{}, err
 	}
+	// A gate that ran but could not see its infrastructure (ga-pqlgh: bd/gc
+	// reads blinded by the gate sandbox) exits nonzero and would otherwise be
+	// indistinguishable from a real verdict. Normalize it to GateError so it
+	// takes the attempt-free re-run path below, bounded by the same
+	// maxCheckInfraRetries budget.
+	if reason, blind := convergence.ClassifyInfraBlind(result); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s (reclassified %s -> %s)",
+			bead.ID, attempt, reason, formatGateExitCode(result.ExitCode), result.Outcome, convergence.GateError)
+		result.Outcome = convergence.GateError
+	}
 	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
 		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
 		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
-	if err := persistCheckResult(store, bead.ID, result); err != nil {
+	if err := persistCheckResult(store, bead, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
 
@@ -100,17 +129,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			bead.ID, result.Outcome, infraRetries, attempt)
 	}
 
+	// Every terminal branch below settles the logical bead first and closes
+	// the check last. The open check is what re-drives this function, so a
+	// crash before its close is finished by the next serve cycle (see the
+	// settled-logical guard above); a check closed first would strand the
+	// logical bead open with nothing left to close it.
 	if result.Outcome == convergence.GatePass {
+		settled := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+			settled[beadmeta.OutputJSONMetadataKey] = outputJSON
+		}
+		if err := settleLogicalBead(store, logicalID, settled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: settling passed logical bead: %w", logicalID, err)
+		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed check: %w", bead.ID, err)
-		}
-		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
-			if err := store.SetMetadata(logicalID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
-			}
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
@@ -125,36 +158,30 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	// to gc.max_attempts below. Only an explicit "hard" class terminates here.
 	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
 		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:    retryFailureReason(subject),
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
+			return ControlResult{}, fmt.Errorf("%s: settling hard-failed logical bead: %w", logicalID, err)
 		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed check: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 	}
 
 	if attempt >= maxAttempts {
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey: strconv.Itoa(attempt),
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical failure: %w", logicalID, err)
+			return ControlResult{}, fmt.Errorf("%s: settling failed logical bead: %w", logicalID, err)
 		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed check: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "fail"}, nil
 	}
@@ -206,6 +233,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 	opts.tracef("ralph retry-finalize-done bead=%s next=%d", bead.ID, nextAttempt)
 	return ControlResult{Processed: true, Action: "retry"}, nil
+}
+
+// settleLogicalBead records a control's terminal verdict on its logical bead
+// and closes it. The close is a forced Close, not a status update: the control
+// being processed (a check or retry-eval) still blocks the logical bead (it
+// must stay open until the logical bead is durable), and bd refuses an
+// unforced close of a blocked bead.
+func settleLogicalBead(store beads.Store, logicalID string, metadata map[string]string) error {
+	if err := store.SetMetadataBatch(logicalID, metadata); err != nil {
+		return fmt.Errorf("recording verdict: %w", err)
+	}
+	if err := store.Close(logicalID); err != nil {
+		return fmt.Errorf("closing: %w", err)
+	}
+	return nil
 }
 
 func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opts ProcessOptions) (convergence.GateResult, error) {
@@ -261,6 +303,9 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	// tree even when the script lives in the city tree.
 	trustedAbsRoots := ralphCheckTrustedAbsoluteRoots(cityPath, storePath, opts.FormulaSearchPaths)
 	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
+		trustedAbsRoots = append(trustedAbsRoots, ralphCheckHistoricalFormulaRoots(store, bead, checkPath)...)
+	}
+	if filepath.IsAbs(checkPath) && !pathWithinAny(checkPath, trustedAbsRoots) {
 		return convergence.GateResult{}, fmt.Errorf("%s: absolute gc.check_path %q escapes trusted roots", bead.ID, checkPath)
 	}
 	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
@@ -272,13 +317,31 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// store/city root — exactly the base used when work_dir is empty, so
 		// it introduces no new trusted root and stays subject to
 		// ResolveConditionPath's containment checks. Only on a not-exist miss,
-		// so a check that does exist under the worktree keeps precedence; the
-		// original work_dir error is preserved when the fallback also misses.
-		if fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath); fallbackErr == nil {
+		// so a check that does exist under the worktree keeps precedence. The
+		// original work_dir error is preserved only when the fallback also
+		// misses; any other fallback error (not executable, containment
+		// refusal) describes the copy that would actually run, so it wins.
+		fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath)
+		switch {
+		case fallbackErr == nil:
 			scriptPath, err = fallbackPath, nil
+		case !errors.Is(fallbackErr, fs.ErrNotExist):
+			err = fallbackErr
 		}
 	}
 	if err != nil {
+		if convergence.IsConditionUnlaunchable(err) {
+			// The check cannot be launched: the script is missing, not a regular
+			// file, or not executable. No verdict exists and none will appear by
+			// re-running, so this must neither burn an attempt nor close the step.
+			// Hold the step OPEN on the drift-pending lane (dependents stay
+			// blocked, gc.control_pending_* explains it, control.stalled fires once
+			// after the budget); shipping or chmod-ing the script heals it on the
+			// next sweep (gastownhall/gascity#4239). A removed work_dir heals only
+			// when it is restored: RunCondition runs the check inside it, so a
+			// store-root copy found by the fallback above cannot start.
+			return convergence.GateResult{}, fmt.Errorf("%w: %s: resolving check path: %w (the step stays open until the check script can be launched)", ErrControlDriftPending, bead.ID, err)
+		}
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
 	if filepath.IsAbs(checkPath) && !pathWithinAny(scriptPath, trustedAbsRoots) {
@@ -333,6 +396,109 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	}, timeout, 0)
 	opts.tracef("ralph check-done bead=%s outcome=%s dur=%s", bead.ID, result.Outcome, result.Duration)
 	return result, nil
+}
+
+// ralphCheckHistoricalFormulaRoots preserves the trust decision made when a
+// workflow was materialized from a content-addressed pack cache. A pack pin
+// upgrade changes FormulaSearchPaths immediately, while in-flight controls
+// retain absolute check paths into the previous cache entry. The workflow root
+// records the exact formula source and SHA-256 at materialization time; admit
+// the old entry only when that provenance still matches and the check lives in
+// the same canonical cache entry.
+//
+// Trust granted here is the whole canonical cache entry, not just the formula
+// layer: for the standard <entry>/formulas/x.toml layout,
+// ralphCheckTrustedAbsoluteRoots adds the layer's parent (the entry itself),
+// and the PathWithin(sourceEntry, root) filter below keeps it. That matches
+// what the current-pin path already trusts for a "formulas"-named layer, and
+// the entry is content-addressed — but it is wider than "the layer plus its
+// sibling assets/", so say it out loud.
+//
+// This is deliberately a fallback for paths outside the current roots. It does
+// one small file read and no Git or network work.
+func ralphCheckHistoricalFormulaRoots(store beads.Store, bead beads.Bead, checkPath string) []string {
+	formulaSource, formulaHash := ralphCheckFormulaProvenance(store, bead)
+	if formulaSource == "" || formulaHash == "" || !filepath.IsAbs(formulaSource) {
+		return nil
+	}
+	cacheRoot, err := config.GlobalRepoCacheRoot()
+	if err != nil {
+		return nil
+	}
+	sourceEntry, ok := canonicalRepoCacheEntry(cacheRoot, formulaSource)
+	if !ok {
+		return nil
+	}
+	checkEntry, ok := canonicalRepoCacheEntry(cacheRoot, checkPath)
+	if !ok || !pathutil.SamePath(sourceEntry, checkEntry) {
+		return nil
+	}
+	source, err := os.ReadFile(formulaSource)
+	if err != nil || formula.ContentHash(source) != formulaHash {
+		return nil
+	}
+
+	roots := ralphCheckTrustedAbsoluteRoots("", "", []string{filepath.Dir(formulaSource)})
+	trusted := roots[:0]
+	for _, root := range roots {
+		if pathutil.PathWithin(sourceEntry, root) {
+			trusted = append(trusted, root)
+		}
+	}
+	return trusted
+}
+
+func ralphCheckFormulaProvenance(store beads.Store, bead beads.Bead) (string, string) {
+	formulaSource := strings.TrimSpace(bead.Metadata[beadmeta.FormulaSourceMetadataKey])
+	formulaHash := strings.TrimSpace(bead.Metadata[beadmeta.FormulaHashMetadataKey])
+	if formulaSource != "" && formulaHash != "" {
+		return formulaSource, formulaHash
+	}
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || rootID == bead.ID {
+		return formulaSource, formulaHash
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		return "", ""
+	}
+	if formulaSource == "" {
+		formulaSource = strings.TrimSpace(root.Metadata[beadmeta.FormulaSourceMetadataKey])
+	}
+	if formulaHash == "" {
+		formulaHash = strings.TrimSpace(root.Metadata[beadmeta.FormulaHashMetadataKey])
+	}
+	return formulaSource, formulaHash
+}
+
+func canonicalRepoCacheEntry(cacheRoot, path string) (string, bool) {
+	cacheRoot = pathutil.NormalizePathForCompare(cacheRoot)
+	path = pathutil.NormalizePathForCompare(path)
+	if !pathutil.PathWithin(cacheRoot, path) {
+		return "", false
+	}
+	rel, err := filepath.Rel(cacheRoot, path)
+	if err != nil || rel == "." || pathutil.IsOutsideDir(rel) {
+		return "", false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || !isLowerHexString(parts[0], 64) {
+		return "", false
+	}
+	entry := filepath.Join(cacheRoot, parts[0])
+	return entry, pathutil.PathWithin(entry, path)
+}
+
+func isLowerHexString(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func ralphCheckTrustedAbsoluteRoots(cityPath, storePath string, formulaSearchPaths []string) []string {
@@ -427,20 +593,23 @@ func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
 	return parsed, nil
 }
 
-func persistCheckResult(store beads.Store, beadID string, result convergence.GateResult) error {
-	batch := map[string]string{
-		beadmeta.OutcomeMetadataKey:    result.Outcome,
-		beadmeta.StdoutMetadataKey:     result.Stdout,
-		beadmeta.StderrMetadataKey:     result.Stderr,
-		beadmeta.DurationMsMetadataKey: strconv.FormatInt(result.Duration.Milliseconds(), 10),
-		beadmeta.TruncatedMetadataKey:  strconv.FormatBool(result.Truncated),
-	}
+// persistCheckResult records a launched check's result on its kind=check bead.
+// A launched check also proves any drift-pending wait (an unlaunchable script)
+// has healed, so the batch is seeded with controlCompletionMetadata, which
+// blanks whichever gc.control_pending_* keys the bead carries. That rides the
+// write every launched run already makes, so every later close is clean.
+func persistCheckResult(store beads.Store, bead beads.Bead, result convergence.GateResult) error {
+	batch := controlCompletionMetadata(bead, result.Outcome)
+	batch[beadmeta.StdoutMetadataKey] = result.Stdout
+	batch[beadmeta.StderrMetadataKey] = result.Stderr
+	batch[beadmeta.DurationMsMetadataKey] = strconv.FormatInt(result.Duration.Milliseconds(), 10)
+	batch[beadmeta.TruncatedMetadataKey] = strconv.FormatBool(result.Truncated)
 	if result.ExitCode != nil {
 		batch[beadmeta.ExitCodeMetadataKey] = strconv.Itoa(*result.ExitCode)
 	} else {
 		batch[beadmeta.ExitCodeMetadataKey] = ""
 	}
-	return store.SetMetadataBatch(beadID, batch)
+	return store.SetMetadataBatch(bead.ID, batch)
 }
 
 func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, nextAttempt int, opts ProcessOptions) (map[string]string, error) {
@@ -792,44 +961,65 @@ func buildRalphRetryGraphNode(old beads.Bead, logicalID, oldScopeRef, newScopeRe
 // stampRalphRetryIteration advances the iteration/attempt counters on a bead
 // cloned to form the next Ralph outer iteration, reproducing the contract the
 // mint paths establish (internal/formula/ralph.go and
-// dispatch.buildAttemptRecipe). gc.iteration is the outer loop counter and
-// always advances to nextAttempt. gc.attempt advances too on a loop-level bead
-// (the scope/subject or the check — the beads that ARE the loop), but a nested
-// body member instead resets to its own local step counter (see
-// ralphRetryMemberAttempt) so a retry nested in the body is not born exhausted.
+// dispatch.buildAttemptRecipe). gc.iteration and gc.attempt both advance to
+// nextAttempt on every cloned bead: gc.attempt names the iteration on the loop
+// itself and on every body member, which is what pack gates join on. A retry
+// attempt nested in the body keeps its own counter in gc.retry_attempt instead
+// (see ralphRetryMemberRetryAttempt), so it is not born exhausted.
 //
-// Loop-level vs member is read from the bead: a body member lives inside the
-// scope and carries gc.scope_ref, while the scope subject, the simple-ralph
-// iteration bead, and the check do not. Callers pass the ORIGINAL bead so the
-// classification is not affected by rewrites already applied to the clone's meta.
+// Callers pass the ORIGINAL bead so the classification is not affected by
+// rewrites already applied to the clone's meta.
 func stampRalphRetryIteration(meta map[string]string, old beads.Bead, nextAttempt int) {
 	meta[beadmeta.IterationMetadataKey] = strconv.Itoa(nextAttempt)
+	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
 	if strings.TrimSpace(old.Metadata[beadmeta.ScopeRefMetadataKey]) == "" {
-		meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(nextAttempt)
+		delete(meta, beadmeta.RetryAttemptMetadataKey)
 		return
 	}
-	meta[beadmeta.AttemptMetadataKey] = ralphRetryMemberAttempt(old, nextAttempt)
+	if retryAttempt := ralphRetryMemberRetryAttempt(old); retryAttempt != "" {
+		meta[beadmeta.RetryAttemptMetadataKey] = retryAttempt
+		return
+	}
+	delete(meta, beadmeta.RetryAttemptMetadataKey)
 }
 
-// ralphRetryMemberAttempt derives the gc.attempt a cloned Ralph body member
-// carries in the next outer iteration, matching the runtime mint
-// (dispatch.buildAttemptRecipe -> formula.RalphBodyChildAttempt): a retry or
-// nested-ralph control resets its own counter to 1; an already-materialized
-// attempt.N run keeps the attempt its ref names; every other (plain) member
-// inherits the outer iteration index. Classification is structural because at
-// iteration 1 every member's gc.attempt reads "1" and cannot be told apart by
-// value alone. (A nested ralph SCOPE member is not produced by any current
-// formula and is treated as a plain child here; if one is ever introduced it
-// would want the "1" reset like its control, tracked with the retry/ralph case.)
-func ralphRetryMemberAttempt(old beads.Bead, nextAttempt int) string {
-	switch strings.TrimSpace(old.Metadata[beadmeta.KindMetadataKey]) {
-	case beadmeta.KindRetry, beadmeta.KindRalph:
-		return "1"
+// ralphRetryMemberRetryAttempt derives the gc.retry_attempt a cloned Ralph body
+// member carries in the next outer iteration, matching the runtime mint
+// (dispatch.buildAttemptRecipe -> formula.RalphBodyChildRetryAttempt): an
+// already-materialized attempt.N run keeps the retry number its ref names; a
+// control or plain member has no retry counter of its own. Classification is
+// structural because a pre-key bead's gc.attempt cannot be told apart by value.
+func ralphRetryMemberRetryAttempt(old beads.Bead) string {
+	if !ralphRetryMemberIsFrozenAttempt(old) {
+		return ""
 	}
-	if own := strings.TrimSpace(old.Metadata[beadmeta.AttemptMetadataKey]); own != "" && ralphRetryMemberIsFrozenAttempt(old) {
+	if own := strings.TrimSpace(old.Metadata[beadmeta.RetryAttemptMetadataKey]); own != "" {
 		return own
 	}
-	return strconv.Itoa(nextAttempt)
+	for _, ref := range []string{old.Metadata[beadmeta.StepRefMetadataKey], old.Ref} {
+		if n := trailingAttemptSegment(ref); n != "" {
+			return n
+		}
+	}
+	// The ref names an attempt segment that is not its tail (a bead nested
+	// under an attempt, such as a scope-check), so it is not a retry attempt
+	// root. Its gc.attempt is not a retry counter either: a v1.4.2 bead there
+	// carries the inflated iteration+retry-1 value.
+	return ""
+}
+
+// trailingAttemptSegment returns n when ref ends in ".attempt.<n>", else "".
+func trailingAttemptSegment(ref string) string {
+	const marker = ".attempt."
+	idx := strings.LastIndex(ref, marker)
+	if idx < 0 {
+		return ""
+	}
+	n := ref[idx+len(marker):]
+	if _, err := strconv.Atoi(n); err != nil {
+		return ""
+	}
+	return n
 }
 
 // ralphRetryMemberIsFrozenAttempt reports whether a Ralph body member is an
@@ -1068,6 +1258,10 @@ func logicalStepRefForAttemptBead(bead beads.Bead) string {
 		normalized = strings.TrimSuffix(normalized, "-scope-check")
 	}
 	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
+	if kind == beadmeta.KindRetryRun || kind == beadmeta.KindRetryEval {
+		// A v1 retry bead's ref suffix names its retry counter, not an iteration.
+		attempt = beadmeta.RetryAttemptValue(bead.Metadata)
+	}
 	if trimmed, ok := trimAttemptStepRefForKind(normalized, kind, attempt); ok {
 		return trimmed
 	}
@@ -1195,6 +1389,11 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.DurationMsMetadataKey,
 		beadmeta.TruncatedMetadataKey,
 		beadmeta.TerminalMetadataKey,
+		// A retry attempt clones the previous attempt's metadata, so it must not
+		// inherit the projector's per-step step_defined marker: a born-marked
+		// clone would be skipped by EmitCurrent and never get its own
+		// step_defined (ga-rd8le). Every clone path here strips it via this list.
+		beadmeta.StepDefinedEmittedMetadataKey,
 		beadmeta.FailedAttemptMetadataKey,
 		beadmeta.FanoutStateMetadataKey,
 		beadmeta.SpawnedCountMetadataKey,
@@ -1207,6 +1406,13 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.ClosedByAttemptMetadataKey,
 		beadmeta.LastFailureClassMetadataKey,
 		beadmeta.RetrySessionRecycledMetadataKey,
+		// A pending budget and its one-shot stall latch belong to one bead's
+		// life; a clone that inherited them would never escalate its own
+		// pending wait (same rationale as clearControllerSpawnErrorMetadata).
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",

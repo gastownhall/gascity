@@ -196,11 +196,14 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and
 [engdocs/contributors/index.md](engdocs/contributors/index.md) before opening a
 PR.
 
-Useful commands:
+Gas City builds and tests with Bazel; CI gates on `bazel test`. Useful
+commands (each runs the matching `bazel test` tier; see
+[engdocs/bazel-quickstart.md](engdocs/bazel-quickstart.md)):
 
 - `make setup`
-- `make check`
+- `make check` (`bazel test //...` plus shell guards)
 - `make check-docs`
+- `make test-acceptance`
 - `make test-integration`
 
 ## License

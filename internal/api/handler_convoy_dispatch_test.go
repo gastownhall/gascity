@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func TestWorkflowGetSelectsScopedRootMatch(t *testing.T) {
@@ -682,6 +683,143 @@ func TestWorkflowDeleteResolvesLogicalWorkflowID(t *testing.T) {
 	if _, err := memStore.Get(child.ID); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("Get(child) err = %v, want ErrNotFound", err)
 	}
+}
+
+// stampEveryIDStore batches CloseAll the way bd and the native Dolt store do: the
+// metadata lands on every id it is handed, closed or not, because the batch
+// makes no per-row status read. MemStore reads each status first and skips a
+// closed row, so a delete tested against MemStore alone cannot tell a handler
+// that keeps its finished steps out of the batch from one that hands them over.
+type stampEveryIDStore struct {
+	beads.Store
+}
+
+func (s stampEveryIDStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if err := s.SetMetadataBatch(id, metadata); err != nil {
+			return 0, err
+		}
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// seedGraphWorkflowWithAFinishedStep seeds a graph workflow part way through
+// its run: the root and one step are open, and one step already passed.
+func seedGraphWorkflowWithAFinishedStep(t *testing.T, store beads.Store, workflowID string) (root, finished, pending beads.Bead) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{
+		Title: "Running workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      workflowID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	finished, err = store.Create(beads.Bead{
+		Title: "Passed step",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.outcome":      "pass",
+			"close_reason":    "the step's own reason",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(finished): %v", err)
+	}
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("Close(finished): %v", err)
+	}
+	pending, err = store.Create(beads.Bead{
+		Title:    "Pending step",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(pending): %v", err)
+	}
+	return root, finished, pending
+}
+
+// assertGraphWorkflowDeleteOutcomes checks that the delete closed the open
+// beads as skipped and left the passed step's own outcome and reason alone.
+func assertGraphWorkflowDeleteOutcomes(t *testing.T, store beads.Store, root, finished, pending beads.Bead) {
+	t.Helper()
+	want := map[string][2]string{
+		root.ID:     {"skipped", sourceworkflow.WorkflowSkippedCloseReason},
+		finished.ID: {"pass", "the step's own reason"},
+		pending.ID:  {"skipped", sourceworkflow.WorkflowSkippedCloseReason},
+	}
+	for id, w := range want {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("%s is %s, want closed", id, got.Status)
+		}
+		if got.Metadata["gc.outcome"] != w[0] || got.Metadata["close_reason"] != w[1] {
+			t.Errorf("%s carries outcome %q and close_reason %q, want %q and %q",
+				id, got.Metadata["gc.outcome"], got.Metadata["close_reason"], w[0], w[1])
+		}
+	}
+}
+
+// TestWorkflowDeleteLeavesAFinishedStepsOutcomeAlone pins that DELETE
+// /workflow/{id} closes what is still open and nothing else. The tree is listed
+// with IncludeClosed, so it carries the steps that already finished, and a store
+// that stamps every id it is handed would rewrite a passed step to skipped.
+func TestWorkflowDeleteLeavesAFinishedStepsOutcomeAlone(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	store := stampEveryIDStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = store
+	root, finished, pending := seedGraphWorkflowWithAFinishedStep(t, store, "wf_finished_step")
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/workflow/wf_finished_step?scope_kind=city&scope_ref=test-city"), nil)
+	req.Header.Set("X-GC-Request", "test")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Closed int `json:"closed"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode(response): %v", err)
+	}
+	if resp.Closed != 2 {
+		t.Errorf("closed = %d, want the 2 beads that were still open", resp.Closed)
+	}
+	assertGraphWorkflowDeleteOutcomes(t, store, root, finished, pending)
+}
+
+// TestConvoyDeleteOfAGraphWorkflowLeavesAFinishedStepsOutcomeAlone is the
+// DELETE /convoy/{id} twin of TestWorkflowDeleteLeavesAFinishedStepsOutcomeAlone:
+// a graph convoy id delegates to the workflow teardown.
+func TestConvoyDeleteOfAGraphWorkflowLeavesAFinishedStepsOutcomeAlone(t *testing.T) {
+	state := newFakeMutatorState(t)
+	store := stampEveryIDStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	root, finished, pending := seedGraphWorkflowWithAFinishedStep(t, store, "wf_convoy_finished_step")
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodDelete, cityURL(state, "/convoy/")+root.ID, nil)
+	req.Header.Set("X-GC-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	assertGraphWorkflowDeleteOutcomes(t, store, root, finished, pending)
 }
 
 func TestWorkflowGetAllowsMissingScopeFields(t *testing.T) {

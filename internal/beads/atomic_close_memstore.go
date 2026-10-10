@@ -27,7 +27,19 @@ func (s *atomicCloseMemStore) CloseWithMetadataIfMatch(id string, expectedRevisi
 	if s == nil || s.MemStore == nil {
 		return Bead{}, fmt.Errorf("atomic closing bead %q: store is nil", id)
 	}
-	m := s.MemStore
+	return s.closeWithMetadataIfMatch(id, expectedRevision, metadata)
+}
+
+// closeWithMetadataIfMatch is the shared atomic terminal-close body: the
+// metadata merge and the status flip happen under one MemStore lock and mint
+// one revision, so nothing can observe or write between them.
+//
+// It stays unexported on purpose. A plain MemStore does NOT advertise
+// AtomicConditionalCloser (TestAtomicCloseMemStoreIsOptIn), which is what keeps
+// the non-atomic close arm of callers such as session.Store.Close exercisable.
+// Its callers are the opt-in atomicCloseMemStore and FileStore, which runs it
+// inside its flock / reload / save wrapper.
+func (m *MemStore) closeWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.DisableConditionalWrites {
@@ -40,13 +52,18 @@ func (s *atomicCloseMemStore) CloseWithMetadataIfMatch(id string, expectedRevisi
 	if m.beads[i].Revision != expectedRevision {
 		return Bead{}, &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
+	noteSessionKeys(m.beads[i], metadata)
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap, len(metadata))
 	}
 	for key, value := range metadata {
 		m.beads[i].Metadata[key] = value
 	}
+	wasClosed := m.beads[i].Status == "closed"
 	setBeadStatus(&m.beads[i], "closed")
+	if !wasClosed {
+		recordCloseReason(&m.beads[i])
+	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	return cloneBead(m.beads[i]), nil

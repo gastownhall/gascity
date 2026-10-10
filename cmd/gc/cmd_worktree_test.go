@@ -74,6 +74,93 @@ func TestCmdWorktreeEnsureCreatesAndVerifies(t *testing.T) {
 	}
 }
 
+// clearCityEnv forces resolveCity to fail deterministically via the
+// ambient-upward-discovery refusal test binaries hit (main.go's
+// isTestBinary branch), regardless of what the host process inherited.
+func clearCityEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG"} {
+		t.Setenv(k, "")
+	}
+}
+
+func TestCmdWorktreeEnsureAgentFlagAttemptsMaterialization(t *testing.T) {
+	clearCityEnv(t)
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
+	var stdout, stderr bytes.Buffer
+
+	opts := managedWorktreeCmdOpts(repo, root, wt, base)
+	opts.Agent = "gc-test-agent"
+	code := runWorktreeEnsure(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("ensure exit = %d, want 0 even when materialization can't resolve a city; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree not created: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "skill materialization skipped") {
+		t.Errorf("stderr = %q, want evidence that --agent triggered a materialization attempt", stderr.String())
+	}
+}
+
+func TestCmdWorktreeEnsureAgentMaterializesSkillsAndKeepsJSONPure(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	writeMaterializeTestCityFile(t, cityDir, "city.toml", "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+	writeMaterializeTestMayor(t, cityDir, "provider = \"claude\"\nstart_command = \"echo\"\n")
+	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeBuiltinImportsFixture(t, cityDir, "core")
+
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
+	var stdout, stderr bytes.Buffer
+
+	opts := managedWorktreeCmdOpts(repo, root, wt, base)
+	opts.Agent = "mayor"
+	opts.JSON = true
+	code := runWorktreeEnsure(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("ensure exit = %d, stderr: %s", code, stderr.String())
+	}
+	var v map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &v); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\nstdout: %q", err, stdout.String())
+	}
+	link := filepath.Join(wt, ".claude", "skills", "core.gc-work")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat(%s): %v; stderr: %s", link, err, stderr.String())
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+}
+
+func TestCmdWorktreeEnsureNoAgentSkipsMaterialization(t *testing.T) {
+	clearCityEnv(t)
+	repo, base := worktreeTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "wt")
+	var stdout, stderr bytes.Buffer
+
+	opts := managedWorktreeCmdOpts(repo, root, wt, base)
+	code := runWorktreeEnsure(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("ensure exit = %d, stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "skill materialization") {
+		t.Errorf("stderr = %q, omitting --agent must not attempt materialization (regression guard for existing callers)", stderr.String())
+	}
+}
+
 func TestCmdWorktreeVerifyFailsOnMissing(t *testing.T) {
 	repo, _ := worktreeTestRepo(t)
 	root := t.TempDir()

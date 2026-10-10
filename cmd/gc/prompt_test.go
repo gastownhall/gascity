@@ -895,6 +895,7 @@ func TestRenderPromptGastownDogPromptHasRequiredSharedTemplates(t *testing.T) {
 }
 
 func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
+	chdirToRealPackageDir(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)
@@ -958,6 +959,7 @@ const (
 // cities hydrate from is pinned separately by
 // TestClaimProtocolFragmentIsEmbedded in the core package.
 func TestPoolWorkerPromptResolvesClaimProtocolFragment(t *testing.T) {
+	chdirToRealPackageDir(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)
@@ -986,6 +988,7 @@ func TestPoolWorkerPromptResolvesClaimProtocolFragment(t *testing.T) {
 }
 
 func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
+	chdirToRealPackageDir(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("filepath.Abs(repo root): %v", err)

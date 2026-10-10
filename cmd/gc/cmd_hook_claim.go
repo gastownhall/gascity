@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 const hookClaimCommandName = "hook"
@@ -37,11 +39,15 @@ const (
 // refused stale session, a refused non-turn invocation, or a seat whose session
 // row is already draining.
 const (
-	hookClaimReasonNoWork         = "no_work"
-	hookClaimReasonClaimsErrored  = "claims_errored"
-	hookClaimReasonStaleSession   = "stale_session"
-	hookClaimReasonNonTurnContext = "non_turn_context"
-	hookClaimReasonDrainPending   = "drain_pending"
+	hookClaimReasonNoWork                     = "no_work"
+	hookClaimReasonClaimsErrored              = "claims_errored"
+	hookClaimReasonStaleSession               = "stale_session"
+	hookClaimReasonNonTurnContext             = "non_turn_context"
+	hookClaimReasonDrainPending               = "drain_pending"
+	hookClaimReasonMissingSessionRegistration = "missing_session_registration"
+	hookClaimReasonCitySuspended              = "city_suspended"
+	hookClaimReasonAgentSuspended             = "agent_suspended"
+	hookClaimReasonRigSuspended               = "rig_suspended"
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
@@ -79,6 +85,11 @@ var hookClaimMutationTimeout = 10 * time.Second
 // lands before the backstop's first nudge, and a pathological slow read only earns
 // the idle-claim backstop's next idempotent (NDI) re-nudge, never a double claim.
 // GC_HOOK_CLAIM_WINDOW (resolveHookClaimWindow) still overrides this default.
+//
+// The window fences when a claim may START. A claim that starts inside it gets
+// its own reserved hookClaimMutationTimeout budget (claimMutationContext) rather
+// than whatever sliver of the window the read left, so a found bead is always
+// claimable; the straddle unwind fires only past window + that reserve.
 var hookClaimWindowDefault = hookWorkQueryTimeout + hookClaimMutationTimeout
 
 // hookClaimNonTurnEnvMarkers are the environment markers that prove a
@@ -156,6 +167,18 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// StrictDrainAck reports that the city runs session_reconciler = "v2",
+	// under which a drain-ack is row-bound and can be refused.
+	StrictDrainAck bool
+	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
+	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
+	// existing assignee. Off by default; wired from config.Agent.
+	AutoReclaimStaleClaims bool
+	// RuntimeActor is this process's BEADS_ACTOR: the identity every later bd
+	// mutation from the worker's shell runs as. Adoption re-stamps a bead held
+	// under a legacy spelling only when this equals Assignee, so the rewrite
+	// always makes the stored assignee match the actor bd will check.
+	RuntimeActor string
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -202,11 +225,19 @@ type hookClaimOps struct {
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
-	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
-	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
-	// repo / detached HEAD) omits the branch key — the session back-reference is
-	// still stamped.
+	// ResolveWorkBranch returns the git branch of the worker's worktree, stamped
+	// onto the bead as gc.work_branch at claim time. It is handed a tree that
+	// already carries the repository it resolved to, so the branch comes from the
+	// repository the store exclusion was decided against. Empty result (no repo /
+	// detached HEAD) omits the branch key — the session back-reference is still
+	// stamped.
 	ResolveWorkBranch hookResolveWorkBranchFunc
+	// ResolveSessionWorkDir returns the checkout the CLAIMING session is running
+	// in, used only as the fallback when the bead records no checkout of its own
+	// (gc-2n4c: a pool-routed bead cannot record one, because no slot is chosen
+	// until this claim). Empty result means nothing is knowable and nothing is
+	// stamped.
+	ResolveSessionWorkDir hookResolveSessionWorkDirFunc
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
@@ -218,7 +249,13 @@ type hookClaimOps struct {
 	StampSessionClaim hookStampSessionClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
-	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
+	ReadWorkMeta func(context.Context, string, []string, string, string) (beads.Bead, error)
+	// ConfirmBlocked re-derives whether a bead is really blocked, from its live
+	// dependencies rather than bd's denormalized is_blocked projection (which
+	// production reads do not carry). Diagnostics-only: the demand/claim
+	// divergence classifier calls it to settle a row it cannot classify from the
+	// bead alone. Nothing on the claim path reads it.
+	ConfirmBlocked           func(context.Context, string, []string, string, string) (bool, error)
 	EmitExecutionStepStarted func(beads.Bead, string, []string, string)
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
@@ -233,6 +270,9 @@ type hookClaimOps struct {
 	EmitClaimWindowExpired func(hookClaimWindowExpiry)
 	EmitClaimReleased      func(hookClaimReleaseRecord)
 	Now                    func() time.Time
+	// Sleep paces the claim-read retry loop (selectStoreWithWorkRetrying). It is
+	// a seam so tests can drive the loop against a fake clock that Now reads.
+	Sleep func(time.Duration)
 	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
 	// is how long after it a claim mutation may still run. Together they are the
 	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
@@ -248,20 +288,43 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// ReclaimStale attempts a scoped stale-lease reclaim (ga-7rj87d FR1/FR2)
+	// for exactly one candidate bead ID. Only consulted when
+	// hookClaimOptions.AutoReclaimStaleClaims is set.
+	ReclaimStale hookClaimReclaimFunc
+	// EmitHookClaimReclaimedStale publishes hook.claim.reclaimed_stale
+	// (ga-7rj87d FR5) after a successful reclaim-then-claim in the same
+	// cycle. Best-effort, like the other Emit* seams.
+	EmitHookClaimReclaimedStale func(beadID, previousOwner, newAssignee string)
+	// RestampAdopted conditionally moves an adopted bead from a legacy
+	// spelling of this session to the claim identity (see
+	// restampHookAdoption). Only a CAS may back it: a lost CAS is how the
+	// caller learns someone else took the bead.
+	RestampAdopted hookClaimRestampFunc
 }
 
 type (
-	hookClaimFunc              func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc   func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc           func(io.Writer) error
-	hookDrainPendingFunc       func(sessionID string) (bool, error)
-	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc  func(dir string) string
-	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookStampSessionClaimFunc  func(sessionID, beadID string) error
-	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
-	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc              func(io.Writer) error
+	hookDrainPendingFunc          func(sessionID string) (bool, error)
+	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc     func(tree hookClaimWorkTree) string
+	hookResolveSessionWorkDirFunc func(sessionID string) string
+	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc     func(sessionID, beadID string) error
+	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
+	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
+	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
+	// the lease and, if so, the previous owner.
+	hookClaimReclaimFunc func(context.Context, string, []string, string) (bool, string, error)
+	// hookClaimRestampFunc (ctx, dir, env, beadID, fromAssignee, toAssignee)
+	// moves an in_progress bead from one exact assignee to another only while
+	// it still carries fromAssignee, reporting whether it now carries
+	// toAssignee.
+	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
 )
 
 type hookClaimJSONResult struct {
@@ -425,14 +488,24 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
-		if certifyHookAdoption(bead, *opts, *ops, dir, stderr) != hookAdoptionRefused {
-			// minted=false: adoption returns work this session already owned.
-			return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
+		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		if verdict != hookAdoptionRefused {
+			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
+				bead = restamped
+				result.Assignee = restamped.Assignee
+				// minted=false: adoption returns work this session already owned.
+				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
+			}
 		}
-		// Refused: fall through to the claim tiers. The seat is healthy — its
-		// cache was not — and neither tier can match this row anyway (ready
-		// requires open, eligible requires an empty assignee), so this ends in
-		// the shared drain unless there is other work to do.
+		// Not adopted — the canonical store named another owner, or the bead is
+		// held under a legacy spelling that could not be moved to this worker's
+		// actor. Fall through to the claim tiers: neither tier can match this
+		// row anyway (ready requires open, eligible requires an empty
+		// assignee), so this ends in the shared drain unless there is other
+		// work to do. Draining is the point — an unclosable bead in hand is the
+		// #5716 loop, while a drain leaves the bead in place, adoptable by the
+		// next attempt once the store recovers, and the operator with the
+		// recovery command restampHookAdoption printed.
 	}
 
 	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
@@ -474,6 +547,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
+	if ops.ResolveSessionWorkDir == nil {
+		ops.ResolveSessionWorkDir = hookResolveSessionWorkDir
+	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
 	}
@@ -485,6 +561,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ReadWorkMeta == nil {
 		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
+	}
+	if ops.ConfirmBlocked == nil {
+		ops.ConfirmBlocked = hookConfirmBeadBlockedWithBdStore
 	}
 	if ops.EmitExecutionStepStarted == nil {
 		ops.EmitExecutionStepStarted = hookEmitExecutionStepStarted
@@ -498,8 +577,20 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitClaimReleased == nil {
 		ops.EmitClaimReleased = hookEmitClaimReleased
 	}
+	if ops.ReclaimStale == nil {
+		ops.ReclaimStale = hookClaimReclaimWithBdStore
+	}
+	if ops.RestampAdopted == nil {
+		ops.RestampAdopted = hookClaimRestampWithBdStore
+	}
+	if ops.EmitHookClaimReclaimedStale == nil {
+		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
+	}
 	if ops.Now == nil {
 		ops.Now = time.Now
+	}
+	if ops.Sleep == nil {
+		ops.Sleep = time.Sleep
 	}
 	// Stamped once per invocation and never refreshed: every federated leg the
 	// claim loop tries shares the window the FIRST one opened, which is what
@@ -515,6 +606,30 @@ func (ops *hookClaimOps) applyDefaults() {
 // claimWindowSpent reports whether this invocation's claim window has elapsed.
 func (ops *hookClaimOps) claimWindowSpent() bool {
 	return ops.invocationAge() > ops.claimWindowOrDefault()
+}
+
+// claimWindowSpentAfter reports whether the claim window will be spent, or
+// closes exactly then, once a further wait of d has elapsed. A retry or backoff
+// loop consults it BEFORE sleeping, so it stops at the window rather than
+// discovering the window has passed only after sleeping through it. The boundary
+// counts as spent: work started at the last instant of the window cannot finish
+// inside it. Like claimWindowSpent, it never fires for a caller that opened no
+// invocation window (zero InvokedAt).
+func (ops *hookClaimOps) claimWindowSpentAfter(d time.Duration) bool {
+	if ops.InvokedAt.IsZero() {
+		return false
+	}
+	return ops.invocationAge()+d >= ops.claimWindowOrDefault()
+}
+
+// sleepOrWallClock is ops.Sleep with its production default applied inline, for
+// the same reason nowOrWallClock exists.
+func (ops *hookClaimOps) sleepOrWallClock(d time.Duration) {
+	if ops.Sleep != nil {
+		ops.Sleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // invocationAge is how long this `gc hook --claim` invocation has been running.
@@ -550,25 +665,33 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 	return resolveHookClaimWindow()
 }
 
-// claimMutationContext bounds a claim-write child by whichever is sooner: the
-// flat mutation timeout, or what remains of the claim window.
+// claimLandingWindowSpent reports whether a claim CAS that just returned landed
+// too late to hand to the invoking turn: past the claim window PLUS the reserved
+// claim budget. The window fences when a claim may START (claimWindowSpent); a
+// claim started inside it owns a separate, full mutation budget
+// (claimMutationContext), so only a CAS that overran that reserved budget is a
+// straddle.
+func (ops *hookClaimOps) claimLandingWindowSpent() bool {
+	return ops.invocationAge() > ops.claimWindowOrDefault()+hookClaimMutationTimeout
+}
+
+// claimMutationContext bounds a claim-write child by the reserved mutation
+// budget, hookClaimMutationTimeout, measured from when the claim tier starts.
 //
-// Bounding by the window is half of F-B. The CAS runs in a bd child with its own
-// 120s ceiling (bdCommandTimeout), so without this a claim started at the last
-// second of the window keeps writing long past the fence — and a claim that
-// lands late is exactly the parked claim the fence exists to prevent.
+// The claim budget is deliberately SEPARATE from the read budget. It used to be
+// min(mutation timeout, what remains of the claim window), which let a slow
+// federated work query spend the claim's time: a read that returned a found
+// bead a few milliseconds before the window closed passed the start fence and
+// then ran the CAS on an already-expired context, so bd failed it with
+// `claiming bead "<id>": timed out after 0s (caller deadline)` and the seat
+// drained claims_errored with its routed work unclaimed (maintainer-city,
+// 2026-09-22/23). A claim that passes the start fence now always gets the full
+// budget, and F-B still holds: the CAS runs in a bd child with its own 120s
+// ceiling, so this bound is what keeps a claim from writing long past the fence,
+// and the straddle unwind (claimLandingWindowSpent) releases one that lands
+// after window + reserve.
 func (ops *hookClaimOps) claimMutationContext() (context.Context, context.CancelFunc) {
-	budget := hookClaimMutationTimeout
-	if remaining := ops.claimWindowOrDefault() - ops.invocationAge(); remaining < budget {
-		budget = remaining
-	}
-	if budget <= 0 {
-		// Already spent. The tier's own fence refuses before using this, but an
-		// already-expired context keeps the contract honest for any path that
-		// does not.
-		budget = time.Nanosecond
-	}
-	return context.WithTimeout(context.Background(), budget)
+	return context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 }
 
 // refuseExpiredHookClaimWindow reports the spent-window refusal and returns the
@@ -603,18 +726,24 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 // A candidate whose claim errors because THIS store cannot resolve the id is
 // skipped rather than fatal (see hookClaimBeadIsElsewhere), so the federated
 // caller can try the store that actually holds it; the returned result's
-// claimsErrored flag carries the skip to the shared drain. Every other claim
-// error still fails closed: ownership is unresolved on a bead this session
-// already owns, and claiming unrelated fresh work would strand it.
+// claimsErrored flag carries the skip to the shared drain. A routed candidate
+// that resolves to a wisp row (hookClaimBeadIsAWisp) and a binding that refuses
+// the claim CAS outright (hookClaimBindingRefusedTheClaim) are skipped for the
+// same reason: both are refused before any write, so nothing is outstanding.
+// Every other claim error still fails closed: ownership is unresolved on a
+// bead this session already owns, and claiming unrelated fresh work would
+// strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
+	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.ID) == "" ||
 			hookClaimCandidateIsMessage(candidate) ||
 			!strings.EqualFold(strings.TrimSpace(candidate.Status), "open") ||
-			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) {
+			!hookClaimHasIdentity(candidate.Assignee, opts.IdentityCandidates) ||
+			hookCandidateBudgetDeferred(candidate, now) {
 			continue
 		}
 		// F-B. Promoting a ready assignment is a status CAS — a mutation — so it
@@ -635,7 +764,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -649,6 +778,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// lands before any write (hookClaimBindingRefusedTheClaim). One
 				// bead no store can claim must not stop this session claiming
 				// the work that other stores can.
+				//
+				// A routed id that resolves to a wisp row carries the same proof
+				// for the same reason (hookClaimBeadIsAWisp): the claimer refused
+				// before any write, so nothing is outstanding, and a wisp is never
+				// claimable through this role no matter how many times it is
+				// retried.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
@@ -682,6 +817,20 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			)
 			return hookClaimResult{terminal: true, code: 1}
 		}
+		// The claim ran as the bead's stored spelling (bd's idempotent --claim
+		// requires it), so a ready bead assigned to a legacy spelling of this
+		// session — e.g. an open bead pinned to the pool session_name before
+		// #6324 — is now in_progress under that spelling, and bd would reject
+		// this worker's close/update actored as BEADS_ACTOR (ga-uk5jj). Move it
+		// to the claim identity exactly as adoption does. A lost CAS means the
+		// bead changed hands after our claim: move on to the next candidate. A
+		// failed one still hands the bead out (this invocation just minted the
+		// claim, and refusing would strand it) with the manual recovery on stderr.
+		restamped, keep := restampHookAdoption(claimed, claimed.Assignee, hookClaimMinted, opts, ops, dir, stderr)
+		if !keep {
+			continue
+		}
+		claimed = restamped
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
@@ -733,9 +882,33 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
 	claimsErrored := false
+	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
-		if !hookCandidateClaimable(candidate, opts.RouteTargets) {
-			continue
+		reclaimedFrom := ""
+		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
+			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
+			// blocker is an existing (possibly stale) assignee gets a scoped,
+			// opt-in reclaim attempt before being skipped. Off by default
+			// (NFR4/NFR5): the flag check short-circuits before
+			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
+			// flag-off path is byte-for-byte unchanged.
+			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
+				continue
+			}
+			if ops.claimWindowSpent() {
+				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			reclaimed, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
+			if err != nil || !reclaimed {
+				// Best-effort optimization, not a claim path of its own: any
+				// non-reclaim outcome leaves the candidate untouched (FR4) and
+				// the hook moves on to the next candidate.
+				continue
+			}
+			reclaimedFrom = previousOwner
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
 		// so it is the one the turn-binding window most directly guards.
@@ -815,6 +988,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
 		}
+		if reclaimedFrom != "" {
+			// ga-7rj87d FR5: only fires once the retried Claim above actually
+			// succeeded -- a reclaim followed by a lost claim race reports nothing,
+			// since the bead was never ours to begin with.
+			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
+		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 
@@ -835,12 +1014,47 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 }
 
 // hookCandidateClaimable reports whether a work-query candidate is eligible for a
-// fresh claim: it has an id, is currently unassigned, and matches one of this
-// session's route targets.
-func hookCandidateClaimable(candidate beads.Bead, routeTargets []string) bool {
+// fresh claim: it has an id, is currently unassigned, matches one of this
+// session's route targets, and is not still within a build-budget deferral
+// window (see hookCandidateBudgetDeferred).
+func hookCandidateClaimable(candidate beads.Bead, routeTargets []string, now time.Time) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&
-		hookClaimMatchesRoute(candidate, routeTargets)
+		hookClaimMatchesRoute(candidate, routeTargets) &&
+		!hookCandidateBudgetDeferred(candidate, now)
+}
+
+// hookCandidateBudgetDeferred reports whether a candidate is still within a
+// build-budget deferral window stamped by the sling boundary (host/bin/gc, in
+// the outer city repo) via gc.budget_deferred_until, an RFC3339 timestamp
+// cleared by deacon-dispatch.sh on successful dispatch. Callers inject now
+// (ops.nowOrWallClock) so behavior stays deterministic under test. Mirrors
+// isFutureDeferredHookCandidate's fail-open shape: an absent or malformed
+// timestamp is never treated as deferred, so a bad stamp cannot wedge a
+// candidate forever.
+func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
+	raw := strings.TrimSpace(candidate.Metadata[beadmeta.BudgetDeferredUntilMetadataKey])
+	if raw == "" {
+		return false
+	}
+	deferAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	return deferAt.After(now)
+}
+
+// hookCandidateReclaimEligible reports whether a route-matched candidate's ONLY
+// claim-eligibility failure is a non-empty (possibly stale) assignee -- the exact
+// shape ga-7rj87d FR1 scopes a stale-lease reclaim attempt to. A candidate still
+// inside its gc.budget_deferred_until window is never reclaim-eligible: the
+// budget gate must hold across both the fresh-claim and reclaim paths, or a
+// stale assignee lets a deferred candidate bypass the daily build budget.
+func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, now time.Time) bool {
+	return strings.TrimSpace(candidate.ID) != "" &&
+		strings.TrimSpace(candidate.Assignee) != "" &&
+		hookClaimMatchesRoute(candidate, routeTargets) &&
+		!hookCandidateBudgetDeferred(candidate, now)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -867,6 +1081,12 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
+	// hookClaimMinted: not an adoption at all — the ready-assignment tier just
+	// won this claim and read it back canonically. Used only to tell
+	// restampHookAdoption that a failed re-stamp must still hand the bead out
+	// (with the recovery warning): refusing would strand a claim this
+	// invocation minted.
+	hookClaimMinted
 )
 
 // certifyHookAdoption checks a bead the work query says this session already
@@ -880,25 +1100,112 @@ const (
 // stamp path already treats that case as "proceed, but emit no durable
 // lifecycle record", and failing closed here would idle every seat behind one
 // store hiccup, the same trade the F-D probe makes for the same reason.
-func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) hookAdoptionVerdict {
+//
+// On hookAdoptionOwned it also returns the canonical assignee spelling, which
+// may differ from the work query's (cached) row.
+func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string) {
 	beadID := strings.TrimSpace(bead.ID)
 	if beadID == "" || ops.ReadWorkMeta == nil {
-		return hookAdoptionUnverified
+		return hookAdoptionUnverified, ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified
+		return hookAdoptionUnverified, ""
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
 			"gc hook --claim: refusing to re-serve %s: the canonical store records assignee=%q, not this session (%s)\n",
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
-		return hookAdoptionRefused
+		return hookAdoptionRefused, ""
 	}
-	return hookAdoptionOwned
+	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+}
+
+// restampHookAdoption rewrites an adopted bead's assignee from a legacy
+// spelling of this session to the claim identity before the worker is handed
+// the bead, and reports whether the bead may be adopted.
+//
+// Adoption matches any spelling in the session's identity set, but bd checks
+// the worker's later close/update against BEADS_ACTOR byte for byte. A bead
+// held under an older spelling (a v1.4.2 hook claim under the pool
+// session_name, a raw `bd update --claim`, an API assign) is adopted and then
+// every mutation of it is rejected with "assignee mismatch": the #5716 loop,
+// reached on upgrade by a same-bead respawn. So the stored spelling is moved to
+// Assignee first, with a compare-and-set naming the spelling we saw.
+//
+// It only rewrites when RuntimeActor == Assignee, i.e. when the rewrite makes
+// the stored assignee equal the actor bd will check. Otherwise (no actor in the
+// environment, or an unaliased manual session whose actor is still its
+// session_name) the bead is adopted untouched, exactly as before.
+//
+// A lost CAS means the bead changed hands between the readback and the write,
+// so it is not adopted.
+//
+// A restamp that FAILED is decided by where the bead lives, not by the error
+// value, because the same beads.ErrConditionalTransferUnsupported reaches here
+// from two places with opposite correct answers:
+//
+//   - errRestampGraphResident, from the class route for a bead resident in the
+//     relocated graph store. Nothing downstream fences that bead's close on the
+//     stored assignee, so the legacy spelling costs the worker nothing and there
+//     is no recovery to prescribe: adopt as-is.
+//   - anything else, which is the work store, whose door bd fences byte for
+//     byte. A failure there — a transient bd error, or a bd too old for
+//     --if-assignee — is if anything STRONGER evidence that the stored spelling
+//     is still wrong, so handing the bead over would hand over the #5716 loop:
+//     refuse adoption and print the manual recovery.
+//
+// The one surviving fail-open on a work-store bead is hookAdoptionUnverified,
+// where the readback could not be made at all: `current` is then the work
+// query's (possibly stale) row rather than a canonical fact, so a failed CAS is
+// evidence of nothing, which is the same trade certifyHookAdoption makes for an
+// unreadable readback.
+func restampHookAdoption(bead beads.Bead, canonicalAssignee string, verdict hookAdoptionVerdict, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
+	target := strings.TrimSpace(opts.Assignee)
+	current := strings.TrimSpace(canonicalAssignee)
+	if current == "" {
+		current = strings.TrimSpace(bead.Assignee)
+	}
+	if target == "" || current == "" || current == target ||
+		strings.TrimSpace(opts.RuntimeActor) != target || ops.RestampAdopted == nil {
+		return bead, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	moved, err := ops.RestampAdopted(ctx, dir, opts.Env, bead.ID, current, target)
+	if err != nil {
+		return bead, adoptAfterFailedRestamp(bead.ID, current, target, verdict, err, stderr)
+	}
+	if !moved {
+		fmt.Fprintf(stderr, "gc hook --claim: not adopting %s: it no longer carries assignee %q (re-stamp to %q lost)\n", bead.ID, current, target) //nolint:errcheck
+		return bead, false
+	}
+	bead.Assignee = target
+	return bead, true
+}
+
+// adoptAfterFailedRestamp reports whether a bead whose re-stamp failed may
+// still be adopted, and says why on stderr. See restampHookAdoption for the
+// rule: the answer is where the bead lives, plus the unverified-readback
+// exception.
+func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptionVerdict, err error, stderr io.Writer) bool {
+	switch {
+	case errors.Is(err, errRestampGraphResident):
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q: it is graph-resident, which has no conditional-transfer primitive and no close-path actor fence, so the spelling does not need to move to %q\n", beadID, current, target) //nolint:errcheck
+		return true
+	case verdict == hookClaimMinted:
+		fmt.Fprintf(stderr, "gc hook --claim: claimed %s under assignee %q; re-stamping it to %q failed: %v (bd will reject this worker's close/update until it moves; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
+		return true
+	case verdict == hookAdoptionUnverified:
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under assignee %q without a canonical readback; re-stamping it to %q failed: %v (if the stored spelling really is %q, bd will reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, current, beadID, current, target) //nolint:errcheck
+		return true
+	default:
+		fmt.Fprintf(stderr, "gc hook --claim: not adopting %s: it is held under legacy assignee %q and re-stamping it to %q failed: %v (bd would reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
+		return false
+	}
 }
 
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {
@@ -945,13 +1252,13 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // turn legitimately made. A held claim that goes undelivered is re-served to the
 // next turn by the existing-assignment tier instead.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
-	// F-B straddle. The CAS was STARTED inside the window and LANDED outside it:
-	// the claim-write child carries its own ceiling, so a claim can commit after
-	// the invoking turn is already gone. That is the same parked claim by another
+	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
+	// window plus its reserved claim budget: the claim-write child carries its own
+	// ceiling, so a claim can commit after the invoking turn is already gone. That is the same parked claim by another
 	// route, so it takes the same unwind as an undelivered one.
-	if minted && ops.claimWindowSpent() {
-		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
-			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
+	if minted && ops.claimLandingWindowSpent() {
+		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s); releasing it rather than parking it",
+			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.invocationAge().Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
@@ -1125,17 +1432,25 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // with no argument binds through the caller's own GC_SESSION_ID/GC_INSTANCE_TOKEN,
 // and an adopted pane whose environment did not survive a restart acks as nobody
 // — which reads downstream as no acknowledgement at all. Naming the id lets the
-// agent run the form that resolves the target from the store instead.
+// agent run the form that resolves the target from the store instead. Under
+// session_reconciler = "v2" the line also names --operator for whoever acks
+// from outside the session, since there a bare-id ack must prove its token.
+// A refused v2 ack is tolerated, as on the stale-session drain.
+//
 // label names the door the refusal came through ("gc hook --claim" or
 // "gc hook"), because both are fenced and an operator reading a pane needs to
 // know which one answered. The JSON record is identical either way: the command
 // is "hook" for both, and a consumer should not have to care.
 func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	operatorHint := ""
+	if opts.StrictDrainAck {
+		operatorHint = " (an operator acking it from outside the session adds --operator)"
+	}
 	_, _ = fmt.Fprintf(stderr,
-		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
-		label, sessionID)
+		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit%s\n",
+		label, sessionID, operatorHint)
 
-	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
@@ -1146,7 +1461,30 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
-	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(opts.drainAckFn()), stdout, stderr)
+}
+
+// drainAckFn returns the injected drain-ack, or the runtime one.
+func (opts hookCommandOptions) drainAckFn() hookDrainAckFunc {
+	if opts.DrainAckFn != nil {
+		return opts.DrainAckFn
+	}
+	return hookRuntimeDrainAck
+}
+
+func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
+	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, opts.drainAckFn(), stdout, stderr)
+}
+
+// writeHookClaimMissingSessionRegistrationDrain emits the terminal result for a
+// runtime that carries pool-membership identity (GC_TEMPLATE) but no durable
+// session bead to verify (GC_SESSION_ID empty) — a managed pool session that
+// never registered, or lost registration, before reaching the claim path. It
+// preserves the same result contract as the stale-session drain but with a
+// distinct reason so a wrapper or dashboard can tell "never registered" apart
+// from "registered, then went stale."
+func writeHookClaimMissingSessionRegistrationDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(opts.drainAckFn()), stdout, stderr)
 }
 
 // writeHookClaimDrain writes the single structured drain result shared by every
@@ -1176,12 +1514,18 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 	// the seat that is trying to leave. The exit code still reports that nothing
 	// was acknowledged; the record still reports that the answer was "drain".
 	// Those are different facts and the consumer needs both.
+	//
+	// A tolerated refusal (errHookDrainAckTolerated) reports the drain without
+	// drain_acknowledged and still exits 0: the seat is leaving either way.
 	ackFailed := false
 	if drainAck {
-		if err := drainAckFn(stderr); err != nil {
+		switch err := drainAckFn(stderr); {
+		case errors.Is(err, errHookDrainAckTolerated):
+			fmt.Fprintf(stderr, "%s: drain-ack refused for this seat; exiting anyway, the controller stops it through its own drain\n", label) //nolint:errcheck
+		case err != nil:
 			fmt.Fprintf(stderr, "%s: drain-ack failed: %v\n", label, err) //nolint:errcheck
 			ackFailed = true
-		} else {
+		default:
 			result.DrainAcknowledged = true
 		}
 	}
@@ -1216,7 +1560,13 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
-			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
+			!hookClaimMatchesRoute(sibling, opts.RouteTargets) ||
+			// Pre-assignment is a decision about what to DO with a bead, and a
+			// canonical dispatch hold (beadmeta.DispatchHoldLabels) means the
+			// sibling's required next actor is, by construction, not this
+			// claimant — mirrors isHeldHookCandidate in cmd_hook.go, the same
+			// check on the JSON-decoded work-query shape (gas-kg6, #6026).
+			beadCarriesDispatchHoldLabel(sibling.Labels) {
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
@@ -1227,11 +1577,38 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	return assigned, nil
 }
 
+// beadCarriesDispatchHoldLabel reports whether labels contains a canonical
+// dispatch hold value (beadmeta.DispatchHoldLabels), compared case-insensitively.
+// Mirrors isHeldHookCandidate's comparison logic (cmd_hook.go) but operates
+// directly on beads.Bead's Labels []string instead of that function's
+// JSON-decoded map[string]any/[]any shape.
+func beadCarriesDispatchHoldLabel(labels []string) bool {
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		for _, hold := range beadmeta.DispatchHoldLabels {
+			if strings.EqualFold(label, hold) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
 	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
 		store.Get)
+}
+
+// hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
+// FR1/FR2) via `bd reclaim --id beadID`, inheriting bd's own default staleness
+// threshold (NFR3) rather than passing --older-than. No assignee: a reclaim only
+// reverts a stale bead to ready, it never assigns -- the caller retries a normal
+// Claim to actually take it.
+func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return store.ReclaimStale(beadID)
 }
 
 // hookClaimThroughStore is the post-mutation classification shared by every
@@ -1361,27 +1738,76 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 // (ApplyGraphControlRouteBinding), even when a control-dispatcher session claims one
 // through this same hook path.
 //
-// gc.claimed_at (OBS-001) is a fourth, differently-shaped entry: unlike the three
-// keys above, it is WRITE-ONCE, stamped only when absent from the bead's current
-// metadata and never touched again. A naive claimed_at = now() would differ from
+// It also carries gc.work_dir, but only for a bead that records no checkout under
+// either key and only from the claiming session's own checkout, which is the one
+// case where the bead has named no workspace for the branch to come from. A bead
+// that records a checkout keeps it, even an unusable one, because overwriting the
+// canonical key while the legacy key disagrees is a state worktreeSpecForBead
+// refuses outright.
+//
+// gc.claimed_at (OBS-001) is differently shaped from all of those: it is
+// WRITE-ONCE, stamped only when absent from the bead's current metadata and never
+// touched again. A naive claimed_at = now() would differ from
 // the stored value on every tick by construction and defeat the compare-and-skip
 // protection the rest of this function relies on (see stampHookClaimIdentity's doc
 // comment on the flood-class risk). It is also unconditional across control and
 // non-control beads alike: a claim timestamp answers "when was this claimed",
 // which is meaningful regardless of session identity, so it is not gated on
 // IsControlKind, GC_SESSION_ID, or a resolvable worktree branch the way the other
-// three keys are.
+// keys are.
 //
 // An empty result means every key is already current, so the caller issues no
 // write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
-	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
-		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
+	sessionID := hookClaimSessionID(opts.Env)
+	isControl := beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]))
+
+	storeHead := hookClaimResolveStoreHead(dir)
+	trees := hookClaimWorkerTrees(bead, storeHead)
+	// A pool-routed bead records no checkout at all, so fall back to the checkout
+	// of the claiming session (gc-2n4c). Only as a fallback: a recorded value is
+	// the declared intent of the bead and the tree the close gate resolves from,
+	// while the session dir is at best the same tree reached another way. The seam
+	// is nil when a test constructs hookClaimOps directly instead of going through
+	// applyDefaults; like every other identity source here, an unavailable one
+	// stamps nothing rather than guessing a path. The store-dir refusal applies
+	// here too: a rig-scoped session can legitimately be running IN the shared rig
+	// checkout, and that tree is no more the workspace of this bead than it was
+	// when the branch was read from it directly.
+	//
+	// The precondition is hookClaimRecordsNoWorkDir, NOT an empty dirs: those are
+	// different states and only the first one is this fallback's case. A bead whose
+	// recorded checkouts were all EXCLUDED as the store also yields an empty dirs,
+	// and stamping the session dir there would write a canonical gc.work_dir while
+	// the legacy key keeps the store path. worktreeSpecForBead
+	// (pool_desired_state.go) treats a canonical/legacy disagreement as a hard
+	// error, so that write would starve the bead of a session rather than help it;
+	// workDirStampWouldClobberEvidence (pool_slot_workdir.go) refuses the same
+	// manufactured conflict on the reconciler side for the same reason. A bead that
+	// recorded the store under both keys is therefore left alone: it is stamped with
+	// no branch, which is the honest outcome, not repointed at a tree it never named.
+	//
+	// The partial-evidence guard applies here for the same ga-ryeij1.1 Decision (b)
+	// reason the branch stamp below carries it: worktreeSpecForBead returns early on
+	// an empty path, so INTRODUCING a path is what first exposes a half-published
+	// bead to its missing-key error. A bead carrying some but not all of the eight
+	// ownership keys would go from spawning unmanaged to being starved outright.
+	if hookClaimRecordsNoWorkDir(bead) && sessionID != "" && !isControl &&
+		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) && ops.ResolveSessionWorkDir != nil {
+		if sessionDir := strings.TrimSpace(ops.ResolveSessionWorkDir(sessionID)); sessionDir != "" {
+			if tree, admitted := storeHead.Admit(sessionDir); admitted {
+				patch[beadmeta.WorkDirMetadataKey] = sessionDir
+				trees = []hookClaimWorkTree{tree}
+			}
+		}
+	}
+	if branch := hookClaimWorkerBranch(trees, ops.ResolveWorkBranch); branch != "" &&
+		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch &&
+		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) {
 		patch[beadmeta.WorkBranchMetadataKey] = branch
 	}
-	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" &&
-		!beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
+	if sessionID != "" && !isControl {
 		if strings.TrimSpace(bead.Metadata[beadmeta.SessionIDMetadataKey]) != sessionID {
 			patch[beadmeta.SessionIDMetadataKey] = sessionID
 		}
@@ -1396,6 +1822,455 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 	return patch
 }
 
+// hookClaimRecordsNoWorkDir reports whether bead names no work checkout at all,
+// under either the canonical or the legacy key. This is deliberately the RAW
+// question, asked before the store-dir exclusion: a bead that recorded the store
+// HAS named a checkout, it just named an unusable one, and the session fallback
+// must not treat the two cases alike. Stamping a canonical value over a legacy
+// one that disagrees manufactures the conflict worktreeSpecForBead fails closed
+// on.
+func hookClaimRecordsNoWorkDir(bead beads.Bead) bool {
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if strings.TrimSpace(bead.Metadata[key]) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// hookClaimProbe is what came back from one git query on the claim path. The
+// distinction that matters is not success versus failure but ANSWERED versus NOT
+// ASKED: git reporting that a directory holds no repository is information the
+// exclusion can act on, while a query that never completed is not, and reading the
+// second as the first admits the shared checkout whenever a probe times out or git
+// cannot be run.
+type hookClaimProbe int
+
+const (
+	// hookClaimProbeAnswered means git ran and returned a value.
+	hookClaimProbeAnswered hookClaimProbe = iota
+	// hookClaimProbeAbsent means git ran and reported there is nothing here, which
+	// for repository discovery means no repository covers the directory.
+	hookClaimProbeAbsent
+	// hookClaimProbeUnavailable means the query did not complete, so nothing was
+	// learned either way.
+	hookClaimProbeUnavailable
+)
+
+// hookClaimStoreHead identifies the repository whose HEAD the store checkout would
+// answer a branch read with. It is resolved once per claim so a candidate list does
+// not re-probe the store for every entry.
+//
+// The branch is read by running git inside a candidate, and git answers that read
+// from the repository it discovers, not from the candidate's own path. So the
+// question the exclusion has to ask is whether the candidate would be answered by
+// the STORE's repository. Every earlier shape of this filter asked something about
+// paths instead, and each one left a different way in: a symlinked, relative or
+// bind-mounted spelling of the store; a ".." folded across a symlink, which Clean
+// resolves wrongly; a plain subdirectory of the checkout, which is a different
+// directory by device and inode and still answers with the checkout's branch; and
+// the checkout's own .git directory, which is not under its worktree at all.
+// hookClaimWorkTree is a checkout a branch can be stamped from, together with the
+// repository that answered for it. The pair travels as one value because the two
+// halves have to be the same observation: the exclusion is decided against RepoDir,
+// and resolving the path a second time at the branch read would let the path be
+// repointed in between and stamp a branch out of a repository the exclusion never
+// saw. RepoDir is empty when nothing identified the tree's repository, and a tree
+// with no repository yields no branch.
+type hookClaimWorkTree struct {
+	Dir     string
+	RepoDir string
+}
+
+type hookClaimStoreHead struct {
+	dir string
+	// repoDir is the absolute git directory the store resolves to, and probe says
+	// whether the query that produced it actually answered.
+	repoDir string
+	probe   hookClaimProbe
+}
+
+// hookClaimResolveStoreHead probes storeDir once and returns its identity.
+func hookClaimResolveStoreHead(storeDir string) hookClaimStoreHead {
+	store := strings.TrimSpace(storeDir)
+	head := hookClaimStoreHead{dir: store, probe: hookClaimProbeAbsent}
+	if store == "" {
+		return head
+	}
+	head.repoDir, head.probe = hookClaimHeadRepoDir(store)
+	return head
+}
+
+// Covers reports whether candidate's branch would be read out of the store's
+// repository, which makes it useless as evidence of where this bead's work happened.
+func (s hookClaimStoreHead) Covers(candidate string) bool {
+	_, admitted := s.Admit(candidate)
+	return !admitted
+}
+
+// Admit resolves candidate to the work tree a branch can be read from, and reports
+// whether it is admissible as evidence of this bead's work. A candidate the store
+// covers is refused; an admitted one carries the repository that answered for it, so
+// the branch read later happens against the identity this decision was made
+// against rather than against a path that is resolved a second time.
+func (s hookClaimStoreHead) Admit(candidate string) (hookClaimWorkTree, bool) {
+	cand := strings.TrimSpace(candidate)
+	if cand == "" {
+		return hookClaimWorkTree{}, false
+	}
+	if s.dir == "" {
+		// No store was named, so there is nothing to exclude. The candidate still
+		// has to be identified, because the branch is read from the repository that
+		// answers for it rather than from the path a second time.
+		repo, probe := hookClaimHeadRepoDir(cand)
+		if probe != hookClaimProbeAnswered {
+			return hookClaimWorkTree{Dir: cand}, true
+		}
+		return hookClaimWorkTree{Dir: cand, RepoDir: repo}, true
+	}
+
+	// Two names that clean alike are the same path, which settles the case without
+	// running anything, and settles it for a recorded path that no longer exists
+	// where git can answer nothing at all. It holds only when neither name folds a
+	// "..": filepath.Clean removes a ".." by folding the element before it away,
+	// which names the same directory only when that element is not a symlink, so
+	// "<root>/link/../shared" cleans to "<root>/shared" while actually naming
+	// whatever sits beside the link's target.
+	foldsDotDot := hookClaimPathFoldsDotDot(cand) || hookClaimPathFoldsDotDot(s.dir)
+	if !foldsDotDot && filepath.Clean(cand) == filepath.Clean(s.dir) {
+		return hookClaimWorkTree{}, false
+	}
+
+	candRepo, candProbe := hookClaimHeadRepoDir(cand)
+	switch candProbe {
+	case hookClaimProbeAbsent:
+		// git ran and reported that no repository covers this candidate. Usually
+		// there is nothing to exclude, because the branch read is the same discovery
+		// and will find none either.
+		//
+		// Usually, not always: git declines some questions with the same exit status
+		// it uses for "no repository here". A shared checkout owned by another user
+		// is refused for dubious ownership, an unreadable config is fatal, and in
+		// both cases the store IS a repository that the claiming session simply
+		// cannot ask about. Refusing a candidate that lies inside the store's own
+		// directory covers that, and it is the one comparison that needs no
+		// cooperation from git. It is a refusal only: a directory that answers for
+		// itself never reaches here, so a nested independent checkout and a linked
+		// worktree keep their own identity.
+		//
+		// Both halves of that refusal have to be positive, because this arm ADMITS on
+		// its own judgement and a stamp it hands out is never checked again. A store
+		// whose own repository was never identified clears nothing: there is no
+		// identity to compare against, and a candidate reached from outside the store
+		// directory can still name the store's repository through a .git file or an
+		// administrative directory, which no comparison of paths can see. And
+		// containment has to be SHOWN, not merely not-disproved, so every name this
+		// cannot decide is refused rather than stamped.
+		if s.probe != hookClaimProbeAnswered && hookClaimDirLooksLikeRepo(s.dir) {
+			return hookClaimWorkTree{}, false
+		}
+		if !hookClaimPathOutside(cand, s.dir) {
+			return hookClaimWorkTree{}, false
+		}
+		return hookClaimWorkTree{Dir: cand}, true
+	case hookClaimProbeUnavailable:
+		// The question could not be asked, so which repository answers for this
+		// candidate is unknown while a later branch read may still succeed. Refuse
+		// it. The premise of this change is that the store's branch is worse than no
+		// branch, and that ordering has to hold when the answer is unknown, not only
+		// when it is known.
+		return hookClaimWorkTree{}, false
+	}
+	if s.probe != hookClaimProbeAnswered {
+		// The store's own repository was never identified, so there is nothing to
+		// compare the candidate against, and the same ordering applies. A store that
+		// genuinely holds no repository hands out no branch, so this costs only the
+		// claim-time convenience stamp; the closer still supplies the branch with its
+		// own metadata.
+		return hookClaimWorkTree{}, false
+	}
+	if hookClaimSameDir(candRepo, s.repoDir) {
+		return hookClaimWorkTree{}, false
+	}
+	return hookClaimWorkTree{Dir: cand, RepoDir: candRepo}, true
+}
+
+// hookClaimDirLooksLikeRepo reports whether dir carries a repository on disk, asked
+// without git. It separates the two readings that share one exit status: a directory
+// that holds no repository at all, and a repository git declined to answer for.
+//
+// Only the second one is dangerous. When the store holds a repository that refused to
+// identify itself -- another user owns it, or its config is unreadable -- then every
+// candidate reaching that same repository refuses identically, whether it sits inside
+// the store directory or outside it behind a .git file or an administrative path, and
+// no comparison of paths separates them. Nothing can be cleared in that state. When
+// the store holds no repository, there is no branch to leak and the path comparison
+// is the whole question.
+//
+// A worktree carries .git as a directory or as a file; a bare repository carries HEAD
+// beside objects/.
+func hookClaimDirLooksLikeRepo(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dir, "objects"))
+	return err == nil && info.IsDir()
+}
+
+// hookClaimPathOutside reports whether child can be SHOWN to name a directory that
+// is neither parent nor inside it. Symlinks are resolved on both sides so an aliased
+// spelling is compared as the directory it reaches; when a name cannot be resolved --
+// a recorded path that no longer exists -- the cleaned names are compared instead.
+//
+// Every reading it cannot establish is false, because the caller admits on true. A
+// relative name is refused because it means nothing without the process directory it
+// was written against, and two names resolved against different directories compare
+// as unrelated, which would read as "outside". A name that folds a ".." is refused
+// because Clean's output does not name the same directory once a symlink precedes
+// the "..", so its comparison would be about a path nobody can reach.
+func hookClaimPathOutside(child, parent string) bool {
+	if !filepath.IsAbs(child) || !filepath.IsAbs(parent) {
+		return false
+	}
+	if hookClaimPathFoldsDotDot(child) || hookClaimPathFoldsDotDot(parent) {
+		return false
+	}
+	resolve := func(path string) string {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return resolved
+		}
+		return filepath.Clean(path)
+	}
+	childPath, parentPath := resolve(child), resolve(parent)
+	if childPath == parentPath {
+		return false
+	}
+	rel, err := filepath.Rel(parentPath, childPath)
+	if err != nil {
+		return false
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// hookClaimHeadRepoDir returns the absolute git directory whose HEAD a branch read
+// inside dir would report, with the probe outcome that produced it.
+//
+// This is hookResolveWorkBranch's own repository discovery asked directly. git
+// climbs to a repository from any depth, resolves symlinked and bind-mounted
+// spellings on the way, gives a LINKED worktree its own directory under the main
+// repository's worktrees/ (so a per-bead worktree cut from the rig checkout keeps
+// its own identity, which this fork depends on), and resolves a .git directory, or
+// anything inside one, to the repository it belongs to. A bare repository resolves
+// to itself and does report a branch, which is why the question is about the
+// repository rather than about the worktree: a worktree comparison misses both the
+// bare case and the .git directory, neither of which is under any worktree.
+func hookClaimHeadRepoDir(dir string) (string, hookClaimProbe) {
+	return hookClaimRunGit(dir, "rev-parse", "--absolute-git-dir")
+}
+
+// hookClaimGitProbeTimeout bounds each git query the claim path runs. Repository
+// discovery reads the filesystem and can block on an unresponsive mount, and no
+// caller deadline covers it: the claim's delivery window is checked before the
+// identity patch is built, and the metadata-write timeout is created after it. It
+// does not bound the claim as a whole, only each query.
+const hookClaimGitProbeTimeout = 5 * time.Second
+
+// hookClaimRunGit runs one git query in dir and returns its single-line output.
+//
+// Both the branch read and the repository probe go through here so the two cannot
+// drift in the environment they run under or the deadline they respect, and they
+// have to agree: the exclusion compares what this answers for a candidate against
+// what it answers for the store. git.SanitizedEnv is the reason the environment
+// matters. git reads GIT_DIR and GIT_WORK_TREE ahead of its own -C argument, a
+// pre-commit hook or nested worktree tooling exports both, and a leaked pair would
+// otherwise point every query in this file at the leaking repository.
+func hookClaimRunGit(dir string, args ...string) (string, hookClaimProbe) {
+	return hookClaimRunGitArgs(append([]string{"-C", dir}, args...))
+}
+
+// hookClaimRunGitDirAt runs one git query against the repository at repoDir by name,
+// from dir. This is how the branch read reaches the repository the exclusion already
+// identified.
+//
+// Both arguments are load-bearing and they do different jobs. --git-dir pins WHICH
+// repository answers, so the read cannot be redirected to a repository the exclusion
+// never saw. -C supplies the directory git runs FROM, because a relative path in the
+// environment -- GIT_CONFIG_GLOBAL is the one that survives the sanitizer -- is
+// resolved against the process directory, and dropping -C silently moved that
+// resolution from the checkout being read to whatever directory the claiming process
+// happened to sit in. git applies -C first and --git-dir second, so the directory
+// never overrides the pin.
+func hookClaimRunGitDirAt(dir, repoDir string, args ...string) (string, hookClaimProbe) {
+	return hookClaimRunGitArgs(append([]string{"-C", dir, "--git-dir=" + repoDir}, args...))
+}
+
+func hookClaimRunGitArgs(args []string) (string, hookClaimProbe) {
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimGitProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = git.SanitizedEnv()
+	out, err := cmd.Output()
+	return hookClaimClassifyGitOutput(ctx.Err(), err, string(out))
+}
+
+// hookClaimClassifyGitOutput decides what one git query actually established, from
+// the deadline state, the run error, and the output.
+//
+// A nonzero EXIT from a git that ran IS an answer for the queries here: "not a git
+// repository" and "cannot change to <dir>" both mean no repository covers the
+// directory. Exiting is the part that makes it an answer, so the status has to be a
+// real exit status: a process killed by a signal also surfaces as an ExitError while
+// having established nothing, and so does one the context killed, which is why the
+// deadline is checked first and on its own. Anything else, a git that could not be
+// started or output that cannot be used, established nothing either.
+func hookClaimClassifyGitOutput(ctxErr, runErr error, out string) (string, hookClaimProbe) {
+	if ctxErr != nil {
+		return "", hookClaimProbeUnavailable
+	}
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) && exitErr.Exited() {
+			return "", hookClaimProbeAbsent
+		}
+		return "", hookClaimProbeUnavailable
+	}
+	value := strings.TrimSpace(out)
+	if value == "" {
+		return "", hookClaimProbeUnavailable
+	}
+	return value, hookClaimProbeAnswered
+}
+
+// hookClaimSameDir reports whether a and b are one directory. Both are git
+// directories here, so both normally exist and the kernel settles it through device
+// and inode; the name comparison is the answer when one has gone away between
+// resolving it and inspecting it.
+func hookClaimSameDir(a, b string) bool {
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	if aErr != nil || bErr != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return os.SameFile(aInfo, bInfo)
+}
+
+// hookClaimPathFoldsDotDot reports whether path contains a ".." element, which is
+// what makes filepath.Clean's output unusable as evidence of identity: Clean
+// removes the element by folding the preceding one away, and the result names the
+// same directory only when that preceding element is not a symlink.
+func hookClaimPathFoldsDotDot(path string) bool {
+	for _, element := range strings.Split(filepath.ToSlash(path), "/") {
+		if element == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// hookClaimWorkerBranch returns the branch of the first tree in trees that resolves
+// to one, or "" when none does. An unusable tree (missing path, no repo, detached
+// HEAD) is skipped like any other, so the order of trees is the authority order.
+func hookClaimWorkerBranch(trees []hookClaimWorkTree, resolve hookResolveWorkBranchFunc) string {
+	if resolve == nil {
+		return ""
+	}
+	for _, tree := range trees {
+		if branch := strings.TrimSpace(resolve(tree)); branch != "" {
+			return branch
+		}
+	}
+	return ""
+}
+
+// hookClaimWorkerTrees returns the checkouts bead records for its own work, most
+// authoritative first: the canonical gc.work_dir, then the legacy work_dir.
+//
+// These are deliberately NOT storeDir, the directory the work query was answered
+// from. Store and workspace are independent inputs a federated claim routinely
+// disagrees on: for a rig-scoped worker the store is the shared rig checkout, a
+// tree the worker never commits to and which sits on whatever branch someone last
+// left it on.
+//
+// The canonical key comes first because it is the one the work-record close gate
+// resolves its repo from (work_record_gate.go), so the branch stamped at claim
+// time and the branch a commit is validated against at close time name the same
+// tree. The legacy key follows because it is not reliably dead data here: this
+// fork's provisioner writes gc.work_dir as the per-bead worktree path it INTENDS,
+// which may never be created, while work_dir still records the tree the worker
+// actually used.
+//
+// store is passed in only to be EXCLUDED, and that exclusion is the whole reason it
+// stays a parameter. It arrives already resolved so the list costs one probe of the
+// store rather than one per candidate. Resolving a branch proves a candidate is
+// WELL-FORMED, not that it is the right tree: skipping candidates that fail to
+// resolve (missing path, detached HEAD, a legacy value written under the old
+// artifact-dir semantics) cannot reject a candidate that is a perfectly good repo
+// which merely IS the store. That case is not hypothetical -- a bead whose
+// gc.work_dir was itself stamped from the shared checkout carries the store path
+// under the canonical key, and without this filter the chain resolves it happily
+// and re-stamps the shared branch. The refusal compares the REPOSITORY a branch
+// read would be answered by rather than the path, so an alias, a plain subdirectory
+// and the checkout's own .git directory are all refused with it, while an
+// independently nested checkout and a linked worktree cut from the same repository,
+// both of which report a branch of their own, are not.
+func hookClaimWorkerTrees(bead beads.Bead, store hookClaimStoreHead) []hookClaimWorkTree {
+	var trees []hookClaimWorkTree
+	for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		candidate := strings.TrimSpace(bead.Metadata[key])
+		if candidate == "" {
+			continue
+		}
+		tree, admitted := store.Admit(candidate)
+		if !admitted {
+			continue
+		}
+		if slices.ContainsFunc(trees, func(have hookClaimWorkTree) bool { return have.Dir == tree.Dir }) {
+			continue
+		}
+		trees = append(trees, tree)
+	}
+	return trees
+}
+
+// worktreeOwnershipEvidenceKeys are the eight worktree-ownership metadata
+// keys worktreeSpecForBead (pool_desired_state.go) requires alongside
+// gc.work_branch before it will treat a bead as a fully managed workspace.
+var worktreeOwnershipEvidenceKeys = []string{
+	beadmeta.WorktreeRepoMetadataKey,
+	beadmeta.WorktreeRootMetadataKey,
+	beadmeta.WorktreeBaseRefMetadataKey,
+	beadmeta.WorktreeBaseSHAMetadataKey,
+	beadmeta.WorktreeCreatorMetadataKey,
+	beadmeta.WorktreeOwnerMetadataKey,
+	beadmeta.WorktreeGenerationMetadataKey,
+	beadmeta.WorktreeLifecycleMetadataKey,
+}
+
+// hookClaimWorktreeEvidenceIsWholeOrAbsent reports whether a bead's other
+// eight worktree-ownership keys are either all present or all absent. A claim
+// must not be the thing that first introduces a partial (1-7 of 8) ownership
+// shape by ambiently stamping gc.work_branch onto a bead that already carries
+// some-but-not-all of the other eight keys -- that half-published shape is
+// exactly what worktreeSpecForBead hard-errors on (ga-ryeij1.1 Decision b).
+// Stamping stays safe at both boundaries: zero of the eight (a legacy or
+// not-yet-published bead) or all eight (evidence already complete; this is
+// just keeping the branch in sync).
+func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
+	present := 0
+	for _, key := range worktreeOwnershipEvidenceKeys {
+		if strings.TrimSpace(bead.Metadata[key]) != "" {
+			present++
+		}
+	}
+	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
+}
+
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
@@ -1403,6 +2278,14 @@ func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, b
 
 func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
 	return hookClaimBdStore(dir, env, assignee).Get(beadID)
+}
+
+// hookConfirmBeadBlockedWithBdStore is the production ConfirmBlocked seam. It
+// binds its bd children to ctx — the divergence classifier runs after the drain
+// is already written, so its dependency walk must never outlive the deadline that
+// caller set.
+func hookConfirmBeadBlockedWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+	return beadHasUnmetPlainBlocksDep(hookClaimBdStoreContext(ctx, dir, env, assignee), beadID)
 }
 
 func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, assignee string) {
@@ -1988,18 +2871,25 @@ func hookClaimSessionName(env []string) string {
 	return strings.TrimSpace(sessionName)
 }
 
-// hookResolveWorkBranch returns the current git branch of dir, or "" when dir
-// is not a worktree or HEAD is detached (no meaningful branch to stamp).
-func hookResolveWorkBranch(dir string) string {
-	if strings.TrimSpace(dir) == "" {
+// hookResolveWorkBranch returns the current git branch of the work tree, or "" when
+// no repository was identified for it or HEAD is detached (no meaningful branch to
+// stamp).
+//
+// It reads HEAD out of the repository the tree already resolved to, by name, rather
+// than discovering a repository from the path again. The exclusion that admitted
+// this tree was decided against that repository; rediscovering it here would be a
+// second answer to the same question, and a path repointed between the two answers
+// would stamp a branch out of a repository nothing checked.
+//
+// It shares one runner with the repository probe, which keeps both queries under one
+// environment and one deadline.
+func hookResolveWorkBranch(tree hookClaimWorkTree) string {
+	repoDir := strings.TrimSpace(tree.RepoDir)
+	if repoDir == "" {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
-	if err != nil {
-		return ""
-	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "HEAD" { // detached HEAD
+	branch, probe := hookClaimRunGitDirAt(tree.Dir, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if probe != hookClaimProbeAnswered || branch == "HEAD" { // unresolvable, or detached
 		return ""
 	}
 	return branch
@@ -2011,6 +2901,13 @@ func hookResolveWorkBranch(dir string) string {
 // city so the release reaches the ledger the claim actually landed in.
 func hookClaimReleaseWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
 	return hookClaimBdStoreContext(ctx, dir, env, assignee).ReleaseIfCurrent(beadID, assignee)
+}
+
+// hookClaimRestampWithBdStore is the unrouted adoption re-stamp: an assignee
+// compare-and-set through the agent's own work-directory bd context, actored
+// as the new assignee.
+func hookClaimRestampWithBdStore(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
+	return hookClaimBdStoreContext(ctx, dir, env, toAssignee).TransferIfCurrent(beadID, fromAssignee, toAssignee)
 }
 
 // hookEmitClaimWindowExpired publishes a best-effort
@@ -2084,6 +2981,30 @@ func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	}
 }
 
+// hookEmitClaimReclaimedStale publishes a best-effort hook.claim.reclaimed_stale
+// event (ga-7rj87d FR5) so a scoped stale-lease recovery is observable to
+// mayor/watchers instead of surfacing only as an ordinary fresh claim.
+func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
+	payload, err := json.Marshal(events.HookClaimReclaimedStalePayload{
+		BeadID:        beadID,
+		PreviousOwner: previousOwner,
+		NewAssignee:   newAssignee,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    events.HookClaimReclaimedStale,
+		Actor:   newAssignee,
+		Subject: beadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
 	store := hookClaimBdStore(dir, env, "")
 	return store.List(beads.ListQuery{
@@ -2102,10 +3023,38 @@ func hookAssignContinuationWithBdStore(_ context.Context, dir string, env []stri
 }
 
 func hookRuntimeDrainAck(stderr io.Writer) error {
-	if code := cmdRuntimeDrainAck(nil, false, io.Discard, stderr); code != 0 {
+	switch cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr) {
+	case 0:
+		return nil
+	case drainAckRefused:
+		return errDrainAckRefused
+	default:
 		return errors.New("runtime drain-ack returned non-zero")
 	}
-	return nil
+}
+
+// errDrainAckRefused is hookRuntimeDrainAck's error for a v2 drain-ack that
+// the session row refused: the incarnation check, which releases nothing, or
+// the row CAS after the held-claim release. Neither writes the row ack or the
+// env ack.
+var errDrainAckRefused = errors.New("runtime drain-ack refused by the session row")
+
+// errHookDrainAckTolerated marks a refused drain-ack the drain may complete
+// without (see tolerateDrainAckRefusal).
+var errHookDrainAckTolerated = errors.New("runtime drain-ack refused; tolerated")
+
+// tolerateDrainAckRefusal wraps the drain-ack of the stale-session,
+// missing-registration and drain-pending drains. Under v2 those are the seats
+// whose self-ack the row cannot prove, the seat is exiting either way, and v2
+// stops it through its own drain, so a refusal must not fail the hook. Any
+// other failure still does.
+func tolerateDrainAckRefusal(fn hookDrainAckFunc) hookDrainAckFunc {
+	return func(stderr io.Writer) error {
+		if err := fn(stderr); !errors.Is(err, errDrainAckRefused) {
+			return err
+		}
+		return errHookDrainAckTolerated
+	}
 }
 
 func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
@@ -2275,13 +3224,32 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 	return agent.UnsanitizeQualifiedNameFromSession(a) == agent.UnsanitizeQualifiedNameFromSession(b)
 }
 
+// workflowRunTargetFallbackEligible reports whether candidate is a
+// KindWorkflow root the gc.run_target fallback may apply to. The fallback
+// exists so a genuinely root-only (#2763-shape) molecule - whose root IS the
+// unit of work, with no compiled children - is claimable via its
+// gc.run_target authoring hint. It must not also resurrect a fully-expanded
+// root: once compile.go gives a graph.v2 root real child steps, it stamps
+// gc.workflow_expanded=true, and that root's only remaining path to
+// dependency-readiness is every real child closing while workflow-finalize
+// has not yet run and closed it (#5900) - a state the fallback must not
+// treat as claimable (WorkflowTopologyKinds document workflow roots as never
+// claimable). A candidate without the stamp predates this fix or was never
+// expanded, so it keeps the original permissive behavior.
+func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
+	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
+	if kind != beadmeta.KindWorkflow {
+		return false
+	}
+	return strings.TrimSpace(candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) != "true"
+}
+
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
 	}
 	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
 	runTarget := strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
-	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	for _, target := range routeTargets {
 		target = strings.TrimSpace(target)
 		if target == "" {
@@ -2290,7 +3258,7 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		if hookRouteIdentitiesEqual(routedTo, target) {
 			return true
 		}
-		if routedTo == "" && kind == beadmeta.KindWorkflow && hookRouteIdentitiesEqual(runTarget, target) {
+		if routedTo == "" && workflowRunTargetFallbackEligible(candidate) && hookRouteIdentitiesEqual(runTarget, target) {
 			return true
 		}
 	}
@@ -2321,7 +3289,7 @@ func hookClaimRoute(candidate beads.Bead) string {
 	if routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		return routedTo
 	}
-	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow {
+	if workflowRunTargetFallbackEligible(candidate) {
 		return strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 	return ""

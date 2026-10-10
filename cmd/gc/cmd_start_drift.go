@@ -68,8 +68,8 @@ type driftCheckResult struct {
 // All twelve flag×outcome combinations from the designer brief
 // (§ "Flag-combination matrix") are pinned by table tests, so
 // behavioral changes here will surface as test diffs.
-func decideDriftAction(localBuildID string, sv SupervisorStatus, packDrift []string, flags driftFlags) driftCheckResult {
-	binaryDrift := DetectBinaryDrift(localBuildID, sv)
+func decideDriftAction(local gcBinaryIdentity, sv SupervisorStatus, packDrift []string, flags driftFlags) driftCheckResult {
+	binaryDrift := detectGCBinaryDrift(local, sv)
 	hasDrift := binaryDrift || len(packDrift) > 0
 	if !hasDrift {
 		return driftCheckResult{ProceedNormally: true}
@@ -89,6 +89,28 @@ func decideDriftAction(localBuildID string, sv SupervisorStatus, packDrift []str
 		res.Restart = true
 	}
 	return res
+}
+
+// detectGCBinaryDrift reports whether the supervisor runs a different gc
+// build than local. Build identities decide when both sides report one.
+// Builds that carry no commit (homebrew-core sets only the version, so
+// both sides report "unknown") fall back to comparing release versions, so
+// an in-place `brew upgrade` is still detected. Callers only reach this for
+// a supervisor that runs the same installation as local: a different
+// installation is refused earlier (checkSupervisorBinaryBeforeRegister).
+func detectGCBinaryDrift(local gcBinaryIdentity, sv SupervisorStatus) bool {
+	if knownGCBuildID(local.BuildID) && knownGCBuildID(sv.BuildID) {
+		return DetectBinaryDrift(local.BuildID, sv)
+	}
+	if knownGCVersion(local.Version) && knownGCVersion(sv.Version) {
+		return normalizeGCVersion(local.Version) != normalizeGCVersion(sv.Version)
+	}
+	return DetectBinaryDrift(local.BuildID, sv)
+}
+
+// localGCBinaryIdentity is the invoking binary's build identity.
+func localGCBinaryIdentity() gcBinaryIdentity {
+	return gcBinaryIdentity{Version: version, BuildID: commit}
 }
 
 // supervisorIdentity is the data printSupervisorIdentity needs to
@@ -146,10 +168,12 @@ func humanizeAge(d time.Duration) string {
 
 // driftReport collects what printDriftReport renders.
 type driftReport struct {
-	BinaryDrift  bool
-	LocalBuildID string
-	SupervisorID string
-	PackDrifted  []string
+	BinaryDrift       bool
+	LocalBuildID      string
+	SupervisorID      string
+	LocalVersion      string
+	SupervisorVersion string
+	PackDrifted       []string
 }
 
 // printDriftReport writes the `Drift detected:` block. Wording is
@@ -165,6 +189,12 @@ func printDriftReport(w io.Writer, r driftReport) {
 		sup := r.SupervisorID
 		if sup == "" {
 			sup = "(unknown)"
+		}
+		if !knownGCBuildID(r.LocalBuildID) || !knownGCBuildID(r.SupervisorID) {
+			// Builds without a commit stamp drift by release version.
+			if knownGCVersion(r.LocalVersion) && knownGCVersion(r.SupervisorVersion) {
+				local, sup = "version "+r.LocalVersion, "version "+r.SupervisorVersion
+			}
 		}
 		fmt.Fprintf(w, "  binary: local=%s supervisor=%s\n", local, sup) //nolint:errcheck // best-effort stderr
 	}
@@ -256,26 +286,30 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		NoAutoRestart:    noAutoRestartMode,
 		KillSwitchActive: !readDaemonAutoRestart(cityPath),
 	}
-	res := decideDriftAction(commit, status, nil, flags)
+	res := decideDriftAction(localGCBinaryIdentity(), status, nil, flags)
 
 	switch {
 	case res.ProceedNormally:
 		return 0, true
 	case res.DryRun:
 		printDriftReport(stdout, driftReport{
-			BinaryDrift:  res.BinaryDrift,
-			LocalBuildID: commit,
-			SupervisorID: status.BuildID,
-			PackDrifted:  res.PackDrift,
+			BinaryDrift:       res.BinaryDrift,
+			LocalBuildID:      commit,
+			SupervisorID:      status.BuildID,
+			LocalVersion:      version,
+			SupervisorVersion: status.Version,
+			PackDrifted:       res.PackDrift,
 		})
 		fmt.Fprintln(stdout, "(would auto-restart; --dry-run)") //nolint:errcheck // best-effort stdout
 		return 0, false
 	case res.Error:
 		printDriftReport(stderr, driftReport{
-			BinaryDrift:  res.BinaryDrift,
-			LocalBuildID: commit,
-			SupervisorID: status.BuildID,
-			PackDrifted:  res.PackDrift,
+			BinaryDrift:       res.BinaryDrift,
+			LocalBuildID:      commit,
+			SupervisorID:      status.BuildID,
+			LocalVersion:      version,
+			SupervisorVersion: status.Version,
+			PackDrifted:       res.PackDrift,
 		})
 		if flags.KillSwitchActive {
 			fmt.Fprintf(stderr, "error: supervisor binary drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with '%s'.\n", supervisorRestartGuidance()) //nolint:errcheck // best-effort stderr
@@ -285,10 +319,12 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		return 1, false
 	case res.Restart:
 		printDriftReport(stdout, driftReport{
-			BinaryDrift:  res.BinaryDrift,
-			LocalBuildID: commit,
-			SupervisorID: status.BuildID,
-			PackDrifted:  res.PackDrift,
+			BinaryDrift:       res.BinaryDrift,
+			LocalBuildID:      commit,
+			SupervisorID:      status.BuildID,
+			LocalVersion:      version,
+			SupervisorVersion: status.Version,
+			PackDrifted:       res.PackDrift,
 		})
 		delegation, delegated, derr := supervisorSystemdDelegation()
 		if derr != nil {
@@ -444,7 +480,7 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 			switch {
 			case verifyPID == oldPID && verifyStatus.BuildID == oldBuildID:
 				lastMsg = fmt.Sprintf("error: supervisor was not replaced by '%s': PID %d still serving build %s; it is not managed by delegated unit %s — stop it with 'gc supervisor stop' (%s unset), or fix the delegation env", d.commandHint("try-restart"), verifyPID, verifyStatus.BuildID, d.Unit, supervisorSystemdUnitEnv)
-			case DetectBinaryDrift(localBuildID, verifyStatus):
+			case detectGCBinaryDrift(gcBinaryIdentity{BuildID: localBuildID, Version: version}, verifyStatus):
 				lastMsg = fmt.Sprintf("error: supervisor restarted by '%s' but still serves drifted build %s (local build %s); unit %s's ExecStart does not launch the updated gc binary — point the unit at the new binary, or fix the delegation env", d.commandHint("try-restart"), verifyStatus.BuildID, localBuildID, d.Unit)
 			default:
 				// Replaced and drift cleared.
@@ -570,9 +606,9 @@ func humanizeReadyDuration(d time.Duration) string {
 }
 
 // spawnDetachedSupervisor starts a backgrounded supervisor process,
-// inheriting the operator's environment and writing logs to the same
-// path doSupervisorStart uses. The child is fully detached so the
-// `gc start` invocation can return without orphaning it.
+// inheriting the operator's environment minus any agent-session identity, and
+// writing logs to the same path doSupervisorStart uses. The child is fully
+// detached so the `gc start` invocation can return without orphaning it.
 func spawnDetachedSupervisor(exe string, argv ...string) error {
 	logPath := supervisorLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -588,7 +624,10 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	child.Stdin = nil
 	child.Stdout = logFile
 	child.Stderr = logFile
-	child.Env = os.Environ()
+	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
+	// to init; inheriting an agent shell's session identity would make it that
+	// session's orphan-sweep target once the session closes (#6316).
+	child.Env = withoutSessionIdentityEnv(os.Environ())
 	disableProductMetricsForChild(child)
 	return child.Start()
 }

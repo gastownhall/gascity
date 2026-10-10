@@ -25,9 +25,24 @@ const (
 	// SessionEventAgentDetected means the provider recognized an agent TUI
 	// running inside the session.
 	SessionEventAgentDetected SessionEventKind = "agent_detected"
-	// SessionEventAgentStatus reports a change of the session agent's
-	// activity status (see SessionEvent.AgentStatus).
-	SessionEventAgentStatus SessionEventKind = "agent_status"
+	// SessionEventAgentIdle means the session's agent reached the state where
+	// it is ready for input. It is a semantic kind, not a relayed provider
+	// status: each provider decides which of its own states is the
+	// idle-equivalent and translates at its boundary, so no provider
+	// vocabulary reaches a generic consumer.
+	SessionEventAgentIdle SessionEventKind = "agent_idle"
+	// SessionEventAgentStateChanged means the provider reported the session's
+	// agent in some state other than the idle-equivalent, including a state the
+	// provider cannot classify or did not name. It is deliberately weaker than
+	// a transition: nothing here compares against a previous state, so a
+	// provider that re-reports an unchanged state, or replays its recent
+	// backlog on resubscribe, produces this kind more than once for one state.
+	// It also does not say WHICH state. The arrival is the information, and a
+	// consumer acts on it by reconciling against live state rather than by
+	// trusting the event to describe one. Providers emit it instead of relaying
+	// their own spelling, so a consumer needing a specific state asks for a
+	// kind for it rather than matching a string.
+	SessionEventAgentStateChanged SessionEventKind = "agent_state_changed"
 )
 
 // SessionEvent is a push notification about one session, delivered by a
@@ -47,10 +62,6 @@ type SessionEvent struct {
 	// with no agent mapping); consumers should treat unattributed lifecycle
 	// events as a hint to reconcile broadly rather than ignore them.
 	Session string
-	// AgentStatus carries the new status for SessionEventAgentStatus events,
-	// in the provider's native vocabulary (herdr: idle | working | blocked |
-	// done | unknown).
-	AgentStatus string
 	// Ref identifies the provider-native object the event came from (e.g. the
 	// herdr pane id). For logging and diagnosis only — not a stable handle.
 	Ref string

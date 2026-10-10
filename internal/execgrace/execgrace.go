@@ -4,14 +4,20 @@
 // It generalizes two patterns that already exist piecemeal in the codebase:
 //
 //   - Graceful cancellation ([Apply]): the command runs in its own process
-//     group and context cancellation interrupts that group first, so shell
+//     group and context cancellation sends that group SIGTERM first, so shell
 //     rollback traps (and any foreground child blocking them) get a chance to
 //     run before cancellation escalates to a forced kill. Without this, Go's
 //     default [os/exec.CommandContext] cancel is Process.Kill — SIGKILL — which
 //     is untrappable: a setup script killed mid-flight can never restore state
-//     it staged aside (the worktree-setup data-loss class). This is the same
-//     protection [internal/runtime/exec]'s interruptThenKill introduced for
-//     adapter scripts, lifted to a reusable home.
+//     it staged aside (the worktree-setup data-loss class).
+//
+//     The cooperative signal is SIGTERM, not SIGINT. SIGINT is the keyboard
+//     interrupt and shells treat it specially: a non-interactive shell
+//     started as a background job inherits SIGINT ignored and cannot trap it
+//     at all, and bash can stop acting on signals entirely when SIGINT lands
+//     during a command substitution. SIGTERM has neither hazard, and it is
+//     the signal docker stop and Kubernetes use for the same TERM-then-KILL
+//     contract.
 //
 //   - Activity-aware deadlines ([Monitor]): a fixed wall-clock timeout cannot
 //     distinguish a hung command from a slow-but-healthy one. A Monitor cancels
@@ -27,6 +33,7 @@ package execgrace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -43,51 +50,118 @@ var ErrIdle = errors.New("command produced no output within the idle timeout")
 // elapses regardless of output. Retrieve it with [context.Cause].
 var ErrCeiling = errors.New("command exceeded the maximum runtime ceiling")
 
-// Apply configures cmd for cooperative cancellation and returns the flag that
-// records whether a cancellation action was delivered.
+// CancelOutcome classifies how a delivered cancellation actually reached the
+// command, distinguishing the clean group signal from the fallback paths.
+type CancelOutcome uint8
+
+const (
+	// CancelNotDelivered is the zero value: cancellation was never invoked,
+	// or the target was already gone by the time it fired.
+	CancelNotDelivered CancelOutcome = iota
+
+	// CancelGroupSignaled means the process group was sent SIGTERM
+	// successfully. The command (and any foreground child) received the
+	// signal; whether it then exits cooperatively or is later force-killed
+	// by os/exec's own WaitDelay escalation happens outside Apply, and does
+	// not change this outcome.
+	CancelGroupSignaled
+
+	// CancelLeaderSignaledOnly means the process group could not be
+	// resolved, so only the process leader was sent SIGTERM directly.
+	CancelLeaderSignaledOnly
+
+	// CancelForceKilled means the SIGTERM itself could not be delivered
+	// (group and leader signaling both failed) and Apply fell back to
+	// killing the process directly rather than leaving it to run out the
+	// WaitDelay clock.
+	CancelForceKilled
+)
+
+// String renders o for diagnostics and test failure messages.
+func (o CancelOutcome) String() string {
+	switch o {
+	case CancelNotDelivered:
+		return "CancelNotDelivered"
+	case CancelGroupSignaled:
+		return "CancelGroupSignaled"
+	case CancelLeaderSignaledOnly:
+		return "CancelLeaderSignaledOnly"
+	case CancelForceKilled:
+		return "CancelForceKilled"
+	default:
+		return fmt.Sprintf("CancelOutcome(%d)", uint8(o))
+	}
+}
+
+// CancelResult reports whether and how [Apply]'s cooperative cancellation was
+// delivered to a command. The zero value correctly reports an undelivered
+// cancellation; callers only ever receive one from Apply.
+type CancelResult struct {
+	delivered atomic.Bool
+	outcome   atomic.Uint32
+}
+
+// Delivered reports whether a cancellation action of any kind was delivered
+// to the command. Callers that need cancellation to win over the command's
+// own exit status (see [internal/runtime/exec]) check this.
+func (r *CancelResult) Delivered() bool { return r.delivered.Load() }
+
+// Outcome reports which cancellation path was taken. It is only meaningful
+// once Delivered reports true.
+func (r *CancelResult) Outcome() CancelOutcome { return CancelOutcome(r.outcome.Load()) }
+
+func (r *CancelResult) record(outcome CancelOutcome) {
+	r.outcome.Store(uint32(outcome))
+	r.delivered.Store(true)
+}
+
+// Apply configures cmd for cooperative cancellation and returns a
+// [CancelResult] that records whether, and how, a cancellation action was
+// delivered.
 //
 // It places the command in its own process group (POSIX; no-op on Windows),
 // replaces the default context-cancel behavior (SIGKILL) with
-// [InterruptThenKill], and raises cmd.WaitDelay to grace when grace is larger
+// [TerminateThenKill], and raises cmd.WaitDelay to grace when grace is larger
 // than the current value. WaitDelay bounds how long Wait allows the
-// interrupted process — its rollback traps included — and any grandchildren
+// terminated process — its rollback traps included — and any grandchildren
 // holding the I/O pipes before Go forcibly terminates them, so grace is
 // effectively the trap budget. A zero grace leaves WaitDelay untouched.
 //
-// The returned flag serves callers that need cancellation to win over the
+// The returned result serves callers that need cancellation to win over the
 // command's own exit status (see [internal/runtime/exec]); callers that only
 // need the graceful signal ordering may ignore it.
-func Apply(cmd *exec.Cmd, grace time.Duration) *atomic.Bool {
+func Apply(cmd *exec.Cmd, grace time.Duration) *CancelResult {
 	setProcessGroup(cmd)
-	accepted := new(atomic.Bool)
-	cmd.Cancel = InterruptThenKill(cmd, accepted)
+	result := new(CancelResult)
+	cmd.Cancel = TerminateThenKill(cmd, result)
 	if grace > cmd.WaitDelay {
 		cmd.WaitDelay = grace
 	}
-	return accepted
+	return result
 }
 
-// InterruptThenKill builds an [os/exec.Cmd.Cancel] that first interrupts the
-// command's process group so a cooperative command — and any foreground child
-// blocking its rollback trap — can roll back before cancellation becomes a
-// forced kill, recording in accepted whether cancellation was delivered so the
-// caller can let it win over the command's own exit status. Platforms without
-// process groups or os.Interrupt (such as Windows) fall back to Kill.
-func InterruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
+// TerminateThenKill builds an [os/exec.Cmd.Cancel] that first sends SIGTERM
+// to the command's process group so a cooperative command — and any
+// foreground child blocking its rollback trap — can roll back before
+// cancellation becomes a forced kill, recording in result whether and how
+// cancellation was delivered so the caller can let it win over the command's
+// own exit status. Platforms without process groups or a catchable
+// termination signal (such as Windows) fall back to Kill.
+func TerminateThenKill(cmd *exec.Cmd, result *CancelResult) func() error {
 	return func() error {
-		err := interruptProcessGroup(cmd)
+		outcome, err := terminateProcessGroup(cmd)
 		if err == nil {
-			accepted.Store(true)
+			result.record(outcome)
 			return nil
 		}
 		if errors.Is(err, os.ErrProcessDone) {
 			return err
 		}
-		err = cmd.Process.Kill()
-		if err == nil {
-			accepted.Store(true)
+		killErr := cmd.Process.Kill()
+		if killErr == nil {
+			result.record(CancelForceKilled)
 		}
-		return err
+		return killErr
 	}
 }
 

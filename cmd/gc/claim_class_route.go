@@ -93,17 +93,18 @@ package main
 //
 // # A binding that cannot claim is a city fact, not a bead fault
 //
-// The CAS the routed claim acquires through is a capability: *beads.SQLiteStore
-// has the two-argument Claim and the other compiled-in binding provider's engine
-// (beadsworkspace over *beads.NativeDoltStore) does not, so the closed contract
-// answers ErrBeadsAdapterCapability rather than emulating it. That is a standing
+// The CAS the routed claim acquires through is a capability: over an engine
+// without the two-argument Claim, the closed contract answers
+// ErrBeadsAdapterCapability rather than emulating it. That is a standing
 // property of the city's storage configuration, so it is refused at the DOOR —
 // newHookClaimClassRoute verifies it once, the way storebinding's
 // NewBeadsNudgeQueue verifies the same capability at construction — and
 // claimHookWork then runs unrouted with one loud line rather than failing every
 // claim of every bead in every store.
 //
-// If a refusal reaches a claim anyway, it is a per-BEAD skip and not a terminal
+// If a refusal reaches a claim anyway (a forwarding wrapper carries the method
+// its leaf lacks, so it passes the door and refuses per bead with
+// beads.ErrClaimUnsupported), it is a per-BEAD skip and not a terminal
 // tick: the escalation only ran because a work store returned not-found, which
 // proves this session owns nothing there and that no mutation is outstanding
 // anywhere (the capability refusal is returned before any write). That is the
@@ -130,6 +131,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // errClaimRouteBindingCannotClaim reports that the relocated coordination-class
@@ -137,6 +139,17 @@ import (
 // it. It is a property of the city's storage configuration rather than of any
 // bead, which is why the caller degrades to unrouted claiming instead of failing.
 var errClaimRouteBindingCannotClaim = errors.New("the relocated coordination-class binding cannot claim")
+
+// errRestampGraphResident reports that an adoption re-stamp was declined because
+// the bead is resident in the relocated graph store, which has no
+// conditional-transfer primitive — and needs none, since no production close
+// path fences a graph-resident bead on its stored assignee.
+//
+// It wraps beads.ErrConditionalTransferUnsupported so a caller that only asks
+// "was a transfer possible?" still sees the same class of answer, while a caller
+// that must decide whether the un-moved spelling is HARMFUL can tell this
+// resident case apart from the work store's identical error.
+var errRestampGraphResident = fmt.Errorf("graph-resident bead: %w", beads.ErrConditionalTransferUnsupported)
 
 // hookClaimClassRoute is the opened coordination-class front door a claim-time
 // write falls back to, plus the per-invocation record of which bead ids the
@@ -161,6 +174,13 @@ type hookClaimClassRoute struct {
 	// takes a beads.Store rather than the closed contract.
 	class beads.Store
 	graph storebinding.GraphStore
+
+	// topology is the residency frame holds() plans over, captured once at
+	// construction. Data, not a path and not a func: a route that re-entered the
+	// funnel per bead could resolve a DIFFERENT handle from the one class and
+	// graph were opened over, and would then prove a bead absent in one engine
+	// while the claim wrote through another.
+	topology storeref.Topology
 
 	resident map[string]bool
 
@@ -199,13 +219,48 @@ func newHookClaimClassRoute(class beads.Store) (*hookClaimClassRoute, error) {
 // newClaimClassRouteOver builds the route value over an already-projected front
 // door, with both per-invocation memos live. It is the one place they are
 // created, so a route can never reach the escalation with a nil map.
+//
+// The topology it derives is PESSIMISTIC: one binding over the given store,
+// serving every infrastructure class, censused by a nil relics func — which
+// storeref.BuildBindings reads as HasLegacyResidents=true for every store,
+// because a caller holding no censused routes is entitled to claim nothing more.
+// That makes probeRetired() false, so a route built here probes on exactly the
+// ids it probed on before this frame existed. Callers that DO hold a census —
+// hookClaimClassRouteForCity, the only production one — overwrite it with the
+// real thing.
+//
+// Deriving it through soleBindingResidency rather than assembling a ClassBinding
+// literal is the point of doing it at all: Prefixes, Classes, Ref and both
+// retirement bits then come from the one production derivation, so a route built
+// from a bare store cannot disagree with a route built from a city about what
+// the binding's namespaces are.
+//
+// class is what the topology's binding leg is, and graph must be the projection
+// OF that same store — newHookClaimClassRoute is what guarantees it. A caller
+// pairing a graph over one store with a topology over another would prove a bead
+// absent in one engine and write through the other, which is the split this
+// route exists to close, one level up.
 func newClaimClassRouteOver(class beads.Store, graph storebinding.GraphStore) *hookClaimClassRoute {
+	bindings, refused := soleBindingResidency(class)
 	return &hookClaimClassRoute{
 		class:    class,
 		graph:    graph,
+		topology: claimRouteTopology(bindings, refused),
 		resident: map[string]bool{},
 		workHeld: map[string]bool{},
 	}
+}
+
+// claimRouteTopology frames the bindings for holds().
+//
+// The work leg is the unprobed residual, which is what makes the plan's answer
+// readable as a yes/no about the BINDING alone: this route's work axis is the
+// federated bd fan-out the caller already ran and found not-found, not a store,
+// and a real work leg here would report those same beads owned by work again.
+// No rig legs, for the reason cliByIDOwner passes none — a claim escalation has
+// never read them, and starting to would change which beads it claims.
+func claimRouteTopology(bindings []storeref.ClassBinding, refused error) storeref.Topology {
+	return assembleResidencyTopology(nil, newUnprobedWorkResidual(), nil, bindings, refused)
 }
 
 // hookClaimRouteVerdict turns one class-route resolution into the claim ops the
@@ -241,12 +296,39 @@ func hookClaimRouteVerdict(route *hookClaimClassRoute, err error, stderr io.Writ
 // answers a question about the WORK store, where only beads.ErrNotFound proves
 // the bead is absent and everything else may be an outstanding mutation; this
 // one answers a question about the BINDING, reached only after a work store
-// already proved this session owns nothing there. The refusal is returned before
-// any write (the adapter's type assertion fails first), so nothing is
-// outstanding anywhere and the bead can be skipped exactly as the work-side
-// not-found is.
+// already proved this session owns nothing there. Both refusals it recognizes
+// are returned before any write, so nothing is outstanding anywhere and the bead
+// can be skipped exactly as the work-side not-found is:
+//
+//   - storebinding.ErrBeadsAdapterCapability: the graph adapter's type
+//     assertion on the binding fails first.
+//   - beads.ErrClaimUnsupported: a forwarding wrapper has the two-argument
+//     Claim, so it passes newHookClaimClassRoute's door check, but the store it
+//     wraps does not, and the wrapper refuses before forwarding.
 func hookClaimBindingRefusedTheClaim(err error) bool {
-	return errors.Is(err, storebinding.ErrBeadsAdapterCapability)
+	return errors.Is(err, storebinding.ErrBeadsAdapterCapability) ||
+		errors.Is(err, beads.ErrClaimUnsupported)
+}
+
+// hookClaimBeadIsAWisp reports whether a routed claim failed because the
+// relocated binding resolved id to a wisp row rather than to a claimable
+// issue.
+//
+// A wisp is not an ownership conflict and not evidence of an outstanding
+// mutation: beads.NativeDoltStore.Claim returns beads.ErrWispNotClaimable (see
+// its doc comment) only for an id the claimer's own contract refused before any
+// write was attempted, which is the same "refused before any write, so nothing
+// is outstanding" shape hookClaimBindingRefusedTheClaim carries for a
+// capability-less binding. Only a native-store binding produces this sentinel;
+// a SQLite- or bd-backed binding never does.
+//
+// The ready tier's claimFirstReadyHookAssignment fails the whole hook invocation
+// on any claim error it does not recognize, so an unrecognized wisp refusal
+// would stop this session over one routed id that no front door will ever be
+// able to claim — the one outcome ErrWispNotClaimable's own doc comment says
+// should instead be "log it once and move on."
+func hookClaimBeadIsAWisp(err error) bool {
+	return errors.Is(err, beads.ErrWispNotClaimable)
 }
 
 // hookClaimClassRouteForCity resolves the claim-time class front door for a
@@ -270,7 +352,18 @@ func hookClaimClassRouteForCity(cityPath string) (*hookClaimClassRoute, error) {
 	if !relocated {
 		return nil, nil
 	}
-	return newHookClaimClassRoute(binding.Store)
+	route, err := newHookClaimClassRoute(binding.Store)
+	if err != nil {
+		return nil, err
+	}
+	// The census-bearing frame, read from the SAME memo cliSoleClassBinding just
+	// took the store out of. That is what makes the probe handle and the write
+	// handle one store by construction rather than by coincidence, and it is why
+	// the topology is not resolved from cityPath later: a second derivation could
+	// open a second engine on the same root.
+	bindings, refused := cliResidencyBindings(cityPath)
+	route.topology = claimRouteTopology(bindings, refused)
+	return route, nil
 }
 
 // knownResident reports whether an earlier probe in THIS invocation already
@@ -285,13 +378,23 @@ func (r *hookClaimClassRoute) knownResident(id string) bool {
 
 // holds probes the binding for id and memoizes the answer.
 //
-// An error is a read that FAILED, never absence. The single exception is the
-// one-shot funnel's standing refusal on a WORK-shaped id: it says this city's
-// storage configuration cannot be served, which is a fact about the city and
-// none about a particular bead, and a refused city still serves work from its
-// work ledger — so the caller's own work-store answer stands. An id only the
-// binding could own (a reserved class prefix) has nowhere else to live, so for
-// that one the refusal is the answer and surfaces.
+// The judgement is the residency resolver's, over the frame captured at
+// construction. It used to be spelled here — an unconditional Get, a not-found
+// arm, a hand-rolled standing-refusal arm — and every clause of it was a
+// restatement of one the by-id door already had. Two consequences follow from
+// the collapse, and both are the point:
+//
+// An error is a read that FAILED, never absence, and the one non-fault is the
+// one-shot funnel's standing refusal on a WORK-shaped id. That is now the
+// resolver's per-leg policy rather than a predicate here: a residence probe for
+// an id no relocated class could own tolerates the refusal, because a refused
+// city still serves work from its work ledger, while the authority leg for an id
+// inside a reserved namespace surfaces it, because there the refusal IS the
+// answer.
+//
+// And a binding the boot census certified relic-free is not probed at all for a
+// work-shaped id. The census is taken to retire exactly this read, and this seam
+// was paying it once per escalated bead while the by-id door had already stopped.
 func (r *hookClaimClassRoute) holds(id string) (bool, error) {
 	id = strings.TrimSpace(id)
 	if r == nil || id == "" {
@@ -300,19 +403,12 @@ func (r *hookClaimClassRoute) holds(id string) (bool, error) {
 	if known, ok := r.resident[id]; ok {
 		return known, nil
 	}
-	_, err := r.graph.Get(id)
-	switch {
-	case err == nil:
-		r.resident[id] = true
-		return true, nil
-	case errors.Is(err, beads.ErrNotFound):
-		r.resident[id] = false
-		return false, nil
-	case isStandingStorageRefusal(err) && !bdIDIsClassReserved(id):
-		return false, nil
-	default:
+	_, resident, err := byIDBindingOwnerForTopology(r.topology, id)
+	if err != nil {
 		return false, fmt.Errorf("reading %q from the relocated class binding: %w", id, err)
 	}
+	r.resident[id] = resident
+	return resident, nil
 }
 
 // routes reports whether a claim-time write for id must run against the binding
@@ -580,6 +676,24 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.graph.ReleaseIfCurrent(beadID, assignee)
 		}
 		return base.Release(ctx, dir, env, beadID, assignee)
+	}
+
+	// An adoption re-stamp of a bead resident in the relocated graph store has
+	// no conditional-transfer primitive there, so it reports unsupported and
+	// the bead is adopted as-is (the pre-re-stamp behavior). Anything else
+	// is the work store's, like the release above.
+	//
+	// The unsupported answer is tagged with errRestampGraphResident, because the
+	// caller's decision turns on WHERE the bead lives rather than on the error:
+	// the identical beads.ErrConditionalTransferUnsupported from the work store
+	// (a bd below the --if-assignee floor) means the opposite — a bead whose
+	// close bd will fence on the spelling that could not be moved — and must
+	// refuse adoption. See restampHookAdoption.
+	ops.RestampAdopted = func(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
+		if route.knownResident(beadID) {
+			return false, errRestampGraphResident
+		}
+		return base.RestampAdopted(ctx, dir, env, beadID, fromAssignee, toAssignee)
 	}
 
 	// The lifecycle-start emission reads the step's workflow root, so it belongs

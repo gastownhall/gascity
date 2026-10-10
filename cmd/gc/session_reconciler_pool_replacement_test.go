@@ -289,6 +289,124 @@ func TestReusablePoolSessionInfo_DrainAckStopPendingNotReusable(t *testing.T) {
 	}
 }
 
+// TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable is the
+// regression guard for the recurring one-shot pool-name-holder outage
+// (EDGE-RECEIPT-asleep-holder): a one_shot pool session that finishes its
+// bounded unit of work exits, and the generic heal path lands it in
+// state=asleep with a freeable reason (idle, idle-timeout, ...) — not a
+// crash, not a deliberate hold. Nothing in the reconciler closes that bead
+// (the "reconciler closes orphaned asleep beads" comment on the caller is
+// aspirational, not implemented), so it sits open forever holding the
+// identity's runtime session_name. Because this function excluded EVERY
+// asleep session from reuse, selectOrPlanPoolSessionBead fell through to a
+// fresh create, which collided with the very name this bead still holds:
+// derivePoolSessionName -> errPoolSessionNameUnavailable, and buildDesiredState
+// refuses to mint ("pool session name unavailable ... session name already
+// exists") on every tick until an operator runs `gc session close` by hand.
+//
+// A one_shot pool's own freeable-asleep exit must be reusable so the ordinary
+// wake path (the same one that already handles this fine for other pool
+// states, per the "Woke session" / outcome=success log lines) retires the
+// exit and remints the identity — matching the reuse this function already
+// grants a closed/swept slot with the pool markers intact.
+func TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable(t *testing.T) {
+	t.Parallel()
+
+	bp := &agentBuildParams{}
+	cfgAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad", Lifecycle: config.AgentLifecycleOneShot}
+	template := "fable-nomad/claude-sonnet-one-shot"
+
+	asleepFreeable := session.Info{
+		ID:                  "session-asleep-freeable",
+		Template:            template,
+		SessionNameMetadata: "fable-nomad--claude-sonnet-one-shot-1-pool",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       "asleep",
+		SleepReason:         "idle",
+	}
+	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepFreeable, nil); !got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=idle) = false; "+
+			"want true — a freeable-asleep one_shot exit must be reusable or it blocks its own "+
+			"identity name forever (session %s)", asleepFreeable.ID)
+	}
+
+	// Control: a deliberately held asleep one_shot session (e.g. quarantine)
+	// must stay excluded — freeable-only, not asleep-blanket.
+	asleepHeld := asleepFreeable
+	asleepHeld.ID = "session-asleep-quarantine"
+	asleepHeld.SleepReason = "quarantine"
+	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepHeld, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=quarantine) = true; " +
+			"want false — a deliberately held sleep must still block reuse")
+	}
+
+	// Control: a persistent (non-one_shot) pool keeps today's behavior — an
+	// asleep session is never reused, even when freeable, so a genuine crash
+	// gets a fresh identity instead of resuming a possibly-corrupt conversation.
+	persistentAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad"}
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, asleepFreeable, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, sleep_reason=idle) = true; " +
+			"want false — the freeable-asleep reuse carve-out is scoped to lifecycle=one_shot")
+	}
+}
+
+// TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReusable
+// is the regression guard for the wake-reuse-orphans-work outage: a one_shot
+// pool session lands asleep with a freeable reason (idle, ...) per the
+// carve-out above, but the identity still has an open/in-progress assigned
+// work bead attached from before the exit (the step never finished). The
+// ordinary wake path (reusablePoolSessionInfo -> true) "reuses" the identity
+// without giving the step a real execution turn: the reconciler logs
+// `session lifecycle: op=start ... outcome=success`, then the reused session
+// drains and lands `orphaned` ~45-55s later with no work done, and the step
+// stays in_progress pinned to the now-dead name — retry control never
+// re-attempts it because the step still looks claimed.
+//
+// A one_shot exit that still holds assigned work is not a clean exit: it must
+// fall through to fresh-identity creation (the pre-6f1ee854b behavior for
+// this case) instead of being reused. This mirrors the assigned-work
+// visibility the caller already provides via bp.assignedWorkBeads (the same
+// slice sessionBeadHasAssignedWorkInfo checks a few lines below the asleep
+// carve-out), not a bypass around it.
+func TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReusable(t *testing.T) {
+	t.Parallel()
+
+	cfgAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad", Lifecycle: config.AgentLifecycleOneShot}
+	template := "fable-nomad/claude-sonnet-one-shot"
+
+	asleepFreeableWithWork := session.Info{
+		ID:                  "session-asleep-freeable-with-work",
+		Template:            template,
+		SessionNameMetadata: "fable-nomad--claude-sonnet-one-shot-2-pool",
+		Alias:               "fable-nomad/claude-sonnet-one-shot-2",
+		PoolManaged:         true,
+		PoolSlot:            "2",
+		MetadataState:       "asleep",
+		SleepReason:         "idle",
+	}
+
+	bp := &agentBuildParams{
+		assignedWorkBeads: []beads.Bead{
+			{
+				// Claimed work is assigned under the session's actor identity
+				// (Alias — GC_ALIAS/BEADS_ACTOR, per session.AssigneeIdentifier),
+				// not necessarily the raw runtime SessionNameMetadata.
+				ID:       "work-in-progress",
+				Status:   "in_progress",
+				Assignee: asleepFreeableWithWork.Alias,
+			},
+		},
+	}
+
+	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepFreeableWithWork, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=idle, open assigned work) = true; "+
+			"want false — an asleep one_shot exit that still holds in-progress assigned work must fall "+
+			"through to fresh-identity creation, not be wake-reused (session %s)",
+			asleepFreeableWithWork.ID)
+	}
+}
+
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {
 	t.Helper()
 	b, err := store.Create(beads.Bead{

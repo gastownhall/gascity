@@ -19,7 +19,7 @@ func TestCodexHooksDriftCheckReportsManagedMissingPreCompact(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
       }]
     }]
   }
@@ -43,13 +43,13 @@ func TestCodexHooksDriftCheckPassesCurrentHooks(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city %s prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city %s prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city %s handoff --auto --hook-format codex \"context cycle\""
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" --city %s handoff --auto --hook-format codex \"context cycle\""
       }]
     }]
   }
@@ -91,7 +91,7 @@ func TestCodexHooksDriftCheckFixUpgradesManagedHooks(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
       }]
     }]
   }
@@ -136,7 +136,7 @@ func TestCodexHooksDriftCheckFixBindsAgentWorkDirToCityRoot(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
       }]
     }]
   }
@@ -152,7 +152,7 @@ func TestCodexHooksDriftCheckFixBindsAgentWorkDirToCityRoot(t *testing.T) {
 		t.Fatalf("read hooks: %v", err)
 	}
 	got := string(data)
-	if !strings.Contains(got, `gc --city `) {
+	if !strings.Contains(got, `\"${GC_BIN:-gc}\" --city `) {
 		t.Fatalf("fixed hooks missing explicit --city binding:\n%s", got)
 	}
 	if !strings.Contains(got, shellquote.Quote(cityDir)) {
@@ -170,13 +170,13 @@ func TestCodexHooksDriftCheckReportsManagedWrongCityBinding(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city /old/city prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city /old/city prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city /old/city handoff --auto --hook-format codex \"context cycle\""
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" --city /old/city handoff --auto --hook-format codex \"context cycle\""
       }]
     }]
   }
@@ -196,13 +196,13 @@ func TestCodexHooksDriftCheckFixRebindsManagedWrongCityBinding(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city /old/city prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city /old/city prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city /old/city handoff --auto --hook-format codex \"context cycle\""
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" --city /old/city handoff --auto --hook-format codex \"context cycle\""
       }]
     }]
   }

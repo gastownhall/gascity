@@ -32,14 +32,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 		closeMetadata := map[string]string{beadmeta.OutcomeMetadataKey: outcome}
 		clearControllerSpawnErrorMetadata(closeMetadata)
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		return ControlResult{Processed: true, Action: "fanout-" + outcome, Skipped: scopeResult.Skipped}, nil
+		return closeScopedControl(store, bead.ID, closeMetadata, "fanout-"+outcome, opts)
 	case "", "spawning":
 		// Continue below. "spawning" means a previous attempt may have created
 		// some or all child fragments before the control bead could persist its
@@ -70,14 +63,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		return ControlResult{}, fmt.Errorf("%s: resolving source step %q: %w", bead.ID, sourceRef, err)
 	}
 	if beadOutcomeFailed(source) {
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing failed fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		return ControlResult{Processed: true, Action: "fanout-fail", Skipped: scopeResult.Skipped}, nil
+		return closeScopedControl(store, bead.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}, "fanout-fail", opts)
 	}
 
 	items, err := resolveFanoutItems(source, bead.Metadata[beadmeta.ForEachMetadataKey])
@@ -85,14 +71,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		return ControlResult{}, fmt.Errorf("%w: %s: resolving items: %w", ErrControlGraphMalformed, bead.ID, err)
 	}
 	if len(items) == 0 {
-		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing empty fanout: %w", bead.ID, err)
-		}
-		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
-		if err != nil {
-			return ControlResult{}, err
-		}
-		return ControlResult{Processed: true, Action: "fanout-empty", Skipped: scopeResult.Skipped}, nil
+		return closeScopedControl(store, bead.ID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}, "fanout-empty", opts)
 	}
 	if len(opts.FormulaSearchPaths) == 0 {
 		return ControlResult{}, fmt.Errorf("%s: missing formula search paths", bead.ID)
@@ -320,7 +299,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		if isAttemptControlKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			target := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRoutedToMetadataKey])
 			if target == "" {
-				target = fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+				target = fanoutFragmentStepTarget(*step, executionRoute, executionRigContext, routeCfg)
 			}
 			if err := applyAttemptControlStepRoute(step, target, routeCfg, store); err != nil {
 				return fmt.Errorf("routing fanout control step %s: %w", step.ID, err)
@@ -330,7 +309,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 		if fanoutFragmentStepHasRoute(*step) {
 			continue
 		}
-		target := fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+		target := fanoutFragmentStepTarget(*step, executionRoute, executionRigContext, routeCfg)
 		if target == "" {
 			continue
 		}
@@ -339,7 +318,7 @@ func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Be
 	return nil
 }
 
-func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, routeCfg *config.City) string {
+func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute, executionRigContext string, routeCfg *config.City) string {
 	target := strings.TrimSpace(step.Metadata[beadmeta.RunTargetMetadataKey])
 	if target == "" {
 		target = strings.TrimSpace(step.Metadata[beadmeta.RoutedToMetadataKey])
@@ -350,7 +329,11 @@ func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, ro
 	if target == "" {
 		return executionRoute
 	}
-	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+	stepRigContext := strings.TrimSpace(step.Metadata[beadmeta.ExecutionRigContextMetadataKey])
+	if stepRigContext == "" {
+		stepRigContext = executionRigContext
+	}
+	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, stepRigContext, routeCfg)
 }
 
 func fanoutFragmentStepHasRoute(step formula.RecipeStep) bool {
