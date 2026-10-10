@@ -2151,17 +2151,10 @@ func restartIsolatedSupervisor(t *testing.T, env []string) {
 	startIsolatedSupervisor(t, env, gcHome)
 }
 
+// reserveLoopbackPort returns a loopback port no other process on the host
+// is handed while this test binary lives (testutil.ReserveLoopbackPort).
 func reserveLoopbackPort() (int, error) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer lis.Close() //nolint:errcheck
-	addr, ok := lis.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0, fmt.Errorf("unexpected addr type %T", lis.Addr())
-	}
-	return addr.Port, nil
+	return testutil.ReserveLoopbackPort()
 }
 
 func TestIntegrationEnvForIsolatesHome(t *testing.T) {

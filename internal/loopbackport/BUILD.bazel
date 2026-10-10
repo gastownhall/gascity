@@ -1,30 +1,23 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "testutil",
+    name = "loopbackport",
     srcs = [
-        "dolt.go",
-        "failure_artifacts.go",
-        "git.go",
-        "loopback_port.go",
-        "path.go",
-        "timeout.go",
+        "lease_linux.go",
+        "lease_other.go",
+        "loopbackport.go",
     ],
-    importpath = "github.com/gastownhall/gascity/internal/testutil",
+    importpath = "github.com/gastownhall/gascity/internal/loopbackport",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/loopbackport",
-        "//internal/pathutil",
-    ],
 )
 
 go_test(
-    name = "testutil_test",
+    name = "loopbackport_test",
     srcs = [
-        "failure_artifacts_test.go",
+        "loopbackport_test.go",
         "testenv_import_test.go",
     ],
-    embed = [":testutil"],
+    embed = [":loopbackport"],
     deps = ["//internal/testenv"],
 )
 

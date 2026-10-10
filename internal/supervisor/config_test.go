@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -410,4 +411,46 @@ func TestRegistryRegisterPanicsOnHostPath(t *testing.T) {
 		}
 	}()
 	_ = reg.Register(t.TempDir(), "test-city")
+}
+
+// The seeded port is outside the kernel's ephemeral range, so no bind(":0")
+// or outgoing connect of another process on the host is ever handed it, and
+// two isolated homes seeded at once get different ports. A listen-then-close
+// reservation on ":0" let concurrent isolated supervisors seed the same port
+// and the loser exit on "address already in use" (ga-96smfk.87).
+func TestLoadConfigSeedsAPortOutsideTheEphemeralRange(t *testing.T) {
+	seen := map[int]bool{}
+	for i := 0; i < 20; i++ {
+		t.Setenv("GC_HOME", t.TempDir())
+		cfg, err := LoadConfig(ConfigPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := cfg.Supervisor.Port
+		if port >= supervisorEphemeralPortFloor() {
+			t.Fatalf("seeded port %d is in the kernel's ephemeral range (from %d)", port, supervisorEphemeralPortFloor())
+		}
+		if seen[port] {
+			t.Fatalf("seeded port %d twice", port)
+		}
+		seen[port] = true
+	}
+}
+
+// supervisorEphemeralPortFloor is the lower bound of the kernel's ephemeral
+// port range (the Linux default where it cannot be read).
+func supervisorEphemeralPortFloor() int {
+	data, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		return 32768
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return 32768
+	}
+	lo, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 32768
+	}
+	return lo
 }
