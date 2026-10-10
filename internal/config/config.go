@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -2897,9 +2898,12 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 30s if empty or unparseable.
+// Defaults to 30s if empty or unparseable. A test-hooks gc run with
+// clock.BackstopSpeedupEnv set returns it already divided, so callers that
+// derive other durations from it (the startup retry delay, the restart
+// timeout) compute those from the divided value too.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	return durationOr(d.PatrolInterval, 30*time.Second)
+	return clock.Backstop(durationOr(d.PatrolInterval, 30*time.Second))
 }
 
 // TickDebounceDuration returns the tick-debounce window as a

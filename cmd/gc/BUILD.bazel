@@ -758,6 +758,21 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
+# gc linked with test hooks (internal/clock.testHooks): the only binary in
+# which GC_TEST_BACKSTOP_SPEEDUP divides the controller's backstop cadences.
+# testonly, manual, and visible only to the acceptance rows that use it;
+# scripts/cmd_gc_testhooks_test.go keeps the stamp out of every other link
+# and out of the release config.
+# keep
+go_binary(
+    name = "gc_testhooks",
+    testonly = True,
+    embed = [":gc_lib"],
+    tags = ["manual"],
+    visibility = ["//test/acceptance:__pkg__"],
+    x_defs = {"github.com/gastownhall/gascity/internal/clock.testHooks": "enabled"},
+)
+
 # Two gc links that differ only in their stamped build commit (what the
 # release build's -ldflags "-X main.commit=..." sets), for the supervisor
 # binary-drift tests in //test/integration (start_drift_test.go). Those tests
