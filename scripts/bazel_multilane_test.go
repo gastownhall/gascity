@@ -1094,13 +1094,15 @@ func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
 	}
 }
 
-// TestBazelWorkerHostFetchAndParityAlwaysRun: during S3-S5, the worker-host
-// job fetches the PR's pinned rbe-worker and checks tree parity on every
-// run, pin-moved or not (fix 3); only the H5 range check and the measure
+// TestBazelWorkerHostFetchAlwaysRuns: the worker-host job fetches the PR's
+// pinned rbe-worker on every run, pin-moved or not (fix 3), so H5 always
+// has the fetched history to walk; only the H5 range check and the measure
 // step stay gated. A permissive "accept either" if: would let this job
 // silently stop fetching once nobody notices a tightened measure-only
-// gate; pin the exact conditions instead.
-func TestBazelWorkerHostFetchAndParityAlwaysRun(t *testing.T) {
+// gate; pin the exact conditions instead. The worker code is the pinned
+// rbe-worker's alone (S5): the fetch takes no source input, and no step
+// reads or compares against a gascity copy of it.
+func TestBazelWorkerHostFetchAlwaysRuns(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	job, ok := wf.Jobs["worker-host"]
 	if !ok {
@@ -1109,6 +1111,9 @@ func TestBazelWorkerHostFetchAndParityAlwaysRun(t *testing.T) {
 	byName := map[string]multiLaneStep{}
 	for _, s := range job.Steps {
 		byName[s.Name] = s
+		if strings.Contains(s.Run, "tools/rbe/") && !strings.Contains(s.Run, "tools/rbe/worker-env-drift preflight ") {
+			t.Errorf("worker-host step %q reads tools/rbe beyond the client preflight; the worker code is the pinned rbe-worker's:\n%s", s.Name, s.Run)
+		}
 	}
 
 	fetch, ok := byName["Fetch the PR's pinned rbe-worker"]
@@ -1116,15 +1121,10 @@ func TestBazelWorkerHostFetchAndParityAlwaysRun(t *testing.T) {
 		t.Fatalf("worker-host: no %q step", "Fetch the PR's pinned rbe-worker")
 	}
 	if fetch.If != "" {
-		t.Errorf("worker-host fetch step: if %q, want unconditional (runs on every worker-host run, S3-S5)", fetch.If)
+		t.Errorf("worker-host fetch step: if %q, want unconditional (runs on every worker-host run)", fetch.If)
 	}
-
-	parity, ok := byName["In-tree and pinned trees are identical (S3-S5 only)"]
-	if !ok {
-		t.Fatalf("worker-host: no %q step", "In-tree and pinned trees are identical (S3-S5 only)")
-	}
-	if parity.If != "" {
-		t.Errorf("worker-host parity step: if %q, want unconditional (runs on every worker-host run, S3-S5)", parity.If)
+	if fetch.Uses != "./.github/actions/rbe-worker" || len(fetch.With) != 0 {
+		t.Errorf("worker-host fetch step: uses %q with %v, want ./.github/actions/rbe-worker with no inputs (always pinned)", fetch.Uses, fetch.With)
 	}
 
 	measure, ok := byName["Measure this Blacksmith host against the PR's manifest"]
@@ -1136,7 +1136,7 @@ func TestBazelWorkerHostFetchAndParityAlwaysRun(t *testing.T) {
 		t.Errorf("worker-host measure step: if %q, want %q", measure.If, wantMeasureIf)
 	}
 	if measure.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
-		t.Errorf("worker-host measure step: RBE_WORKER_REVISION %q, want the fetched sha (pinned mode must log a real sha, not in-tree)", measure.Env["RBE_WORKER_REVISION"])
+		t.Errorf("worker-host measure step: RBE_WORKER_REVISION %q, want the fetched sha", measure.Env["RBE_WORKER_REVISION"])
 	}
 
 	h5, ok := byName["Every commit in the bump range is signed, merged and verified (H5)"]

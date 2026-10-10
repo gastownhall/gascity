@@ -2,24 +2,17 @@ name: rbe-worker
 description: >
   Fetch the gastownhall/rbe-worker commit in ./pin, anonymously, after
   verifying it is in the history of rbe-worker's main. Runs no fetched code
-  and reads no secret. During the cutover window (S3-S5), source in-tree
-  returns this checkout's tools/rbe instead.
-inputs:
-  source:
-    description: "pinned (default) or in-tree (S3-S5 only)"
-    default: pinned
+  and reads no secret.
 outputs:
   dir:
     description: "worker/ of the fetched tree"
     value: ${{ steps.fetch.outputs.dir }}
   sha:
-    description: "the rbe-worker commit, or in-tree"
+    description: "the rbe-worker commit"
     value: ${{ steps.fetch.outputs.sha }}
 runs:
   using: composite
   steps:
     - id: fetch
       shell: bash
-      env:
-        SOURCE: ${{ inputs.source }}
       run: bash "$GITHUB_ACTION_PATH/fetch.sh" pin

@@ -49,21 +49,6 @@ pin | pin-client) ;;
 *) echo "::error title=rbe-worker::bad pin file '$pinfile'"; exit 2 ;;
 esac
 
-# Cutover switch (D8, S3-S5 only): source in-tree returns this checkout's own
-# tools/rbe instead of fetching rbe-worker. Only the worker pin takes
-# in-tree; pin-client (the client mechanism) always fetches/verifies.
-if [ "$mode" = fetch ] && [ "${SOURCE:-pinned}" = in-tree ] && [ "$pinfile" = pin ]; then
-	[ -x "$GITHUB_WORKSPACE/tools/rbe/blacksmith-worker.sh" ] ||
-		{ echo "::error title=rbe-worker::source in-tree, but this checkout has no tools/rbe"; exit 1; }
-	{ echo "dir=$GITHUB_WORKSPACE/tools/rbe"; echo "sha=in-tree"; } >>"$GITHUB_OUTPUT"
-	echo "rbe-worker: in-tree tools/rbe"
-	exit 0
-fi
-case "${SOURCE:-pinned}" in
-pinned | in-tree) ;;
-*) echo "::error title=rbe-worker::source must be pinned or in-tree"; exit 2 ;;
-esac
-
 sha=$(grep -E '^[0-9a-f]{40}$' "$here/$pinfile" || true)
 if [ -z "$sha" ] || [ "$(printf '%s\n' "$sha" | wc -l | tr -d ' ')" != 1 ]; then
 	echo "::error title=rbe-worker::$pinfile needs exactly one 40-hex line"
