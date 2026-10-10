@@ -652,3 +652,107 @@ func TestExecutionBackstopRecordsARevalidateHoldWithoutFlapping(t *testing.T) {
 		t.Fatalf("hold breadcrumb after delivery = %q, want cleared", got)
 	}
 }
+
+func (f *executionBackstopFixture) renewCount() int {
+	return strings.Count(f.stdout.String(), "showed activity since")
+}
+
+// TestExecutionBackstopNeverDrainsASessionThatAnswersEachNudge: an agent
+// waiting out a long command answers every nudge and goes quiet again. Each
+// answer restarts the window, so it is nudged once per quiet spell and never
+// drained, however many more spells than the attempt cap it needs. Before the
+// reset, a reply only held the count, and the session was drained on the
+// fourth quiet spell.
+func TestExecutionBackstopNeverDrainsASessionThatAnswersEachNudge(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // observe
+
+	const cycles = 2*idleClaimNudgeMaxAttempts + 1
+	for i := 0; i < cycles; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+		f.tick(t)
+		if got := f.nudgeCount(); got != i+1 {
+			t.Fatalf("cycle %d: delivered nudges = %d, want %d; stdout=%s", i, got, i+1, f.stdout.String())
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "1" {
+			t.Fatalf("cycle %d: attempt count after the nudge = %q, want 1 (the answer reset it)", i, got)
+		}
+
+		// The agent answers 30s after the nudge, then waits quietly again.
+		answered := f.now.Add(30 * time.Second)
+		f.sp.SetActivity(f.sessName, answered)
+		f.now = answered.Add(idleClaimNudgeGrace + time.Second)
+		f.tick(t)
+		if got := f.renewCount(); got != i+1 {
+			t.Fatalf("cycle %d: window restarts = %d, want %d; stdout=%s", i, got, i+1, f.stdout.String())
+		}
+		if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+			t.Fatalf("cycle %d: attempt count after the answer = %q, want 0", i, got)
+		}
+	}
+
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests for a session that answered every nudge = %v, want none; stdout=%s", f.drained, f.stdout.String())
+	}
+	if got := f.stalledEvents(); got != 0 {
+		t.Fatalf("execution.step_stalled events = %d, want 0", got)
+	}
+	if !strings.Contains(f.stdout.String(), "showed activity since its last nudge") {
+		t.Fatalf("stdout does not name the reset; stdout=%s", f.stdout.String())
+	}
+}
+
+// TestExecutionBackstopStillDrainsASessionThatNeverAnswers: the reset needs
+// activity AFTER the last nudge. A session whose activity clock never moves is
+// nudged the capped number of times and drained exactly as before.
+func TestExecutionBackstopStillDrainsASessionThatNeverAnswers(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.idleFor(t, 10*time.Minute) // pinned: nothing below moves it
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts+2; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.tick(t)
+	}
+
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	if got := f.renewCount(); got != 0 {
+		t.Fatalf("window restarts for a silent session = %d, want 0; stdout=%s", got, f.stdout.String())
+	}
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests = %v, want exactly one for %s", f.drained, f.sessName)
+	}
+}
+
+// TestExecutionBackstopRenewsANoNudgeSessionThatWorkedAfterObservation: with
+// no nudge configured the window still drains straight after the grace, unless
+// the session did something after it was observed. Then the grace restarts, and
+// a session that goes quiet for a full grace after that drains as before.
+func TestExecutionBackstopRenewsANoNudgeSessionThatWorkedAfterObservation(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = ""
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // observe
+
+	worked := f.now.Add(time.Minute)
+	f.sp.SetActivity(f.sessName, worked)
+	f.now = worked.Add(idleClaimNudgeGrace + time.Second)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests after activity past the observe marker = %v, want none; stdout=%s", f.drained, f.stdout.String())
+	}
+	if !strings.Contains(f.stdout.String(), "showed activity since it was observed") {
+		t.Fatalf("stdout does not name the restart; stdout=%s", f.stdout.String())
+	}
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("drain requests once quiet through the restarted grace = %v, want exactly one; stdout=%s", f.drained, f.stdout.String())
+	}
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("delivered nudges with no configured nudge = %d, want 0", got)
+	}
+}

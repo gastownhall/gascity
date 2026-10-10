@@ -65,6 +65,21 @@ type backstopHoldObserver interface {
 	clearHold(store beads.Store, s *beads.Bead, stdout io.Writer)
 }
 
+// activityRenewingBackstop is an optional predicate extension for a predicate
+// whose outstanding condition LOOKS like a working agent: an in-progress claim,
+// which a busy seat holds by design. Bead state cannot tell "working slowly"
+// from "stalled" there, so runtime activity after the last nudge (or after the
+// observe marker, before any nudge) is taken as the session answering, and the
+// predicate restarts its window instead of stepping toward the terminal action.
+// The open-bead predicates do not implement it: their condition vanishes the
+// instant the agent acts.
+type activityRenewingBackstop interface {
+	// renew restarts the pacing window for target and reports whether it did.
+	// last is the persisted time of the last attempt, or of first observation
+	// when attempts is 0. A false answer leaves the ordinary ladder in charge.
+	renew(store beads.Store, s *beads.Bead, target backstopTarget, sessName string, attempts int, last, now time.Time, stdout io.Writer) bool
+}
+
 // Engine-level hold reasons passed to backstopHoldObserver.observeHold.
 const (
 	backstopHoldRuntimeNotRunning = "runtime_not_running"
@@ -202,6 +217,11 @@ func runNudgeBackstop(
 			// lands within the grace window.
 			clearBackstopHold(pred, store, s, stdout)
 			pred.observe(store, s, target, now, stdout)
+			continue
+		}
+
+		if renewer, ok := pred.(activityRenewingBackstop); ok && renewer.renew(store, s, target, sessName, attempts, last, now, stdout) {
+			clearBackstopHold(pred, store, s, stdout)
 			continue
 		}
 
