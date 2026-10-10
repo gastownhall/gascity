@@ -47,6 +47,7 @@ func cityWorkLegOf(work beads.WorkStore) cityWorkLeg {
 type WorkLegs struct {
 	cfg  *config.City
 	work beads.Store
+	rigs map[string]beads.Store // the serving rigs
 	plan storeref.ResolvedPlan
 	err  error // no leg set: a refused city
 }
@@ -66,8 +67,8 @@ func workLegsFromCensus(cityPath string, cfg *config.City, work cityWorkLeg, rig
 	if work.store == nil {
 		return l
 	}
-	serving := servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
-	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, residencyTopologyForCity(cityPath, cfg, work.store, serving))
+	l.rigs = servingRigStores(cfg, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
+	l.plan, l.err = storeref.Plan(storeref.AssignedWork{}, residencyTopologyForCity(cityPath, cfg, work.store, l.rigs))
 	return l
 }
 
@@ -84,6 +85,15 @@ func (l WorkLegs) unusable() error {
 		return errNoWorkStore
 	}
 	return l.err
+}
+
+// newSeatWork is the controller's read for one tick (or one dispatcher pass),
+// raising session.unserved_claims through the controller's one alerter.
+func (cr *CityRuntime) newSeatWork() *SeatWork {
+	cr.unservedAlertsOnce.Do(func() { cr.unservedAlerts = &unservedClaimAlerts{rec: cr.rec} })
+	sw := newSeatWork(cr.workLegs())
+	sw.alerts = cr.unservedAlerts
+	return sw
 }
 
 // each visits every leg's store in plan order.
@@ -152,6 +162,14 @@ func releaseScope(info sessionpkg.Info, cfg *config.City) ReleaseScope {
 // releaseScopeOfBead is releaseScope for a caller holding the raw bead.
 func releaseScopeOfBead(b beads.Bead, cfg *config.City) ReleaseScope {
 	return ReleaseScope{ids: sessionAssignmentIdentifiersForConfig(b, cfg)}
+}
+
+// releaseScopeOwn is b's own persisted identities (ID, session_name, the
+// configured named identity), without the config-derived stable alias: the
+// drain-ack (D5) and retired-session releases' set, a subset of
+// releaseScopeOfBead.
+func releaseScopeOwn(b beads.Bead) ReleaseScope {
+	return ReleaseScope{ids: sessionAssignmentIdentifiers(b)}
 }
 
 // except drops the identities in preserve: work held under them is not this

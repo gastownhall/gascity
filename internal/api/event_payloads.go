@@ -576,6 +576,36 @@ func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, te
 	return b
 }
 
+// SessionUnservedClaimsPayload carries the machine-readable context for a
+// session.unserved_claims event: a close refused because the seat holds
+// claims no lane serves, which stay assigned rather than being released into
+// no lane.
+type SessionUnservedClaimsPayload struct {
+	SessionID   string   `json:"session_id" doc:"Canonical session bead ID of the seat whose close was refused."`
+	SessionName string   `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template    string   `json:"template,omitempty" doc:"Template of the seat, when set."`
+	Refusal     string   `json:"refusal" doc:"Why the close was refused: always unserved-claims."`
+	Reason      string   `json:"reason" doc:"The refused close: its close reason (orphaned, drained, ...), or the release path that would have closed the seat (killed, stranded-repair)."`
+	WorkBeadIDs []string `json:"work_bead_ids" doc:"IDs of the claims no lane serves, sorted. They stay assigned to the seat."`
+}
+
+// IsEventPayload marks SessionUnservedClaimsPayload as an events.Payload variant.
+func (SessionUnservedClaimsPayload) IsEventPayload() {}
+
+// SessionUnservedClaimsPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field.
+func SessionUnservedClaimsPayloadJSON(sessionID, sessionName, template, reason string, workBeadIDs []string) json.RawMessage {
+	b, _ := json.Marshal(SessionUnservedClaimsPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Refusal:     "unserved-claims",
+		Reason:      reason,
+		WorkBeadIDs: workBeadIDs,
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -750,6 +780,7 @@ func init() {
 	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
+	events.RegisterPayload(events.SessionUnservedClaims, SessionUnservedClaimsPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})

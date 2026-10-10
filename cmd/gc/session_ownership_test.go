@@ -419,7 +419,7 @@ func TestOwnershipVeto_MaxSessionAgeUnaffected(t *testing.T) {
 func TestSessionOwnsLiveClaim(t *testing.T) {
 	t.Run("nothing stamped", func(t *testing.T) {
 		f := newOwnershipFixture(t)
-		owns, claimID, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, nil, f.env.sessionInfo(f.session.ID))
+		owns, claimID, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, testSeatWork("", f.env.cfg, f.env.store, nil), f.env.sessionInfo(f.session.ID))
 		if owns || claimID != "" || err != nil {
 			t.Fatalf("sessionOwnsLiveClaim = (%v, %q, %v), want (false, \"\", nil)", owns, claimID, err)
 		}
@@ -428,7 +428,7 @@ func TestSessionOwnsLiveClaim(t *testing.T) {
 		f := newOwnershipFixture(t)
 		f.claimOutOfProcess(t)
 		f.assertCacheStale(t)
-		owns, claimID, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, nil, f.env.sessionInfo(f.session.ID))
+		owns, claimID, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, testSeatWork("", f.env.cfg, f.env.store, nil), f.env.sessionInfo(f.session.ID))
 		if !owns || claimID != f.work.ID || err != nil {
 			t.Fatalf("sessionOwnsLiveClaim = (%v, %q, %v), want (true, %q, nil)", owns, claimID, err, f.work.ID)
 		}
@@ -436,7 +436,7 @@ func TestSessionOwnsLiveClaim(t *testing.T) {
 	t.Run("session bead read error fails safe", func(t *testing.T) {
 		f := newOwnershipFixture(t)
 		f.reads.arm(f.session.ID)
-		owns, _, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, nil, f.env.sessionInfo(f.session.ID))
+		owns, _, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, testSeatWork("", f.env.cfg, f.env.store, nil), f.env.sessionInfo(f.session.ID))
 		if !owns || err == nil {
 			t.Fatalf("sessionOwnsLiveClaim = (%v, %v), want claim held with the read error", owns, err)
 		}
@@ -446,7 +446,7 @@ func TestSessionOwnsLiveClaim(t *testing.T) {
 		if err := f.backing.SetMetadata(f.session.ID, beadmeta.CurrentClaimBeadIDMetadataKey, "gc-missing"); err != nil {
 			t.Fatal(err)
 		}
-		owns, claimID, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, nil, f.env.sessionInfo(f.session.ID))
+		owns, claimID, err := sessionOwnsLiveClaim("", f.env.cfg, f.env.store, testSeatWork("", f.env.cfg, f.env.store, nil), f.env.sessionInfo(f.session.ID))
 		if owns || claimID != "gc-missing" || err != nil {
 			t.Fatalf("sessionOwnsLiveClaim = (%v, %q, %v), want (false, gc-missing, nil)", owns, claimID, err)
 		}
@@ -549,7 +549,7 @@ func TestSessionOwnsLiveClaim_StopsAtFoundBead(t *testing.T) {
 			tc.mutate(t, work)
 
 			cityBefore, aBefore, bBefore := city.count(), rigA.count(), rigB.count()
-			held, claimID, err := sessionOwnsLiveClaim("", cfg, city, rigStores, info)
+			held, claimID, err := sessionOwnsLiveClaim("", cfg, city, testSeatWork("", cfg, city, rigStores), info)
 			if err != nil || claimID != work.ID || held != tc.wantHeld {
 				t.Fatalf("sessionOwnsLiveClaim = (%v, %q, %v), want (%v, %q, nil)", held, claimID, err, tc.wantHeld, work.ID)
 			}
@@ -569,7 +569,7 @@ func TestSessionOwnsLiveClaim_StopsAtFoundBead(t *testing.T) {
 			t.Fatal(err)
 		}
 		aBefore, bBefore := rigA.count(), rigB.count()
-		held, _, err := sessionOwnsLiveClaim("", cfg, city, rigStores, info)
+		held, _, err := sessionOwnsLiveClaim("", cfg, city, testSeatWork("", cfg, city, rigStores), info)
 		if held || err != nil {
 			t.Fatalf("sessionOwnsLiveClaim = (%v, %v), want not held", held, err)
 		}

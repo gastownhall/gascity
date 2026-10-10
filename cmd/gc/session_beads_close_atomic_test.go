@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
@@ -203,7 +204,7 @@ func controllerClosePaths(now time.Time) []struct {
 		{
 			name: "closeBead",
 			close: func(store beads.Store, id string, stderr *bytes.Buffer) bool {
-				return closeBead(store, testSeatWork("", nil, store, nil), decidedSessionInfo(store, id), "dead-runtime", now, stderr)
+				return closeBead(store, testSeatWork("", servingCity("worker"), store, nil), decidedSessionInfo(store, id), "dead-runtime", now, stderr)
 			},
 			want: session.ClosePatch(now, "dead-runtime"),
 		},
@@ -231,7 +232,7 @@ func TestControllerClosesRefuseAWakeAfterTheCallersDecision(t *testing.T) {
 		close func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool
 	}{
 		{name: "closeBead", close: func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool {
-			return closeBead(store, testSeatWork("", nil, store, nil), decided, "dead-runtime", now, stderr)
+			return closeBead(store, testSeatWork("", servingCity("worker"), store, nil), decided, "dead-runtime", now, stderr)
 		}},
 		{name: "closeFailedCreateBead", close: func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool {
 			return closeFailedCreateBead(sessionFrontDoor(store), decided, now, stderr)
@@ -244,7 +245,7 @@ func TestControllerClosesRefuseAWakeAfterTheCallersDecision(t *testing.T) {
 			t.Run(path.name+"/"+backend.name, func(t *testing.T) {
 				store, backing := backend.open(t)
 				created := createControllerCloseSession(t, store)
-				work, err := store.Create(beads.Bead{Title: "task", Type: "task", Assignee: created.ID})
+				work, err := store.Create(beads.Bead{Title: "task", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}, Assignee: created.ID})
 				if err != nil {
 					t.Fatalf("Create work: %v", err)
 				}
@@ -323,7 +324,7 @@ func TestControllerClosesKeepAConcurrentWakeOutOfTheClosedRow(t *testing.T) {
 					}
 					return
 				}
-				work, err := store.Create(beads.Bead{Title: "task", Type: "task", Assignee: created.ID})
+				work, err := store.Create(beads.Bead{Title: "task", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}, Assignee: created.ID})
 				if err != nil {
 					t.Fatalf("Create work: %v", err)
 				}
@@ -514,7 +515,7 @@ func TestControllerClosesYieldToAKillFenceThatLandsInTheWindow(t *testing.T) {
 				t.Fatalf("OpenFileStore: %v", err)
 			}
 			created := createControllerCloseSession(t, store)
-			work, err := store.Create(beads.Bead{Title: "task", Type: "task", Assignee: created.ID})
+			work, err := store.Create(beads.Bead{Title: "task", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}, Assignee: created.ID})
 			if err != nil {
 				t.Fatalf("Create work: %v", err)
 			}

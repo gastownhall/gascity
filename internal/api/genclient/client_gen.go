@@ -4933,6 +4933,27 @@ type SessionUnknownStatePayload struct {
 	State string `json:"state"`
 }
 
+// SessionUnservedClaimsPayload defines model for SessionUnservedClaimsPayload.
+type SessionUnservedClaimsPayload struct {
+	// Reason The refused close: its close reason (orphaned, drained, ...), or the release path that would have closed the seat (killed, stranded-repair).
+	Reason string `json:"reason"`
+
+	// Refusal Why the close was refused: always unserved-claims.
+	Refusal string `json:"refusal"`
+
+	// SessionId Canonical session bead ID of the seat whose close was refused.
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Template of the seat, when set.
+	Template *string `json:"template,omitempty"`
+
+	// WorkBeadIds IDs of the claims no lane serves, sorted. They stay assigned to the seat.
+	WorkBeadIds *[]string `json:"work_bead_ids"`
+}
+
 // SessionWakeRefusedPayload defines model for SessionWakeRefusedPayload.
 type SessionWakeRefusedPayload struct {
 	// Attempts wake_attempts recorded after this refusal.
@@ -6987,6 +7008,22 @@ type TypedEventStreamEnvelopeSessionUnknownState struct {
 	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionUnservedClaims defines model for TypedEventStreamEnvelopeSessionUnservedClaims.
+type TypedEventStreamEnvelopeSessionUnservedClaims struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionUnservedClaimsPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionUpdated defines model for TypedEventStreamEnvelopeSessionUpdated.
 type TypedEventStreamEnvelopeSessionUpdated struct {
 	Actor            string                   `json:"actor"`
@@ -8759,6 +8796,23 @@ type TypedTaggedEventStreamEnvelopeSessionUnknownState struct {
 	Ts               time.Time                  `json:"ts"`
 	Type             string                     `json:"type"`
 	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionUnservedClaims defines model for TypedTaggedEventStreamEnvelopeSessionUnservedClaims.
+type TypedTaggedEventStreamEnvelopeSessionUnservedClaims struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionUnservedClaimsPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionUpdated defines model for TypedTaggedEventStreamEnvelopeSessionUpdated.
@@ -11844,6 +11898,32 @@ func (t *EventPayload) FromSessionUnknownStatePayload(v SessionUnknownStatePaylo
 
 // MergeSessionUnknownStatePayload performs a merge with any union data inside the EventPayload, using the provided SessionUnknownStatePayload
 func (t *EventPayload) MergeSessionUnknownStatePayload(v SessionUnknownStatePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionUnservedClaimsPayload returns the union data inside the EventPayload as a SessionUnservedClaimsPayload
+func (t EventPayload) AsSessionUnservedClaimsPayload() (SessionUnservedClaimsPayload, error) {
+	var body SessionUnservedClaimsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionUnservedClaimsPayload overwrites any union data inside the EventPayload as the provided SessionUnservedClaimsPayload
+func (t *EventPayload) FromSessionUnservedClaimsPayload(v SessionUnservedClaimsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionUnservedClaimsPayload performs a merge with any union data inside the EventPayload, using the provided SessionUnservedClaimsPayload
+func (t *EventPayload) MergeSessionUnservedClaimsPayload(v SessionUnservedClaimsPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16357,6 +16437,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUnknownSt
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionUnservedClaims returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionUnservedClaims
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionUnservedClaims() (TypedEventStreamEnvelopeSessionUnservedClaims, error) {
+	var body TypedEventStreamEnvelopeSessionUnservedClaims
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionUnservedClaims overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionUnservedClaims
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionUnservedClaims(v TypedEventStreamEnvelopeSessionUnservedClaims) error {
+	v.Type = "session.unserved_claims"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionUnservedClaims performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionUnservedClaims
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUnservedClaims(v TypedEventStreamEnvelopeSessionUnservedClaims) error {
+	v.Type = "session.unserved_claims"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionUpdated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionUpdated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionUpdated() (TypedEventStreamEnvelopeSessionUpdated, error) {
 	var body TypedEventStreamEnvelopeSessionUpdated
@@ -17025,6 +17133,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionUndrained()
 	case "session.unknown_state":
 		return t.AsTypedEventStreamEnvelopeSessionUnknownState()
+	case "session.unserved_claims":
+		return t.AsTypedEventStreamEnvelopeSessionUnservedClaims()
 	case "session.updated":
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
 	case "session.wake_refused":
@@ -19536,6 +19646,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionUnservedClaims returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionUnservedClaims
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionUnservedClaims() (TypedTaggedEventStreamEnvelopeSessionUnservedClaims, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionUnservedClaims
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionUnservedClaims overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionUnservedClaims
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionUnservedClaims(v TypedTaggedEventStreamEnvelopeSessionUnservedClaims) error {
+	v.Type = "session.unserved_claims"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionUnservedClaims performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionUnservedClaims
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionUnservedClaims(v TypedTaggedEventStreamEnvelopeSessionUnservedClaims) error {
+	v.Type = "session.unserved_claims"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionUpdated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionUpdated
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionUpdated() (TypedTaggedEventStreamEnvelopeSessionUpdated, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionUpdated
@@ -20204,6 +20342,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUndrained()
 	case "session.unknown_state":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUnknownState()
+	case "session.unserved_claims":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionUnservedClaims()
 	case "session.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
 	case "session.wake_refused":

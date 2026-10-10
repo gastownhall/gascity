@@ -209,7 +209,7 @@ func TestSplitStoreCascade_LiveClaimVetoReadsABindingClaimWithoutTheWorkStore(t 
 			t.Fatal(err)
 		}
 
-		owns, _, err := sessionOwnsLiveClaim(cityPath, cfg, sessions, nil, sessionInfosFromBeads([]beads.Bead{seat})[0])
+		owns, _, err := sessionOwnsLiveClaim(cityPath, cfg, sessions, testSeatWork(cityPath, cfg, sessions, nil), sessionInfosFromBeads([]beads.Bead{seat})[0])
 		if err != nil || owns == closed {
 			t.Fatalf("closed=%v: sessionOwnsLiveClaim = %v, %v", closed, owns, err)
 		}

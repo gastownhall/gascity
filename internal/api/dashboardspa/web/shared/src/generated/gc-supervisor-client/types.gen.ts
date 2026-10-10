@@ -940,7 +940,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionUnservedClaimsPayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -4713,6 +4713,33 @@ export type SessionUnknownStatePayload = {
     state: string;
 };
 
+export type SessionUnservedClaimsPayload = {
+    /**
+     * The refused close: its close reason (orphaned, drained, ...), or the release path that would have closed the seat (killed, stranded-repair).
+     */
+    reason: string;
+    /**
+     * Why the close was refused: always unserved-claims.
+     */
+    refusal: string;
+    /**
+     * Canonical session bead ID of the seat whose close was refused.
+     */
+    session_id: string;
+    /**
+     * Runtime session name from the session bead metadata, when set.
+     */
+    session_name?: string;
+    /**
+     * Template of the seat, when set.
+     */
+    template?: string;
+    /**
+     * IDs of the claims no lane serves, sorted. They stay assigned to the seat.
+     */
+    work_bead_ids: Array<string> | null;
+};
+
 export type SessionWakeRefusedPayload = {
     /**
      * wake_attempts recorded after this refusal.
@@ -5657,6 +5684,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionUndrained) | ({
     type: 'session.unknown_state';
 } & TypedEventStreamEnvelopeSessionUnknownState) | ({
+    type: 'session.unserved_claims';
+} & TypedEventStreamEnvelopeSessionUnservedClaims) | ({
     type: 'session.updated';
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.wake_refused';
@@ -7295,6 +7324,24 @@ export type TypedEventStreamEnvelopeSessionUnknownState = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.unserved_claims
+ */
+export type TypedEventStreamEnvelopeSessionUnservedClaims = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionUnservedClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.unserved_claims';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.updated
  */
 export type TypedEventStreamEnvelopeSessionUpdated = {
@@ -7764,6 +7811,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionUndrained) | ({
     type: 'session.unknown_state';
 } & TypedTaggedEventStreamEnvelopeSessionUnknownState) | ({
+    type: 'session.unserved_claims';
+} & TypedTaggedEventStreamEnvelopeSessionUnservedClaims) | ({
     type: 'session.updated';
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.wake_refused';
@@ -9487,6 +9536,25 @@ export type TypedTaggedEventStreamEnvelopeSessionUnknownState = {
     subject?: string;
     ts: string;
     type: 'session.unknown_state';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.unserved_claims
+ */
+export type TypedTaggedEventStreamEnvelopeSessionUnservedClaims = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionUnservedClaimsPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.unserved_claims';
     workflow?: WorkflowEventProjection;
 };
 

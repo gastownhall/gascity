@@ -1127,10 +1127,12 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
 			step := e.mintWispWith(t, wispOpts{
 				title:    "graph step claimed by a session that then died",
+				routedTo: "worker",
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			legs := workLegsFromCensus(e.cityPath, e.cfg, cityWorkLeg{store: e.work}, e.rigStores)
+			// A configured "worker" lane the released step routes to.
+			legs := workLegsFromCensus(e.cityPath, servingRigsCity(e.cfg, "worker"), cityWorkLeg{store: e.work}, e.rigStores)
 			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {

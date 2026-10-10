@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,6 +111,9 @@ max_active_sessions = 1
 // is the command's call site, which that helper test cannot see.
 func TestCmdSessionCloseClearsClaimInTheSessionStoreOnAMigratedCity(t *testing.T) {
 	cityPath, cfg := migratedOneShotCLICity(t)
+	// The lane the released claim routes to: a claim no configured agent
+	// serves stays assigned (work_release.go).
+	appendCityTOML(t, cityPath, "\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\n")
 	captureCLIStorageStderr(t)
 	t.Setenv("GC_SESSION", "fake")
 
@@ -134,7 +139,7 @@ func TestCmdSessionCloseClearsClaimInTheSessionStoreOnAMigratedCity(t *testing.T
 	claimed, err := work.Create(beads.Bead{
 		Title:    "claimed step",
 		Type:     "task",
-		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "worker"}, Assignee: sessionBead.ID,
 	})
 	if err != nil {
 		t.Fatalf("Create(work bead): %v", err)
@@ -204,7 +209,7 @@ func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := work.Create(beads.Bead{Title: "claimed step", Type: "task", Assignee: sessionBead.ID})
+	claimed, err := work.Create(beads.Bead{Title: "claimed step", Type: "task", Assignee: sessionBead.ID, Metadata: map[string]string{"gc.routed_to": "worker"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +219,7 @@ func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, work, nil, "worker-draining", &stderr)
+	releaseUnexecutedClaimsForSessionStore(cityPath, servingRigsCity(cfg, "worker"), work, nil, "worker-draining", &stderr)
 
 	got, err := work.Get(claimed.ID)
 	if err != nil {
@@ -222,5 +227,18 @@ func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
 	}
 	if got.Assignee != "" || got.Status != "open" {
 		t.Fatalf("work bead = (%q, %q), want released from the work store; stderr=%s", got.Assignee, got.Status, stderr.String())
+	}
+}
+
+// appendCityTOML appends body to cityPath's city.toml.
+func appendCityTOML(t *testing.T, cityPath, body string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(cityPath, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatal(err)
 	}
 }
