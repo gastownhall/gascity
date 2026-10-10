@@ -109,6 +109,10 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"JS lookbehind only warns", "PreToolUse", "(?<=Notebook)Edit", SeverityWarning, "JavaScript"},
 		{"JS backreference only warns", "PreToolUse", "^(Bash)\\1?$", SeverityWarning, "JavaScript"},
 		{"permission-shaped JS lookahead warns, not errors", "PreToolUse", "Bash(?!Output)", SeverityWarning, "JavaScript"},
+		{"JS unicode escape only warns", "PreToolUse", `^\u0042ash$`, SeverityWarning, "JavaScript"},
+		{"JS braced unicode escape only warns", "PreToolUse", `^\u{42}ash$`, SeverityWarning, "JavaScript"},
+		{"JS named backreference only warns", "PreToolUse", `^(?<t>Bash)\k<t>?$`, SeverityWarning, "JavaScript"},
+		{"JS any-char class only warns", "PreToolUse", `^Bas[^]$`, SeverityWarning, "JavaScript"},
 
 		// Compiles, but names nothing Claude Code has.
 		{"unknown tool", "PreToolUse", "^Frobnicate$", SeverityWarning, "no known Claude Code tool"},

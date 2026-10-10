@@ -803,6 +803,22 @@ func TestLintWarnsOnUnknownToolHookMatcherWithoutFailing(t *testing.T) {
 	}
 }
 
+// A JavaScript-only escape such as \u0042 is valid in Claude Code but does not
+// compile under Go RE2; lint must warn, not fail the pack.
+func TestLintWarnsOnJavaScriptOnlyHookMatcherWithoutFailing(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"PreToolUse":[{"matcher":"^\\u0042ash$","hooks":[{"type":"command","command":"true"}]}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a JavaScript-only matcher only warns)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	wantLoc := filepath.Join(".claude", "settings.json") + ": warning: hooks.PreToolUse[0] matcher"
+	if !strings.Contains(stderr.String(), wantLoc) {
+		t.Errorf("stderr missing %q:\n%s", wantLoc, stderr.String())
+	}
+}
+
 // The matchers this city and its packs ship today must keep linting clean: the
 // anchored ^Bash$ guard, the empty all-tools matcher, and SessionStart's
 // "startup" source matcher.

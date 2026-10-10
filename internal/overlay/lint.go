@@ -99,10 +99,11 @@ type HookMatcherFinding struct {
 var permissionSyntaxMatcher = regexp.MustCompile(`^[A-Za-z|]+\(`)
 
 // jsOnlyRegexSyntax matches constructs JavaScript regexes support and Go
-// RE2 rejects: lookaround and backreferences. Claude Code evaluates
-// matchers as JavaScript regexes, so a matcher using them may work there
-// and lint cannot call it broken.
-var jsOnlyRegexSyntax = regexp.MustCompile(`\(\?<?[=!]|\\[1-9]`)
+// RE2 rejects: lookaround, numbered and named backreferences, \u escapes
+// and the [^] any-character class. Claude Code evaluates matchers as
+// JavaScript regexes, so a matcher using them may work there and lint
+// cannot call it broken.
+var jsOnlyRegexSyntax = regexp.MustCompile(`\(\?<?[=!]|\\[1-9]|\\k<|\\u[0-9A-Fa-f{]|\[\^\]`)
 
 // exactNameMatcher matches a matcher Claude Code reads as a list of exact tool
 // names instead of a regex: only letters, digits, underscores, hyphens, spaces,
