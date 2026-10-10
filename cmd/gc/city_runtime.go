@@ -140,6 +140,14 @@ type CityRuntime struct {
 	// replaced.
 	v2 *plannerRuntime
 
+	// nudgeDispatcherActive mirrors, for cross-goroutine reads by the
+	// controller socket's identity command, whether this runtime is
+	// currently hosting the supervisor-mode nudge dispatcher. Kept in sync
+	// with cfg on construction and on every reload commit (see
+	// nudgeDispatcherIsSupervisor). May be nil in tests that build a
+	// CityRuntime directly without going through runController/gc supervisor.
+	nudgeDispatcherActive *atomic.Bool
+
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
@@ -364,6 +372,11 @@ type CityRuntimeParams struct {
 	WatchTargets []config.WatchTarget
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
+	// NudgeDispatcherActive, when set, is kept in sync with the runtime's
+	// live cfg (construction and every reload commit) so the controller
+	// socket's identity command can report supervisor-dispatch hosting from
+	// another goroutine without racing cfg itself. May be nil.
+	NudgeDispatcherActive *atomic.Bool
 	// ConfigDebounce overrides the config watcher's coalesce window when
 	// non-zero (used by tests).
 	ConfigDebounce time.Duration
@@ -462,6 +475,11 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if configDirty == nil {
 		configDirty = &atomic.Bool{}
 	}
+	nudgeDispatcherActive := p.NudgeDispatcherActive
+	if nudgeDispatcherActive == nil {
+		nudgeDispatcherActive = &atomic.Bool{}
+	}
+	nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(p.Cfg))
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
@@ -518,6 +536,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		nudgeDispatcherActive:   nudgeDispatcherActive,
 		configDebounce:          p.ConfigDebounce,
 		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv},
 		cfg:                     p.Cfg,

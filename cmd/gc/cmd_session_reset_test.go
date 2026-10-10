@@ -138,6 +138,7 @@ func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -235,6 +236,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -330,6 +332,7 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -412,6 +415,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -968,6 +972,7 @@ func startSessionResetTestController(t *testing.T, cityDir string) {
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)

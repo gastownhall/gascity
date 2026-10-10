@@ -27,6 +27,9 @@ func (cr *CityRuntime) publishRuntimeConfig(
 	cr.dops = dops
 	cr.publishedRev = revision
 	cr.serviceStateMu.Unlock()
+	if cr.nudgeDispatcherActive != nil {
+		cr.nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(cfg))
+	}
 	cr.demandSnapshot = nil
 	return true
 }

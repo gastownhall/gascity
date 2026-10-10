@@ -94,6 +94,13 @@ func (m controllerHostingMode) known() bool {
 type controllerIdentityReply struct {
 	PID         int                   `json:"pid"`
 	HostingMode controllerHostingMode `json:"hosting_mode"`
+	// NudgeDispatcherActive reports whether this controller is currently
+	// hosting the supervisor-mode nudge dispatcher, read live off its own
+	// running config rather than off whatever config a caller loaded from
+	// disk. daemon.nudge_dispatcher="supervisor" only states the intent; a
+	// crashed/not-yet-started controller, or one mid config-reload, can
+	// disagree with it (gascity#6361).
+	NudgeDispatcherActive bool `json:"nudge_dispatcher_active"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -149,6 +156,7 @@ func startControllerSocket(
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	wake *controllerWake,
+	nudgeDispatcherActive *atomic.Bool,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -169,7 +177,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, wake)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, wake, nudgeDispatcherActive)
 		}
 	}()
 	return lis, nil
@@ -191,6 +199,7 @@ func handleControllerConn(
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	wake *controllerWake,
+	nudgeDispatcherActive *atomic.Bool,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -212,7 +221,11 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
+			writeJSONLine(conn, controllerIdentityReply{
+				PID:                   os.Getpid(),
+				HostingMode:           hostingMode,
+				NudgeDispatcherActive: nudgeDispatcherActive != nil && nudgeDispatcherActive.Load(),
+			})
 		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
 			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
 			// non-blocking enqueue for event-driven wake, e.g. after sling
@@ -1335,10 +1348,12 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	nudgeDispatcherActive := &atomic.Bool{}
+	nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(cfg))
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake, nudgeDispatcherActive)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1375,6 +1390,7 @@ func runController(
 		TomlPath:                tomlPath,
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
+		NudgeDispatcherActive:   nudgeDispatcherActive,
 		ConfigDebounce:          configDebounce,
 		Cfg:                     cfg,
 		SP:                      sp,

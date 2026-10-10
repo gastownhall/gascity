@@ -110,7 +110,7 @@ func runControllerSocketCommand(t *testing.T, line string, pokeCh, dispatchCh ch
 	defer client.Close() //nolint:errcheck
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, t.TempDir(), controllerHostingStandalone, func() {}, nil, nil, nil, nil, newLegacyWake(pokeCh, dispatchCh))
+		handleControllerConn(server, t.TempDir(), controllerHostingStandalone, func() {}, nil, nil, nil, nil, newLegacyWake(pokeCh, dispatchCh), nil)
 		close(done)
 	}()
 	if _, err := client.Write([]byte(line + "\n")); err != nil {
