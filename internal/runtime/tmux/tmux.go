@@ -2545,11 +2545,12 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 }
 
 // Staged-draft recovery bounds. The confirm window above totals ~2.4s, and a
-// codex TUI under load can take longer than that to ingest a large pasted
-// prompt (an ~11KB startup nudge). Every submit in the window then lands inside
-// the ingest and is swallowed, and the paste stays staged in the composer as
-// "[Pasted Content N chars]" with the seat idle and its claim held. Recovery
-// re-sends at a slower pace while that draft is visible, up to this bound.
+// staged-draft TUI (codex, Claude) under load can take longer than that to
+// ingest a large pasted prompt, such as codex's ~11KB startup nudge. Every
+// submit in the window then lands inside the ingest and is swallowed, and the
+// paste stays staged in the composer as its placeholder (stagedDraftMarkers)
+// with the seat idle and its claim held. Recovery re-sends at a slower pace
+// while that draft is visible, up to this bound.
 const (
 	submitDraftRecoverySends   = 8
 	submitDraftRecoveryBackoff = time.Second
@@ -2565,12 +2566,15 @@ type stagedDraftMarker struct {
 }
 
 // stagedDraftMarkers lists the families whose staged-paste placeholder is
-// known. codex collapses a large paste into "[Pasted Content N chars]" until
-// it is submitted. A family without an entry never gets recovery submits.
-// Every entry must also be submit-verify eligible: recovery runs only on the
-// verified submit path.
+// known. codex collapses a large paste into "[Pasted Content N chars]" and
+// Claude into "[Pasted text #N +M lines]" until it is submitted. A family
+// without an entry never gets recovery submits. Every entry must also be
+// submit-verify eligible: recovery runs only on the verified submit path.
+// paneShowsDrainedComposer reads every entry too: a composer that still shows
+// a placeholder has not drained.
 var stagedDraftMarkers = map[string]stagedDraftMarker{
-	"codex": {promptPrefix: "› ", marker: "[Pasted Content "},
+	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
+	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
 }
 
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
@@ -4823,15 +4827,39 @@ func paneContainsBusyIndicator(lines []string) bool {
 // line of sent (compared on its first 40 runes, trimmed) is still present in
 // what remains after stripping the prompt prefix. That is the ga-bwm case --
 // the message is sitting drafted-but-unsubmitted -- and callers must keep
-// treating it as unconfirmed and retry. It returns true otherwise: the
-// composer is bare (or holds different, newer text), so the prior submit
-// drained it and only the busy-state OBSERVATION failed. When no line
-// matches the prompt prefix at all, the composer cannot be observed, so this
-// conservatively returns false rather than claiming delivery is proven.
+// treating it as unconfirmed and retry. It also returns false while the live
+// composer shows a staged-paste placeholder (stagedDraftMarkers): a TUI that
+// collapses a large paste into "[Pasted text #N +M lines]" still holds sent,
+// only not as its text. For this check the live composer is the last line
+// matching ANY family's prompt prefix, plus the lines below it, and every
+// family's placeholder counts. A placeholder echoed above that line is
+// transcript whichever prompt starts it, and a staged paste below a transcript
+// line that starts with another family's prompt is still live. A placeholder
+// cannot be matched to sent, so one left by a different paste reads as
+// undrained too; retrying is the safe side of that ambiguity. It returns true
+// otherwise: the composer is bare (or holds different, newer text), so the
+// prior submit drained it and only the busy-state OBSERVATION failed. When no
+// line matches the prompt prefix at all, the composer cannot be observed, so
+// this conservatively returns false rather than claiming delivery is proven.
 func paneShowsDrainedComposer(lines []string, sent string) bool {
 	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
 	if !observed {
 		return false
+	}
+	live := 0
+	for i, line := range lines {
+		for _, m := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, m.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	for _, line := range lines[live:] {
+		for _, m := range stagedDraftMarkers {
+			if strings.Contains(line, m.marker) {
+				return false
+			}
+		}
 	}
 	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
 	if draft != "" && strings.Contains(remainder, draft) {
