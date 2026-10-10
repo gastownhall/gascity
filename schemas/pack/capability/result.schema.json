@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack capability: the capability manifest of one pack directory.",
+  "required": ["schema_version", "ok", "path", "entries"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether the manifest was computed."
+    },
+    "path": {
+      "type": "string",
+      "description": "Pack directory, as given on the command line."
+    },
+    "entries": {
+      "type": "array",
+      "description": "Manifest entries sorted byte-wise by property and value, without duplicates.",
+      "items": {
+        "type": "object",
+        "description": "One manifest entry.",
+        "required": ["property", "value"],
+        "properties": {
+          "property": {
+            "enum": ["PROVIDES", "MANDATES", "DEMANDS", "USES", "NORMS", "OPAQUE"],
+            "description": "Capability property."
+          },
+          "value": {
+            "type": "string",
+            "description": "Property value, for example command:status, order:gate-sweep, gc hook --claim, or a pack-relative path and digest for any file in the pack."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

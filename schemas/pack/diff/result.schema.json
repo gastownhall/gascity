@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack diff: the classified capability-surface change between two pack directories.",
+  "required": ["schema_version", "ok", "a", "b", "verdict", "exit_code", "findings", "moved_files"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether both manifests were computed and compared. The verdict, not ok, carries compatibility."
+    },
+    "a": {
+      "type": "string",
+      "description": "Older pack directory, as given on the command line."
+    },
+    "b": {
+      "type": "string",
+      "description": "Newer pack directory, as given on the command line."
+    },
+    "verdict": {
+      "enum": ["BREAKING", "ADDITIVE", "UNCLASSIFIED", "NONE"],
+      "description": "Overall classification of the change from a to b: the highest that applies, in precedence order BREAKING > UNCLASSIFIED > ADDITIVE > NONE."
+    },
+    "exit_code": {
+      "enum": [0, 1, 2],
+      "description": "Process exit status for the verdict: 2 BREAKING, 1 UNCLASSIFIED, 0 ADDITIVE or NONE."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Computable changes, in property order.",
+      "items": {
+        "type": "object",
+        "description": "Values of one property that were added or removed, and how that change is classified.",
+        "required": ["property", "change", "verdict", "values"],
+        "properties": {
+          "property": {
+            "enum": ["PROVIDES", "MANDATES", "DEMANDS", "USES", "NORMS"],
+            "description": "Capability property the values belong to."
+          },
+          "change": {
+            "enum": ["added", "removed"],
+            "description": "Whether the values appear only in b (added) or only in a (removed)."
+          },
+          "verdict": {
+            "enum": ["BREAKING", "ADDITIVE"],
+            "description": "Classification of this change."
+          },
+          "values": {
+            "type": "array",
+            "description": "Changed manifest values, sorted.",
+            "items": {
+              "type": "string",
+              "description": "One manifest value."
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "moved_files": {
+      "type": "array",
+      "description": "Pack-relative files whose digest changed, appeared, or disappeared, sorted, leaving out files added or removed together with the PROVIDES value they belong to. Non-empty means the verdict is at least UNCLASSIFIED.",
+      "items": {
+        "type": "string",
+        "description": "One pack-relative file path."
+      }
+    }
+  },
+  "additionalProperties": false
+}

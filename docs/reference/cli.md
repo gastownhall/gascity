@@ -3039,7 +3039,9 @@ Manage remote pack sources that provide agent configurations.
 
 Packs are git repositories containing pack.toml files that
 define agent configurations for rigs. They are cached locally and
-can be pinned to specific git refs.
+can be pinned to specific git refs. "gc pack capability" and "gc pack diff"
+compute a pack directory's capability surface and classify the change
+between two versions of a pack.
 
 ```
 gc pack
@@ -3047,10 +3049,94 @@ gc pack
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc pack capability](#gc-pack-capability) | Print a pack directory's capability manifest |
+| [gc pack diff](#gc-pack-diff) | Classify the capability-surface change between two pack versions |
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
 | [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
 | [gc pack registry](#gc-pack-registry) | Manage pack registries |
 | [gc pack release](#gc-pack-release) | Author pack registry release metadata |
+
+## gc pack capability
+
+Print the capability manifest of a pack directory.
+
+The manifest is sorted, one "PROPERTY&lt;TAB&gt;value" line per entry, and depends
+only on the directory's contents:
+
+  PROVIDES  commands, agents, formulas and orders the pack ships, including
+            inline [[agent]] and [[commands]] in pack.toml
+  MANDATES  claim and drain-ack commands its prose tells an agent to run
+  DEMANDS   reserved gc.* metadata keys and versioned schema ids it requires
+  USES      formula constructs it depends on (steps.check, steps.retry, ...)
+            and each file's requires.formula_compiler with its value
+  NORMS     must/never/always/do-not lines in role prompts and template
+            fragments (.md, .template.md and .md.tmpl)
+  OPAQUE    a 12-hex SHA-256 prefix per file, except .git
+
+A symlinked pack directory is resolved first. Inside the pack, a symlink to a
+regular file within the pack is read through; any other symlink is recorded
+by its target string and never followed.
+
+"gc pack diff" compares two manifests.
+
+```
+gc pack capability <pack-dir> [flags]
+```
+
+**Example:**
+
+```
+gc pack capability internal/bootstrap/packs/core
+gc pack capability ./my-pack --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit the manifest as JSON |
+
+## gc pack diff
+
+Compare the capability surfaces of two versions of a pack and classify the change.
+
+A pack's declared version does not carry compatibility, so this command
+computes each pack directory's capability manifest (see "gc pack capability")
+and compares the two. The six properties are PROVIDES, MANDATES, DEMANDS,
+USES, NORMS and OPAQUE.
+
+Verdicts and exit codes, highest precedence first:
+  BREAKING      a commitment was removed or changed                     exit 2
+  UNCLASSIFIED  a file moved that no computable change accounts for     exit 1
+  ADDITIVE      a commitment was added and every moved file is new      exit 0
+                with an added provider
+  NONE          the manifests are identical                             exit 0
+
+The verdict is the highest that applies: an addition never hides an
+unexplained moved file. PROVIDES and USES: removal is breaking, addition is
+additive. MANDATES and NORMS: any change is breaking. DEMANDS: addition is
+breaking, removal is additive. OPAQUE digests every file in the pack; a moved
+digest is UNCLASSIFIED, never NONE, unless the file was added or removed with
+the agent, command, formula or order it belongs to. Read the listed files.
+
+Errors (a missing directory, an unparseable TOML file) also exit 1; with
+--json they print an ok:false failure payload instead of a verdict.
+
+To compare a pack at two commits, extract the older tree first, for example:
+  git archive &lt;ref&gt; path/to/pack | tar -x -C /tmp/old
+
+```
+gc pack diff <old-pack-dir> <new-pack-dir> [flags]
+```
+
+**Example:**
+
+```
+gc pack diff /tmp/old/internal/bootstrap/packs/core internal/bootstrap/packs/core
+gc pack diff old-pack new-pack --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit the verdict and findings as JSON |
 
 ## gc pack fetch
 

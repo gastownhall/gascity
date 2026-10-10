@@ -405,6 +405,40 @@ loading uses the local resolved pack instead of re-fetching the remote source.
 
 </Accordion>
 
+### Compare Two Versions Of A Pack
+
+A pack's `[pack].version` says nothing about compatibility: packs often keep
+`0.1.0` across many commits, and `0.x` allows breaking changes in any release.
+`gc pack diff` computes what each version commits to and classifies the change:
+
+```shell
+old=$(mktemp -d)
+git archive <old-ref> path/to/pack | tar -x -C "$old"
+gc pack diff "$old/path/to/pack" path/to/pack
+```
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `BREAKING` | a commitment was removed or changed | 2 |
+| `UNCLASSIFIED` | a file moved that no computable change accounts for | 1 |
+| `ADDITIVE` | a commitment was added, and every moved file is new with an added provider | 0 |
+| `NONE` | the two surfaces are identical | 0 |
+
+The verdict is the highest that applies, in the order of the table. An
+addition never hides an unexplained change: a new formula shipped alongside a
+reworded prompt is `UNCLASSIFIED`.
+
+The surface covers the commands, agents, formulas and orders a pack ships
+(including inline `[[agent]]` and `[[commands]]` in `pack.toml`), the claim
+commands its prompts tell agents to run, the reserved metadata it requires, the
+formula constructs and `formula_compiler` requirement it uses, every *must*,
+*never* and *do not* line in its role prompts and template fragments
+(`.md`, `.template.md` and `.md.tmpl`), and a digest of every file. Read the
+files an `UNCLASSIFIED` verdict lists: a rewritten prompt or script can change
+behavior with the same surface.
+`gc pack capability <dir>` prints one version's surface, and `--json` makes both
+commands scriptable.
+
 ### Registry State Is Local
 
 Registry commands manage local discovery state. Pack imports manage shared city
