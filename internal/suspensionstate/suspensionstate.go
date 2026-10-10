@@ -97,12 +97,19 @@ func Load(fs fsys.FS, cityPath string) (State, error) {
 	return st, nil
 }
 
-// Save writes the runtime suspension state to disk atomically.
+// Save writes the runtime suspension state to disk atomically. On the OS
+// filesystem it holds the suspension [Fence] for the write, so it waits for a
+// controller that is stopping a still-suspended scope's store.
 func Save(fs fsys.FS, cityPath string, st State) error {
 	p := citylayout.SuspensionStateFile(cityPath)
 	if err := fs.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
+	release, err := fenceFor(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	defer release()
 	st.UpdatedAt = time.Now().UTC()
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
