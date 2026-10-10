@@ -13,10 +13,10 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	const (
 		ghVersion                 = "2.96.0"
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
-		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
+		doltSourceRef             = "a6690826d767743df7adf0b8bfea3830ee2c4cf6"
 		grpcVersion               = "1.83.2"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
-		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
+		doltSourceSHA256          = "3d7ed1a4ad464dca37228c8b069fc84c803be7ab5254534774728559492a0622"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
 		doltOptcrossX8664SHA256   = "caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0"
 		doltOptcrossAarch64SHA256 = "5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce"
@@ -66,9 +66,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "f45b249ce6b40ba62aecc03949e6371e8f7c79d8"
-		bdSourceSHA256 = "51689f2a4d9f3437334d6e9f91e3b18c0793fb9cc8cf988ce511ef1f39b13214"
-		bdBuild        = "f45b249ce6b"
+		bdSourceRef    = "c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c"
+		bdSourceSHA256 = "1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8"
+		bdBuild        = "c1c4b642ac1"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		thriftVersion  = "0.24.0"
@@ -153,27 +153,37 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.59",
+		"gitpython>=3.1.60",
 		"aiohttp>=3.14.3",
 		"anyio>=4.14.2",
 		"pillow>=12.3.0",
+		"urllib3>=2.8.0",
+		"fsspec>=2026.6.0",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
 		}
 	}
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
-	if !strings.Contains(overrides, "cryptography>=50.0.0") {
-		t.Error("mcp-agent-mail overrides missing cryptography security floor >=50.0.0")
+	for _, want := range []string{
+		"cryptography>=50.0.0",
+		"pyjwt>=2.14.0",
+	} {
+		if !strings.Contains(overrides, want) {
+			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
+		}
 	}
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.59 \\",
+		"gitpython==3.1.60 \\",
 		"aiohttp==3.14.3 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
+		"pyjwt==2.14.0 \\",
+		"urllib3==2.8.0 \\",
+		"fsspec==2026.6.0 \\",
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)

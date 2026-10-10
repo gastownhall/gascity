@@ -357,11 +357,19 @@ func TestHookClaimWindowDefaultCoversWorkQueryBudget(t *testing.T) {
 	}
 }
 
-// TestHookClaimWindowBoundsTheClaimWriteChild pins the ctx half of F-B: the
-// claim-write child's own deadline is the REMAINING window, not the flat
-// mutation timeout. Without it a claim started at second 44 of a 45s window
-// keeps a bd subprocess alive for another 10s past the fence.
-func TestHookClaimWindowBoundsTheClaimWriteChild(t *testing.T) {
+// TestHookClaimWriteChildGetsReservedBudgetAtWindowEdge pins the reserved claim
+// budget: a claim that reaches the CAS inside its window gets the FULL mutation
+// budget, never the sliver of window the read left over.
+//
+// The old contract bounded the claim-write child by the REMAINING window, so a
+// federated read that finished a few milliseconds before the window closed
+// handed the CAS an already-expired context. bd then failed the claim with
+// `claiming bead "<id>": timed out after 0s (caller deadline)`, the tier skipped
+// it as an errored claim, and the seat drained claims_errored with its routed
+// work still unclaimed (maintainer-city, 2026-09-22/23). The claim budget is now
+// separate from the read budget; the straddle fence still bounds how late the
+// CAS may land (window + reserve).
+func TestHookClaimWriteChildGetsReservedBudgetAtWindowEdge(t *testing.T) {
 	rec := &turnBoundClaimRecorder{}
 	ops := rec.ops(t, turnBoundRoutedWork)
 	ops.InvokedAt = time.Now().Add(-44 * time.Second)
@@ -381,8 +389,60 @@ func TestHookClaimWindowBoundsTheClaimWriteChild(t *testing.T) {
 	if !ok {
 		t.Fatal("claim ran with no deadline")
 	}
-	if remaining := time.Until(deadline); remaining > 2*time.Second {
-		t.Fatalf("claim-write deadline = %s away, want <= the ~1s remaining window", remaining)
+	if remaining := time.Until(deadline); remaining < hookClaimMutationTimeout-2*time.Second {
+		t.Fatalf("claim-write deadline = %s away, want the reserved mutation budget (~%s): the read must not eat the claim's time", remaining, hookClaimMutationTimeout)
+	}
+	if remaining := time.Until(deadline); remaining > hookClaimMutationTimeout+time.Second {
+		t.Fatalf("claim-write deadline = %s away, want it bounded by the mutation budget %s", remaining, hookClaimMutationTimeout)
+	}
+}
+
+// TestHookClaimFoundBeadStaysClaimableWhenReadSpendsTheWindow reproduces the
+// claims_errored specimen end to end: the work query returns routed work with
+// 1ms of the claim window left. The claim op behaves like BdStore.Claim — it
+// fails with the caller-deadline error when its context has no time left — so
+// under the old leftover-window budget the only candidate errored and the seat
+// drained claims_errored. With the reserved budget the found bead is claimed.
+func TestHookClaimFoundBeadStaysClaimableWhenReadSpendsTheWindow(t *testing.T) {
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, turnBoundRoutedWork)
+	clk := time.Now()
+	ops.Now = func() time.Time { return clk }
+	ops.InvokedAt = clk
+	ops.ClaimWindow = 240 * time.Second // the maintainer city's GC_HOOK_CLAIM_WINDOW
+	ops.Runner = func(string, string) (string, error) {
+		// A slow federated read that returns with 1ms of window left.
+		clk = clk.Add(ops.ClaimWindow - time.Millisecond)
+		return turnBoundRoutedWork, nil
+	}
+	baseClaim := ops.Claim
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		// A healthy CAS takes a moment of real time; one that starts with an
+		// all-but-expired context is refused by the bd runner exactly as in the
+		// supervisor evidence.
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < time.Second {
+			return beads.Bead{}, false, errors.New(`claiming bead "` + beadID + `": timed out after 0s (caller deadline)`)
+		}
+		return baseClaim(ctx, dir, env, beadID, assignee)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		DrainAck:     true,
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0: the found bead must be claimable; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	result := decodeTurnBoundResult(t, stdout.String())
+	if result.Action != "work" || result.BeadID != "work-1" {
+		t.Fatalf("result = %+v, want action=work bead=work-1 (not a %s drain)", result, hookClaimReasonClaimsErrored)
+	}
+	if len(rec.releases) != 0 {
+		t.Fatalf("releases = %v, want none: the claim landed inside window+reserve", rec.releases)
 	}
 }
 
@@ -514,6 +574,39 @@ func TestHookClaimSlowButInsideWindowStands(t *testing.T) {
 	}
 	if len(rec.releases) != 0 {
 		t.Fatalf("releases = %v, want none: the claim landed inside its window", rec.releases)
+	}
+}
+
+// TestHookClaimLandingInsideReserveStands pins the other edge of the reserved
+// claim budget: a CAS that STARTS just inside the window and lands a few seconds
+// past it — inside window + hookClaimMutationTimeout — is a healthy claim, not a
+// straddle. Under the old window-only landing check it was released, so the
+// found bead was claimed and immediately given back.
+func TestHookClaimLandingInsideReserveStands(t *testing.T) {
+	rec := &turnBoundClaimRecorder{}
+	ops := rec.ops(t, turnBoundRoutedWork)
+	clock := time.Now()
+	ops.Now = func() time.Time { return clock }
+	ops.InvokedAt = clock.Add(-(40*time.Second - time.Millisecond))
+	ops.ClaimWindow = 40 * time.Second
+	baseClaim := ops.Claim
+	ops.Claim = func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
+		clock = clock.Add(hookClaimMutationTimeout / 2)
+		return baseClaim(ctx, dir, env, beadID, assignee)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(rec.releases) != 0 {
+		t.Fatalf("releases = %v, want none: the claim landed inside its reserved budget", rec.releases)
 	}
 }
 

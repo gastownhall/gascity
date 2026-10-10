@@ -90,10 +90,17 @@ Per scope, in order, city first:
    The classifier reads the `dolt_data_dir` a scope already records, so a rig
    whose key was written by a run that then failed at `bd migrate` resumes on
    the next run instead of refusing.
-5. **Run `bd migrate from-server-to-proxied-server --idle-timeout 0`** in the
-   scope. `--idle-timeout 0` is bd's `IdleTimeoutNever` and is required: without
-   it the proxy and its Dolt child retire after 30s idle and every later command
-   pays a cold start.
+5. **Run `bd migrate from-server-to-proxied-server --idle-timeout <T>`** in the
+   scope. `<T>` is the city's resolved idle timeout: `[beads]
+   proxied_idle_timeout`, or `GC_BEADS_PROXIED_IDLE_TIMEOUT` when set, or the
+   default `30m`; `0` is bd's `IdleTimeoutNever`. gc always passes it: without
+   it bd falls back to its own 30s. Every rig that shares the city's proxy root
+   gets the city's value, because one proxy serves all of them; such a rig's own
+   `beads_proxied_idle_timeout` is ignored with a warning. A rig on its own root
+   gets its own value. When bd *resumes* an interrupted migration it keeps the
+   value it recorded when the migration started and ignores the one passed now.
+   gc reads the sidecar back afterwards and reports a mismatch as a per-scope
+   warning, and `gc doctor`'s `proxied-idle-timeout` check keeps showing it.
 6. **Verify and normalise.** Confirm bd's outcome from `metadata.json` and the
    absence of its in-flight journal `.beads/dolt-mode-migration.json`, then
    rewrite `.beads/config.yaml` through
@@ -181,8 +188,9 @@ grep dolt.mode <city>/.beads/config.yaml # no match
 # A shared-root rig names the city's data dir, relatively.
 cat <rig>/.beads/metadata.json           # "dolt_data_dir": "../../.beads/dolt"
 
-# Sidecar: idle-never, rooted at the city.
-cat <scope>/.beads/proxied_server_client_info.json   # "idle_timeout": -1
+# Sidecar: the configured idle timeout in nanoseconds (1800000000000 for the
+# default 30m), or -1 for never; rooted at the city.
+cat <scope>/.beads/proxied_server_client_info.json   # "idle_timeout": 1800000000000
 ```
 
 `gc start` must **not** republish `<city>/.gc/runtime/packs/dolt/dolt-state.json`

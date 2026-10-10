@@ -26,11 +26,23 @@ package storeref
 //
 //   - The RUNTIME plane is city operations: ticks, hooks, claims, sweeps,
 //     census. It is a LATENCY contract, and it narrows to the infra/class
-//     binding. Every bd operation on this plane hits the binding only; a
-//     work-ledger leg here is a misrouting bug by definition, not a cost to
-//     amortize (operator invariant 2026-08-15, bd memory
+//     binding: an infrastructure-class read on this plane hits the binding
+//     only (operator invariant 2026-08-15, bd memory
 //     gascity-runtime-infra-store-invariant, ga-l7jdg). It is why a claim needed
 //     a 240s window and why one tick leg cost 185s of a 360s tick.
+//
+//     One tick read is deliberately NOT on this plane: the default pool-demand
+//     probe (cmd/gc routedWorkCityDemandLegs) counts routed work over
+//     Plan(RoutedWork) on the RECONCILE plane — the work ledger, then the
+//     binding. `gc sling` and formula dispatch stamp gc.routed_to on
+//     WORK-class beads, which live in the ledger, and the claim reader
+//     (`gc ready`) federates the unnarrowed plan and serves them. A demand
+//     count narrowed to the binding is therefore a claimable bead counted by
+//     nobody, and the pool never spawns for it (#6019). The cost is one ready
+//     read of the ledger per tick per city (the per-pass demand cache shares it
+//     across pools) — the same read a city that relocates nothing pays every
+//     tick. A work-ledger leg on any OTHER runtime-plane read is still a
+//     misrouting bug, not a cost to amortize.
 //   - The RECONCILE plane is the rare, separately-scheduled convergence lane. It
 //     is a CONVERGENCE contract and narrows NOTHING, because a store it skips is
 //     a store nothing converges: the runtime plane over that same binding is

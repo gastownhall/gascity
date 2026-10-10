@@ -660,3 +660,44 @@ func TestCityRegistryByNameCollisionWithFailedCity(t *testing.T) {
 		t.Fatalf("ListCities returned %d cities, want 2", len(cities))
 	}
 }
+
+func cityChangeFired(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// CityChanges must fire when the set of cities or their running state
+// changes, so an open supervisor event stream can attach and detach city
+// providers (#6861), and must stay quiet for status-only rebuilds that the
+// reconcile tick performs constantly.
+func TestCityRegistryCityChangesSignalsMembershipChanges(t *testing.T) {
+	reg := newCityRegistry()
+	var _ api.CityChangeNotifier = reg
+
+	ch := reg.CityChanges()
+	reg.Add("/path/a", &managedCity{name: "city-a", cr: &CityRuntime{cityName: "city-a"}, status: "starting"})
+	if !cityChangeFired(ch) {
+		t.Fatal("CityChanges did not fire when a city was added")
+	}
+
+	ch = reg.CityChanges()
+	reg.UpdateCallback("/path/a", func(m *managedCity) { m.status = "starting_agents" })
+	if cityChangeFired(ch) {
+		t.Fatal("CityChanges fired for a status-only update")
+	}
+
+	reg.UpdateCallback("/path/a", func(m *managedCity) { m.started = true })
+	if !cityChangeFired(ch) {
+		t.Fatal("CityChanges did not fire when the city started")
+	}
+
+	ch = reg.CityChanges()
+	reg.Remove("/path/a")
+	if !cityChangeFired(ch) {
+		t.Fatal("CityChanges did not fire when the city was removed")
+	}
+}

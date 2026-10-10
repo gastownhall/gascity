@@ -176,6 +176,21 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 	return deleter.DeleteBatch(ids)
 }
 
+// GetExactBatch forwards the exact batch read to the wrapped store. The policy
+// layer shapes creation and listing, not exact reads by id.
+func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var (
+	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+)
+
 var (
 	_ beads.RowWitness = (*beadPolicyStore)(nil)
 	_ beads.RowWitness = (*beadPolicyGraphStore)(nil)
@@ -195,6 +210,31 @@ var (
 func (s *beadPolicyStore) SawRows() bool {
 	witness, ok := s.Store.(beads.RowWitness)
 	return ok && witness.SawRows()
+}
+
+// DepListBatch forwards the batched dep-edge read to the wrapped store.
+//
+// The policy layer shapes which BEADS are visible — Create, List, Ready,
+// Children, ListByLabel and the rest are filtered here. It does not shape DEP
+// EDGES: DepList is already answered by the embedded store with no policy
+// applied, and this is DepList's batch shape, so forwarding it keeps the two
+// answers identical rather than giving the batch a reach the single read
+// does not have.
+//
+// It is explicit for the reason DeleteBatch above is: the embedded Store
+// interface does not promote optional capabilities, so a silent wrapper makes
+// the batch unreachable and the caller takes the per-anchor path with no
+// diagnostic. That is exactly what happened on a live hosted city, where the
+// recovery walk asked this wrapper for the batch, was told no by a failed type
+// assertion, and read a few hundred beads one round trip at a time over a link
+// that drops handshakes (ga-50tsx). beadPolicyGraphStore embeds
+// *beadPolicyStore, so it forwards through this too.
+func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
@@ -283,6 +323,23 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 		return false, beads.ErrConditionalReleaseUnsupported
 	}
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
+}
+
+// Claim forwards the two-argument compare-and-swap claim to the wrapped
+// store, the same plain pass-through ReleaseIfCurrent just above uses: the
+// policy layer shapes creation and reads, and has no claim policy of its own
+// to apply, so the inner store's ok/error idiom (a conflict is ok=false with a
+// nil error; a missing bead is ErrNotFound) travels unmodified.
+// beadPolicyGraphStore inherits this via its embedded *beadPolicyStore,
+// matching ConditionalWritesResolveTarget's comment above.
+func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.Store.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
+	}
+	return claimer.Claim(id, assignee)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {

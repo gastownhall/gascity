@@ -27,8 +27,10 @@ import (
 // is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
 // transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
 // green PR (maintainer-city incident: 3 attempts burned in one outage). The
-// bound guarantees a gate that can never run (a missing script, a perpetual
-// timeout) still terminates the workflow instead of pending forever. The
+// bound guarantees a gate that launches but never yields a verdict (a
+// perpetual timeout, exit 75 forever) still terminates the workflow instead of
+// pending forever; an unlaunchable script never reaches this budget and is
+// held open on the drift-pending lane instead (see runRalphCheck). The
 // counter is cloned into each next attempt, so this is the ralph loop's total
 // infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
 // outage.
@@ -54,6 +56,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	logicalID := resolveLogicalBeadID(store, bead)
 	if logicalID == "" {
 		return ControlResult{}, fmt.Errorf("%s: could not resolve logical bead ID", bead.ID)
+	}
+	// The terminal branches below settle the logical bead before closing this
+	// check, so an open check over a closed logical bead is a settle that was
+	// interrupted between those two writes. Finish it without re-running the
+	// gate: the verdict is already durable on the logical bead, and a second
+	// run could disagree with it.
+	logical, err := store.Get(logicalID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
+	}
+	if logical.Status == "closed" {
+		if err := setOutcomeAndClose(store, bead.ID, logical.Metadata[beadmeta.OutcomeMetadataKey]); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing check of settled logical bead %s: %w", bead.ID, logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "logical-settled"}, nil
 	}
 
 	subjectID, err := resolveBlockingSubjectID(store, bead.ID)
@@ -82,7 +99,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
 		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
 		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
-	if err := persistCheckResult(store, bead.ID, result); err != nil {
+	if err := persistCheckResult(store, bead, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
 
@@ -112,17 +129,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			bead.ID, result.Outcome, infraRetries, attempt)
 	}
 
+	// Every terminal branch below settles the logical bead first and closes
+	// the check last. The open check is what re-drives this function, so a
+	// crash before its close is finished by the next serve cycle (see the
+	// settled-logical guard above); a check closed first would strand the
+	// logical bead open with nothing left to close it.
 	if result.Outcome == convergence.GatePass {
+		settled := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+			settled[beadmeta.OutputJSONMetadataKey] = outputJSON
+		}
+		if err := settleLogicalBead(store, logicalID, settled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: settling passed logical bead: %w", logicalID, err)
+		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed check: %w", bead.ID, err)
-		}
-		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
-			if err := store.SetMetadata(logicalID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
-			}
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass"}, nil
 	}
@@ -137,36 +158,30 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	// to gc.max_attempts below. Only an explicit "hard" class terminates here.
 	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail &&
 		strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) == beadmeta.FailureClassHard {
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
 			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
 			beadmeta.FailureReasonMetadataKey:    retryFailureReason(subject),
 			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
+			return ControlResult{}, fmt.Errorf("%s: settling hard-failed logical bead: %w", logicalID, err)
 		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed check: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 	}
 
 	if attempt >= maxAttempts {
-		if err := store.SetMetadataBatch(logicalID, map[string]string{
+		if err := settleLogicalBead(store, logicalID, map[string]string{
 			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 			beadmeta.FailedAttemptMetadataKey: strconv.Itoa(attempt),
 		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking logical failure: %w", logicalID, err)
+			return ControlResult{}, fmt.Errorf("%s: settling failed logical bead: %w", logicalID, err)
 		}
 		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing failed check: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: closing failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "fail"}, nil
 	}
@@ -218,6 +233,21 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 	opts.tracef("ralph retry-finalize-done bead=%s next=%d", bead.ID, nextAttempt)
 	return ControlResult{Processed: true, Action: "retry"}, nil
+}
+
+// settleLogicalBead records a control's terminal verdict on its logical bead
+// and closes it. The close is a forced Close, not a status update: the control
+// being processed (a check or retry-eval) still blocks the logical bead (it
+// must stay open until the logical bead is durable), and bd refuses an
+// unforced close of a blocked bead.
+func settleLogicalBead(store beads.Store, logicalID string, metadata map[string]string) error {
+	if err := store.SetMetadataBatch(logicalID, metadata); err != nil {
+		return fmt.Errorf("recording verdict: %w", err)
+	}
+	if err := store.Close(logicalID); err != nil {
+		return fmt.Errorf("closing: %w", err)
+	}
+	return nil
 }
 
 func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opts ProcessOptions) (convergence.GateResult, error) {
@@ -287,13 +317,31 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// store/city root — exactly the base used when work_dir is empty, so
 		// it introduces no new trusted root and stays subject to
 		// ResolveConditionPath's containment checks. Only on a not-exist miss,
-		// so a check that does exist under the worktree keeps precedence; the
-		// original work_dir error is preserved when the fallback also misses.
-		if fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath); fallbackErr == nil {
+		// so a check that does exist under the worktree keeps precedence. The
+		// original work_dir error is preserved only when the fallback also
+		// misses; any other fallback error (not executable, containment
+		// refusal) describes the copy that would actually run, so it wins.
+		fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath)
+		switch {
+		case fallbackErr == nil:
 			scriptPath, err = fallbackPath, nil
+		case !errors.Is(fallbackErr, fs.ErrNotExist):
+			err = fallbackErr
 		}
 	}
 	if err != nil {
+		if convergence.IsConditionUnlaunchable(err) {
+			// The check cannot be launched: the script is missing, not a regular
+			// file, or not executable. No verdict exists and none will appear by
+			// re-running, so this must neither burn an attempt nor close the step.
+			// Hold the step OPEN on the drift-pending lane (dependents stay
+			// blocked, gc.control_pending_* explains it, control.stalled fires once
+			// after the budget); shipping or chmod-ing the script heals it on the
+			// next sweep (gastownhall/gascity#4239). A removed work_dir heals only
+			// when it is restored: RunCondition runs the check inside it, so a
+			// store-root copy found by the fallback above cannot start.
+			return convergence.GateResult{}, fmt.Errorf("%w: %s: resolving check path: %w (the step stays open until the check script can be launched)", ErrControlDriftPending, bead.ID, err)
+		}
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
 	if filepath.IsAbs(checkPath) && !pathWithinAny(scriptPath, trustedAbsRoots) {
@@ -545,20 +593,23 @@ func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
 	return parsed, nil
 }
 
-func persistCheckResult(store beads.Store, beadID string, result convergence.GateResult) error {
-	batch := map[string]string{
-		beadmeta.OutcomeMetadataKey:    result.Outcome,
-		beadmeta.StdoutMetadataKey:     result.Stdout,
-		beadmeta.StderrMetadataKey:     result.Stderr,
-		beadmeta.DurationMsMetadataKey: strconv.FormatInt(result.Duration.Milliseconds(), 10),
-		beadmeta.TruncatedMetadataKey:  strconv.FormatBool(result.Truncated),
-	}
+// persistCheckResult records a launched check's result on its kind=check bead.
+// A launched check also proves any drift-pending wait (an unlaunchable script)
+// has healed, so the batch is seeded with controlCompletionMetadata, which
+// blanks whichever gc.control_pending_* keys the bead carries. That rides the
+// write every launched run already makes, so every later close is clean.
+func persistCheckResult(store beads.Store, bead beads.Bead, result convergence.GateResult) error {
+	batch := controlCompletionMetadata(bead, result.Outcome)
+	batch[beadmeta.StdoutMetadataKey] = result.Stdout
+	batch[beadmeta.StderrMetadataKey] = result.Stderr
+	batch[beadmeta.DurationMsMetadataKey] = strconv.FormatInt(result.Duration.Milliseconds(), 10)
+	batch[beadmeta.TruncatedMetadataKey] = strconv.FormatBool(result.Truncated)
 	if result.ExitCode != nil {
 		batch[beadmeta.ExitCodeMetadataKey] = strconv.Itoa(*result.ExitCode)
 	} else {
 		batch[beadmeta.ExitCodeMetadataKey] = ""
 	}
-	return store.SetMetadataBatch(beadID, batch)
+	return store.SetMetadataBatch(bead.ID, batch)
 }
 
 func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, nextAttempt int, opts ProcessOptions) (map[string]string, error) {
@@ -1355,6 +1406,13 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.ClosedByAttemptMetadataKey,
 		beadmeta.LastFailureClassMetadataKey,
 		beadmeta.RetrySessionRecycledMetadataKey,
+		// A pending budget and its one-shot stall latch belong to one bead's
+		// life; a clone that inherited them would never escalate its own
+		// pending wait (same rationale as clearControllerSpawnErrorMetadata).
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",

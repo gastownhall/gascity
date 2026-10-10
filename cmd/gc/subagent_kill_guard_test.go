@@ -33,7 +33,7 @@ func TestHandoffRemoteRefusesLiveSubagentsUnlessForced(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := doHandoffRemoteWithForce(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 || sp.IsRunning("target") {
+	if code := doHandoffRemoteWithForce("", store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 || sp.IsRunning("target") {
 		t.Fatalf("force code=%d running=%v stderr=%s", code, sp.IsRunning("target"), stderr.String())
 	}
 }
@@ -119,7 +119,7 @@ func TestHandoffRemoteRefusalSendsNoMailAndForceSendsExactlyOne(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := doHandoffRemoteWithForce(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 {
+	if code := doHandoffRemoteWithForce("", store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 {
 		t.Fatalf("force code=%d stderr=%s", code, stderr.String())
 	}
 	if got := countMail(); got != 1 {

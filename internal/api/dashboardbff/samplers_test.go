@@ -461,6 +461,42 @@ func TestProbeRigProxiedModeIgnoresStalePortArtifact(t *testing.T) {
 	}
 }
 
+// A proxied rig whose proxy retired on its finite idle timeout is healthy and
+// is not pinged; a never-idle rig with no proxy is still pinged.
+func TestProbeRigDoesNotPingAnIdleRetiredProxiedRig(t *testing.T) {
+	for _, tc := range []struct {
+		name, sidecar string
+		wantPing      bool
+	}{
+		{name: "finite", sidecar: `{"idle_timeout":1800000000000}`},
+		{name: "never", sidecar: `{"idle_timeout":-1}`, wantPing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig, bin := newProbeRigFixture(t)
+			if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{"dolt_mode":"proxied-server"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rig, ".beads", "proxied_server_client_info.json"), []byte(tc.sidecar), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "pinged")
+			writeFakeBd(t, bin, "#!/bin/sh\n: > "+marker+"\nprintf '%s' '{\"status\":\"ok\"}'\n")
+
+			rep := newSamplerManager(Deps{}, newExecRunner()).probeRig(context.Background(), "r1", rig)
+			_, err := os.Stat(marker)
+			if pinged := err == nil; pinged != tc.wantPing {
+				t.Fatalf("pinged = %v, want %v (report %+v)", pinged, tc.wantPing, rep)
+			}
+			if rep.Rollup != "ok" {
+				t.Fatalf("rollup = %q, want ok", rep.Rollup)
+			}
+			if !tc.wantPing && rep.Note != rigIdleNote {
+				t.Fatalf("note = %q, want the idle note", rep.Note)
+			}
+		})
+	}
+}
+
 func TestProbeRigConfigMarkerIgnoresStalePortArtifact(t *testing.T) {
 	rig, bin := newProbeRigFixture(t)
 	if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
@@ -546,6 +582,16 @@ func TestProbeRigOnlyPersistedServerModeAuthorizesTCPProbe(t *testing.T) {
 			name:         "server config without metadata",
 			config:       "dolt.mode: server\n",
 			wantEndpoint: true,
+		},
+		{
+			// bd >= 1.3.1 writes `bd config set dolt.mode` nested.
+			name:         "nested server config without metadata",
+			config:       "dolt:\n    mode: server\n",
+			wantEndpoint: true,
+		},
+		{
+			name:   "flat config mode wins over nested",
+			config: "dolt:\n    mode: server\ndolt.mode: embedded\n",
 		},
 		{
 			name:     "malformed metadata overrides server config",

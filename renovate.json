@@ -111,17 +111,6 @@
     {
       "customType": "regex",
       "fileMatch": [
-        "/^scripts/test-docker-session$/"
-      ],
-      "matchStrings": [
-        "FROM alpine:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)"
-      ],
-      "datasourceTemplate": "docker",
-      "depNameTemplate": "alpine"
-    },
-    {
-      "customType": "regex",
-      "fileMatch": [
         "/^scripts/worker_inference_setup\\.py$/"
       ],
       "matchStrings": [

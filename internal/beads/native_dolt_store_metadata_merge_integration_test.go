@@ -13,91 +13,87 @@ import (
 	beadslib "github.com/steveyegge/beads"
 )
 
-// TestNativeDoltStoreSetMetadataBatchKeepsAConcurrentUpdateAgainstRealDolt is
-// the real-store proof of the compare-and-swap: a second writer changes other
-// keys of the same bead between the merge's read and its checked write, on
-// the pinned backend with its own row version and audit events. The refused
-// swap is retried from a fresh read, every key of both writers survives, and
-// exactly one event is recorded for the stamp — the refused attempt leaves
-// none. The in-memory test owns the interleaving detail; this pins that the
-// backend's version check is the one the store compares against.
+// TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate is the
+// real-store proof that a metadata stamp keeps a competing writer's keys. Two
+// handles on one sql-server are two sessions, the way two processes share a
+// ledger. A stamps a key and reads the row. B then commits the fence
+// activation: it clears two keys and sets a third. A stamps again without
+// reading. A stamp merged against A's last view would write B's cleared keys
+// back and drop B's new one. The facade merges against the row its own
+// transaction reads, so every key of both writers survives, seen from either
+// session. It runs against the issues table and the wisps table, whose writes
+// are separate backend paths.
 //
-// The proof never skips: a host that cannot open the pinned backend fails
-// the test, so a lane cannot go green with the proof unexecuted.
-func TestNativeDoltStoreSetMetadataBatchKeepsAConcurrentUpdateAgainstRealDolt(t *testing.T) {
-	ctx := context.Background()
-	store := openRealNativeDoltStoreForMergeProof(t, "merge-race")
+// The ordering is forced between transactions, not inside one: no hook reaches
+// inside a facade transaction. A commit landing inside the stamp's own
+// transaction is Dolt's to merge or refuse, and the store replays the refusal;
+// TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop exercises that
+// window by racing the two writers.
+//
+// The proof never skips: a host that cannot start the pinned server fails the
+// test, so a lane cannot go green with the proof unexecuted.
+func TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate(t *testing.T) {
+	for tableName, ephemeral := range map[string]bool{"issues": false, "wisps": true} {
+		t.Run(tableName, func(t *testing.T) {
+			scopeRoot := initServerScopeForMergeProof(t)
+			a := openNativeDoltStoreHandleForMergeProof(t, scopeRoot)
+			b := openNativeDoltStoreHandleForMergeProof(t, scopeRoot)
 
-	created, err := store.Create(Bead{
-		Title:    "fenced entry step",
-		Metadata: map[string]string{"gc.run_target": "pool", "gc.instantiating": "true", "gc.deferred_routed_to": "rig/pool"},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	id := created.ID
+			created, err := a.Create(Bead{
+				Title:     "fenced entry step",
+				Ephemeral: ephemeral,
+				Metadata:  map[string]string{"gc.run_target": "pool", "gc.instantiating": "true", "gc.deferred_routed_to": "rig/pool"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if created.Ephemeral != ephemeral {
+				t.Fatalf("Ephemeral = %v, want %v: the variant does not exercise the table it names", created.Ephemeral, ephemeral)
+			}
+			id := created.ID
 
-	countEvents := func() int {
-		t.Helper()
-		storage, release, err := store.acquireStorage()
-		if err != nil {
-			t.Fatalf("acquire storage: %v", err)
-		}
-		defer release()
-		events, err := storage.GetEvents(ctx, id, 100)
-		if err != nil {
-			t.Fatalf("GetEvents: %v", err)
-		}
-		return len(events)
-	}
+			if err := a.SetMetadataBatch(id, map[string]string{"gc.attempt": "1"}); err != nil {
+				t.Fatalf("A's first stamp: %v", err)
+			}
+			view, err := a.Get(id)
+			if err != nil {
+				t.Fatalf("A's read: %v", err)
+			}
+			if view.Metadata["gc.instantiating"] != "true" || view.Metadata["gc.routed_to"] != "" {
+				t.Fatalf("A's view = %#v, want the row as it stood before B's write", view.Metadata)
+			}
 
-	reads := 0
-	afterCompetingWrite := -1
-	store.afterMetadataMergeRead = func(readID string) {
-		reads++
-		if reads != 1 || readID != id {
-			return
-		}
-		// The competing writer: the fence activation, on other keys of the same
-		// row, committing after the merge's read and before its checked write.
-		if err := store.Update(id, UpdateOpts{Metadata: map[string]string{
-			"gc.instantiating":      "",
-			"gc.deferred_routed_to": "",
-			"gc.routed_to":          "rig/pool",
-		}}); err != nil {
-			t.Errorf("competing Update: %v", err)
-		}
-		afterCompetingWrite = countEvents()
-	}
+			if err := b.Update(id, UpdateOpts{Metadata: map[string]string{
+				"gc.instantiating":      "",
+				"gc.deferred_routed_to": "",
+				"gc.routed_to":          "rig/pool",
+			}}); err != nil {
+				t.Fatalf("B's competing Update: %v", err)
+			}
+			if err := a.SetMetadataBatch(id, map[string]string{"gc.heartbeat": "now"}); err != nil {
+				t.Fatalf("A's second stamp: %v", err)
+			}
 
-	if err := store.SetMetadataBatch(id, map[string]string{"gc.heartbeat": "now"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if reads != 2 {
-		t.Fatalf("merge reads = %d, want 2 (the swap refused after the competing write, then a fresh read)", reads)
-	}
-
-	got, err := store.Get(id)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	for key, want := range map[string]string{
-		"gc.heartbeat":          "now",
-		"gc.instantiating":      "",
-		"gc.deferred_routed_to": "",
-		"gc.routed_to":          "rig/pool",
-		"gc.run_target":         "pool",
-	} {
-		if got.Metadata[key] != want {
-			t.Errorf("%s = %q, want %q (the competing write was lost or the merge was)", key, got.Metadata[key], want)
-		}
-	}
-
-	if afterCompetingWrite < 0 {
-		t.Fatal("the competing write never ran")
-	}
-	if delta := countEvents() - afterCompetingWrite; delta != 1 {
-		t.Fatalf("events recorded by the merge = %d, want 1: the committed stamp records one event and the refused swap none", delta)
+			want := map[string]string{
+				"gc.run_target":         "pool",
+				"gc.attempt":            "1",
+				"gc.instantiating":      "",
+				"gc.deferred_routed_to": "",
+				"gc.routed_to":          "rig/pool",
+				"gc.heartbeat":          "now",
+			}
+			for session, store := range map[string]*NativeDoltStore{"A": a, "B": b} {
+				got, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("session %s Get: %v", session, err)
+				}
+				for key, value := range want {
+					if got.Metadata[key] != value {
+						t.Errorf("session %s: %s = %q, want %q: a stale merge lost a write (full: %#v)", session, key, got.Metadata[key], value, got.Metadata)
+					}
+				}
+			}
+		})
 	}
 }
 

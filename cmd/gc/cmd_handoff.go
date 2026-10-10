@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -186,7 +187,8 @@ func cmdHandoffWithForce(args []string, target string, auto bool, hookFormat str
 		return 0
 	}
 
-	if err := pokeControllerForRestart(current.cityPath); err != nil {
+	// Name-only key: the env-derived GC_SESSION_ID can be stale.
+	if err := pokeControllerForRestart(current.cityPath, reconcilekey.SessionNamed(current.sessionName)); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -233,7 +235,7 @@ func cmdHandoffRemoteWithForce(args []string, target string, force bool, stdout,
 		return 1
 	}
 	rec := openCityRecorder(stderr)
-	return doHandoffRemoteWithForce(msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
+	return doHandoffRemoteWithForce(cityPath, msgStore, sessStore, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, force, stdout, stderr)
 }
 
 func sessionRestartPersister(cityPath string, sessStore beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
@@ -446,10 +448,10 @@ func clearRestartRequest(sessStore beads.Store, dops drainOps, sessionName strin
 func doHandoffRemote(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
-	return doHandoffRemoteWithForce(msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
+	return doHandoffRemoteWithForce("", msgStore, sessStore, rec, sp, sessionName, targetAddress, sender, args, false, stdout, stderr)
 }
 
-func doHandoffRemoteWithForce(msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
+func doHandoffRemoteWithForce(cityPath string, msgStore, sessStore beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, force bool, stdout, stderr io.Writer,
 ) int {
 	restartable, _, err := sessionRestartableByController(sessStore, sessionName)
@@ -494,7 +496,7 @@ func doHandoffRemoteWithForce(msgStore, sessStore beads.Store, rec events.Record
 	// still live. The metric label uses the agent identity (not the sanitized
 	// runtime session name) so handoff stops join the start/crash/kill counters.
 	agentIdentity := sessionAgentMetricIdentityByName(sessStore, sessionName)
-	if err := workerKillSessionTargetWithConfig("", sessStore, sp, nil, sessionName); err != nil {
+	if err := workerKillSessionTargetWithConfig(cityPath, sessStore, sp, nil, sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

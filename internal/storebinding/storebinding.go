@@ -221,13 +221,10 @@ type SessionsStore interface {
 	UpdateMetadataInfo(session.Info, session.MetadataPatch) (session.Info, error)
 	SetState(string, session.State, string) error
 	Sleep(string, string, time.Time) error
-	BeginDrainAckStopPending(string, time.Time) error
-	RequestRestart(string, string, time.Time) error
-	ResetConfigDrift(string, session.State, string, time.Time) error
 	SetWaitHold(string, bool, string) error
 	SetMarker(string, string, string) error
 	RecordCurrentBead(string, string) error
-	Close(string, string, time.Time) (bool, error)
+	Close(session.Info, string, time.Time) (bool, error)
 	CloseWithoutReason(string) error
 	SetStatusOpen(string) error
 	RepairType(string) error

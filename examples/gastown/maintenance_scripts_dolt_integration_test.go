@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,21 +52,7 @@ func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
 	}
-	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
-set -e
-printf '%s\n' "$*" >> "$BD_CALL_LOG"
-case "$1" in
-  prune)
-    printf '{"pruned_count":0}\n'
-    ;;
-  close)
-    issue_id="$2"
-    DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db citydb sql \
-      -q "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='${issue_id}'; CALL DOLT_COMMIT('-Am', 'test bd close')"
-    ;;
-esac
-exit 0
-`)
+	writeRealDoltBdDouble(t, filepath.Join(binDir, "bd"))
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 case "$1 $2" in
   "session prune")
@@ -76,14 +63,16 @@ exit 0
 `)
 
 	env := map[string]string{
-		"BD_CALL_LOG":      bdLog,
-		"GC_CITY":          cityDir,
-		"GC_CITY_PATH":     cityDir,
-		"GC_DOLT_HOST":     "127.0.0.1",
-		"GC_DOLT_PORT":     fmt.Sprintf("%d", port),
-		"GC_DOLT_USER":     "root",
-		"GC_DOLT_PASSWORD": "",
-		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_CALL_LOG":        bdLog,
+		"GC_CITY":            cityDir,
+		"GC_CITY_PATH":       cityDir,
+		"GC_DOLT_HOST":       "127.0.0.1",
+		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":       "root",
+		"GC_DOLT_PASSWORD":   "",
+		"FAKE_RIG_LIST_JSON": `{"rigs":[{"name":"rig-with-db-alias","hq":false}]}`,
+		"FAKE_SCOPE_DBS":     "city=citydb rig:rig-with-db-alias=rigdb",
+		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	runScript(t, coreScriptPath("reaper.sh"), env)
 
@@ -91,7 +80,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(bdData), "close issue-close --reason stale inactive workflow root auto-closed by reaper") {
+	if !strings.Contains(string(bdData), " issue-close --reason stale inactive workflow root auto-closed by reaper") {
 		t.Fatalf("reaper did not close city workflow issue root through bd close:\n%s", bdData)
 	}
 
@@ -131,6 +120,75 @@ exit 0
 	requireMaintenanceStatuses(t, rigIssueStatuses, map[string]string{
 		"rig-issue-preserve": "open",
 	})
+}
+
+// writeRealDoltBdDouble installs a bd double that applies the verbs the
+// reaper sends through `gc bd` (close, update --set-metadata) to the scope's
+// database on the real dolt sql-server, so the test observes the end state of
+// the reaper's real-Dolt selections. The scope's database comes from
+// FAKE_SCOPE_DBS via the fake gc route (GC_FAKE_SCOPE). Every call is logged to
+// BD_CALL_LOG.
+func writeRealDoltBdDouble(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+set -e
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+db=""
+for pair in ${FAKE_SCOPE_DBS:-}; do
+  case "$pair" in
+    "${GC_FAKE_SCOPE:-city}="*) db="${pair#*=}" ;;
+  esac
+done
+run_sql() {
+  DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db "$db" sql -q "$1"
+}
+verb="$1"
+shift
+ids=""
+sets=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reason) shift ;;
+    --force|--json) ;;
+    --set-metadata)
+      key="${2%%=*}"
+      value="${2#*=}"
+      sets="$sets, '\$.\"$key\"', '$value'"
+      shift
+      ;;
+    -*) ;;
+    *) ids="$ids $1" ;;
+  esac
+  shift
+done
+case "$verb" in
+  prune)
+    printf '{"pruned_count":0}\n'
+    ;;
+  purge)
+    printf '{"purged_count":0}\n'
+    ;;
+  backup)
+    printf '{"backup":{},"dolt":{"configured":false}}\n'
+    ;;
+  close|update)
+    # Report every applied id in bd's --json array shape.
+    sep=""
+    printf '['
+    for id in $ids; do
+      if [ "$verb" = close ]; then
+        run_sql "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='$id'; UPDATE wisps SET status='closed', closed_at=NOW() WHERE id='$id'; CALL DOLT_COMMIT('-Am', 'test bd close')" >/dev/null 2>&1 || true
+      else
+        run_sql "UPDATE issues SET metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT())$sets) WHERE id='$id'; UPDATE wisps SET metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT())$sets) WHERE id='$id'; CALL DOLT_COMMIT('-Am', 'test bd update')" >/dev/null 2>&1 || true
+      fi
+      printf '%s{"id":"%s"}' "$sep" "$id"
+      sep=","
+    done
+    printf ']\n'
+    ;;
+esac
+exit 0
+`)
 }
 
 func maintenanceReaperSchemaSQL() string {
@@ -244,7 +302,7 @@ func runDoltSQLForMaintenanceTest(t *testing.T, doltPath, dir, query string) str
 	return runDoltForMaintenanceTest(t, doltPath, dir, "sql", "-q", query)
 }
 
-func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string) int {
+func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string, extraEnv ...string) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -268,6 +326,7 @@ func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string) i
 		"--data-dir", dataDir,
 		"--loglevel", "warning",
 	)
+	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -320,22 +379,8 @@ func waitForDoltServerForMaintenanceTest(t *testing.T, doltPath string, port int
 
 func queryMaintenanceStatusByID(t *testing.T, doltPath string, port int, db string, table string) map[string]string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, doltPath,
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-		"--user", "root",
-		"--no-tls",
-		"--use-db", db,
-		"sql", "-r", "csv", "-q", fmt.Sprintf("SELECT id,status FROM %s ORDER BY id", table),
-	)
-	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("query %s.%s statuses: %v\n%s", db, table, err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := doltServerCSVQuery(t, doltPath, port, db, fmt.Sprintf("SELECT id,status FROM %s ORDER BY id", table))
+	out := strings.Join(lines, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "id,status" {
 		t.Fatalf("unexpected status output for %s.%s:\n%s", db, table, out)
 	}
@@ -348,6 +393,28 @@ func queryMaintenanceStatusByID(t *testing.T, doltPath string, port int, db stri
 		statuses[fields[0]] = fields[1]
 	}
 	return statuses
+}
+
+// doltServerCSVQuery runs query against db on the local dolt sql-server at
+// port and returns the trimmed CSV output split into lines.
+func doltServerCSVQuery(t *testing.T, doltPath string, port int, db, query string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, doltPath,
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprintf("%d", port),
+		"--user", "root",
+		"--no-tls",
+		"--use-db", db,
+		"sql", "-r", "csv", "-q", query,
+	)
+	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query %s (%s): %v\n%s", db, query, err, out)
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n")
 }
 
 func requireMaintenanceStatuses(t *testing.T, got map[string]string, want map[string]string) {
@@ -396,6 +463,13 @@ func TestReaperStaleIssueCloseSkipsDurableExtmsgRecordsRealDolt(t *testing.T) {
 	}
 	// Decoy: a durable label for the rig's ordinary row lives only in citydb.
 	seed.WriteString(",\n  ('rig-ord', 'gc:extmsg-group');\n")
+	// A live task blocked by a wisp: its dependency row has a NULL
+	// depends_on_issue_id. Before the NOT IN guard, that NULL turned the whole
+	// active-dependency exclusion list to NULL and no stale issue was closed.
+	seed.WriteString("INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES\n" +
+		"  ('live-on-wisp', 'live task blocked by a wisp', 'open', 'task', 2, NOW(), NOW(), '', '{}');\n" +
+		"INSERT INTO dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type) VALUES\n" +
+		"  ('live-on-wisp', NULL, 'some-wisp', NULL, 'blocks');\n")
 
 	// my-rig: rig-ext and rig-ext2 are durable via my-rig's own labels; rig-ord
 	// is ordinary there. The decoy label for the city's ord-stale lives only in
@@ -441,21 +515,7 @@ INSERT INTO labels (issue_id, label) VALUES
 	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
 		t.Fatalf("Symlink(dolt): %v", err)
 	}
-	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
-set -e
-printf '%s\n' "$*" >> "$BD_CALL_LOG"
-case "$1" in
-  prune)
-    printf '{"pruned_count":0}\n'
-    ;;
-  close)
-    issue_id="$2"
-    DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$GC_DOLT_HOST" --port "$GC_DOLT_PORT" --user "$GC_DOLT_USER" --no-tls --use-db citydb sql \
-      -q "UPDATE issues SET status='closed', closed_at=NOW() WHERE id='${issue_id}'; CALL DOLT_COMMIT('-Am', 'test bd close')"
-    ;;
-esac
-exit 0
-`)
+	writeRealDoltBdDouble(t, filepath.Join(binDir, "bd"))
 	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
 case "$1 $2" in
   "session prune")
@@ -480,6 +540,8 @@ exit 0
 		"GC_DOLT_PORT":       fmt.Sprintf("%d", port),
 		"GC_DOLT_USER":       "root",
 		"GC_DOLT_PASSWORD":   "",
+		"FAKE_RIG_LIST_JSON": `{"rigs":[{"name":"my-rig","hq":false}]}`,
+		"FAKE_SCOPE_DBS":     "city=citydb rig:my-rig=my-rig",
 		"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 	reaperOut, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
@@ -525,4 +587,86 @@ exit 0
 		"rig-ext":  "open",
 		"rig-ext2": "open",
 	})
+}
+
+func TestReaperAgeGatesUseUTCUnderNonUTCServerRealDolt(t *testing.T) {
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skipf("dolt not found: %v", err)
+	}
+
+	seed := `
+INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
+  ('past-age', 'updated beyond the stale age', 'open', 'task', 2, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 61 HOUR), DATE_SUB(UTC_TIMESTAMP(), INTERVAL 49 HOUR), '', '{}'),
+  ('within-age', 'updated inside the stale age', 'open', 'task', 2, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 61 HOUR), DATE_SUB(UTC_TIMESTAMP(), INTERVAL 47 HOUR), '', '{}');
+`
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "dolt")
+	dbDir := filepath.Join(dataDir, "citydb")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", dbDir, err)
+	}
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "init", "--name", "Gas City", "--email", "test@example.com")
+	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, maintenanceReaperSchemaSQL())
+	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, seed)
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "add", ".")
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "commit", "-m", "seed age gate rows")
+
+	port := startDoltServerForMaintenanceTest(t, doltPath, dataDir, "TZ=America/Los_Angeles")
+	waitForDoltServerForMaintenanceTest(t, doltPath, port, "citydb")
+	if off := queryDoltServerUTCOffsetHours(t, doltPath, port, "citydb"); off != -7 && off != -8 {
+		t.Fatalf("dolt sql-server ignored TZ=America/Los_Angeles; the test cannot distinguish NOW() from UTC_TIMESTAMP() (offset %d hours)", off)
+	}
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
+		t.Fatalf("Symlink(dolt): %v", err)
+	}
+	writeRealDoltBdDouble(t, filepath.Join(binDir, "bd"))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+case "$1 $2" in
+  "session prune")
+    printf '{"count":0}\n'
+    ;;
+esac
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":               bdLog,
+		"GC_CITY":                   cityDir,
+		"GC_CITY_PATH":              cityDir,
+		"GC_DOLT_HOST":              "127.0.0.1",
+		"GC_DOLT_PORT":              fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":              "root",
+		"GC_DOLT_PASSWORD":          "",
+		"GC_REAPER_STALE_ISSUE_AGE": "48h",
+		"FAKE_RIG_LIST_JSON":        `{"rigs":[]}`,
+		"FAKE_SCOPE_DBS":            "city=citydb",
+		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	reaperOut, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+	if err != nil {
+		t.Fatalf("reaper.sh failed: %v\n%s", err, reaperOut)
+	}
+
+	requireMaintenanceStatuses(t, queryMaintenanceStatusByID(t, doltPath, port, "citydb", "issues"), map[string]string{
+		"past-age":   "closed",
+		"within-age": "open",
+	})
+}
+
+func queryDoltServerUTCOffsetHours(t *testing.T, doltPath string, port int, db string) int {
+	t.Helper()
+	lines := doltServerCSVQuery(t, doltPath, port, db, "SELECT TIMESTAMPDIFF(HOUR, UTC_TIMESTAMP(), NOW()) AS off")
+	if len(lines) != 2 || strings.TrimSpace(lines[0]) != "off" {
+		t.Fatalf("unexpected UTC offset output for %s:\n%s", db, strings.Join(lines, "\n"))
+	}
+	off, err := strconv.Atoi(strings.TrimSpace(lines[1]))
+	if err != nil {
+		t.Fatalf("parse UTC offset %q: %v", lines[1], err)
+	}
+	return off
 }
