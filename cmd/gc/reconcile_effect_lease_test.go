@@ -360,6 +360,9 @@ func TestTxCallCarriesTheLease(t *testing.T) {
 	k := newTxKit(t)
 	var helperErr error
 	call := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(ctx context.Context, c txCaps, _ any) (any, error) {
+		if c.by.Kind != session.ActorController || c.by.Lease == nil {
+			t.Errorf("the Call's actor = kind %d, lease %v; want the controller carrying the effect's lease", c.by.Kind, c.by.Lease)
+		}
 		release, err := session.LeaseRuntimeName(ctx, c.by, "s-gc-1")
 		if err == nil {
 			release()
