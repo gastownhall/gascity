@@ -21,6 +21,17 @@ import "github.com/gastownhall/gascity/internal/worker"
 // already tracks the transcript size across poll intervals -- so ga-xqv68
 // owns that. Closed-session snapshots and the structured stream are
 // unaffected.
+//
+// An ACP tool_use entry is never partial, yet the capture reader rewrites it
+// in place when a later tool_call_update brings the tool's input or a better
+// title, so these streams (and the agent-output streams, which also send each
+// entry once) keep the first rendering they sent. The structured stream
+// delivers the refined entry, as an upsert or a history_rewritten reset, and
+// any new snapshot shows it. Holding a tool_use back until its call reaches a
+// terminal status would lose it instead: the cursor is positional, so an
+// entry withheld behind a later sent entry is never sent. Appending the
+// refinement as an entry of its own, as the reader's turnEnd does for a stop
+// reason, is the safe remedy; ga-t0c4nz owns that.
 func settledHistorySnapshot(snapshot *worker.HistorySnapshot) *worker.HistorySnapshot {
 	if snapshot == nil {
 		return nil
