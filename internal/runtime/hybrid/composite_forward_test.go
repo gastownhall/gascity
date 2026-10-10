@@ -22,12 +22,17 @@ type capLeaf struct {
 	teardownErr error
 }
 
-func (l *capLeaf) record(method, name string) {
-	*l.log = append(*l.log, strings.TrimSuffix(l.label+":"+method+":"+name, ":"))
+// record logs a call with every argument it was forwarded.
+func (l *capLeaf) record(method string, args ...string) {
+	*l.log = append(*l.log, strings.Join(append([]string{l.label, method}, args...), ":"))
 }
 
-func (l *capLeaf) DismissKnownDialogs(_ context.Context, name string, _ time.Duration) error {
-	l.record("DismissKnownDialogs", name)
+// ctxKey tags the context a test passes, so a forward that drops it shows.
+type ctxKey struct{}
+
+func (l *capLeaf) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	tag, _ := ctx.Value(ctxKey{}).(string)
+	l.record("DismissKnownDialogs", name, tag, timeout.String())
 	return nil
 }
 
@@ -37,27 +42,27 @@ func (l *capLeaf) GetAllEnvironment(name string) (map[string]string, error) {
 }
 
 func (l *capLeaf) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
-	l.record("SessionRoster", "")
+	l.record("SessionRoster")
 	return l.roster, nil
 }
 
 func (l *capLeaf) ConfigureServer() error {
-	l.record("ConfigureServer", "")
+	l.record("ConfigureServer")
 	return nil
 }
 
 func (l *capLeaf) TeardownServer() error {
-	l.record("TeardownServer", "")
+	l.record("TeardownServer")
 	return l.teardownErr
 }
 
-func (l *capLeaf) KillCorpseObject(name, _, _ string) (runtime.SessionObjectKillResult, error) {
-	l.record("KillCorpseObject", name)
+func (l *capLeaf) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	l.record("KillCorpseObject", name, objectID, created)
 	return runtime.SessionObjectKilled, nil
 }
 
-func (l *capLeaf) KillZombieObject(name, _, _, _ string) (runtime.SessionObjectKillResult, error) {
-	l.record("KillZombieObject", name)
+func (l *capLeaf) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	l.record("KillZombieObject", name, objectID, created, panePID)
 	return runtime.SessionObjectKilled, nil
 }
 
@@ -81,23 +86,23 @@ func wantLog(t *testing.T, log *[]string, want ...string) {
 func TestPerSessionCapabilitiesRouteToSessionBackend(t *testing.T) {
 	local, remote, log := twoCapLeaves()
 	p := New(local, remote, isRemote)
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
 
 	for _, tc := range []struct{ name, leaf string }{{"agent", "local"}, {"remote-agent", "remote"}} {
-		if err := p.DismissKnownDialogs(ctx, tc.name, time.Second); err != nil {
+		if err := p.DismissKnownDialogs(ctx, tc.name, 7*time.Second); err != nil {
 			t.Fatalf("DismissKnownDialogs(%s): %v", tc.name, err)
 		}
 		if env, err := p.GetAllEnvironment(tc.name); err != nil || env["LEAF"] != tc.leaf {
 			t.Fatalf("GetAllEnvironment(%s) = %v, %v; want the %s leg's env", tc.name, env, err, tc.leaf)
 		}
-		if res, err := p.KillCorpseObject(tc.name, "$1", "1"); err != nil || res != runtime.SessionObjectKilled {
+		if res, err := p.KillCorpseObject(tc.name, "$1", "100"); err != nil || res != runtime.SessionObjectKilled {
 			t.Fatalf("KillCorpseObject(%s) = %v, %v", tc.name, res, err)
 		}
-		if res, err := p.KillZombieObject(tc.name, "$1", "1", "9"); err != nil || res != runtime.SessionObjectKilled {
+		if res, err := p.KillZombieObject(tc.name, "$2", "200", "9"); err != nil || res != runtime.SessionObjectKilled {
 			t.Fatalf("KillZombieObject(%s) = %v, %v", tc.name, res, err)
 		}
-		wantLog(t, log, tc.leaf+":DismissKnownDialogs:"+tc.name, tc.leaf+":GetAllEnvironment:"+tc.name,
-			tc.leaf+":KillCorpseObject:"+tc.name, tc.leaf+":KillZombieObject:"+tc.name)
+		wantLog(t, log, tc.leaf+":DismissKnownDialogs:"+tc.name+":caller:7s", tc.leaf+":GetAllEnvironment:"+tc.name,
+			tc.leaf+":KillCorpseObject:"+tc.name+":$1:100", tc.leaf+":KillZombieObject:"+tc.name+":$2:200:9")
 	}
 }
 
@@ -110,8 +115,8 @@ func TestPerSessionCapabilitiesUnsupportedOnBareBackend(t *testing.T) {
 	if err := p.DismissKnownDialogs(context.Background(), name, time.Second); !errors.Is(err, runtime.ErrInteractionUnsupported) {
 		t.Fatalf("DismissKnownDialogs = %v, want ErrInteractionUnsupported", err)
 	}
-	if _, err := p.GetAllEnvironment(name); !errors.Is(err, runtime.ErrMetaUnsupported) {
-		t.Fatalf("GetAllEnvironment = %v, want ErrMetaUnsupported", err)
+	if _, err := p.GetAllEnvironment(name); !errors.Is(err, runtime.ErrEnvironmentBatchUnsupported) || errors.Is(err, runtime.ErrMetaUnsupported) {
+		t.Fatalf("GetAllEnvironment = %v, want ErrEnvironmentBatchUnsupported, not ErrMetaUnsupported", err)
 	}
 	if res, err := p.KillCorpseObject(name, "$1", "1"); !errors.Is(err, runtime.ErrSessionObjectKillUnsupported) || res != runtime.SessionObjectNotKilled {
 		t.Fatalf("KillCorpseObject = %v, %v; want NotKilled, ErrSessionObjectKillUnsupported", res, err)
@@ -144,8 +149,9 @@ func TestServerLifecycleAndRosterReachEveryBackend(t *testing.T) {
 	}
 }
 
-// The local tmux leg's process-table scan is forwarded; behind a scannerless
-// local leg the composite has no scanner, as auto behind a scannerless default.
+// The local tmux leg's process-table scan is forwarded and the remote leg is
+// never scanned; behind a scannerless local leg the composite has no scanner,
+// as auto behind a scannerless default.
 func TestProcessTableScannerFollowsLocalBackend(t *testing.T) {
 	local, remote := runtime.NewFake(), runtime.NewFake()
 	if err := local.Start(context.Background(), "agent", runtime.Config{Env: map[string]string{"GC_SESSION_ID": "sid"}}); err != nil {
@@ -159,8 +165,8 @@ func TestProcessTableScannerFollowsLocalBackend(t *testing.T) {
 	if err != nil || len(found) != 1 || !found[0].IsTracked {
 		t.Fatalf("FindRuntimesBySessionID = %+v, %v; want the local leg's tracked root", found, err)
 	}
-	if remote.CountCalls("FindRuntimesBySessionID", "sid") != 1 {
-		t.Error("a scanning remote backend was not scanned")
+	if n := remote.CountCalls("FindRuntimesBySessionID", "sid"); n != 0 {
+		t.Errorf("remote backend scanned %d time(s); its sessions are off this host, so it must never be scanned", n)
 	}
 	if err := p.TerminateRuntime(found[0]); err != nil {
 		t.Fatalf("TerminateRuntime: %v", err)

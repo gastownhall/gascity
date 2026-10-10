@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
 // capLeaf is a Fake that also implements the optional capabilities auto must
@@ -23,12 +24,17 @@ type capLeaf struct {
 	configureErr, dialogsErr error
 }
 
-func (l *capLeaf) record(method, name string) {
-	*l.log = append(*l.log, strings.TrimSuffix(l.label+":"+method+":"+name, ":"))
+// record logs a call with every argument it was forwarded.
+func (l *capLeaf) record(method string, args ...string) {
+	*l.log = append(*l.log, strings.Join(append([]string{l.label, method}, args...), ":"))
 }
 
-func (l *capLeaf) DismissKnownDialogs(_ context.Context, name string, _ time.Duration) error {
-	l.record("DismissKnownDialogs", name)
+// ctxKey tags the context a test passes, so a forward that drops it shows.
+type ctxKey struct{}
+
+func (l *capLeaf) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	tag, _ := ctx.Value(ctxKey{}).(string)
+	l.record("DismissKnownDialogs", name, tag, timeout.String())
 	return l.dialogsErr
 }
 
@@ -38,17 +44,17 @@ func (l *capLeaf) GetAllEnvironment(name string) (map[string]string, error) {
 }
 
 func (l *capLeaf) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
-	l.record("SessionRoster", "")
+	l.record("SessionRoster")
 	return l.roster, l.rosterErr
 }
 
 func (l *capLeaf) ConfigureServer() error {
-	l.record("ConfigureServer", "")
+	l.record("ConfigureServer")
 	return l.configureErr
 }
 
 func (l *capLeaf) TeardownServer() error {
-	l.record("TeardownServer", "")
+	l.record("TeardownServer")
 	return l.teardownErr
 }
 
@@ -73,16 +79,16 @@ func TestDismissKnownDialogsRoutesToSessionBackend(t *testing.T) {
 	tmux, acp, log := twoCapLeaves()
 	p := New(tmux, acp)
 	p.RouteACP("a")
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
 
-	if err := p.DismissKnownDialogs(ctx, "t", time.Second); err != nil {
+	if err := p.DismissKnownDialogs(ctx, "t", 7*time.Second); err != nil {
 		t.Fatalf("DismissKnownDialogs(t): %v", err)
 	}
-	wantLog(t, log, "tmux:DismissKnownDialogs:t")
-	if err := p.DismissKnownDialogs(ctx, "a", time.Second); err != nil {
+	wantLog(t, log, "tmux:DismissKnownDialogs:t:caller:7s")
+	if err := p.DismissKnownDialogs(ctx, "a", 9*time.Second); err != nil {
 		t.Fatalf("DismissKnownDialogs(a): %v", err)
 	}
-	wantLog(t, log, "acp:DismissKnownDialogs:a")
+	wantLog(t, log, "acp:DismissKnownDialogs:a:caller:9s")
 
 	tmux.dialogsErr = runtime.ErrWorkspaceTrustUnconfirmed
 	if err := p.DismissKnownDialogs(ctx, "t", time.Second); !errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
@@ -115,8 +121,8 @@ func TestGetAllEnvironmentRoutesToSessionBackend(t *testing.T) {
 
 	p = New(tmux, bareLeaf{runtime.NewFake()})
 	p.RouteACP("a")
-	if _, err := p.GetAllEnvironment("a"); !errors.Is(err, runtime.ErrMetaUnsupported) {
-		t.Fatalf("GetAllEnvironment(a) on a bare acp leg = %v, want ErrMetaUnsupported", err)
+	if _, err := p.GetAllEnvironment("a"); !errors.Is(err, runtime.ErrEnvironmentBatchUnsupported) || errors.Is(err, runtime.ErrMetaUnsupported) {
+		t.Fatalf("GetAllEnvironment(a) on a bare acp leg = %v, want ErrEnvironmentBatchUnsupported, not ErrMetaUnsupported", err)
 	}
 	wantLog(t, log)
 }
@@ -199,5 +205,45 @@ func TestSessionRosterWithoutRosterBackends(t *testing.T) {
 	got, err := New(tmux, New(bare(), bare())).SessionRoster()
 	if err != nil || !reflect.DeepEqual(got, tmux.roster) {
 		t.Fatalf("SessionRoster over a rosterless nested composite = %v, %v; want the tmux roster", got, err)
+	}
+}
+
+// TestForwardsThroughRealHybrid nests a real hybrid under auto, as a hybrid
+// city with an ACP-capable provider is built: every forward reaches the
+// hybrid's local tmux-like leg, and a hybrid city now has a process-table
+// scanner (orphan sweep, killExistingOrphans, drain-ack escalation).
+func TestForwardsThroughRealHybrid(t *testing.T) {
+	local, _, log := twoCapLeaves()
+	remote := bareLeaf{runtime.NewFake()}
+	p := New(hybrid.New(local, remote, func(name string) bool { return strings.HasPrefix(name, "remote-") }), runtime.NewFake())
+	p.RouteACP("a")
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
+
+	if err := p.DismissKnownDialogs(ctx, "t", time.Second); err != nil {
+		t.Fatalf("DismissKnownDialogs(t): %v", err)
+	}
+	if env, err := p.GetAllEnvironment("t"); err != nil || env["LEAF"] != "tmux" {
+		t.Fatalf("GetAllEnvironment(t) = %v, %v; want the local leg's env", env, err)
+	}
+	if err := p.TeardownServer(); err != nil {
+		t.Fatalf("TeardownServer: %v", err)
+	}
+	local.roster = map[string]runtime.SessionRosterEntry{"t": {Attached: true}}
+	if got, err := p.SessionRoster(); err != nil || !reflect.DeepEqual(got, local.roster) {
+		t.Fatalf("SessionRoster = %v, %v; want the local leg's roster", got, err)
+	}
+	wantLog(t, log, "tmux:DismissKnownDialogs:t:caller:1s", "tmux:GetAllEnvironment:t", "tmux:TeardownServer", "tmux:SessionRoster")
+
+	if _, err := p.GetAllEnvironment("remote-x"); !errors.Is(err, runtime.ErrEnvironmentBatchUnsupported) {
+		t.Fatalf("GetAllEnvironment(remote-x) = %v, want ErrEnvironmentBatchUnsupported", err)
+	}
+	if err := local.Start(context.Background(), "t", runtime.Config{Env: map[string]string{"GC_SESSION_ID": "sid"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := runtime.AsProcessTableScanner(p); !ok {
+		t.Fatal("AsProcessTableScanner(auto over hybrid) = false, want the local leg's scanner")
+	}
+	if found, err := p.FindRuntimesBySessionID("sid"); err != nil || len(found) != 1 || !found[0].IsTracked {
+		t.Fatalf("FindRuntimesBySessionID = %+v, %v; want the local leg's tracked root", found, err)
 	}
 }

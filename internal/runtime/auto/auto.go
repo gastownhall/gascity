@@ -527,7 +527,7 @@ func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
 	if ep, ok := p.route(name).(runtime.EnvironmentBatchProvider); ok {
 		return ep.GetAllEnvironment(name)
 	}
-	return nil, fmt.Errorf("%w: batched environment read of %q", runtime.ErrMetaUnsupported, name)
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrEnvironmentBatchUnsupported, name)
 }
 
 // ConfigureServer configures the server of every backend that has one.

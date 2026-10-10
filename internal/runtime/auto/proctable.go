@@ -44,9 +44,9 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 // is signaled. With a scannerless default it returns an error, matching
 // FindRuntimesBySessionID, which surfaces nothing to terminate.
 func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
-	scanner, ok := runtime.AsProcessTableScanner(p.defaultSP)
-	if !ok {
+	scanners := runtime.ScanningBackends(p.Backends())
+	if len(scanners) == 0 {
 		return fmt.Errorf("auto: no backend can terminate runtime PID %d for session %s", r.PID, r.SessionID)
 	}
-	return scanner.TerminateRuntime(r)
+	return scanners[0].Scanner.TerminateRuntime(r)
 }

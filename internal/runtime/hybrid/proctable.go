@@ -11,24 +11,30 @@ var (
 	_ runtime.ConditionalProcessTableScanner = (*Provider)(nil)
 )
 
+// The process-table scanner is the local backend's alone. The remote backend
+// hosts its sessions off this host, so it is never scanned: a scan it ran
+// here could only report this host's runtimes, none of them its own.
+
 // CanScanProcessTable implements [runtime.ConditionalProcessTableScanner]: the
 // composite scans only when its local backend does, so a hybrid over a
 // scannerless local backend reads as lacking the capability.
 func (p *Provider) CanScanProcessTable() bool {
-	return len(runtime.ScanningBackends(p.Backends())) > 0
+	_, ok := runtime.AsProcessTableScanner(p.local)
+	return ok
 }
 
-// FindRuntimesBySessionID implements [runtime.ProcessTableScanner] by merging
-// the scans of the backends that can scan, local first
-// ([runtime.FindRuntimesAcross]). It finds nothing when the local backend
-// cannot scan; see [runtime.ScanningBackends].
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner] with the
+// local backend's scan. It finds nothing when the local backend cannot scan.
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	return runtime.FindRuntimesAcross(p.Backends(), id)
+	scanner, ok := runtime.AsProcessTableScanner(p.local)
+	if !ok {
+		return nil, nil
+	}
+	return scanner.FindRuntimesBySessionID(id)
 }
 
-// TerminateRuntime implements [runtime.ProcessTableScanner]. A scanned root is
-// a host process rather than a routed session, so the local backend's scanner
-// terminates it.
+// TerminateRuntime implements [runtime.ProcessTableScanner] with the local
+// backend's scanner.
 func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	scanner, ok := runtime.AsProcessTableScanner(p.local)
 	if !ok {

@@ -10,6 +10,12 @@ import (
 // reports a session roster.
 var ErrSessionRosterUnsupported = errors.New("runtime does not report a session roster")
 
+// ErrEnvironmentBatchUnsupported reports that the backend serving a session
+// has no batched environment read; fall back to per-key GetMeta. It is
+// deliberately not [ErrMetaUnsupported], which means the runtime has no
+// metadata at all, so a token read through it is absent by construction.
+var ErrEnvironmentBatchUnsupported = errors.New("runtime has no batched environment read; fall back to per-key GetMeta")
+
 // The helpers below let composite providers (auto, hybrid) forward optional
 // capabilities that are not per-session, so callers asserting them on the
 // city provider still reach the backends that have them.
@@ -41,8 +47,9 @@ func eachServer(backends []Backend, op func(ServerLifecycleProvider) error) erro
 
 // MergeSessionRosters merges the rosters of the backends that report one. A
 // name two backends report keeps the entry of the backend r routes it to. A
-// backend without a roster contributes no entries, so its sessions read as
-// absent and callers fall back to per-session reads for them. Any backend
+// backend without a roster contributes no entries, so its running sessions
+// are absent: unlike a leaf's roster, absence from the merged roster does not
+// mean not running, and callers fall back to per-session reads. Any backend
 // error fails the merge; with no roster-reporting backend it returns
 // [ErrSessionRosterUnsupported].
 func MergeSessionRosters(r Router, backends []Backend) (map[string]SessionRosterEntry, error) {
@@ -80,22 +87,28 @@ func MergeSessionRosters(r Router, backends []Backend) (map[string]SessionRoster
 	return merged, nil
 }
 
-// ScanningBackends returns the backends that can scan the process table
-// ([AsProcessTableScanner]), in order. It returns none when the first backend
-// cannot scan: a later backend's scanner tracks only the sessions it hosts,
-// so behind a scannerless first backend it would report every live runtime
-// that backend hosts as an untracked orphan, and orphan reaping would kill it.
-func ScanningBackends(backends []Backend) []Backend {
-	if len(backends) == 0 {
-		return nil
-	}
-	if _, ok := AsProcessTableScanner(backends[0].Provider); !ok {
-		return nil
-	}
-	out := []Backend{backends[0]}
-	for _, b := range backends[1:] {
-		if _, ok := AsProcessTableScanner(b.Provider); ok {
-			out = append(out, b)
+// BackendScanner is a backend's process-table scanner, as
+// [ScanningBackends] returns it.
+type BackendScanner struct {
+	Label   string
+	Scanner ProcessTableScanner
+}
+
+// ScanningBackends returns the scanners of the backends that can scan the
+// process table ([AsProcessTableScanner]), in order. It returns none when the
+// first backend cannot scan: a later backend's scanner tracks only the
+// sessions it hosts, so behind a scannerless first backend it would report
+// every live runtime that backend hosts as an untracked orphan, and orphan
+// reaping would kill it.
+func ScanningBackends(backends []Backend) []BackendScanner {
+	var out []BackendScanner
+	for i, b := range backends {
+		s, ok := AsProcessTableScanner(b.Provider)
+		if !ok && i == 0 {
+			return nil
+		}
+		if ok {
+			out = append(out, BackendScanner{Label: b.Label, Scanner: s})
 		}
 	}
 	return out
@@ -115,8 +128,7 @@ func FindRuntimesAcross(backends []Backend, id string) ([]LiveRuntime, error) {
 	merged := make(map[int]LiveRuntime)
 	var errs []error
 	for _, b := range ScanningBackends(backends) {
-		scanner, _ := AsProcessTableScanner(b.Provider)
-		found, err := scanner.FindRuntimesBySessionID(id)
+		found, err := b.Scanner.FindRuntimesBySessionID(id)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s backend: %w", b.Label, err))
 		}
