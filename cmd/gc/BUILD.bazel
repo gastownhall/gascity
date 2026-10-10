@@ -25,8 +25,22 @@ INTEGRATION_SOLO_TESTS = {
     "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",  # 32 s
     "gc_managed_bd_rig_hard_kill_test": "TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",  # 26 s
     "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # 22 s
-    "gc_phase2_worker_core_transport_test": "TestPhase2WorkerCoreRealTransportProof",  # 58 s
     "gc_provider_owned_real_init_test": "TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace",  # 29 s
+}
+
+# Solo tests still too long to run whole: their subtests run in series, and
+# even alone the test set integration-packages' critical path (58-63 s after the
+# ~100 s cmd/gc compile-and-link chain). Each is split by first-level subtest
+# with -test.run / -test.skip over the same binary (no code change): a target
+# per named subtest, and the "" target for the rest. gc_test skips them in the
+# integration build like INTEGRATION_SOLO_TESTS. Seconds measured 2026-10-10
+# under bazel on rbe-west (--config=ci --config=integration).
+INTEGRATION_SOLO_SPLIT_TESTS = {
+    "TestPhase2WorkerCoreRealTransportProof": {
+        "gc_phase2_worker_core_transport_claude_test": "claude",  # 25 s
+        "gc_phase2_worker_core_transport_codex_test": "codex",  # 26 s
+        "gc_phase2_worker_core_transport_test": "",  # the other seven providers, ~8 s
+    },
 }
 
 go_library(
@@ -1833,7 +1847,7 @@ go_test(
         "write_auth_boot_warning_test.go",
     ],
     args = select({
-        "//:gotags_integration": ["-test.skip=^(%s)$$" % "|".join(INTEGRATION_SOLO_TESTS.values())],
+        "//:gotags_integration": ["-test.skip=^(%s)$$" % "|".join(INTEGRATION_SOLO_TESTS.values() + INTEGRATION_SOLO_SPLIT_TESTS.keys())],
         "//conditions:default": [],
     }),
     data = glob([
@@ -1882,10 +1896,12 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    # No single test runs long (the longest ~10 s); the slowest shard follows
+    # No single test runs long (the longest ~13 s); the slowest shard follows
     # the shard count. At 15 the unit lane's slowest shard ran 40-67 s after
-    # the ~90 s compile-and-link chain; 20 brings it to ~33 s.
-    shard_count = 20,
+    # the ~90 s compile-and-link chain; 20 brought it to ~33 s. The
+    # integration build's shards ran 15-48 s at 20, above the slowest solo
+    # test (~42 s); 24 brings them under it.
+    shard_count = 24,
     deps = [
         "//:gascity",
         "//examples/bd",
@@ -2044,7 +2060,8 @@ go_variant_test(
     test = ":gc_test",
 )
 
-# INTEGRATION_SOLO_TESTS, each alone, in gc_test's integration build.
+# INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
+# subtest, in gc_test's integration build.
 # Manual: the unit lane's //... does not run them (gc_test runs them there);
 # tools/bazel/integration_suite.py lists :gc_integration_solo_tests in
 # //test:integration_packages.
@@ -2056,10 +2073,28 @@ go_variant_test(
     test = ":gc_test",
 ) for name, test in INTEGRATION_SOLO_TESTS.items()]
 
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$/^%s$$" % (test, subtest)] if subtest else [
+        "-test.run=^%s$$" % test,
+        "-test.skip=^%s$$/^(%s)$$" % (
+            test,
+            "|".join([s for s in parts.values() if s]),
+        ),
+    ],
+    tags = ["manual"],
+    test = ":gc_test",
+) for test, parts in INTEGRATION_SOLO_SPLIT_TESTS.items() for name, subtest in parts.items()]
+
 test_suite(
     name = "gc_integration_solo_tests",
     tags = ["manual"],
-    tests = [":" + name for name in INTEGRATION_SOLO_TESTS],
+    tests = [":" + name for name in INTEGRATION_SOLO_TESTS] + [
+        ":" + name
+        for parts in INTEGRATION_SOLO_SPLIT_TESTS.values()
+        for name in parts
+    ],
 )
 
 # scripts/ci_critical_path_test.go pins gc_productmetrics_testhook_test.
