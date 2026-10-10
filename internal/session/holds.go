@@ -7,6 +7,12 @@ import (
 
 // Hold is one operator intent that holds a row (CONTRACT v5.9 D8 7(a)),
 // shaped after ARCH-RESTRUCTURE R3's concept kernel.
+//
+// HoldSet is the disposition's older view (disposition.go, R7): a reader
+// switches to DecodeDisposition or DispositionOfInfo and its projections
+// (SuppressesWake, BlocksConsume, KeepsSlot for HoldUser) with no change in
+// what it decides; TestDispositionProjectionsMatchHolds holds the two to the
+// same answers over every combination of the keys.
 type Hold uint8
 
 const (
