@@ -1,0 +1,56 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "v2purity",
+    srcs = [
+        "default.go",
+        "methods.go",
+        "v2purity.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/v2purity",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+go_test(
+    name = "v2purity_test",
+    srcs = ["v2purity_test.go"],
+    deps = [
+        ":v2purity",
+        "//tools/nogo/analyzers/internal/analyzertest",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

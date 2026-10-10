@@ -189,6 +189,8 @@ type admission struct {
 // creates in fair-share order; the other probing effects; row writes. Each
 // intent is checked against the boot gate, its row's backoff, the swap
 // pause, then its class's caps.
+//
+//gc:pure
 func admit(in admitInput, intents []intent) admitResult {
 	cfg := in.Cfg
 	if cfg == nil {

@@ -77,6 +77,10 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	return p
 }
 
+// effectSpecs is the kind table. Its functions are effects, run by the
+// executor, never by the decide that reads the table for a kind's class
+// (v2purity reaches a function stored in a field only through a read of
+// that field):
 var effectSpecs = map[string]effectSpec{
 	intentStart:           {class: capStarts, tokens: 1},
 	intentAdopt:           {class: capProbing},
