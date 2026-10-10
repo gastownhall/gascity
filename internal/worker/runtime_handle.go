@@ -93,6 +93,9 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
 		return err
 	}
+	if err = by.CheckStarts(); err != nil {
+		return err
+	}
 	release, err := sessionpkg.LeaseRuntimeName(ctx, by, h.sessionName)
 	if err != nil {
 		return err

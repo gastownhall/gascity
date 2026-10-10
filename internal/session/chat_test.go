@@ -513,7 +513,7 @@ func TestResumeInjectsSSHKeepalive(t *testing.T) {
 			return m.Start(context.Background(), testActor(m, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 		},
 		"StartRuntimeOnly": func(m *Manager, info Info) error {
-			return m.StartRuntimeOnly(context.Background(), testActor(m, ActorController), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+			return m.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, m, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

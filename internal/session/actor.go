@@ -9,22 +9,24 @@ import (
 )
 
 // CityDir is a city's directory: absolute and existing when it was made. The
-// zero value names no city; only NewCityDir makes one.
-type CityDir struct{ abs string }
+// zero value names no city; only NewCityDir makes one. A path NewCityDir
+// refused is kept for the refusal's message, and names no city either.
+type CityDir struct{ abs, rejected string }
 
 // NewCityDir validates path as a city directory: absolute, and an existing
-// directory.
+// directory. On error the CityDir names no city and keeps path as refused.
 func NewCityDir(path string) (CityDir, error) {
 	path = strings.TrimSpace(path)
+	refused := CityDir{rejected: path}
 	if !filepath.IsAbs(path) {
-		return CityDir{}, fmt.Errorf("city dir %q: not an absolute path", path)
+		return refused, fmt.Errorf("city dir %q: not an absolute path", path)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		return CityDir{}, fmt.Errorf("city dir: %w", err)
+		return refused, fmt.Errorf("city dir: %w", err)
 	}
 	if !fi.IsDir() {
-		return CityDir{}, fmt.Errorf("city dir %q: not a directory", path)
+		return refused, fmt.Errorf("city dir %q: not a directory", path)
 	}
 	return CityDir{abs: filepath.Clean(path)}, nil
 }
@@ -34,6 +36,14 @@ func (d CityDir) Path() string { return d.abs }
 
 // IsZero reports whether d names no city.
 func (d CityDir) IsZero() bool { return d.abs == "" }
+
+// String is d's path, or the path NewCityDir refused, for messages.
+func (d CityDir) String() string {
+	if d.abs != "" {
+		return d.abs
+	}
+	return d.rejected
+}
 
 // ActorKind is who calls a Manager lifecycle verb. It decides the runtime
 // lease mode and whether the call may resume a held row.
@@ -79,6 +89,10 @@ type Actor struct {
 // ErrNoActor refuses a lifecycle verb called with no ActorKind.
 var ErrNoActor = errors.New("session: the lifecycle verb names no actor")
 
+// ErrSweepStarts refuses a start by a stop sweep: it takes no runtime lease,
+// so it may only stop.
+var ErrSweepStarts = errors.New("session: a stop sweep starts nothing")
+
 // leaseMode is how a verb takes the runtime lease.
 type leaseMode int
 
@@ -111,6 +125,18 @@ func (a Actor) leaseMode() (leaseMode, error) {
 func (a Actor) check() error {
 	_, err := a.leaseMode()
 	return err
+}
+
+// CheckStarts refuses an Actor that may not start a runtime: one that names
+// no kind, or a stop sweep.
+func (a Actor) CheckStarts() error {
+	if err := a.check(); err != nil {
+		return err
+	}
+	if a.Kind == ActorSweep {
+		return ErrSweepStarts
+	}
+	return nil
 }
 
 // consumesHold reports whether the actor's resume consumes an operator's

@@ -367,7 +367,8 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(t.TempDir())).Attach(context.Background(), testActorIn(t, session.ActorOperator, t.TempDir()), id, "claude", runtime.Config{}); err != nil {
+				city := t.TempDir()
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -389,7 +390,8 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(t.TempDir())).Suspend(context.Background(), testActorIn(t, session.ActorOperator, t.TempDir()), id, false); err != nil {
+				city := t.TempDir()
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Suspend(context.Background(), testActorIn(t, session.ActorOperator, city), id, false); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata

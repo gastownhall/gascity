@@ -6878,12 +6878,15 @@ func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBounda
 		cfg: runtime.Config{Command: "claude --resume " + info.SessionKey},
 	}
 	waiter := newManualStartStabilityWaiter(t)
+	city := t.TempDir()
+	item, release := leasedStart(t, city, item)
+	defer release()
 	resultsCh := make(chan []startResult, 1)
 	go func() {
 		resultsCh <- executePreparedStartWaveForCity(
 			context.Background(),
 			[]preparedStart{item},
-			t.TempDir(),
+			city,
 			sp,
 			store,
 			nil,

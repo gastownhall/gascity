@@ -64,24 +64,19 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		t.Fatalf("Get bead: %v", err)
 	}
 
-	results := executePreparedStartWaveForCity(
-		context.Background(),
-		[]preparedStart{{
-			candidate: startCandidate{
-				info: sessiontest.SeedBead(t, bead),
-				tp:   TemplateParams{TemplateName: "worker"},
-			},
-			cfg: runtime.Config{
-				Command: "claude --resume seeded-session",
-				WorkDir: info.WorkDir,
-			},
-		}},
-		t.TempDir(),
-		sp,
-		store,
-		nil,
-		10*time.Second, 1,
-	)
+	city := t.TempDir()
+	item, release := leasedStart(t, city, preparedStart{
+		candidate: startCandidate{
+			info: sessiontest.SeedBead(t, bead),
+			tp:   TemplateParams{TemplateName: "worker"},
+		},
+		cfg: runtime.Config{
+			Command: "claude --resume seeded-session",
+			WorkDir: info.WorkDir,
+		},
+	})
+	defer release()
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, store, nil, 10*time.Second, 1)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}
@@ -395,4 +390,23 @@ func TestStartPreparedStartCandidateRuntimeOnlyBorrowsTheCandidateLease(t *testi
 		t.Fatal("the refused start reached the provider")
 	}
 	release()
+}
+
+// TestStartLeaseNameIsTheStartsName: a start's lease names the runtime the
+// start starts: the candidate's own name, or, with none, the row's resolved
+// one.
+func TestStartLeaseNameIsTheStartsName(t *testing.T) {
+	for _, c := range []struct {
+		meta, resolved, want string
+	}{
+		{"worker-1", "worker-1", "worker-1"},
+		{"worker-1", "s-gc-1", "worker-1"},
+		{"", "s-gc-1", "s-gc-1"},
+		{"", "", ""},
+	} {
+		cand := startCandidate{info: sessionpkg.Info{SessionNameMetadata: c.meta, SessionName: c.resolved}}
+		if got := startLeaseName(cand); got != c.want {
+			t.Errorf("startLeaseName(meta %q, resolved %q) = %q, want %q", c.meta, c.resolved, got, c.want)
+		}
+	}
 }

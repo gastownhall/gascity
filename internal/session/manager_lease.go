@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -93,6 +94,10 @@ func operatorRuntimeLease(l *RuntimeLease, err error) (*RuntimeLease, error) {
 	return l, err
 }
 
+// ErrNoCallerLease refuses a runtime-only start (StartRuntimeOnly) whose
+// caller hands it no lease: it takes none of its own.
+var ErrNoCallerLease = errors.New("runtime lease: a runtime-only start runs under its caller's lease, and has none")
+
 // ErrRuntimeLeaseNoCity refuses a start or stop by an Actor with no City:
 // there is no runtime dir to take the lease in (RefuseWithoutCity).
 var ErrRuntimeLeaseNoCity = errors.New("runtime lease: no absolute city path to take the lease in")
@@ -104,13 +109,10 @@ var ErrRuntimeLeaseNoCity = errors.New("runtime lease: no absolute city path to 
 // Actor with no City refuses with ErrRuntimeLeaseNoCity, unless it is a stop
 // sweep; then the lease is nil.
 func (m *Manager) leaseRuntime(ctx context.Context, by Actor, id, sessName string, wait time.Duration) (*RuntimeLease, func(), error) {
-	mode, err := by.leaseMode()
-	if err != nil {
-		return nil, func() {}, err
-	}
+	mode, _ := by.leaseMode() // every verb checked by's kind (Manager.checkActor)
 	if borrowed := by.Lease; borrowed != nil {
-		if borrowed.name != strings.TrimSpace(sessName) || (borrowed.id != "" && borrowed.id != id) {
-			return nil, func() {}, fmt.Errorf("runtime lease: the caller's lease is on session %q runtime %q, not session %q runtime %q", borrowed.id, borrowed.name, id, sessName)
+		if err := checkBorrowed(borrowed, id, sessName); err != nil {
+			return nil, func() {}, err
 		}
 		return borrowed, func() {}, nil
 	}
@@ -118,7 +120,7 @@ func (m *Manager) leaseRuntime(ctx context.Context, by Actor, id, sessName strin
 		return nil, func() {}, nil
 	}
 	if by.City.IsZero() {
-		return nil, func() {}, RefuseWithoutCity(by.City.Path(), fmt.Sprintf("session %q", id))
+		return nil, func() {}, RefuseWithoutCity(by.City.String(), fmt.Sprintf("session %q", id))
 	}
 	ttl := m.leaseTTL
 	if ttl <= 0 {
@@ -131,6 +133,7 @@ func (m *Manager) leaseRuntime(ctx context.Context, by Actor, id, sessName strin
 		return l, l.Release, err
 	}
 	var l *RuntimeLease
+	var err error
 	if wait <= 0 {
 		l, err = operatorRuntimeLease(TryRuntimeLease(front, req))
 	} else {
@@ -150,10 +153,12 @@ func LeaseRuntimeName(ctx context.Context, by Actor, name string) (release func(
 	switch {
 	case err != nil:
 		return func() {}, err
-	case by.Lease != nil || mode == leaseNone:
+	case by.Lease != nil:
+		return func() {}, checkBorrowed(by.Lease, "", name)
+	case mode == leaseNone:
 		return func() {}, nil
 	case by.City.IsZero():
-		return func() {}, RefuseWithoutCity(by.City.Path(), fmt.Sprintf("runtime %q", name))
+		return func() {}, RefuseWithoutCity(by.City.String(), fmt.Sprintf("runtime %q", name))
 	}
 	req := RuntimeLeaseRequest{City: by.City.Path(), Name: name}
 	var l *RuntimeLease
@@ -168,6 +173,39 @@ func LeaseRuntimeName(ctx context.Context, by Actor, name string) (release func(
 	return l.Release, nil
 }
 
+// checkBorrowed refuses a lease a caller hands a verb (Actor.Lease) that is
+// not on runtime name and, when both name one, session id, or that its holder
+// already released.
+func checkBorrowed(l *RuntimeLease, id, name string) error {
+	l.mu.Lock()
+	released := l.released
+	l.mu.Unlock()
+	switch {
+	case released:
+		return fmt.Errorf("runtime lease: the caller's lease on session %q runtime %q was released", l.id, l.name)
+	case l.name != strings.TrimSpace(name) || (id != "" && l.id != "" && l.id != id):
+		return fmt.Errorf("runtime lease: the caller's lease is on session %q runtime %q, not session %q runtime %q", l.id, l.name, id, name)
+	}
+	return nil
+}
+
+// CityDir is the Manager's city as a CityDir: the one an Actor driving it
+// must name (checkActor).
+func (m *Manager) CityDir() (CityDir, error) { return NewCityDir(m.cityPath) }
+
+// checkActor is Actor.check, and refuses an Actor on another city than the
+// Manager's own: its lease would be taken where none of the Manager's
+// holders look.
+func (m *Manager) checkActor(by Actor) error {
+	if err := by.check(); err != nil {
+		return err
+	}
+	if filepath.IsAbs(m.cityPath) && !by.City.IsZero() && filepath.Clean(m.cityPath) != by.City.Path() {
+		return fmt.Errorf("session: the actor's city %q is not the manager's %q", by.City.Path(), m.cityPath)
+	}
+	return nil
+}
+
 // leaseForStop is leaseRuntime for a stop, which a store is never allowed to
 // hold hostage: a lease failure other than busy (the store unreachable, the
 // row closed or renamed, no conditional writes in require mode) is logged and
@@ -175,7 +213,7 @@ func LeaseRuntimeName(ctx context.Context, by Actor, name string) (release func(
 // a busy lease is the bare ErrRuntimeLeaseBusy.
 func (m *Manager) leaseForStop(ctx context.Context, by Actor, id, sessName string, wait time.Duration) (func(), error) {
 	_, release, err := m.leaseRuntime(ctx, by, id, sessName, wait)
-	if err != nil && !errors.Is(err, ErrRuntimeLeaseBusy) && !errors.Is(err, ErrNoActor) && !by.City.IsZero() {
+	if err != nil && !errors.Is(err, ErrRuntimeLeaseBusy) && !by.City.IsZero() {
 		log.Printf("runtime lease: session %q: stopping %q under the name's flock alone: %v", id, sessName, err)
 		var flock *RuntimeLease
 		flock, err = TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: sessName})

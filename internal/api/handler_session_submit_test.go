@@ -83,7 +83,7 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(context.Background(), testOperator(t), info.ID, false); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 

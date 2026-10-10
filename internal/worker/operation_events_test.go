@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type recordingEventRecorder struct {
@@ -30,7 +31,7 @@ func TestSessionHandleStartRecordsWorkerOperationEvent(t *testing.T) {
 		Provider: "claude",
 	}, recorder)
 
-	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -74,12 +75,12 @@ func TestSessionHandleMessageRecordsQueuedState(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	}, recorder)
-	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	recorder.events = nil
 
-	result, err := handle.Message(context.Background(), testAgent(t), MessageRequest{Text: "hello"})
+	result, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"})
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestSessionHandleNudgeRecordsDeliveredFalse(t *testing.T) {
 	}
 	recorder.events = nil
 
-	result, err := handle.Nudge(context.Background(), testAgent(t), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "queued reminder",
 		Delivery: NudgeDeliveryWaitIdle,
 		Source:   "mail",
@@ -208,7 +209,7 @@ func TestSessionHandleCloseKeepsRuntimeSessionNameInWorkerOperationEvent(t *test
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	}, recorder)
-	if err := handle.Start(context.Background(), testAgent(t)); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	info, err := mgr.Get(handle.sessionID)
@@ -217,7 +218,7 @@ func TestSessionHandleCloseKeepsRuntimeSessionNameInWorkerOperationEvent(t *test
 	}
 	recorder.events = nil
 
-	if err := handle.Close(context.Background(), testOperator(t)); err != nil {
+	if err := handle.Close(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

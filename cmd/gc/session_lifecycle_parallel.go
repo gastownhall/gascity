@@ -194,6 +194,17 @@ func (c startCandidate) name() string {
 	return c.info.SessionNameMetadata
 }
 
+// startLeaseName is the runtime name a candidate's start runs under, which
+// its lease must name: its own name, or the row's resolved one (the name a
+// bead-backed start's Manager resolves). A borrow on another name is refused
+// at the start (session's checkBorrowed).
+func startLeaseName(c startCandidate) string {
+	if name := strings.TrimSpace(c.name()); name != "" {
+		return name
+	}
+	return strings.TrimSpace(c.info.SessionName)
+}
+
 // wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
 // session was last woken (last_woke_at), falling back to when it last slept
 // (slept_at), and finally to its creation time so a brand-new session does not
@@ -4015,7 +4026,7 @@ func executePlannedStartsTraced(
 				// defers, writing nothing; the next pass reconsiders it, as does a
 				// city path that is not absolute (ErrRuntimeLeaseNoCity).
 				leased := false
-				if name := strings.TrimSpace(candidate.info.SessionName); name != "" {
+				if name := startLeaseName(candidate); name != "" {
 					lease, dropLease, err := tryRuntimeLease(store, cityPath, name, "", 0)
 					if err != nil {
 						if release != nil {

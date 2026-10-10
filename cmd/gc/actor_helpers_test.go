@@ -6,13 +6,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// testOperator is an operator on a fresh t.TempDir() city. A test whose
-// Manager leases in a city it shares with another holder uses testActorIn.
-func testOperator(t testing.TB) session.Actor {
-	t.Helper()
-	return testActorIn(t, session.ActorOperator, t.TempDir())
-}
-
 // testActorIn is an Actor of kind on city, whose runtime dir holds the lease.
 func testActorIn(t testing.TB, kind session.ActorKind, city string) session.Actor {
 	t.Helper()
@@ -21,4 +14,22 @@ func testActorIn(t testing.TB, kind session.ActorKind, city string) session.Acto
 		t.Fatal(err)
 	}
 	return session.Actor{Kind: kind, City: dir}
+}
+
+func testOperatorIn(t testing.TB, city string) session.Actor {
+	t.Helper()
+	return testActorIn(t, session.ActorOperator, city)
+}
+
+// leasedStart is item with the lease the planned start takes on its
+// candidate before the wave (executePlannedStartsTraced): a test that runs
+// the wave or one candidate directly holds it too. release ends it.
+func leasedStart(t testing.TB, city string, item preparedStart) (preparedStart, func()) {
+	t.Helper()
+	lease, release, err := tryRuntimeLease(nil, city, startLeaseName(item.candidate), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.candidate.lease = lease
+	return item, release
 }

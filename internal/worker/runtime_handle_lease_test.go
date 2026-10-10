@@ -39,3 +39,19 @@ func TestRuntimeHandleStopsUnderTheNamesFlock(t *testing.T) {
 		t.Fatalf("kill of a free name = %v (running %v)", err, sp.IsRunning("legacy-1"))
 	}
 }
+
+// TestRuntimeHandleSweepStartsNothing: a runtime-only handle refuses a stop
+// sweep's start, which would take no flock, before any provider call.
+func TestRuntimeHandleSweepStartsNothing(t *testing.T) {
+	sp := runtime.NewFake()
+	h, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.StartResolved(context.Background(), session.Actor{Kind: session.ActorSweep}, "x", runtime.Config{}); !errors.Is(err, session.ErrSweepStarts) {
+		t.Fatalf("StartResolved by a sweep = %v, want ErrSweepStarts", err)
+	}
+	if sp.IsRunning("legacy-2") {
+		t.Fatal("a sweep started the runtime")
+	}
+}

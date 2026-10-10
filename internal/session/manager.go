@@ -1239,7 +1239,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // hold when by is an operator (CONTRACT v5.9 D8). If the tmux session died
 // (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand string, hints runtime.Config) error {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return err
 	}
 	return withSessionStartLock(ctx, id, func() error {
@@ -1291,7 +1291,7 @@ const (
 // is torn down and the bead is left in draining for the drain machinery or
 // the reconciler to finish.
 func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) error {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return err
 	}
 	intent := suspendIntentOperator
@@ -1519,7 +1519,7 @@ func (m *Manager) Close(ctx context.Context, by Actor, id string) error {
 // CloseDetailed ends a conversation permanently and reports cleanup
 // artifacts. It stops the runtime under by's runtime lease mode.
 func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (CloseResult, error) {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return CloseResult{}, err
 	}
 	result := CloseResult{}
@@ -1635,7 +1635,7 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 // It runs under the session's runtime lease: by.Lease, or one taken in by's
 // mode, an operator's waited for up to RuntimeLeaseOperatorWait.
 func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
-	if err := by.check(); err != nil {
+	if err := m.checkActor(by); err != nil {
 		return err
 	}
 	b, sessName, err := m.sessionBead(id)

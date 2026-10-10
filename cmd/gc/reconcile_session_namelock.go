@@ -38,17 +38,14 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 // controllerStopLease takes, without waiting, the runtime lease a controller
 // stop sequence holds across all its kills (a kill, its confirm-dead
 // re-kills, an escalation's process-table kill), and returns the controller's
-// Actor carrying it to each. A lease failure other than busy (the store unreachable, the row
-// closed) is logged, and the sequence runs under the name's flock alone: a
-// store never holds a stop hostage. Busy is session.ErrRuntimeLeaseBusy, which
-// the caller defers to a later tick. A city path that is not absolute has no
-// runtime dir to lock in: the stop refuses with session.ErrRuntimeLeaseNoCity
-// and kills nothing.
+// Actor carrying it to each. A lease failure other than busy (the store
+// unreachable, the row closed) is logged, and the sequence runs under the
+// name's flock alone: a store never holds a stop hostage. Busy is
+// session.ErrRuntimeLeaseBusy, which the caller defers to a later tick. A city
+// path that is not absolute has no runtime dir to lock in: tryRuntimeLease
+// refuses with session.ErrRuntimeLeaseNoCity, and nothing is killed.
 func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (session.Actor, func(), error) {
 	by := sessionActor(session.ActorController, cityPath)
-	if !filepath.IsAbs(cityPath) {
-		return by, func() {}, session.RefuseWithoutCity(cityPath, fmt.Sprintf("the controller's stop of runtime %q", name))
-	}
 	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
 	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
 		fmt.Fprintf(stderr, "session reconciler: stopping %s under the name's flock alone: %v\n", name, err) //nolint:errcheck
