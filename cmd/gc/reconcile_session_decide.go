@@ -81,6 +81,8 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 // event, and the time is w's. A hold or no action has no Kind; Reason names
 // the arm for the trace (R6). next is the row's earliest deadline, zero for
 // none. The pass skips rows with an effect in flight (R5).
+//
+//gc:pure
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
 	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
 	r.row, r.found = w.Census.Rows[k]
