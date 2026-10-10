@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -509,14 +510,14 @@ func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, cl
 // snapshot advanced by every write on that path (front-door migration Step 6d,
 // write-returns-Info, STEP6-PREPASS-AUDIT group 2). Returns (info, false)
 // otherwise with the input Info unchanged (no write occurred).
-func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, peek func(lines int) (string, error)) (sessionpkg.Info, bool) {
+func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, peek func(lines int) (string, error)) (sessionpkg.Info, bool) {
 	if next, handled, err := checkRateLimitStability(info, cfg, alive, dt, sessFront, clk, peek); handled || err != nil {
 		return next, true
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
 	}
-	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+	info = recordWakeFailure(info, sessFront, clk, rec, sessionAgentMetricIdentityInfo(info, cfg))
 	info = clearLastWokeAt(info, sessFront)
 	return info, true
 }
@@ -697,7 +698,7 @@ func wakeFailureKeepsConversation(info sessionpkg.Info) bool {
 	return probeable && present
 }
 
-func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
+func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, agentIdentity string) sessionpkg.Info {
 	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
 	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
 	// same clamped value the old strconv.Atoi(session.Metadata[...]) path did —
@@ -732,10 +733,22 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 			info = info.ApplyPatch(reset)
 		}
 	}
-	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
+	now := clk.Now()
+	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
+		// A failure that lands while a quarantine is still active only extends
+		// it; announce the quarantine once, on entry.
+		entering := !metadataTimeInFuture(info.QuarantinedUntil, now)
 		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
+			if entering && rec != nil {
+				rec.Record(events.Event{
+					Type:      events.SessionQuarantined,
+					Actor:     "gc",
+					Subject:   agentIdentity,
+					SessionID: info.ID,
+				})
+			}
 			info = next
 		}
 	} else {

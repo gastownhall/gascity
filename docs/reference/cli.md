@@ -231,7 +231,7 @@ Reliability reports per-(model, prompt_version, rig) counts of
 the tracked session-lifecycle events:
 
   session.crashed
-  session.quarantined (reserved; current production paths do not emit it)
+  session.quarantined
   session.idle_killed
   session.draining
 

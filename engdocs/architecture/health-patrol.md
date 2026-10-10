@@ -153,10 +153,14 @@ Additional sub-states within "running" are checked in order:
 
 Agents not running are subject to **crash loop quarantine**: if
 `crashTracker.isQuarantined()` returns true, the agent is skipped
-silently. `session.quarantined` is a registered/reserved event type, but
-there is no production emitter today. Operators that need this signal
-must read the crash tracker quarantine state; subscribing to
-`session.quarantined` will not observe transitions yet.
+silently. When repeated wake failures first quarantine a session, the
+reconciler emits `session.quarantined` once, on entry (session ID: the
+session bead; subject: the agent identity the `gc.agent.*` counters use,
+which is the start's display name on a failed start and, on a rapid exit,
+the bead's agent name, else its pool instance identity, else its
+template). Failures inside an active quarantine
+do not emit it again; `quarantined_until` on the session bead says when the
+quarantine ends.
 
 **Orphan cleanup** (Phase 2) handles sessions with the city prefix that
 are not in the desired set:
@@ -309,7 +313,7 @@ Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 |---|---|
 | `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
 | `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitted lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.draining`, `session.undrained`, `session.idle_killed`, `session.updated`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `session.quarantined` and `session.suspended` are registered/reserved but currently un-emitted. `Provider` interface for event trigger queries. Event names were renamed from the `agent.*` prefix by commit `be8debd8`. |
+| `internal/events` | `Recorder` interface for emitted lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.draining`, `session.undrained`, `session.idle_killed`, `session.quarantined`, `session.updated`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `session.suspended` is registered/reserved but currently un-emitted. `Provider` interface for event trigger queries. Event names were renamed from the `agent.*` prefix by commit `be8debd8`. |
 | `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
 | `internal/orders` | `Scan()` to discover orders from formula layers. `CheckTrigger()` to evaluate trigger conditions. `Order` struct for dispatch metadata. |
 | `internal/agent` | `SessionNameFor()` for session name computation and `StartupHints` for runtime config assembly (`internal/agent/` is now a small helper package; the former `Agent` / `Handle` interfaces were removed by `dd90ac0a`). |

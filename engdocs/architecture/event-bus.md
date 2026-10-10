@@ -266,7 +266,7 @@ API/SSE projection:
 | `SessionCrashed` | `session.crashed` | `cmd/gc/session_reconciler.go` when a runtime exists but the expected child process is gone |
 | `SessionDraining` | `session.draining` | `cmd/gc/session_reconciler.go`, `cmd/gc/cmd_runtime_drain.go`, `cmd/gc/cmd_handoff.go` |
 | `SessionUndrained` | `session.undrained` | `cmd/gc/cmd_runtime_drain.go` |
-| `SessionQuarantined` | `session.quarantined` | Registered/reserved; no production emitter today |
+| `SessionQuarantined` | `session.quarantined` | `cmd/gc/session_reconcile.go` when repeated wake failures first quarantine a session (once on entry, not on failures inside an active quarantine) |
 | `SessionIdleKilled` | `session.idle_killed` | `cmd/gc/session_reconciler.go` when idle timeout handling stops a session |
 | `SessionSuspended` | `session.suspended` | Registered/reserved; no production emitter today |
 | `SessionUpdated` | `session.updated` | `cmd/gc/session_reconciler.go` on live-only config drift repair |

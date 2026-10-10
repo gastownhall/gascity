@@ -3529,7 +3529,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// checkStability returns the write-returns-Info result (Step 6d); the input
 		// Info unchanged when no stability event was recorded, so the assignment on the
 		// true branch is the only snapshot advance. Pre-pass-masked (STEP6-PREPASS-AUDIT group 2).
-		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, nil); stab {
+		if stabInfo, stab := checkStability(infoByID[id], cfg, alive, dt, sessFront, clk, rec, nil); stab {
 			tick.set(id, stabInfo)
 			continue // rapid exit recorded, skip further processing
 		}

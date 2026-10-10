@@ -90,9 +90,6 @@ func reportNotes(r Report) []string {
 			inst.MissingModel, inst.WorkerOperations, inst.MissingPromptVersion, inst.WorkerOperations,
 		))
 	}
-	if inst.QuarantineSignalStatus == quarantineSignalStatusNotEmitted {
-		notes = append(notes, "note: session.quarantined is not emitted by current production paths; the Quarantined column is reserved pending instrumentation.")
-	}
 	return notes
 }
 

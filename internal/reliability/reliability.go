@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	quarantineSignalStatusNotEmitted = "not_emitted_by_production"
-	quarantineSignalStatusObserved   = "observed"
+	quarantineSignalStatusNotObserved = "not_observed"
+	quarantineSignalStatusObserved    = "observed"
 )
 
 // LifecycleKind names a tracked session-lifecycle event class. Strongly
@@ -430,7 +430,7 @@ func recordOwnerKey(rec sessionRecord) string {
 }
 
 func analyzeInstrumentation(es []events.Event, win Window) Instrumentation {
-	out := Instrumentation{QuarantineSignalStatus: quarantineSignalStatusNotEmitted}
+	out := Instrumentation{QuarantineSignalStatus: quarantineSignalStatusNotObserved}
 	for _, e := range es {
 		if e.Type == events.SessionQuarantined {
 			// This is a stream-level feature signal, not a windowed metric.

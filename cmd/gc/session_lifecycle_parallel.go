@@ -3148,7 +3148,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, rec, tp.DisplayName())
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),
