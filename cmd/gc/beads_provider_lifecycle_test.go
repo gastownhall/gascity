@@ -5332,17 +5332,8 @@ exit 1
 		"GC_CITY_PATH="+cityPath,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)
-	t.Cleanup(func() {
-		cmd := exec.Command(script, "stop")
-		cmd.Env = scriptEnv
-		_ = cmd.Run()
-	})
-
-	cmd := exec.Command(script, "start")
-	cmd.Env = scriptEnv
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("start: %v\n%s", err, out)
+	if stdout, stderr, err := runGcBeadsBdStartForTest(t, script, scriptEnv); err != nil {
+		t.Fatalf("start: %v\n%s%s", err, stdout, stderr)
 	}
 
 	data, err := os.ReadFile(portsFile)
@@ -5364,6 +5355,26 @@ exit 1
 	if got := strconv.Itoa(state.Port); got != ports[1] {
 		t.Fatalf("provider state port = %q, want retry port %q", got, ports[1])
 	}
+}
+
+// runGcBeadsBdStartForTest runs `script start` with env after registering a
+// `script stop` cleanup against the same env, so a server the start launched
+// does not outlive the test. It returns stdout and stderr separately because
+// callers assert on the notices the script prints to stderr.
+func runGcBeadsBdStartForTest(t *testing.T, script string, env []string) (stdout, stderr string, err error) {
+	t.Helper()
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+	var outBuf, errBuf bytes.Buffer
+	start := exec.Command(script, "start")
+	start.Env = env
+	start.Stdout = &outBuf
+	start.Stderr = &errBuf
+	err = start.Run()
+	return outBuf.String(), errBuf.String(), err
 }
 
 type rootStoreVerificationRetryStore struct {
@@ -11913,7 +11924,13 @@ esac
 // holder took a live city's sql-server down for ~90s; the Go managed start has
 // never done that (TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder).
 func TestGcBeadsBdStartLeavesForeignPortHolderAlone(t *testing.T) {
-	skipSlowCmdGCTest(t, "starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
+	// The holder is a child of the test, never the test process: a script that
+	// signals its port holder must take down this child, not the test binary.
+	// startTCPListenerProcess also gates the test to the process tier.
+	holderPort := reserveRandomTCPPort(t)
+	holder := startTCPListenerProcess(t, holderPort)
+	holderPID := holder.Process.Pid
+
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -11984,48 +12001,42 @@ esac
 		t.Fatal(err)
 	}
 
-	holderPID, holderPort, holderExited := startForeignPortHolderForTest(t)
-
 	// sanitizedBaseEnv strips every GC_* variable, so GC_BIN is unset and start
 	// takes the shell's own inspection path rather than the gc helper's.
+	holderPortText := strconv.Itoa(holderPort)
 	env := sanitizedBaseEnv(
 		"GC_CITY_PATH="+cityPath,
-		"GC_DOLT_PORT="+holderPort,
+		"GC_DOLT_PORT="+holderPortText,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)
-	t.Cleanup(func() {
-		stop := exec.Command(script, "stop")
-		stop.Env = env
-		_ = stop.Run()
-	})
-
-	var stdout, stderr bytes.Buffer
-	start := exec.Command(script, "start")
-	start.Env = env
-	start.Stdout = &stdout
-	start.Stderr = &stderr
-	if err := start.Run(); err != nil {
-		t.Fatalf("start with a foreign holder on port %s: %v\nstdout:\n%s\nstderr:\n%s", holderPort, err, stdout.String(), stderr.String())
+	stdout, stderr, err := runGcBeadsBdStartForTest(t, script, env)
+	if err != nil {
+		t.Fatalf("start with a foreign holder on port %d: %v\nstdout:\n%s\nstderr:\n%s", holderPort, err, stdout, stderr)
 	}
 
-	select {
-	case <-holderExited:
-		t.Errorf("start killed the foreign port holder (pid %d) listening on port %s", holderPID, holderPort)
-	default:
+	// managedStopPIDAlive reads a zombie as dead, so a holder the script
+	// signaled but the test has not reaped yet still counts as killed.
+	if !managedStopPIDAlive(holderPID) {
+		t.Errorf("start killed the foreign port holder (pid %d) listening on port %d", holderPID, holderPort)
+	}
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", holderPortText), time.Second); err != nil {
+		t.Errorf("foreign port holder (pid %d) on port %d stopped accepting connections: %v", holderPID, holderPort, err)
+	} else {
+		_ = conn.Close()
 	}
 
-	wantNotice := fmt.Sprintf("gc-beads-bd: port %s is held by pid %d, which is not this scope's dolt server; leaving it alone and starting on another port.", holderPort, holderPID)
-	if !strings.Contains(stderr.String(), wantNotice) {
-		t.Errorf("start stderr does not say it left the holder alone; want %q in:\n%s", wantNotice, stderr.String())
+	wantNotice := fmt.Sprintf("gc-beads-bd: port %d is held by pid %d, which is not this scope's dolt server; leaving it alone and starting on another port.", holderPort, holderPID)
+	if !strings.Contains(stderr, wantNotice) {
+		t.Errorf("start stderr does not say it left the holder alone; want %q in:\n%s", wantNotice, stderr)
 	}
 
 	ports := strings.Fields(string(mustReadFile(t, portsFile)))
 	if len(ports) == 0 {
-		t.Fatalf("fake dolt was never launched; start output:\n%s%s", stdout.String(), stderr.String())
+		t.Fatalf("fake dolt was never launched; start output:\n%s%s", stdout, stderr)
 	}
 	for _, port := range ports {
-		if port == holderPort {
-			t.Errorf("dolt was launched on port %s, which the foreign holder (pid %d) was listening on", holderPort, holderPID)
+		if port == holderPortText {
+			t.Errorf("dolt was launched on port %s, which the foreign holder (pid %d) was listening on", port, holderPID)
 		}
 	}
 	serverPort := ports[len(ports)-1]
@@ -12043,56 +12054,6 @@ esac
 	} else {
 		_ = conn.Close()
 	}
-}
-
-// startForeignPortHolderForTest starts a child process that listens on a port
-// it picks itself, and returns the child's pid, that port, and a channel that
-// is closed once the child has exited and been reaped (so a signaled holder
-// reads as gone instead of as a zombie that still answers kill -0). The holder
-// is a child of the test, never the test process: a script that signals its
-// port holder must take down this child, not the test binary. It also stops
-// listening on its own after two minutes in case a failed test leaks it.
-func startForeignPortHolderForTest(t *testing.T) (pid int, port string, exited <-chan struct{}) {
-	t.Helper()
-	holder := exec.Command("python3", "-c", `import socket, time
-sock = socket.socket()
-sock.bind(("0.0.0.0", 0))
-sock.listen(16)
-print(sock.getsockname()[1], flush=True)
-sock.settimeout(1.0)
-deadline = time.time() + 120
-while time.time() < deadline:
-    try:
-        conn, _ = sock.accept()
-        conn.close()
-    except socket.timeout:
-        continue
-`)
-	holder.Env = sanitizedBaseEnv()
-	var holderErr bytes.Buffer
-	holder.Stderr = &holderErr
-	out, err := holder.StdoutPipe()
-	if err != nil {
-		t.Fatalf("foreign port holder stdout pipe: %v", err)
-	}
-	if err := holder.Start(); err != nil {
-		t.Fatalf("start foreign port holder: %v", err)
-	}
-	if _, err := fmt.Fscanln(out, &port); err != nil {
-		_ = holder.Process.Kill()
-		_ = holder.Wait()
-		t.Fatalf("read foreign port holder's port: %v\nstderr:\n%s", err, holderErr.String())
-	}
-	done := make(chan struct{})
-	go func() {
-		_ = holder.Wait()
-		close(done)
-	}()
-	t.Cleanup(func() {
-		_ = holder.Process.Kill()
-		<-done
-	})
-	return holder.Process.Pid, port, done
 }
 
 func TestGcBeadsBdEnsureReadyDoesNotRestartAfterTransientTCPProbeFailure(t *testing.T) {
