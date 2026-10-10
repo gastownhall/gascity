@@ -1647,6 +1647,17 @@ func wakeDemandOverridesSleepSuppression(
 	if eval.HasAssignedWork || explicitWake {
 		return true
 	}
+	// A terminal attached to the session (or an attach probe that could not
+	// tell, which reads as attached) holds it awake for every sleep class:
+	// the idle window starts at detach (detached_at), and the pane's last
+	// activity says nothing about a human reading it. Without this, the
+	// config suppression computed from that activity overrode the attached
+	// wake and drained the session under its user. ComputeAwakeSet already
+	// keeps attached sessions out of its own idle-sleep; this is the same
+	// rule for the sleep-policy suppression layered on top of it.
+	if decision.Reason == "attached" || containsWakeReason(eval.Reasons, WakeAttached) {
+		return true
+	}
 	// Routed demand wakes the canonical alias holder, for EVERY sleep class.
 	// Alias suppression (canonicalSingletonAliasHeldTemplates) deliberately
 	// drops the standby's poolDesired to zero while the holder exists, so the
