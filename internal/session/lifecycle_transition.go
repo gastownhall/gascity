@@ -454,7 +454,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	// prior interval on a reused session bead; a recovery re-confirmation of an
 	// already-running runtime leaves the in-flight interval's epoch untouched.
 	if input.StartsAwakeInterval {
-		patch["awake_started_at"] = awakeIntervalStartedAt(input.Now)
+		patch["awake_started_at"] = input.Now.UTC().Format(time.RFC3339Nano) // every caller passes Now (R12: no clock fallback)
 	}
 	// Priming confirmation pair (both-or-neither). Stamped atomically with
 	// started_config_hash so priming inherits its crash semantics and lifetime.
