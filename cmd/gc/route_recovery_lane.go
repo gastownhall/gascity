@@ -507,6 +507,14 @@ type planeLeg struct {
 	// legs the RUNTIME plane reads. The convergence lane uses it to say which of
 	// the legs it scanned are ones the tick cannot see.
 	binding bool
+	// runtimeUnreadable reports whether the RUNTIME plane specifically (not
+	// whatever plane this walk is running under) would refuse to read this
+	// leg — planeReadsLeg's own bindingOnly test, pinned to the runtime plane
+	// and computed once per walk from the whole plan (beads#7410: a per-leg
+	// !binding check alone double-counts a single-store city's work leg,
+	// which the runtime plane reads via the no-binding degradation even
+	// though it is not itself a binding).
+	runtimeUnreadable bool
 }
 
 // planeLegLabel spells a plan leg the way the pre-lane log line did:
@@ -562,14 +570,16 @@ func planeLegLabel(ref storeref.StoreRef) string {
 // cannot even be HANDED a ledger leg.
 func walkPlaneLegs(plan storeref.ResolvedPlan, plane storePlane, visit func(planeLeg) error) (partial bool, err error) {
 	bindingOnly := plane == runtimePlane && plan.TouchesBinding()
+	runtimeBindingOnly := plan.TouchesBinding()
 	result, walkErr := storeref.Walk(plan, func(leg storeref.Leg) (bool, error) {
 		if leg.Store == nil || !planeReadsLeg(plane, leg.Ref, bindingOnly) {
 			return false, nil
 		}
 		return false, visit(planeLeg{
-			label:   planeLegLabel(leg.Ref),
-			store:   leg.Store,
-			binding: storeref.IsClassRef(string(leg.Ref)),
+			label:             planeLegLabel(leg.Ref),
+			store:             leg.Store,
+			binding:           storeref.IsClassRef(string(leg.Ref)),
+			runtimeUnreadable: !planeReadsLeg(runtimePlane, leg.Ref, runtimeBindingOnly),
 		})
 	})
 	return result.Partial, walkErr
@@ -707,7 +717,7 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 	}
 	var ids []string
 	for _, b := range items {
-		if !leg.binding && b.Status == "open" && strings.TrimSpace(b.Assignee) == "" &&
+		if leg.runtimeUnreadable && b.Status == "open" && strings.TrimSpace(b.Assignee) == "" &&
 			strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 			// Already routed, on a leg the tick's demand read refuses: nothing
 			// will ever spawn a seat for it. See routeRecoveryReport.offPlaneRouted.
