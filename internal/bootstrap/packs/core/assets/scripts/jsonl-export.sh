@@ -108,7 +108,11 @@ count_jsonl_rows() {
 }
 
 push_retry_delay_seconds() {
-    awk -v seed="$RANDOM$$" -v min="$PUSH_RETRY_DELAY_MIN" -v span="$PUSH_RETRY_DELAY_SPAN" \
+    # LC_ALL=C so printf emits a dot, not a locale decimal separator: `sleep`
+    # rejects "3,97" with "invalid time interval" and the backoff below is then
+    # silently skipped. Matches the LC_ALL=C awk already used in
+    # truncate_push_stderr_for_state.
+    LC_ALL=C awk -v seed="$RANDOM$$" -v min="$PUSH_RETRY_DELAY_MIN" -v span="$PUSH_RETRY_DELAY_SPAN" \
         'BEGIN{srand(seed); printf "%.2f", min + rand() * span}'
 }
 
@@ -509,10 +513,12 @@ retry_pending_spike_alert() {
     while IFS= read -r alert_json; do
         [ -n "$alert_json" ] || continue
         pending_alerts+=("$alert_json")
-    done < <(
+    # A here-string, not process substitution: bash 3.2 (macOS) rejects <(...)
+    # in POSIX mode (POSIXLY_CORRECT).
+    done <<< "$(
         printf '%s\n' "$state_json" \
             | jq -c '.pending_spike_alerts // {} | to_entries | sort_by(.key) | .[].value'
-    )
+    )"
     if [ "${#pending_alerts[@]}" -eq 0 ]; then
         return
     fi

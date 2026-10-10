@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/overlay"
@@ -673,7 +674,16 @@ func waitTestEnv(overrides map[string]string) []string {
 func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
+	// Bazel hands the test the pinned release bd (MODULE.bazel's bd_bin
+	// archive, built from the same github.com/steveyegge/beads version go.mod
+	// requires; TestBuildPinnedBDBinaryForTestsUsesGoModSource checks that
+	// against this binary's build info). Under go test, build it from source.
+	bazelBD := bazeltest.DataPath(t, "GC_TEST_PINNED_BD_BIN")
 	waitTestRealBDPathOnce.Do(func() {
+		if bazelBD != "" {
+			waitTestRealBDCached = bazelBD
+			return
+		}
 		waitTestRealBDCached, waitTestRealBDErr = buildPinnedBDBinaryForTests()
 	})
 	if waitTestRealBDErr != nil {
@@ -910,14 +920,6 @@ func TestReadyWaitSetForList_ReturnsSetAndCapError(t *testing.T) {
 	}
 }
 
-func writeWaitTestDoltIdentity(homeDir string) error {
-	if err := os.MkdirAll(filepath.Join(homeDir, ".dolt"), 0o755); err != nil {
-		return err
-	}
-	doltConfig := `{"user.name":"gc-test","user.email":"gc-test@example.com"}`
-	return os.WriteFile(filepath.Join(homeDir, ".dolt", "config_global.json"), []byte(doltConfig), 0o644)
-}
-
 func writeManagedBdWaitTestCityScaffold(cityPath string) (string, error) {
 	rigPath := filepath.Join(cityPath, "frontend")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -979,7 +981,7 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
 			return
 		}
-		if err := writeWaitTestDoltIdentity(homeDir); err != nil {
+		if err := writeTestDoltIdentity(homeDir); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
 			return
 		}
@@ -1914,7 +1916,7 @@ func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCh
 	}
 	for _, call := range sp.Calls {
 		switch call.Method {
-		case "IsRunning", "ProcessAlive", "IsAttached", "GetLastActivity", "GetMeta":
+		case "IsRunning", "ProcessAlive", "IsAttached", "IsAttachedWithError", "GetLastActivity", "GetMeta":
 			t.Fatalf("dispatch should trust cached session state, saw provider call %#v", call)
 		}
 	}
@@ -2470,6 +2472,60 @@ func TestClearSessionWaitHoldIfIdle_UsesSessionWaitLookup(t *testing.T) {
 	}
 	if updated.Metadata["wait_hold"] != "true" {
 		t.Fatalf("wait_hold = %q, want preserved", updated.Metadata["wait_hold"])
+	}
+}
+
+// TestClearSessionWaitHoldKeepsOperatorHold: the wait-hold clear drops the
+// wait's own intent and reason but never an operator's user-hold (CONTRACT
+// v5.9 D8). Kills clearing sleep_intent unconditionally.
+func TestClearSessionWaitHoldKeepsOperatorHold(t *testing.T) {
+	for intent, want := range map[string]string{"wait-hold": "", "user-hold": "user-hold"} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"wait_hold": "true", "sleep_intent": intent, "sleep_reason": intent,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), b.ID); err != nil {
+			t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
+		}
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata["wait_hold"] != "" || got.Metadata["sleep_intent"] != want || got.Metadata["sleep_reason"] != want {
+			t.Errorf("intent %s: after clear %v, want wait_hold cleared and intent/reason %q", intent, got.Metadata, want)
+		}
+	}
+}
+
+// TestClearSessionWaitHoldReportsContention: a clear whose every CAS loses
+// returns a retryable error, not silent success; a clear with nothing to
+// write succeeds. Kills an exhausted clear reported as done.
+func TestClearSessionWaitHoldReportsContention(t *testing.T) {
+	for name, meta := range map[string]map[string]string{
+		"held":    {"wait_hold": "true", "sleep_intent": "wait-hold"},
+		"nothing": {"sleep_intent": "user-hold"},
+	} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessFront := sessionFrontDoor(store)
+		lose := func(id string, _ int, decide func(sessionpkg.Info, sessionpkg.PersistedResponse) sessionpkg.MetadataPatch) (bool, error) {
+			info, err := sessFront.Get(id)
+			if err != nil {
+				return false, err
+			}
+			decide(info, sessionpkg.PersistedResponse{})
+			return false, nil
+		}
+		err = clearSessionWaitHoldWith(sessFront, b.ID, lose)
+		if contended := errors.Is(err, errWaitHoldClearContended); contended != (name == "held") {
+			t.Errorf("%s: clear = %v, want contended %v", name, err, name == "held")
+		}
 	}
 }
 
@@ -3342,8 +3398,8 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeWaitTestDoltIdentity: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("writeTestDoltIdentity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
@@ -3422,8 +3478,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeWaitTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeWaitTestDoltIdentity: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("writeTestDoltIdentity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)

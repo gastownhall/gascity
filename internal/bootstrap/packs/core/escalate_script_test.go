@@ -26,6 +26,30 @@ func fakeGCBin(t *testing.T, body string) (binDir, logPath string) {
 	return binDir, logPath
 }
 
+// runPackScript runs one of this package's scripts under bash and returns its
+// combined output. It drops the inherited settings named in skipEnv, which
+// each test supplies itself, puts binDir first on PATH so the script reaches
+// the fake gc, and then appends extraEnv.
+func runPackScript(t *testing.T, script, binDir string, skipEnv map[string]struct{}, extraEnv []string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("bash", append([]string{script}, args...)...)
+	inherited := os.Environ()
+	env := make([]string, 0, len(inherited)+1+len(extraEnv))
+	for _, entry := range inherited {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			if _, skip := skipEnv[key]; skip {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	env = append(env, extraEnv...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // escalationEnvKeys are the escalate.sh settings each test supplies itself. A
 // live Gas City session exports GC_ESCALATION_RECIPIENT, so an inherited copy
 // makes the default-recipient assertion read the host's routing rather than
@@ -37,22 +61,9 @@ var escalationEnvKeys = map[string]struct{}{
 
 func runEscalate(t *testing.T, binDir string, extraEnv ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("bash", escalateScriptPath, "--subject", "Dolt backup: 1/2 databases failed to sync [MEDIUM]", "--message", "Failed databases: hq(sync failed)")
-	inherited := os.Environ()
-	env := make([]string, 0, len(inherited)+1+len(extraEnv))
-	for _, entry := range inherited {
-		if key, _, ok := strings.Cut(entry, "="); ok {
-			if _, skip := escalationEnvKeys[key]; skip {
-				continue
-			}
-		}
-		env = append(env, entry)
-	}
-	env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	env = append(env, extraEnv...)
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return runPackScript(t, escalateScriptPath, binDir, escalationEnvKeys, extraEnv,
+		"--subject", "Dolt backup: 1/2 databases failed to sync [MEDIUM]",
+		"--message", "Failed databases: hq(sync failed)")
 }
 
 // TestEscalateWakesAnAgentRecipient pins that an escalation addressed to an

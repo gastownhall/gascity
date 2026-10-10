@@ -16,10 +16,12 @@ go_test(
     name = "apierr_test",
     srcs = [
         "apierr_test.go",
+        "emitted_codes_guard_test.go",
         "testenv_import_test.go",
     ],
     embed = [":apierr"],
     deps = [
+        "//internal/bazeltest",
         "//internal/testenv",
         "@com_github_danielgtaylor_huma_v2//:huma",
     ],
@@ -33,6 +35,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

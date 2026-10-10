@@ -662,7 +662,12 @@
             "type": "boolean"
           },
           "pool": {
+            "description": "Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.",
             "type": "string"
+          },
+          "pool_limits": {
+            "$ref": "#/components/schemas/PoolLimits",
+            "description": "Configured session limits of the agent (or of its pool)."
           },
           "provider": {
             "type": "string"
@@ -904,6 +909,9 @@
           "assignee": {
             "type": "string"
           },
+          "close_reason": {
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -1044,6 +1052,16 @@
           "assignee",
           "reason"
         ],
+        "type": "object"
+      },
+      "BeadCloseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason.",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "BeadCreateInputBody": {
@@ -1344,6 +1362,27 @@
           "ended"
         ],
         "type": "string"
+      },
+      "BlockedRecomputedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bd_version": {
+            "type": "string"
+          },
+          "rows_corrected": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "rows_corrected",
+          "bd_version"
+        ],
+        "type": "object"
       },
       "BoundEventPayload": {
         "additionalProperties": false,
@@ -2474,6 +2513,7 @@
               "urn:gascity:error:conflict-concurrent-modify",
               "urn:gascity:error:conflict-wrong-state",
               "urn:gascity:error:convoy-not-found",
+              "urn:gascity:error:demand-only-singleton",
               "urn:gascity:error:extmsg-group-not-found",
               "urn:gascity:error:forbidden",
               "urn:gascity:error:formula-not-found",
@@ -2507,6 +2547,7 @@
               "urn:gascity:error:transcript-cursor-invalidated",
               "urn:gascity:error:validation-failed",
               "urn:gascity:error:wait-not-found",
+              "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
               "urn:gascity:error:workflow-not-found"
             ],
@@ -2522,6 +2563,7 @@
               "urn:gascity:error:conflict-concurrent-modify",
               "urn:gascity:error:conflict-wrong-state",
               "urn:gascity:error:convoy-not-found",
+              "urn:gascity:error:demand-only-singleton",
               "urn:gascity:error:extmsg-group-not-found",
               "urn:gascity:error:forbidden",
               "urn:gascity:error:formula-not-found",
@@ -2555,6 +2597,7 @@
               "urn:gascity:error:transcript-cursor-invalidated",
               "urn:gascity:error:validation-failed",
               "urn:gascity:error:wait-not-found",
+              "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
               "urn:gascity:error:workflow-not-found"
             ]
@@ -2631,6 +2674,9 @@
           },
           {
             "$ref": "#/components/schemas/BeadWorktreeReapedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BlockedRecomputedPayload"
           },
           {
             "$ref": "#/components/schemas/BoundEventPayload"
@@ -2724,6 +2770,12 @@
           },
           {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionPendingClearedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionPendingPayload"
           },
           {
             "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
@@ -5869,6 +5921,26 @@
         ],
         "type": "object"
       },
+      "PoolLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "max": {
+            "description": "Maximum concurrent sessions; -1 means unlimited.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "min": {
+            "description": "Minimum concurrent sessions kept running.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "type": "object"
+      },
       "PoolOverride": {
         "additionalProperties": false,
         "properties": {
@@ -6925,7 +6997,19 @@
       "RigPatch": {
         "additionalProperties": false,
         "properties": {
+          "BeadsProxiedIdleTimeout": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "DefaultBranch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "DefaultMergeStrategy": {
             "type": [
               "string",
               "null"
@@ -6970,9 +7054,11 @@
           "Path",
           "Prefix",
           "DefaultBranch",
+          "DefaultMergeStrategy",
           "Suspended",
           "SuspendedOnStart",
-          "FormulaVars"
+          "FormulaVars",
+          "BeadsProxiedIdleTimeout"
         ],
         "type": "object"
       },
@@ -7040,7 +7126,22 @@
             "type": "integer"
           },
           "default_branch": {
+            "description": "Mainline branch (e.g. main, master).",
             "type": "string"
+          },
+          "default_sling_target": {
+            "description": "Agent qualified name that targetless gc sling routes this rig's work to.",
+            "type": "string"
+          },
+          "default_sling_targets": {
+            "description": "Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "git": {
             "$ref": "#/components/schemas/GitStatus"
@@ -7056,6 +7157,7 @@
             "type": "string"
           },
           "prefix": {
+            "description": "Effective bead ID prefix: the configured prefix, or the one derived from the rig name.",
             "type": "string"
           },
           "running_count": {
@@ -7774,6 +7876,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -7784,6 +7890,10 @@
       "SessionMessageSucceededPayload": {
         "additionalProperties": false,
         "properties": {
+          "queued": {
+            "description": "True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.",
+            "type": "boolean"
+          },
           "request_id": {
             "description": "Correlation ID from the 202 response.",
             "type": "string"
@@ -7791,11 +7901,20 @@
           "session_id": {
             "description": "Session ID that received the message.",
             "type": "string"
+          },
+          "will_not_start_reason": {
+            "description": "Why the controller will not start the session for a queued message, with the remedy.",
+            "type": "string"
+          },
+          "will_start": {
+            "description": "Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.",
+            "type": "boolean"
           }
         },
         "required": [
           "request_id",
-          "session_id"
+          "session_id",
+          "queued"
         ],
         "type": "object"
       },
@@ -7824,6 +7943,91 @@
         },
         "required": [
           "request_id"
+        ],
+        "type": "object"
+      },
+      "SessionPendingClearedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "Interaction kind from the matching session.pending.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).",
+            "enum": [
+              "resolved",
+              "replaced",
+              "session_gone"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Request ID from the matching session.pending.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID from the matching session.pending.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "request_id",
+          "kind",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SessionPendingPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "description": "Session alias, when set.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Interaction kind (e.g. approval).",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Provider metadata (e.g. tool_name, source).",
+            "type": "object"
+          },
+          "options": {
+            "description": "Answer options as the session shows them.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt": {
+            "description": "Human-readable prompt.",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Pending interaction request ID. Pass it to POST .../session/{id}/respond.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Session bead ID awaiting a decision.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Session template, when known.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "request_id",
+          "kind"
         ],
         "type": "object"
       },
@@ -10945,6 +11149,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -10970,6 +11178,14 @@
           "session_id": {
             "description": "Session ID that received the submission.",
             "type": "string"
+          },
+          "will_not_start_reason": {
+            "description": "Why the controller will not start the session for a queued message, with the remedy.",
+            "type": "string"
+          },
+          "will_start": {
+            "description": "Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -11215,15 +11431,57 @@
         ],
         "type": "object"
       },
+      "SlingBatchSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "container_type": {
+            "description": "Container bead type, e.g. convoy.",
+            "type": "string"
+          },
+          "failed": {
+            "description": "Children whose routing failed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "idempotent": {
+            "description": "Children skipped because they were already routed to the target.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "routed": {
+            "description": "Children routed by this sling.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Children skipped: already routed, or not open.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Children tracked by the container.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "routed",
+          "failed",
+          "skipped",
+          "idempotent"
+        ],
+        "type": "object"
+      },
       "SlingInputBody": {
         "additionalProperties": false,
         "properties": {
           "attached_bead_id": {
-            "description": "Bead ID to attach a formula to.",
+            "description": "Bead or convoy ID to attach formula to, in place of bead (gc sling --on).",
             "type": "string"
           },
           "bead": {
-            "description": "Bead ID to sling.",
+            "description": "Bead or convoy ID to sling, like gc sling \u003ctarget\u003e \u003cbead\u003e. The target's default formula is cooked onto the bead unless no_formula is set; a convoy's open children are routed one by one.",
             "type": "string"
           },
           "force": {
@@ -11231,7 +11489,7 @@
             "type": "boolean"
           },
           "formula": {
-            "description": "Formula name for workflow launch.",
+            "description": "Formula name. Alone, it launches the formula standalone (gc sling --formula). With attached_bead_id, it is attached to that bead (gc sling \u003ctarget\u003e \u003cbead\u003e --on \u003cformula\u003e).",
             "type": "string"
           },
           "merge": {
@@ -11243,7 +11501,7 @@
             "type": "boolean"
           },
           "no_formula": {
-            "description": "Suppress the target's default_sling_formula even when configured.",
+            "description": "Suppress the target's default_sling_formula and route the raw bead (gc sling --no-formula).",
             "type": "boolean"
           },
           "owned": {
@@ -11272,14 +11530,14 @@
             "type": "string"
           },
           "title": {
-            "description": "Workflow title.",
+            "description": "Workflow title (gc sling --title), for an explicit or default formula.",
             "type": "string"
           },
           "vars": {
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Formula variables.",
+            "description": "Formula variables (gc sling --var), for an explicit or default formula.",
             "type": "object"
           }
         },
@@ -11294,7 +11552,15 @@
           "attached_bead_id": {
             "type": "string"
           },
+          "batch": {
+            "$ref": "#/components/schemas/SlingBatchSummary",
+            "description": "Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."
+          },
           "bead": {
+            "type": "string"
+          },
+          "convoy_id": {
+            "description": "Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.",
             "type": "string"
           },
           "dashboard_url": {
@@ -11305,6 +11571,10 @@
             "type": "string"
           },
           "mode": {
+            "type": "string"
+          },
+          "molecule_id": {
+            "description": "Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.",
             "type": "string"
           },
           "root_bead_id": {
@@ -11590,6 +11860,10 @@
           "store_health": {
             "$ref": "#/components/schemas/StatusStoreHealth",
             "description": "Dolt bead store health summary. Omitted when unavailable."
+          },
+          "stores_not_read": {
+            "description": "True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.",
+            "type": "boolean"
           },
           "suspended": {
             "description": "Whether the city is suspended.",
@@ -11943,6 +12217,11 @@
             "description": "Number of ready work items.",
             "format": "int64",
             "type": "integer"
+          },
+          "suspended_rigs_excluded": {
+            "description": "Number of suspended rigs left out of these counts: a suspended rig's store is not read.",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
@@ -11963,6 +12242,15 @@
           },
           "invariant": {
             "type": "string"
+          },
+          "lost_cross_edges": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "outcome": {
             "type": "string"
@@ -12479,6 +12767,7 @@
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.blocked.recomputed": "#/components/schemas/TypedEventStreamEnvelopeBeadsBlockedRecomputed",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
@@ -12546,6 +12835,8 @@
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pending": "#/components/schemas/TypedEventStreamEnvelopeSessionPending",
+            "session.pending_cleared": "#/components/schemas/TypedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
@@ -12603,6 +12894,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsBlockedRecomputed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded"
@@ -12804,6 +13098,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPending"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPendingCleared"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
@@ -13451,6 +13751,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.worktree.reaped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBeadsBlockedRecomputed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BlockedRecomputedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.blocked.recomputed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope beads.blocked.recomputed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
@@ -14198,6 +14555,8 @@
                 "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.pending",
+                "session.pending_cleared",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -14273,6 +14632,7 @@
                 "emergency.signaled",
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
+                "beads.blocked.recomputed",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -17431,6 +17791,120 @@
         "title": "TypedEventStreamEnvelope session.max_age_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionPending": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pending",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionPendingCleared": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingClearedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending_cleared",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pending_cleared",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
         "additionalProperties": false,
         "properties": {
@@ -18813,6 +19287,7 @@
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
+            "beads.blocked.recomputed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
@@ -18880,6 +19355,8 @@
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pending": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending",
+            "session.pending_cleared": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPendingCleared",
             "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
@@ -18937,6 +19414,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded"
@@ -19138,6 +19618,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPendingCleared"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
@@ -19825,6 +20311,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.worktree.reaped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BlockedRecomputedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "beads.blocked.recomputed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope beads.blocked.recomputed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded": {
@@ -20623,6 +21170,8 @@
                 "session.drain_fence_unavailable",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
+                "session.pending",
+                "session.pending_cleared",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -20698,6 +21247,7 @@
                 "emergency.signaled",
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
+                "beads.blocked.recomputed",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -24075,6 +24625,128 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPending": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pending",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPendingCleared": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPendingClearedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pending_cleared",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pending_cleared",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
@@ -29800,6 +30472,15 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeadCloseBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -48358,6 +49039,7 @@
     },
     "/v0/city/{cityName}/session/{id}/wake": {
       "post": {
+        "description": "Records an explicit wake and asks the controller to start the session; the API never starts the runtime itself. 409 wake-will-not-start means the wake is recorded but the controller will not act on it (no runnable template, a dependency-only or drained pool session, a suspended city, rig or agent, a demand-only singleton, an abandoned create, an open circuit breaker, a startup-health quarantine, or an idle latch); the detail names the remedy. `gc session wake` applies the same rules.",
         "operationId": "post-v0-city-by-city-name-session-by-id-wake",
         "parameters": [
           {

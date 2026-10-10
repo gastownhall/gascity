@@ -88,9 +88,7 @@ func pendingCreateRuntimeClearedForRollback(result startResult, sp runtime.Provi
 	if name == "" {
 		return false
 	}
-	attributed := runningSessionMatchesPendingCreateInfo(info, name, sp) ||
-		beadScopedPoolRuntimeNotPositivelyForeign(info, name, sp)
-	if !attributed {
+	if staleAsyncStartRuntimeAttribution(info, name, sp) != pendingCreateRuntimeOurs {
 		// Nothing of ours is there, or the identity probe could not tell. Only
 		// the first is safe to act on, and this attempt may not stop a runtime
 		// it cannot attribute, so require positive absence.

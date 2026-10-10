@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -274,6 +275,17 @@ type ProviderUpdate struct {
 // /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
 type RawConfigProvider interface {
 	RawConfig() *config.City
+}
+
+// WakeStartRefuser is an optional State capability: the controller names
+// why it will not start a session whose wake was just recorded (an
+// idle-latched row, a suspended rig or agent, no runnable template, a
+// dependency-only row, a startup-health quarantine), or "" when it will.
+// certain is false when it does not refuse but cannot tell (a pool seat that
+// starts only for demand). info is the row after the wake was recorded.
+// Optional for the same reason as WebhookDispatchProvider.
+type WakeStartRefuser interface {
+	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live

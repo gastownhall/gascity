@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "hybrid",
-    srcs = ["hybrid.go"],
+    srcs = [
+        "hybrid.go",
+        "proctable.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/hybrid",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/runtime"],
@@ -11,7 +14,9 @@ go_library(
 go_test(
     name = "hybrid_test",
     srcs = [
+        "composite_forward_test.go",
         "hybrid_test.go",
+        "router_test.go",
         "session_events_test.go",
         "testenv_import_test.go",
     ],
@@ -30,6 +35,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

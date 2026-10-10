@@ -37,7 +37,7 @@ import (
 // beads#5008, so a store opened against that bd latches and stays there.
 //
 // The installable default does not reach it. deps.env BD_VERSION is
-// v1.3.1-rc.2, cut from beads main past beads#5008, so on a stock install the
+// v1.3.1, cut from beads main past beads#5008, so on a stock install the
 // VERB is the live path and the fallback serves the floor alone. The verb is
 // also exercised against the source-built deps.env BD_CURRENT_REF bd
 // (make test-bd-conditional-release-contract) — now where the contract is
@@ -229,10 +229,12 @@ func isBdUnknownFlagError(msg, flag string) bool {
 	return false
 }
 
-// ErrConditionalTransferUnsupported reports that this bd does not understand the
-// --if-assignee / --if-status preconditions, so an assignee transfer cannot be
-// made conditional. Callers must not fall back to an unconditional write.
-var ErrConditionalTransferUnsupported = errors.New("bd does not support conditional assignee transfer")
+// ErrConditionalTransferUnsupported reports that a store cannot make an
+// assignee transfer conditional. BdStore wraps it when the bd on PATH does not
+// understand the --if-assignee / --if-status preconditions. A wrapper returns
+// it when the store beneath it is no ConditionalAssigneeTransferer. Match it
+// with errors.Is. Callers must not fall back to an unconditional write.
+var ErrConditionalTransferUnsupported = errors.New("conditional assignee transfer unsupported")
 
 // TransferIfCurrent moves an in_progress bead from one exact assignee spelling
 // to another, only while the bead still carries fromAssignee:
@@ -282,10 +284,68 @@ func (s *BdStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, 
 	}
 	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
 	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
-		return false, ErrConditionalTransferUnsupported
+		return false, fmt.Errorf("bd transfer-if-current: bd on PATH lacks --if-assignee/--if-status: %w", ErrConditionalTransferUnsupported)
 	}
 	if isBdIssueNotFound(runErr) {
 		return false, nil
 	}
 	return false, fmt.Errorf("bd transfer-if-current: %w", runErr)
+}
+
+var _ AssignmentGuardedUpdater = (*BdStore)(nil)
+
+// UpdateIfAssignment applies opts only while the bead still has expectedStatus
+// and expectedAssignee, checked by bd inside the same write:
+//
+//	bd update <id> <opts…> --if-status <status> --if-assignee <assignee>
+//
+// It is the BdStore answer to an assignment change that must be fenced on the
+// facts it was decided from when bd has no --if-revision. An empty
+// expectedAssignee requires the bead to be unassigned, and bd reads a NULL
+// assignee as empty. A rejected guard (bd exit 13) or an unresolvable id
+// reports false with nothing written: another actor won, and the caller's next
+// pass decides again. A bd without the guard flags returns
+// ErrConditionalWriteUnsupported and latches the store, as ReleaseIfCurrent's
+// verb does, so the caller can refuse rather than write blind.
+//
+// An ambiguous failure is never replayed (runBDTransientReleaseOutput): the
+// first attempt may have committed, and a replay could release a same-assignee
+// reclaim that landed in between.
+func (s *BdStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error) {
+	if err := validateConditionalUpdateOpts(opts, false); err != nil {
+		return false, fmt.Errorf("bd update-if-assignment %s: %w", id, err)
+	}
+	expectedStatus = strings.TrimSpace(expectedStatus)
+	if expectedStatus == "" {
+		return false, fmt.Errorf("bd update-if-assignment %s: an expected status is required", id)
+	}
+	if err := s.guardRelocatedClassIDs("update-if-assignment "+id, id); err != nil {
+		return false, err
+	}
+	if s.conditionalReleaseUnsupported() {
+		return false, ErrConditionalWriteUnsupported
+	}
+	if collision := s.releaseIDCollision(id); collision != nil {
+		return false, collision
+	}
+	args := append(bdUpdateArgs(id, opts),
+		"--if-status", expectedStatus,
+		"--if-assignee", strings.TrimSpace(expectedAssignee),
+	)
+	out, runErr := s.runBDTransientReleaseOutput(args...)
+	if runErr == nil {
+		return true, nil
+	}
+	if bdExitCode(runErr) == bdCASPreconditionExitCode {
+		return false, nil
+	}
+	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
+	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
+		s.latchConditionalReleaseUnsupported()
+		return false, ErrConditionalWriteUnsupported
+	}
+	if isBdIssueNotFound(runErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("bd update-if-assignment %s: %w", id, runErr)
 }

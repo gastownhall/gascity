@@ -118,16 +118,26 @@ func (s *ProxiedStore) DepMetadata(issueID, dependsOnID string) (string, bool, e
 
 // DepListBatch reads several beads' "down" edges.
 //
-// The native leaf has no batched read, so the fallback loops DepList THROUGH THIS
-// STORE rather than through a leaf: that keeps the relocated-class guard and the
-// demotion routing live on every id, and on the native lane it costs zero
-// subprocesses whatever the batch size.
+// On the native lane it is the native leaf's ONE batched read, and H5's guard
+// runs over every id before that read is spent. A relocated id refuses the whole
+// batch, with no map, as it refused the per-id loop this replaced at that id:
+// the batch answers an anchor it does not hold with NO ENTRY, which is
+// DependencyBatchLister's contract and which is exactly the silent negative the
+// guard exists to keep a relocated id from becoming.
+//
+// A demoted store answers with the bd leaf's own semantics, through its batch
+// when it has one. A bd leaf without one is looped through DepList on THIS
+// store, which keeps the demotion routing live on every id.
 func (s *ProxiedStore) DepListBatch(ids []string) (map[string][]Dep, error) {
-	if batch, ok := s.readLeaf().(interface {
-		DepListBatch(ids []string) (map[string][]Dep, error)
-	}); ok {
-		deps, err := batch.DepListBatch(ids)
+	if native := s.nativeLeaf(); native != nil {
+		if err := s.guardRelocatedIDs("dep list batch", ids...); err != nil {
+			return nil, err
+		}
+		deps, err := native.DepListBatch(ids)
 		return deps, s.classifyReadError(err)
+	}
+	if batch, ok := DepListBatchFor(s.bd); ok {
+		return batch.DepListBatch(ids)
 	}
 	result := make(map[string][]Dep, len(ids))
 	for _, id := range ids {

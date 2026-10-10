@@ -237,6 +237,35 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		// alone. failed-create appears here in its asleep+sleep_reason spelling,
 		// which is distinct from the "failed-create" fixture below (state=
 		// failed-create) and reaches a different arm.
+		// sleep_reason=killed is freeable only without an honored kill fence
+		// (owner ruling B1): one fixture per side of the fence check.
+		"asleep-killed-freeable": {
+			ID:     "ga-killed",
+			Type:   session.BeadType,
+			Title:  "killed",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonKilled),
+				"slept_at":     recentWokeRFC3339,
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-killed-fence-pending": {
+			ID:     "ga-killfence",
+			Type:   session.BeadType,
+			Title:  "killfence",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonKilled),
+				"state_reason": session.KillPendingReason,
+				"slept_at":     recentWokeRFC3339,
+				"pool_slot":    "2",
+			},
+		},
 		"asleep-city-stop-freeable": {
 			ID:     "ga-citystop",
 			Type:   session.BeadType,
@@ -945,8 +974,11 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		// bead-metadata read (self-sufficient oracle, not a side door).
 		"shouldRollbackPendingCreate": {func(b beads.Bead) bool { return strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" }, shouldRollbackPendingCreateInfo},
 		"isStaleCreating":             {isStaleCreating, isStaleCreatingInfo},
-		"isPoolSessionSlotFreeable":   {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
-		"beadOwnsPoolSessionName":     {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
+		"isPoolSessionSlotFreeable": {
+			func(b beads.Bead) bool { return isPoolSessionSlotFreeable(b, clk.Now()) },
+			func(i session.Info) bool { return isPoolSessionSlotFreeableInfo(i, clk.Now()) },
+		},
+		"beadOwnsPoolSessionName": {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
 	}
 
 	// Agent-dependent classifiers. A bare pool agent (no instance-expansion, no
@@ -1353,6 +1385,23 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		}
 		return refPendingCreateAttemptStale(b)
 	}
+	refPendingCreateSessionStillLeased := func(cfg *config.City) func(beads.Bead) bool {
+		return func(b beads.Bead) bool {
+			claim := strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true"
+			if claim && !refPendingCreateLeaseActive(b) || !claim && !refSessionStartRequested(b) {
+				return false
+			}
+			template := normalizedSessionTemplate(b, cfg)
+			if template == "" {
+				template = b.Metadata["template"]
+			}
+			if agent := findAgentByTemplate(cfg, template); agent != nil {
+				return !agent.Suspended
+			}
+			return claim
+		}
+	}
+	suspendedLeaseCfg := &config.City{Agents: []config.Agent{{Name: "worker", Suspended: true}}}
 	clkBoolChecks := map[string]struct {
 		bead func(beads.Bead) bool
 		info func(session.Info) bool
@@ -1390,6 +1439,33 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(i session.Info) bool {
 				return pendingCreateLeaseExpiredForRollbackInfo(i, clk, leaseStartupTimeout)
 			},
+		},
+		// The decide's clock-free forms (mc-zndi7.89) against the same oracles.
+		"pendingCreateLeaseExpiredForRollbackAt": {
+			refPendingCreateLeaseExpiredForRollback,
+			func(i session.Info) bool {
+				return pendingCreateLeaseExpiredForRollbackAt(i, clk.Now(), leaseStartupTimeout)
+			},
+		},
+		"pendingCreateLeaseActiveAt": {
+			refPendingCreateLeaseActive,
+			func(i session.Info) bool { return pendingCreateLeaseActiveAt(i, clk.Now(), leaseStartupTimeout) },
+		},
+		"sessionStartRequestedAt": {
+			refSessionStartRequested,
+			func(i session.Info) bool { return sessionStartRequestedAt(i, clk.Now()) },
+		},
+		"pendingCreateSessionStillLeased": {
+			refPendingCreateSessionStillLeased(leaseCfg),
+			func(i session.Info) bool { return pendingCreateSessionStillLeasedInfo(i, leaseCfg, clk) },
+		},
+		"pendingCreateSessionStillLeasedAt": {
+			refPendingCreateSessionStillLeased(leaseCfg),
+			func(i session.Info) bool { return pendingCreateSessionStillLeasedAt(i, leaseCfg, clk.Now()) },
+		},
+		"pendingCreateSessionStillLeasedAt/suspended": {
+			refPendingCreateSessionStillLeased(suspendedLeaseCfg),
+			func(i session.Info) bool { return pendingCreateSessionStillLeasedAt(i, suspendedLeaseCfg, clk.Now()) },
 		},
 	}
 

@@ -4,14 +4,20 @@
 // It generalizes two patterns that already exist piecemeal in the codebase:
 //
 //   - Graceful cancellation ([Apply]): the command runs in its own process
-//     group and context cancellation interrupts that group first, so shell
+//     group and context cancellation sends that group SIGTERM first, so shell
 //     rollback traps (and any foreground child blocking them) get a chance to
 //     run before cancellation escalates to a forced kill. Without this, Go's
 //     default [os/exec.CommandContext] cancel is Process.Kill — SIGKILL — which
 //     is untrappable: a setup script killed mid-flight can never restore state
-//     it staged aside (the worktree-setup data-loss class). This is the same
-//     protection [internal/runtime/exec]'s interruptThenKill introduced for
-//     adapter scripts, lifted to a reusable home.
+//     it staged aside (the worktree-setup data-loss class).
+//
+//     The cooperative signal is SIGTERM, not SIGINT. SIGINT is the keyboard
+//     interrupt and shells treat it specially: a non-interactive shell
+//     started as a background job inherits SIGINT ignored and cannot trap it
+//     at all, and bash can stop acting on signals entirely when SIGINT lands
+//     during a command substitution. SIGTERM has neither hazard, and it is
+//     the signal docker stop and Kubernetes use for the same TERM-then-KILL
+//     contract.
 //
 //   - Activity-aware deadlines ([Monitor]): a fixed wall-clock timeout cannot
 //     distinguish a hung command from a slow-but-healthy one. A Monitor cancels
@@ -53,7 +59,7 @@ const (
 	// or the target was already gone by the time it fired.
 	CancelNotDelivered CancelOutcome = iota
 
-	// CancelGroupSignaled means the process group was interrupted
+	// CancelGroupSignaled means the process group was sent SIGTERM
 	// successfully. The command (and any foreground child) received the
 	// signal; whether it then exits cooperatively or is later force-killed
 	// by os/exec's own WaitDelay escalation happens outside Apply, and does
@@ -61,10 +67,10 @@ const (
 	CancelGroupSignaled
 
 	// CancelLeaderSignaledOnly means the process group could not be
-	// resolved, so only the process leader was interrupted directly.
+	// resolved, so only the process leader was sent SIGTERM directly.
 	CancelLeaderSignaledOnly
 
-	// CancelForceKilled means the interrupt itself could not be delivered
+	// CancelForceKilled means the SIGTERM itself could not be delivered
 	// (group and leader signaling both failed) and Apply fell back to
 	// killing the process directly rather than leaving it to run out the
 	// WaitDelay clock.
@@ -115,9 +121,9 @@ func (r *CancelResult) record(outcome CancelOutcome) {
 //
 // It places the command in its own process group (POSIX; no-op on Windows),
 // replaces the default context-cancel behavior (SIGKILL) with
-// [InterruptThenKill], and raises cmd.WaitDelay to grace when grace is larger
+// [TerminateThenKill], and raises cmd.WaitDelay to grace when grace is larger
 // than the current value. WaitDelay bounds how long Wait allows the
-// interrupted process — its rollback traps included — and any grandchildren
+// terminated process — its rollback traps included — and any grandchildren
 // holding the I/O pipes before Go forcibly terminates them, so grace is
 // effectively the trap budget. A zero grace leaves WaitDelay untouched.
 //
@@ -127,23 +133,23 @@ func (r *CancelResult) record(outcome CancelOutcome) {
 func Apply(cmd *exec.Cmd, grace time.Duration) *CancelResult {
 	setProcessGroup(cmd)
 	result := new(CancelResult)
-	cmd.Cancel = InterruptThenKill(cmd, result)
+	cmd.Cancel = TerminateThenKill(cmd, result)
 	if grace > cmd.WaitDelay {
 		cmd.WaitDelay = grace
 	}
 	return result
 }
 
-// InterruptThenKill builds an [os/exec.Cmd.Cancel] that first interrupts the
-// command's process group so a cooperative command — and any foreground child
-// blocking its rollback trap — can roll back before cancellation becomes a
-// forced kill, recording in result whether and how cancellation was
-// delivered so the caller can let it win over the command's own exit status.
-// Platforms without process groups or os.Interrupt (such as Windows) fall
-// back to Kill.
-func InterruptThenKill(cmd *exec.Cmd, result *CancelResult) func() error {
+// TerminateThenKill builds an [os/exec.Cmd.Cancel] that first sends SIGTERM
+// to the command's process group so a cooperative command — and any
+// foreground child blocking its rollback trap — can roll back before
+// cancellation becomes a forced kill, recording in result whether and how
+// cancellation was delivered so the caller can let it win over the command's
+// own exit status. Platforms without process groups or a catchable
+// termination signal (such as Windows) fall back to Kill.
+func TerminateThenKill(cmd *exec.Cmd, result *CancelResult) func() error {
 	return func() error {
-		outcome, err := interruptProcessGroup(cmd)
+		outcome, err := terminateProcessGroup(cmd)
 		if err == nil {
 			result.record(outcome)
 			return nil

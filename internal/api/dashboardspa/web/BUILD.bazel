@@ -1,0 +1,83 @@
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_run_binary")
+load("@npm_dashboard//:defs.bzl", "npm_link_all_packages")
+load("//tools/bazel/rules:pnpm_lock.bzl", "pnpm_lock_in_sync_test")
+
+# The pnpm workspace root of the dashboard SPA (shared + frontend). Every npm
+# package comes from pnpm-lock.yaml via @npm_dashboard (MODULE.bazel).
+npm_link_all_packages(name = "node_modules")
+
+pnpm_lock_in_sync_test(
+    name = "lockfiles_in_sync_test",
+    manifests = [
+        "package.json",
+        "pnpm-workspace.yaml",
+        "//internal/api/dashboardspa/web/frontend:package.json",
+        "//internal/api/dashboardspa/web/shared:package.json",
+    ],
+    rules_ts_typescript = True,
+)
+
+exports_files([
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+])
+
+# `npm run generate:client`: the typed supervisor client openapi-ts generates
+# from internal/api/openapi.json, compared with the committed copy by
+# //internal/api/dashboardspa/web/shared:generated_client_in_sync_test.
+js_binary(
+    name = "generate_client",
+    data = [
+        ":node_modules/@hey-api/openapi-ts",
+        ":node_modules/prettier",
+    ],
+    entry_point = "generate-client.mjs",
+)
+
+js_run_binary(
+    name = "gc_supervisor_client",
+    srcs = [
+        ".prettierignore",
+        "openapi-ts.config.ts",
+        "package.json",
+        "prettier.config.mjs",
+        "//internal/api:openapi_json_bin",
+    ],
+    args = ["gc-supervisor-client"],
+    chdir = package_name(),
+    out_dirs = ["gc-supervisor-client"],
+    tool = ":generate_client",
+    visibility = ["//internal/api/dashboardspa/web/shared:__pkg__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

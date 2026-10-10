@@ -72,6 +72,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatalf("body outcome = %q, want pass", got)
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
@@ -117,6 +118,7 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
@@ -149,6 +151,23 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 
 	assertControlDispatcherLane(t, cityDir)
 }
+
+// waitForWorkflowTeardown waits for the workflow's cleanup-worktree step to
+// close. Teardown is post-settlement by contract (internal/formula/graph.go
+// keeps it out of the finalizer's sinks): workflow-finalize closes the root
+// first and only then does the teardown tail run, so the root closing says
+// nothing yet about the worktree or the convoy's work_dir. The cleanup
+// assertions that follow read state the teardown writes, so they wait for it
+// explicitly instead of racing it.
+func waitForWorkflowTeardown(t *testing.T, cityDir, workflowID string) {
+	t.Helper()
+	cleanup := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, ".cleanup-worktree")
+	waitForBeadClosed(t, cityDir, cleanup.ID, graphWorkflowTeardownTimeout)
+}
+
+// graphWorkflowTeardownTimeout bounds the wait for the cleanup-worktree step
+// after the root has closed: one worker hop plus its retry control.
+const graphWorkflowTeardownTimeout = 2 * time.Minute
 
 func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	t.Helper()
@@ -325,6 +344,7 @@ func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string,
 
 func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {
 	t.Helper()
+	timeout = clampToTestDeadline(t, timeout, 90*time.Second)
 
 	var waitErr error
 	if bead, err := waitForBeadCondition(t, cityDir, beadID, timeout, func(bead graphBead) bool {
@@ -469,4 +489,28 @@ func readWorkflowReport(t *testing.T, cityDir string) string {
 		t.Fatalf("reading workflow report: %v", err)
 	}
 	return string(data)
+}
+
+// clampToTestDeadline shortens a wait so that, if it runs out, the caller
+// still has margin before the test binary's own deadline to write its
+// diagnostics. Under bazel, --test_timeout becomes -test.timeout and a remote
+// action is killed at that same instant with its log discarded, so a wait
+// sized for go test's 30m budget (reviewWorkflowTimeout is 24m) would end in a
+// bare "timed out" with nothing to debug. Outside bazel the go test deadline is
+// far enough away that nothing changes.
+func clampToTestDeadline(t *testing.T, timeout, margin time.Duration) time.Duration {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return timeout
+	}
+	remaining := time.Until(deadline) - margin
+	if remaining >= timeout {
+		return timeout
+	}
+	if remaining < time.Second {
+		remaining = time.Second
+	}
+	t.Logf("waiting %s instead of %s: the test deadline is %s away", remaining.Round(time.Second), timeout, time.Until(deadline).Round(time.Second))
+	return remaining
 }

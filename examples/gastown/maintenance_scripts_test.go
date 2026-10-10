@@ -1975,6 +1975,65 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 	}
 }
 
+func TestOrphanSweepPreservesLivePoolOwnerInOversizedSessionSnapshot(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", binDir, err)
+	}
+	for _, name := range []string{"bash", "cat", "dirname", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
+		linkTestPathTool(t, binDir, name)
+	}
+
+	gcLog := filepath.Join(root, "gc.log")
+	if err := os.WriteFile(gcLog, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", gcLog, err)
+	}
+	writeStrictOrphanSweepGCStub(t, filepath.Join(binDir, "gc"))
+
+	liveOwner := "project-alpha__gastown-refinery-gc-live6714"
+	sessionNames := []string{liveOwner}
+	for i := 0; i < 400; i++ {
+		sessionNames = append(sessionNames, fmt.Sprintf("project-alpha__gastown-worker-%04d-%080d", i, i))
+	}
+	sessionsJSON := orphanSweepSessionListJSON(t, sessionNames...)
+	protectedID := "gc-wisp-protected-live-6714"
+	orphanID := "gc-wisp-orphan-live-6714"
+	orphanAssignee := "project-alpha__gastown-retired-gc-dead6714"
+	rigJSON := orphanSweepProtectedWispBeadsJSON(t, protectedID, liveOwner, orphanID, orphanAssignee)
+	env := orphanSweepCleanroomEnv(t, root, binDir, gcLog, orphanSweepCleanroomEnvConfig{
+		hqJSON:             "[]",
+		rigJSON:            rigJSON,
+		hqSessionsJSON:     sessionsJSON,
+		rigSessionsJSON:    sessionsJSON,
+		configuredIdentity: "project-alpha/gastown.refinery",
+		orphanID:           orphanID,
+		orphanAssignee:     orphanAssignee,
+	})
+
+	script := coreScriptPath("orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, orphanSweepFailureContext(out, gcLog))
+	}
+	if got, want := strings.TrimSpace(string(out)), "orphan-sweep: reset 1 orphaned beads"; got != want {
+		t.Fatalf("orphan-sweep output = %q, want %q\n%s", got, want, orphanSweepFailureContext(out, gcLog))
+	}
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", gcLog, err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "bd release-if-current "+protectedID+" ") {
+		t.Fatalf("oversized snapshot caused live pool owner to be reset\n%s", orphanSweepFailureContext(out, gcLog))
+	}
+	if !strings.Contains(log, "bd release-if-current "+orphanID+" "+orphanAssignee) {
+		t.Fatalf("dead negative-control owner was not reset\n%s", orphanSweepFailureContext(out, gcLog))
+	}
+}
+
 func writeStrictOrphanSweepGCStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
@@ -3079,7 +3138,7 @@ func TestReaperScriptSQLReflectsCurrentSchema(t *testing.T) {
 	}
 	for _, required := range []string{
 		"issue_type NOT IN ('message')",
-		"created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)",
+		"created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("reaper script is missing stale-only query fragment %q", required)
@@ -4157,8 +4216,8 @@ exit 0
 		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = root.id",
 		"COALESCE(w.assignee, '') = ''",
 		"COALESCE(i.assignee, '') = ''",
-		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL",
-		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL",
+		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL",
 		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
 		"roots_with_recent_descendants",
 		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",
@@ -8475,6 +8534,67 @@ func TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure(t *testing
 	}
 	if _, has := state["last_push_stderr"]; has {
 		t.Fatalf("last_push_stderr should clear after retry success:\n%s", stateData)
+	}
+}
+
+// TestJsonlExportPushRetryDelayIsLocaleIndependent guards against the retry
+// delay being formatted with a locale decimal separator ("1,50"), which
+// `sleep` rejects. POSIXLY_CORRECT makes gawk honor LC_NUMERIC on output the
+// way mawk and BSD awk do by default.
+func TestJsonlExportPushRetryDelayIsLocaleIndependent(t *testing.T) {
+	probeScript := filepath.Join(t.TempDir(), "locale-probe.sh")
+	writeExecutable(t, probeScript, "#!/bin/sh\nawk 'BEGIN{printf \"%.2f\",1.5}'\n")
+	probeOut, err := runScriptResult(t, probeScript, map[string]string{
+		"LC_ALL":          "de_DE.UTF-8",
+		"POSIXLY_CORRECT": "1",
+	})
+	if err != nil || string(probeOut) != "1,50" {
+		t.Skipf("awk does not emit a comma decimal under de_DE.UTF-8 (locale missing?): %q, %v", probeOut, err)
+	}
+
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "fail-first", pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "1"
+	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "1"
+	env["LC_ALL"] = "de_DE.UTF-8"
+	env["POSIXLY_CORRECT"] = "1"
+
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	delays := strings.Fields(string(sleepData))
+	if len(delays) == 0 {
+		t.Fatalf("expected at least one retry sleep, got none\n%s", out)
+	}
+	delayRE := regexp.MustCompile(`^[0-9]+\.[0-9]{2}$`)
+	for _, d := range delays {
+		if !delayRE.MatchString(d) {
+			t.Fatalf("retry delay %q is not a dot-decimal sleep argument; all delays: %q", d, delays)
+		}
 	}
 }
 

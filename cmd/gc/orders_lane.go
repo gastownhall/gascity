@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -131,99 +132,29 @@ func (l *ordersLane) lastPass() (at time.Time, reason string, ran bool) {
 }
 
 // startOrdersLane starts the lane goroutine and returns a channel closed when
-// it exits.
-//
-// Two rules pace the lane, both measured from the end of the previous pass:
-//
-//   - Duty cycle. A tick wake starts a pass at once if the lane has been idle
-//     at least as long as its previous pass ran. Otherwise the wake waits
-//     until it has, and every wake in that wait (including one that lands
-//     mid-pass) joins the one pass that follows. The lane is therefore busy
-//     at most half the time while a pass fits in the patrol interval (a
-//     longer pass is followed by one interval idle), never runs two passes
-//     back to back, and a city with short passes keeps the tick's poke
-//     latency.
-//   - Backstop. One timer, reset at the end of every pass, runs a pass one
-//     patrol interval (read once, as the tick's ticker is) after the previous
-//     pass ended if nothing else has — the backstop for a wedged or slow
-//     tick. A wake never waits longer than the backstop would.
+// it exits. It is paced by startPacedLane: a tick wake runs a pass once the
+// lane has idled as long as its previous pass ran, and a backstop timer runs
+// one patrol interval (read once, as the tick's ticker is) after the previous
+// pass ended if nothing else has, the backstop for a wedged or slow tick.
 //
 // On maintainer-city, where a pass (~32s) outlasts the patrol interval (15s),
 // the backstop comes first and the lane runs one pass per interval plus pass
-// time, whatever the tick does. A free-running ticker would add passes on
-// its own grid; a wake that ignored the duty cycle would run passes back to
-// back.
+// time, whatever the tick does.
 func (cr *CityRuntime) startOrdersLane(ctx context.Context, cityRoot string) <-chan struct{} {
 	lane := cr.ordersLaneOf()
 	interval := cr.serviceConfigSnapshot().Daemon.PatrolIntervalDuration()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		timer := time.NewTimer(interval)
-		defer timer.Stop()
-		var pace ordersLanePace
-		wakePending := false
-		for {
-			reason := ordersLaneReasonCadence
-			select {
-			case <-ctx.Done():
-				return
-			case <-lane.wakeCh:
-				wait := pace.wakeWait(time.Now(), interval)
-				if wait > 0 {
-					if !wakePending {
-						wakePending = true
-						timer.Reset(wait)
-					}
-					continue
-				}
-				reason = ordersLaneReasonWake
-			case <-timer.C:
-				if wakePending {
-					reason = ordersLaneReasonWake
-				}
-			}
-			wakePending = false
-			if reason == ordersLaneReasonWake {
-				lane.wakePasses.Add(1)
-			} else {
-				lane.cadencePasses.Add(1)
-			}
-			start := time.Now()
-			cr.safeTick(func() {
-				cr.runOrdersLanePass(ctx, cityRoot, reason)
-			}, ordersLaneSafeTickTrigger)
-			pace = ordersLanePace{lastEnd: time.Now(), lastRun: time.Since(start), passed: true}
-			// Go 1.23+ timers: Reset discards any pending fire, so a timer that
-			// expired during the pass does not start one straight away.
-			timer.Reset(interval)
+	return startPacedLane(ctx, interval, 0, lane.wakeCh, func(wake bool) {
+		reason := ordersLaneReasonCadence
+		if wake {
+			reason = ordersLaneReasonWake
+			lane.wakePasses.Add(1)
+		} else {
+			lane.cadencePasses.Add(1)
 		}
-	}()
-	return done
-}
-
-// ordersLanePace is what the lane remembers of its previous pass.
-type ordersLanePace struct {
-	lastEnd time.Time
-	lastRun time.Duration
-	passed  bool
-}
-
-// wakeWait is how long a wake at now must wait before its pass may start:
-// zero once the lane has idled as long as its previous pass ran, and never
-// longer than the backstop, which fires interval after that pass ended.
-func (p ordersLanePace) wakeWait(now time.Time, interval time.Duration) time.Duration {
-	if !p.passed {
-		return 0
-	}
-	gap := p.lastRun
-	if gap > interval {
-		gap = interval
-	}
-	if wait := p.lastEnd.Add(gap).Sub(now); wait > 0 {
-		return wait
-	}
-	return 0
+		cr.safeTick(func() {
+			cr.runOrdersLanePass(ctx, cityRoot, reason)
+		}, ordersLaneSafeTickTrigger)
+	})
 }
 
 // runOrdersLanePass is one lane pass: the FS-pressure gate, then the
@@ -359,6 +290,12 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 	if ctx.Err() != nil {
 		return
 	}
+	// A suspended city gets no order pass at all: dispatch already skips it,
+	// and the tracking and mail watchdogs below would read every scope's
+	// store, restarting the proxies suspension retired.
+	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
+		return
+	}
 	now := time.Now()
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
@@ -460,7 +397,7 @@ func (cr *CityRuntime) orderRescanDue(now time.Time) bool {
 	lane := cr.ordersLaneOf()
 	lane.setMu.Lock()
 	defer lane.setMu.Unlock()
-	return cr.orderRescanLast.IsZero() || now.Sub(cr.orderRescanLast) >= orderRescanInterval
+	return cr.orderRescanLast.IsZero() || now.Sub(cr.orderRescanLast) >= clock.Backstop(orderRescanInterval)
 }
 
 // markOrderRescan records a rescan attempt so a failing scan is retried on the

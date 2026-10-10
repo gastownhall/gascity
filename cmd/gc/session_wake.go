@@ -17,13 +17,32 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessions "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
-	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // errTokenMismatch indicates the running session's instance token
 // doesn't match the expected one — the session was re-woken by a
 // different incarnation and this drain/stop is stale.
 var errTokenMismatch = errors.New("instance token mismatch")
+
+// errTokenUnverifiable indicates the running session's instance token could
+// not be read, so a kill by name cannot be proven to hit the intended
+// incarnation. The stop is skipped and retried, never treated as stale.
+var errTokenUnverifiable = errors.New("instance token unverifiable")
+
+// tokenUnverifiableError is verifiedStop's errTokenUnverifiable. Its message
+// omits the read error's text, which may match runtime.IsSessionGone (tmux's
+// "no tmux server running") and so read "could not verify" as "gone". The
+// sentinel and the cause stay reachable through errors.Is.
+type tokenUnverifiableError struct {
+	sessionID string
+	cause     error
+}
+
+func (e *tokenUnverifiableError) Error() string {
+	return fmt.Sprintf("%v for session %s (token_unverifiable)", errTokenUnverifiable, e.sessionID)
+}
+
+func (e *tokenUnverifiableError) Unwrap() []error { return []error{errTokenUnverifiable, e.cause} }
 
 // preWakeCommit persists a new incarnation (generation + token) BEFORE
 // starting the process. This is Phase 1 of the two-phase wake protocol.
@@ -37,6 +56,39 @@ func preWakeCommit(
 	info sessions.Info,
 	sessFront *sessions.Store,
 	clk clock.Clock,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		return sessFront.ApplyPatch(info.ID, batch)
+	})
+}
+
+// errPreWakeSuperseded refuses a PreWake whose row moved since it was read.
+var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved since it was read, or its runtime lease was taken over")
+
+// preWakeCommitUnder is preWakeCommit as a compare-and-swap (NEW-6): the
+// incarnation lands only on a re-read row whose lifecycle facts are still
+// info's and that still records lease, fenced at that read's revision. A
+// moved row writes nothing and returns errPreWakeSuperseded. Without a
+// conditional writer the check is the re-read alone.
+func preWakeCommitUnder(
+	info sessions.Info,
+	sessFront *sessions.Store,
+	clk clock.Clock,
+	lease *sessions.RuntimeLease,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		applied, err := sessFront.ApplyPatchIfLifecycleUnchangedUnder(info, batch, lease)
+		if err == nil && !applied {
+			err = errPreWakeSuperseded
+		}
+		return err
+	})
+}
+
+func preWakeCommitWith(
+	info sessions.Info,
+	clk clock.Clock,
+	write func(sessions.MetadataPatch) error,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
@@ -73,7 +125,7 @@ func preWakeCommit(
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
+	if writeErr := write(batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
 	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
@@ -588,7 +640,15 @@ func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Prov
 	return true
 }
 
+// userHoldDrainReleased reports a user-hold drain whose row no longer carries
+// the operator's intent (HoldUser): a resume consumed the hold after the drain
+// began.
+func userHoldDrainReleased(reason string, info sessions.Info, now time.Time) bool {
+	return reason == string(sessions.SleepReasonUserHold) && sessions.HoldsInfo(info, now).In&sessions.HoldUser == 0
+}
+
 func advanceSessionDrainsWithSessionsTraced(
+	cityPath string,
 	dt *drainTracker,
 	sp runtime.Provider,
 	store beads.Store,
@@ -636,6 +696,21 @@ func advanceSessionDrainsWithSessionsTraced(
 					"drain_generation":   ds.generation,
 					"session_generation": gen,
 				})
+			}
+			continue
+		}
+
+		// An operator's resume consumed the hold this drain was for: cancel
+		// it, so neither its ack nor its completion acts on the resumed row.
+		if userHoldDrainReleased(ds.reason, info, clk.Now()) {
+			dt.clearIdleProbe(id)
+			if ds.ackSet {
+				_ = clearReconcilerDrainAckMetadata(sp, name)
+			}
+			dt.remove(id)
+			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
 			}
 			continue
 		}
@@ -773,19 +848,21 @@ func advanceSessionDrainsWithSessionsTraced(
 		// timeout path. Preserve that ordering if this block is refactored.
 		if clk.Now().After(ds.deadline) {
 			// Drain timed out — force stop.
-			if err := verifiedStop(info, store, sp, cfg); err != nil {
+			if err := verifiedStop(cityPath, info, store, sp, cfg); err != nil {
 				if errors.Is(err, errTokenMismatch) {
 					// Session was re-woken by a different incarnation.
 					// This drain is stale — cancel it.
 					dt.clearIdleProbe(id)
 					dt.remove(id)
 				}
-				// Other errors (transient stop failure): keep drain
+				// Other errors (transient stop failure, unverifiable token): keep drain
 				// active for retry on next tick.
 				if trace != nil {
-					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeRetry, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
-						"error": err.Error(),
-					})
+					payload := traceRecordPayload{"error": err.Error()}
+					if errors.Is(err, errTokenUnverifiable) {
+						payload["token"] = "token_unverifiable"
+					}
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeRetry, normalizedSessionTemplateInfo(info, cfg), name, payload)
 				}
 				continue
 			}
@@ -827,46 +904,29 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 		return
 	}
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
-	_ = sessFront.ApplyPatch(info.ID, batch)
+	_, _ = sessFront.ApplyKeepingUserHold(info.ID, batch)
 }
 
 // verifiedStop stops a session after verifying the instance_token matches.
 // Prevents stale drain operations from targeting a re-woken session.
-// Returns errTokenMismatch if the running process has a different token.
+// Returns errTokenMismatch if the running process has a different token, and
+// errTokenUnverifiable if its token cannot be read.
 //
 // NOTE: On composite providers (auto/hybrid), GetMeta and Stop may route
 // to different backends if the route table is stale. This is a pre-existing
 // routing limitation — when the reconciler is wired in, consider a
 // provider-level VerifiedStop that atomically verifies+stops on the same backend.
-func verifiedStop(info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+func verifiedStop(cityPath string, info sessions.Info, store beads.Store, sp runtime.Provider, cfg *config.City) error {
 	name := info.SessionNameMetadata
 	expectedToken := info.InstanceToken
 	if expectedToken != "" {
-		actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-		if actualToken != "" && actualToken != expectedToken {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expectedToken); verdict {
+		case runtimeTokenMismatch:
 			return fmt.Errorf("%w for session %s", errTokenMismatch, info.ID)
+		case runtimeTokenUnverifiable:
+			return &tokenUnverifiableError{sessionID: info.ID, cause: err}
 		}
 	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, info.ID)
-	if err != nil {
-		return err
-	}
-	return handle.Kill(context.Background())
-}
-
-// verifiedInterrupt sends an interrupt signal after verifying instance_token.
-func verifiedInterrupt(session beads.Bead, store beads.Store, sp runtime.Provider, cfg *config.City) error {
-	name := session.Metadata["session_name"]
-	expectedToken := session.Metadata["instance_token"]
-	if expectedToken != "" {
-		actualToken, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-		if actualToken != "" && actualToken != expectedToken {
-			return fmt.Errorf("%w for session %s", errTokenMismatch, session.ID)
-		}
-	}
-	handle, err := workerHandleForSessionWithConfig("", store, sp, cfg, session.ID)
-	if err != nil {
-		return err
-	}
-	return handle.Interrupt(context.Background(), worker.InterruptRequest{})
+	// Decided again under the lease, on a fresh read (controllerKillSessionRow).
+	return controllerKillSessionRow(cityPath, store, sp, cfg, info)
 }

@@ -250,12 +250,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		checks = append(checks, c)
 	}
 
-	// Doctor never starts a server: a store-reading check against a stopped
-	// bd-owned proxied store would start its proxy and Dolt (see
-	// doctorStoreGate), so each such check asks the gate and is replaced by a
-	// "not checked: store not running" line for a stopped scope.
-	storeGate := newDoctorStoreGate(opts.ControllerRunning)
-	cityStoreStopped := storeGate.Stopped(cityPath)
+	// Doctor never starts a stopped city's servers and never wakes a suspended
+	// scope: a store-reading check against a stopped bd-owned proxied store
+	// would start its proxy and Dolt (see doctorStoreGate), so each such check
+	// asks the gate and is replaced by a "not checked" line for a skipped scope.
+	storeGate := newDoctorStoreGate(opts.ControllerRunning, suspendedBeadsScopes(cityPath, cfg).Suspended)
+	cityStoreStopped := storeGate.Skipped(cityPath)
 	registerCityStoreCheck := func(c doctor.Check) {
 		register(storeGate.Check(c, []string{cityPath}, []string{"city"}))
 	}
@@ -268,6 +268,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if layout, err := resolveManagedDoltRuntimeLayout(cityPath); err == nil {
 		managedDoltDataDir = layout.DataDir
 	}
+
+	var reconcilerCheck *sessionReconcilerDoctorCheck
 
 	// Core checks — always run.
 	register(&doctor.CityStructureCheck{})
@@ -294,6 +296,8 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
+		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
+		register(reconcilerCheck)
 		// Rollout gates section: one advisory line per registered gate (value +
 		// origin + notices). Never blocks the exit code.
 		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
@@ -318,6 +322,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
+		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
@@ -375,7 +380,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// stopped proxied city gets the not-running lines without building it.
 		if cityStoreStopped {
 			for _, name := range []string{"agent-sessions", "zombie-sessions", "orphan-sessions"} {
-				register(storeGate.NotRunning(name, "city"))
+				register(storeGate.StandIn(name, []string{cityPath}, []string{"city"}))
 			}
 		} else {
 			sp, err := newSessionProvider()
@@ -442,6 +447,18 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
+			if !cityStoreStopped {
+				reconcilerCheck.capabilities = func() ([]v2StoreCapability, error) {
+					store, err := storeFactory(cityPath)
+					if err != nil {
+						return nil, err
+					}
+					routes := cliStorageRoutes(cityPath)
+					return v2ClassStoreCapabilities(resolveSessionStore(routes, store, cfg, cityPath, nil), resolveGraphStore(routes, store, cfg, cityPath, nil), true), nil
+				}
+			}
 			registerCityStoreCheck(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newBacklogDepthCheck(cityPath, storeFactory))
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
@@ -622,6 +639,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// an abandoned check writes only to its own private buffer. A future caller
 	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	// Identical bd reads are shared across this run's checks; see bdReadMemo.
+	defer installDoctorBdReadMemo(d, cityPath)()
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
@@ -667,7 +686,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {
-		return reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+		reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+		return 1
 	}
 	for _, check := range selected {
 		d.Register(check)
@@ -712,12 +732,27 @@ type doctorUnknownCheckFailure struct {
 	RegisteredChecks []string `json:"registered_checks,omitempty"`
 }
 
+// doctorBlockingFailedErrorCode is the error code a --json run reports when
+// at least one blocking check failed, mirroring the non-zero exit code.
+const doctorBlockingFailedErrorCode = "doctor_blocking_failed"
+
+// doctorBlockingFailure is the --json payload for a run with blocking
+// failures. It is the shared failure envelope (schemas/failure.schema.json),
+// so ok:false always arrives with an error object, and the full report rides
+// along under the schema's additionalProperties so the caller still sees
+// which checks failed. Advisory-only failures keep the report shape and
+// ok:true, matching the zero exit code.
+type doctorBlockingFailure struct {
+	jsonSchemaErrorPayload
+	doctorJSONReport
+}
+
 // reportUnknownDoctorChecks fails a --check run whose names do not all resolve,
 // and tells the caller what it could have asked for. Running the names that did
 // match would be worse than erroring: a caller filtering doctor output by name
 // reads a short result set as a clean one, so a single typo would report health
-// nobody measured.
-func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) int {
+// nobody measured. The caller exits 1.
+func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) {
 	names := doctor.CheckNames(registered)
 	message := unknownDoctorChecksMessage(unmatched, names)
 	if jsonOut {
@@ -735,14 +770,13 @@ func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, js
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
-		return 1
+		return
 	}
 	fmt.Fprintf(stderr, "gc doctor: %s\n", message)                                //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "checks registered in this workspace (%d):\n", len(names)) //nolint:errcheck // best-effort stderr
 	for _, name := range names {
 		fmt.Fprintf(stderr, "  %s\n", name) //nolint:errcheck // best-effort stderr
 	}
-	return 1
 }
 
 func unknownDoctorChecksMessage(unmatched, registered []string) string {
@@ -967,6 +1001,9 @@ type doctorJSONResult struct {
 	Payload any `json:"payload,omitempty"`
 }
 
+// doctorJSONReport carries no ok or error key of its own: a clean or
+// advisory-only run gets ok:true from withDefaultSuccessOK, and a blocking
+// failure wraps it in doctorBlockingFailure, whose envelope supplies both.
 type doctorJSONReport struct {
 	Passed         int                `json:"passed"`
 	Warned         int                `json:"warned"`
@@ -974,7 +1011,6 @@ type doctorJSONReport struct {
 	BlockingFailed int                `json:"blocking_failed"`
 	Fixed          int                `json:"fixed"`
 	Results        []doctorJSONResult `json:"results"`
-	Error          string             `json:"error,omitempty"`
 }
 
 func doctorStatusString(s doctor.CheckStatus) string {
@@ -1023,6 +1059,20 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Payload:      r.Payload,
 		})
 	}
+	if report.BlockingFailed > 0 {
+		return writeCLIJSONLine(w, doctorBlockingFailure{
+			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
+				SchemaVersion: "1",
+				OK:            false,
+				Error: jsonSchemaErrorDetail{
+					Code:     doctorBlockingFailedErrorCode,
+					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
+					ExitCode: 1,
+				},
+			},
+			doctorJSONReport: out,
+		})
+	}
 	return writeCLIJSONLine(w, out)
 }
 
@@ -1061,11 +1111,13 @@ func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 // run, so the dozen-odd store-backed checks share one store per scope instead
 // of each opening its own.
 //
-// A doctor run is a read-only snapshot of a city that is not being mutated
-// underneath it, and no check closes the store it is handed, so reusing the
-// handle is the same object lifetime the checks already assume. What it saves
-// is the open: on a bd-backed scope that is a version probe, a config read and
-// a custom-types read per check, all of them subprocesses.
+// No check closes the store it is handed, so reusing the handle is the same
+// object lifetime the checks already assume. What it saves is the open: on a
+// bd-backed scope that is a version probe, a config read and a custom-types
+// read per check, all of them subprocesses. A shared bd-backed handle also
+// shares its bd runner, which a doctor run memoizes (see bdReadMemo), so a
+// check repeating an earlier check's read may get that earlier answer rather
+// than a live re-read.
 //
 // Failures are memoized too. A store that could not be opened will not open on
 // the next check either, and re-attempting it once per check is how one

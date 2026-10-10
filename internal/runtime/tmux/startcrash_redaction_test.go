@@ -118,7 +118,7 @@ func TestStartOpsCapturePaneJoinsWrappedLines(t *testing.T) {
 		t.Errorf("capture-pane args %q omit -J; wrapped credentials survive redaction", args)
 	}
 	// Control: the joined capture is still a capture of the right pane.
-	if !slices.Contains(args, "capture-pane") || !slices.Contains(args, "gc-test-crash") {
+	if !slices.Contains(args, "capture-pane") || !slices.Contains(args, "=gc-test-crash:") {
 		t.Errorf("capture-pane args %q lost the command or target", args)
 	}
 }

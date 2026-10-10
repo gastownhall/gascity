@@ -325,6 +325,48 @@ requests.
 - `gc events --seq` in supervisor scope prints the current composite
   supervisor cursor, suitable for `--after-cursor`.
 
+### Pending Interactions
+
+A session that stops to ask a human something — a tool approval prompt or
+a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
+lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
+full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
+
+The city event stream (and the supervisor stream, tagged with the city)
+also carries each change as an event, so a client does not have to poll:
+
+- `session.pending` — a session gained an interaction. The payload
+  (`SessionPendingPayload`) has `session_id`, `request_id`, `kind`,
+  `prompt`, `options`, `metadata`, and the session's `template` and
+  `alias`: enough to show the prompt and answer it by `request_id`
+  without another read.
+- `session.pending_cleared` — that interaction is gone. The payload
+  (`SessionPendingClearedPayload`) repeats `session_id`, `request_id`,
+  and `kind`, and gives a `reason`: `resolved` (answered or withdrawn),
+  `replaced` (a different interaction is now pending; its
+  `session.pending` follows), or `session_gone` (the session is no longer
+  active).
+
+Each fires on a transition, not on every detection poll. Detection
+runs while at least one city or supervisor event stream for the city is
+open, every 2 seconds, and immediately after a successful `respond`; it
+uses the same probe as `GET .../pending`, so the two always agree.
+
+Resuming: a client that reconnects with `Last-Event-ID` (or `after_seq` /
+`after_cursor`) gets the transitions it missed. Transitions are written to
+the city event log, and when detection restarts — after a supervisor
+restart, or because the reconnecting client is the only watcher — it emits
+the difference between what it last saved as announced and what is pending
+now. That record is saved after the events, so a supervisor that crashes
+between the two, or fails to save it, diffs against an older one: it can
+repeat a transition (dedupe on `session_id` and `request_id`) or miss one,
+such as the clear of an interaction it does not know it announced. A
+client that must not miss one re-reads `GET /v0/city/{cityName}/pending`
+when its stream reconnects. An interaction that appeared and was answered
+while no stream watched the city is never announced. A client connecting
+without a cursor starts at the head of the log, so it should read
+`GET /v0/city/{cityName}/pending` once and apply events from there.
+
 ### Transport vs Semantic Type
 
 - The SSE `event:` line is the transport envelope:
