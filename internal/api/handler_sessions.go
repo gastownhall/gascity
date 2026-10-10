@@ -374,7 +374,7 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := handle.Stop(r.Context()); err != nil {
+	if err := handle.Stop(r.Context(), s.actor(session.ActorOperator)); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -397,7 +397,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	closeResult, err := handle.CloseDetailed(r.Context())
+	closeResult, err := handle.CloseDetailed(r.Context(), s.actor(session.ActorOperator))
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

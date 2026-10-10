@@ -84,25 +84,20 @@ func createStartRecoveryFixture(t *testing.T, store beads.Store, clk clock.Clock
 
 func executeStartRecovery(t *testing.T, store beads.Store, sp runtime.Provider, bead beads.Bead, workDir string) startResult {
 	t.Helper()
-	results := executePreparedStartWaveForCity(
-		context.Background(),
-		[]preparedStart{{
-			candidate: startCandidate{
-				info: sessiontest.SeedBead(t, bead),
-				tp: TemplateParams{
-					Command:      "claude --resume resume-key",
-					SessionName:  "worker",
-					TemplateName: "worker",
-				},
+	city := t.TempDir()
+	item, release := leasedStart(t, city, preparedStart{
+		candidate: startCandidate{
+			info: sessiontest.SeedBead(t, bead),
+			tp: TemplateParams{
+				Command:      "claude --resume resume-key",
+				SessionName:  "worker",
+				TemplateName: "worker",
 			},
-			cfg: runtime.Config{Command: "claude --resume resume-key", WorkDir: workDir},
-		}},
-		t.TempDir(),
-		sp,
-		store,
-		nil,
-		10*time.Second, 1,
-	)
+		},
+		cfg: runtime.Config{Command: "claude --resume resume-key", WorkDir: workDir},
+	})
+	defer release()
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, store, nil, 10*time.Second, 1)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}

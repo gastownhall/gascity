@@ -15,10 +15,10 @@ import (
 
 // The runtime lease at the Manager's starts and stops (I-LEASE): every path
 // that may call the provider's Start or Stop for a session holds the session's
-// runtime lease across it. Operators wait for it (O3); the controller never
-// does (WithoutLeaseWait), and defers on ErrRuntimeLeaseBusy. A Manager whose
-// city path is not absolute has no runtime dir to lock in: its starts and
-// stops fail with ErrRuntimeLeaseNoCity, except stop sweeps.
+// runtime lease across it, in the mode its Actor derives (Actor.leaseMode):
+// operators wait for it (O3); the controller never does, and defers on
+// ErrRuntimeLeaseBusy. An Actor with no City has no runtime dir to lock in:
+// its starts and stops fail with ErrRuntimeLeaseNoCity, except stop sweeps.
 
 // RuntimeLeaseOperatorWait bounds an operator's wait for a runtime lease
 // another holder has (CONTRACT O3).
@@ -59,39 +59,6 @@ func WithRuntimeLeaseTTL(ttl time.Duration) ManagerOption {
 	return func(m *Manager) { m.leaseTTL = ttl }
 }
 
-type (
-	runtimeLeaseCtxKey struct{}
-	noLeaseWaitCtxKey  struct{}
-	citySweepCtxKey    struct{}
-)
-
-// ContextWithRuntimeLease marks ctx as running under l, a lease its caller
-// holds on the runtime a Manager call starts or stops: the call takes none of
-// its own, and refuses one held on another session or runtime. A nil lease
-// leaves ctx as it is.
-func ContextWithRuntimeLease(ctx context.Context, l *RuntimeLease) context.Context {
-	if l == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, runtimeLeaseCtxKey{}, l)
-}
-
-// CitySweepContext marks ctx as a stop-every-session sweep (`gc stop`, a rig
-// restart): its stops take no runtime lease, by design. It is the only way a
-// Manager stop goes without one: without it, a city path that is not absolute
-// refuses (ErrRuntimeLeaseNoCity).
-func CitySweepContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, citySweepCtxKey{}, true)
-}
-
-// WithoutLeaseWait marks ctx as the controller's: a Manager start or stop
-// under it takes the runtime lease without waiting or retrying, and returns
-// ErrRuntimeLeaseBusy (not ErrSessionStarting) when another holder has it, for
-// the caller to defer.
-func WithoutLeaseWait(ctx context.Context) context.Context {
-	return context.WithValue(ctx, noLeaseWaitCtxKey{}, true)
-}
-
 // WaitOperatorRuntimeLease takes req's lease for an operator, waiting up to
 // RuntimeLeaseOperatorWait; a lease still busy then is ErrSessionStarting.
 func WaitOperatorRuntimeLease(ctx context.Context, s *Store, req RuntimeLeaseRequest) (*RuntimeLease, error) {
@@ -127,36 +94,41 @@ func operatorRuntimeLease(l *RuntimeLease, err error) (*RuntimeLease, error) {
 	return l, err
 }
 
-// ErrRuntimeLeaseNoCity refuses a start or stop whose city path is not
-// absolute: there is no runtime dir to take the lease in (RefuseWithoutCity).
+// ErrNoCallerLease refuses a runtime-only start (StartRuntimeOnly) whose
+// caller hands it no lease: it takes none of its own.
+var ErrNoCallerLease = errors.New("runtime lease: a runtime-only start runs under its caller's lease, and has none")
+
+// ErrRuntimeLeaseNoCity refuses a start or stop by an Actor with no City:
+// there is no runtime dir to take the lease in (RefuseWithoutCity).
 var ErrRuntimeLeaseNoCity = errors.New("runtime lease: no absolute city path to take the lease in")
 
-// leaseRuntime takes the lease on session id's runtime sessName, waiting up
-// to wait (zero: not at all, for a caller under the session mutation lock).
-// release ends it. A lease ctx carries is the caller's: it is returned with a
-// no-op release, and must be on this session and runtime. A Manager whose city
-// path is not absolute refuses with ErrRuntimeLeaseNoCity, unless ctx is a
-// stop sweep; then the lease is nil.
-func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait time.Duration) (*RuntimeLease, func(), error) {
-	if borrowed, ok := ctx.Value(runtimeLeaseCtxKey{}).(*RuntimeLease); ok {
-		if borrowed.name != strings.TrimSpace(sessName) || (borrowed.id != "" && borrowed.id != id) {
-			return nil, func() {}, fmt.Errorf("runtime lease: the caller's lease is on session %q runtime %q, not session %q runtime %q", borrowed.id, borrowed.name, id, sessName)
+// leaseRuntime takes the lease on session id's runtime sessName for by,
+// waiting up to wait in leaseWait mode (zero: not at all, for a caller under
+// the session mutation lock). release ends it. by.Lease is the caller's: it is
+// returned with a no-op release, and must be on this session and runtime. An
+// Actor with no City refuses with ErrRuntimeLeaseNoCity, unless it is a stop
+// sweep; then the lease is nil.
+func (m *Manager) leaseRuntime(ctx context.Context, by Actor, id, sessName string, wait time.Duration) (*RuntimeLease, func(), error) {
+	mode, _ := by.leaseMode() // every verb checked by's kind (Manager.checkActor)
+	if borrowed := by.Lease; borrowed != nil {
+		if err := checkBorrowed(borrowed, id, sessName); err != nil {
+			return nil, func() {}, err
 		}
 		return borrowed, func() {}, nil
 	}
-	if sweep, _ := ctx.Value(citySweepCtxKey{}).(bool); sweep {
+	if mode == leaseNone {
 		return nil, func() {}, nil
 	}
-	if !filepath.IsAbs(m.cityPath) {
-		return nil, func() {}, RefuseWithoutCity(m.cityPath, fmt.Sprintf("session %q", id))
+	if by.City.IsZero() {
+		return nil, func() {}, RefuseWithoutCity(by.City.String(), fmt.Sprintf("session %q", id))
 	}
 	ttl := m.leaseTTL
 	if ttl <= 0 {
 		ttl = RuntimeLeaseTTLFor(nil)
 	}
 	front := NewStore(beads.SessionStore{Store: m.store})
-	req := RuntimeLeaseRequest{City: m.cityPath, Name: sessName, ID: id, TTL: ttl}
-	if controller, _ := ctx.Value(noLeaseWaitCtxKey{}).(bool); controller {
+	req := RuntimeLeaseRequest{City: by.City.Path(), Name: sessName, ID: id, TTL: ttl}
+	if mode == leaseTry {
 		l, err := TryRuntimeLease(front, req) // busy stays ErrRuntimeLeaseBusy: no retry, the caller defers
 		return l, l.Release, err
 	}
@@ -171,23 +143,26 @@ func (m *Manager) leaseRuntime(ctx context.Context, id, sessName string, wait ti
 }
 
 // LeaseRuntimeName takes the runtime name's flock alone, for a starter or
-// stopper with no session row (a runtime-only worker handle), under ctx's
-// lease mode: a lease ctx carries or a stop sweep takes none; the controller
-// (WithoutLeaseWait) never waits and gets ErrRuntimeLeaseBusy; an operator
-// waits up to RuntimeLeaseOperatorWait, then gets ErrSessionStarting. A city
-// path that is not absolute refuses with ErrRuntimeLeaseNoCity.
-func LeaseRuntimeName(ctx context.Context, cityPath, name string) (release func(), err error) {
-	_, borrowed := ctx.Value(runtimeLeaseCtxKey{}).(*RuntimeLease)
-	sweep, _ := ctx.Value(citySweepCtxKey{}).(bool)
+// stopper with no session row (a runtime-only worker handle), in by's lease
+// mode: by.Lease or a stop sweep takes none; the controller never waits and
+// gets ErrRuntimeLeaseBusy; any other actor waits up to
+// RuntimeLeaseOperatorWait, then gets ErrSessionStarting. An Actor with no
+// City refuses with ErrRuntimeLeaseNoCity.
+func LeaseRuntimeName(ctx context.Context, by Actor, name string) (release func(), err error) {
+	mode, err := by.leaseMode()
 	switch {
-	case borrowed || sweep:
+	case err != nil:
+		return func() {}, err
+	case by.Lease != nil:
+		return func() {}, checkBorrowed(by.Lease, "", name)
+	case mode == leaseNone:
 		return func() {}, nil
-	case !filepath.IsAbs(cityPath):
-		return func() {}, RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
+	case by.City.IsZero():
+		return func() {}, RefuseWithoutCity(by.City.String(), fmt.Sprintf("runtime %q", name))
 	}
-	req := RuntimeLeaseRequest{City: cityPath, Name: name}
+	req := RuntimeLeaseRequest{City: by.City.Path(), Name: name}
 	var l *RuntimeLease
-	if controller, _ := ctx.Value(noLeaseWaitCtxKey{}).(bool); controller {
+	if mode == leaseTry {
 		l, err = TryRuntimeLease(nil, req)
 	} else {
 		l, err = operatorRuntimeLease(WaitRuntimeLease(ctx, nil, req, operatorLeaseWait))
@@ -198,20 +173,52 @@ func LeaseRuntimeName(ctx context.Context, cityPath, name string) (release func(
 	return l.Release, nil
 }
 
+// checkBorrowed refuses a lease a caller hands a verb (Actor.Lease) that is
+// not on runtime name and, when both name one, session id, or that its holder
+// already released.
+func checkBorrowed(l *RuntimeLease, id, name string) error {
+	l.mu.Lock()
+	released := l.released
+	l.mu.Unlock()
+	switch {
+	case released:
+		return fmt.Errorf("runtime lease: the caller's lease on session %q runtime %q was released", l.id, l.name)
+	case l.name != strings.TrimSpace(name) || (id != "" && l.id != "" && l.id != id):
+		return fmt.Errorf("runtime lease: the caller's lease is on session %q runtime %q, not session %q runtime %q", l.id, l.name, id, name)
+	}
+	return nil
+}
+
+// CityDir is the Manager's city as a CityDir: the one an Actor driving it
+// must name (checkActor).
+func (m *Manager) CityDir() (CityDir, error) { return NewCityDir(m.cityPath) }
+
+// checkActor is Actor.check, and refuses an Actor on another city than the
+// Manager's own: its lease would be taken where none of the Manager's
+// holders look.
+func (m *Manager) checkActor(by Actor) error {
+	if err := by.check(); err != nil {
+		return err
+	}
+	if filepath.IsAbs(m.cityPath) && !by.City.IsZero() && filepath.Clean(m.cityPath) != by.City.Path() {
+		return fmt.Errorf("session: the actor's city %q is not the manager's %q", by.City.Path(), m.cityPath)
+	}
+	return nil
+}
+
 // leaseForStop is leaseRuntime for a stop, which a store is never allowed to
 // hold hostage: a lease failure other than busy (the store unreachable, the
 // row closed or renamed, no conditional writes in require mode) is logged and
-// the stop runs under the name's flock alone. Under WithoutLeaseWait it never
-// waits, and a busy lease is the bare ErrRuntimeLeaseBusy.
-func (m *Manager) leaseForStop(ctx context.Context, id, sessName string, wait time.Duration) (func(), error) {
-	controller, _ := ctx.Value(noLeaseWaitCtxKey{}).(bool)
-	_, release, err := m.leaseRuntime(ctx, id, sessName, wait)
-	if err != nil && !errors.Is(err, ErrRuntimeLeaseBusy) && filepath.IsAbs(m.cityPath) {
+// the stop runs under the name's flock alone. The controller never waits, and
+// a busy lease is the bare ErrRuntimeLeaseBusy.
+func (m *Manager) leaseForStop(ctx context.Context, by Actor, id, sessName string, wait time.Duration) (func(), error) {
+	_, release, err := m.leaseRuntime(ctx, by, id, sessName, wait)
+	if err != nil && !errors.Is(err, ErrRuntimeLeaseBusy) && !by.City.IsZero() {
 		log.Printf("runtime lease: session %q: stopping %q under the name's flock alone: %v", id, sessName, err)
 		var flock *RuntimeLease
-		flock, err = TryRuntimeLease(nil, RuntimeLeaseRequest{City: m.cityPath, Name: sessName})
+		flock, err = TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: sessName})
 		release = flock.Release
-		if !controller {
+		if by.Kind != ActorController {
 			_, err = operatorRuntimeLease(nil, err)
 		}
 	}
@@ -243,11 +250,14 @@ func withSessionStartLock(ctx context.Context, id string, fn func() error) error
 
 // leaseForRestartLocked takes the runtime lease for an interrupt that may
 // fall back to a stop and a restart, before the interrupt is sent, and returns
-// ctx carrying it, so the stop and the restart run under one lease (D8D-5).
-func (m *Manager) leaseForRestartLocked(ctx context.Context, id, sessName string) (context.Context, func(), error) {
-	l, release, err := m.leaseRuntime(ctx, id, sessName, 0)
+// by carrying it, so the stop and the restart run under one lease (D8D-5).
+func (m *Manager) leaseForRestartLocked(ctx context.Context, by Actor, id, sessName string) (Actor, func(), error) {
+	l, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
 	if err != nil {
-		return ctx, func() {}, err
+		return by, func() {}, err
 	}
-	return ContextWithRuntimeLease(ctx, l), release, nil
+	if l != nil {
+		by.Lease = l
+	}
+	return by, release, nil
 }

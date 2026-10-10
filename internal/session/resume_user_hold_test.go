@@ -63,23 +63,23 @@ func heldKeys(t *testing.T, store beads.Store, id string) map[string]string {
 }
 
 // TestOperatorResumeConsumesUserHold: Attach, and Start, Submit and Send
-// under ResumeOperator, are an operator's own resume; once the runtime is up
+// under ActorOperator, are an operator's own resume; once the runtime is up
 // they drop the user hold with the wake it satisfies, so the controller does
 // not drain the session again.
 func TestOperatorResumeConsumesUserHold(t *testing.T) {
 	for name, resume := range map[string]func(m *Manager, id string) error{
 		"attach": func(m *Manager, id string) error {
-			return m.Attach(context.Background(), id, "claude", runtime.Config{})
+			return m.Attach(context.Background(), testActor(m, ActorOperator), id, "claude", runtime.Config{})
 		},
 		"start": func(m *Manager, id string) error {
-			return m.Start(context.Background(), id, "claude", runtime.Config{}, ResumeOperator)
+			return m.Start(context.Background(), testActor(m, ActorOperator), id, "claude", runtime.Config{})
 		},
 		"submit": func(m *Manager, id string) error {
-			_, err := m.Submit(context.Background(), id, "hello", "claude", runtime.Config{}, SubmitIntentDefault, ResumeOperator)
+			_, err := m.Submit(context.Background(), testActor(m, ActorOperator), id, "hello", "claude", runtime.Config{}, SubmitIntentDefault)
 			return err
 		},
 		"send": func(m *Manager, id string) error {
-			_, err := m.Send(context.Background(), id, "hello", "claude", runtime.Config{}, ResumeOperator)
+			_, err := m.Send(context.Background(), testActor(m, ActorOperator), id, "hello", "claude", runtime.Config{})
 			return err
 		},
 	} {
@@ -110,12 +110,13 @@ func TestOperatorResumeConsumesUserHold(t *testing.T) {
 }
 
 // TestBackgroundSendKeepsUserHold: a send that is not an operator's resume
-// (ResumeIfUnheld) queues and never consumes the hold.
+// (ActorAgent) queues and never consumes the hold.
 func TestBackgroundSendKeepsUserHold(t *testing.T) {
 	store := beads.NewMemStore()
 	b := userHeldRow(t, store)
 	sp := runtime.NewFake()
-	out, err := newTestManager(t, store, sp).Send(context.Background(), b.ID, "hello", "claude", runtime.Config{}, ResumeIfUnheld)
+	mgr := newTestManager(t, store, sp)
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorAgent), b.ID, "hello", "claude", runtime.Config{})
 	if err != nil || !out.Queued || sp.CountCalls("Start", "s-held") != 0 {
 		t.Fatalf("Send = %+v, %v with %d starts; want queued, nothing started", out, err, sp.CountCalls("Start", "s-held"))
 	}
@@ -146,13 +147,13 @@ func liveHeldSession(t *testing.T, state State) (*Manager, *runtime.Fake, beads.
 }
 
 // TestInterruptRestartConsumesOnlyForAnOperator: an interrupt that restarts
-// the runtime carries its caller's policy; only ResumeOperator consumes the
+// the runtime carries its caller's policy; only ActorOperator consumes the
 // user hold, IfUnheld and ViaController keep it.
 func TestInterruptRestartConsumesOnlyForAnOperator(t *testing.T) {
-	for policy, consumed := range map[ResumePolicy]bool{ResumeOperator: true, ResumeIfUnheld: false, ResumeViaController: false} {
+	for policy, consumed := range map[ActorKind]bool{ActorOperator: true, ActorAgent: false, ActorBackground: false} {
 		mgr, sp, store, info := liveHeldSession(t, StateActive)
 		sp.WaitForIdleErrors[info.SessionName] = fmt.Errorf("not idle yet") // forces the restart fallback
-		_, _ = mgr.Submit(context.Background(), info.ID, "replace the turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, policy)
+		_, _ = mgr.Submit(context.Background(), testActor(mgr, policy), info.ID, "replace the turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 		if sp.CountCalls("Stop", info.SessionName) == 0 || sp.CountCalls("Start", info.SessionName) < 2 {
 			t.Fatalf("policy %d: the interrupt did not restart the runtime (test premise)", policy)
 		}
@@ -179,9 +180,9 @@ func TestLiveResumeConsumesUserHold(t *testing.T) {
 		mgr, sp, store, info := liveHeldSession(t, tc.state)
 		var err error
 		if tc.operator {
-			err = mgr.Attach(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{})
+			err = mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{})
 		} else {
-			_, err = mgr.Send(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{}, ResumeIfUnheld)
+			_, err = mgr.Send(context.Background(), testActor(mgr, ActorAgent), info.ID, "hello", BuildResumeCommand(info), runtime.Config{})
 		}
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -221,7 +222,8 @@ func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
 					t.Error(err)
 				}
 			}
-			err := newTestManager(t, store, sp).Attach(context.Background(), b.ID, "claude", runtime.Config{})
+			mgr := newTestManager(t, store, sp)
+			err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
 			if gotErr := err != nil; gotErr != tc.wantErr || (err != nil && !errors.Is(err, ErrStateSync)) {
 				t.Fatalf("Attach = %v, want error=%v (ErrStateSync)", err, tc.wantErr)
 			}
@@ -248,7 +250,7 @@ func TestLiveResumeConsumeDefersOnABusyLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TryRuntimeLease: %v", err)
 	}
-	err = mgr.Attach(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{})
+	err = mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{})
 	if !errors.Is(err, ErrSessionStarting) {
 		t.Fatalf("Attach under a busy lease = %v, want ErrSessionStarting", err)
 	}
@@ -256,7 +258,7 @@ func TestLiveResumeConsumeDefersOnABusyLease(t *testing.T) {
 		t.Fatal("the hold was consumed while the lease was busy")
 	}
 	held.Release()
-	if err := mgr.Attach(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{}); err != nil {
 		t.Fatalf("Attach after the lease is released: %v", err)
 	}
 	if heldKeys(t, store, info.ID)["sleep_intent"] != "" {

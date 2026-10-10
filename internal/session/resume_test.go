@@ -99,7 +99,7 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 		name   string
 		meta   map[string]string
 		live   bool
-		policy ResumePolicy
+		kind   ActorKind // zero: ActorAgent, which resumes only an unheld row
 		queued bool
 	}{
 		{name: "suspended", meta: map[string]string{"state": string(StateSuspended), "suspended_at": "2026-10-08T10:00:00Z"}, queued: true},
@@ -116,13 +116,17 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 		{name: "unparseable timer blocks the start", meta: map[string]string{"held_until": "soon"}, queued: true},
 		{name: "unparseable timer on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "held_until": "soon"}, live: true},
 		{name: "creating, quarantined, runtime dead", meta: map[string]string{"state": string(StateCreating), "quarantined_until": "2099-01-01T00:00:00Z"}, queued: true},
-		{name: "operator resumes a held row", meta: map[string]string{"state": string(StateSuspended)}, policy: ResumeOperator},
+		{name: "operator resumes a held row", meta: map[string]string{"state": string(StateSuspended)}, kind: ActorOperator},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newPolicyEnv(t, policyRow(tc.meta), tc.live)
 			before := e.row(t)
 			startsBefore := e.sp.CountCalls("Start", resumeName)
-			out, err := e.mgr.Send(context.Background(), e.id, "hello", "claude --resume k", runtime.Config{}, tc.policy)
+			kind := tc.kind
+			if kind == 0 {
+				kind = ActorAgent
+			}
+			out, err := e.mgr.Send(context.Background(), testActor(e.mgr, kind), e.id, "hello", "claude --resume k", runtime.Config{})
 			if err != nil {
 				t.Fatalf("Send: %v", err)
 			}
@@ -158,7 +162,7 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 // refusal reported as a plain miss (no held note) or as delivered.
 func TestWaitIdleNudgeToHeldRowIsUndelivered(t *testing.T) {
 	e := newPolicyEnv(t, policyRow(map[string]string{"state": string(StateSuspended)}), false)
-	delivered, err := e.mgr.TryWaitIdleNudge(context.Background(), e.id, "mail", "hello", "claude --resume k", runtime.Config{}, ResumeIfUnheld)
+	delivered, err := e.mgr.TryWaitIdleNudge(context.Background(), testActor(e.mgr, ActorAgent), e.id, "mail", "hello", "claude --resume k", runtime.Config{})
 	if !errors.Is(err, ErrResumeHeld) || delivered || e.sp.CountCalls("Start", resumeName) != 0 || len(e.queued(t)) != 0 {
 		t.Fatalf("TryWaitIdleNudge = %v, %v (starts %d, queue %q); want ErrResumeHeld, no start, nothing queued", delivered, err, e.sp.CountCalls("Start", resumeName), e.queued(t))
 	}
@@ -171,7 +175,7 @@ func TestWaitIdleNudgeToHeldRowIsUndelivered(t *testing.T) {
 // reports queued without enqueueing (MA-2).
 func TestInterruptSubmitToHeldLiveRowQueues(t *testing.T) {
 	e := newPolicyEnv(t, policyRow(map[string]string{"state": string(StateSuspended), "sleep_intent": "user-hold", "provider": "pi"}), true)
-	out, err := e.mgr.Submit(context.Background(), e.id, "now", "pi --resume k", runtime.Config{}, SubmitIntentInterruptNow, ResumeIfUnheld)
+	out, err := e.mgr.Submit(context.Background(), testActor(e.mgr, ActorAgent), e.id, "now", "pi --resume k", runtime.Config{}, SubmitIntentInterruptNow)
 	if err != nil || !out.Queued {
 		t.Fatalf("Submit = %+v, %v; want queued", out, err)
 	}
@@ -240,7 +244,7 @@ func (c *wakeCASLoser) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts
 // row starts and is attached. Kills Attach taking the background policy.
 func TestAttachResumesHeldRow(t *testing.T) {
 	e := newPolicyEnv(t, policyRow(map[string]string{"state": string(StateSuspended), "sleep_intent": "user-hold", "held_until": "2099-01-01T00:00:00Z"}), false)
-	if err := e.mgr.Attach(context.Background(), e.id, "claude --resume k", runtime.Config{}); err != nil {
+	if err := e.mgr.Attach(context.Background(), testActor(e.mgr, ActorOperator), e.id, "claude --resume k", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	if !e.sp.IsRunning(resumeName) || e.sp.CountCalls("Attach", resumeName) != 1 {
@@ -256,7 +260,7 @@ func TestAttachResumesHeldRow(t *testing.T) {
 // interrupt). Kills a restart that refuses, which loses the session and the
 // message.
 func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
-	for _, policy := range []ResumePolicy{ResumeIfUnheld, ResumeViaController} {
+	for _, policy := range []ActorKind{ActorAgent, ActorBackground} {
 		for _, provider := range []string{"codex", "pi"} {
 			for _, until := range []string{"2099-01-01T00:00:00Z", "soon"} {
 				t.Run(fmt.Sprintf("%d/%s/%s", policy, provider, until), func(t *testing.T) {
@@ -272,7 +276,7 @@ func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
 					}
 					sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
 					hints := runtime.Config{WorkDir: info.WorkDir, Env: map[string]string{"PI_CODING_AGENT_SESSION_DIR": t.TempDir()}}
-					out, err := mgr.Submit(context.Background(), info.ID, "replace", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, policy)
+					out, err := mgr.Submit(context.Background(), testActor(mgr, policy), info.ID, "replace", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 					if err != nil || out.Queued {
 						t.Fatalf("Submit = %+v, %v; want delivered", out, err)
 					}

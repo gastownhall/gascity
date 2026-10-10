@@ -99,10 +99,10 @@ func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(started): %v", err)
 	}
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.StartResolved(context.Background(), "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
+	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	select {
@@ -290,7 +290,7 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 		t.Fatalf("SessionByID(%q) returned %T, want *SessionHandle", info.ID, handle)
 	}
 	gotProfile = sessionHandle.session.Profile
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -421,7 +421,7 @@ func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -465,7 +465,7 @@ func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleForTarget: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	last := sp.Calls[len(sp.Calls)-1]

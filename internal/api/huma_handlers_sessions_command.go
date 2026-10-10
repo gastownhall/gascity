@@ -928,7 +928,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	}
 
 	mgr := s.sessionManager(store.Store)
-	if err := mgr.Kill(id); err != nil {
+	if err := mgr.Kill(context.Background(), s.actor(session.ActorOperator), id); err != nil {
 		if errors.Is(err, session.ErrSessionClosed) {
 			out := &OKWithIDResponse{}
 			out.Body.Status = "ok"
@@ -1035,7 +1035,7 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	if err := mgr.Suspend(id); err != nil {
+	if err := mgr.Suspend(ctx, s.actor(session.ActorOperator), id, false); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 	out := &OKResponse{}
@@ -1068,7 +1068,7 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	closeResult, err := handle.CloseDetailed(ctx)
+	closeResult, err := handle.CloseDetailed(ctx, s.actor(session.ActorOperator))
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

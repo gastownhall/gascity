@@ -66,7 +66,7 @@ func newSuspendedResumableSession(t *testing.T) (*Manager, *recordingStartupDeat
 		t.Fatal("expected a session_key in bead metadata after CreateSession with ResumeFlag")
 	}
 
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestEnsureRunning_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T) {
 	sp.commands = nil
 	sp.armed = true
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send should recover with a fresh start when session_key is empty, got: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestEnsureRunning_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *testi
 	sp.commands = nil
 	sp.armed = true
 
-	_, err := mgr.Send(context.Background(), info.ID, "hello", freshCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	_, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", freshCmd, runtime.Config{WorkDir: "/tmp"})
 	if err == nil {
 		t.Fatal("Send should fail when the start dies and there is no resume shape to strip")
 	}
@@ -195,7 +195,7 @@ func TestStartRuntimeOnly_EmptySessionKeyStripsResumeAndStartsFresh(t *testing.T
 	sp.commands = nil
 	sp.armed = true
 
-	if err := mgr.StartRuntimeOnly(context.Background(), info.ID, resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
+	if err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, resumeCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("StartRuntimeOnly should recover with a fresh start when session_key is empty, got: %v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestStartRuntimeOnly_EmptySessionKeyWithoutResumeShapeDoesNotRelaunch(t *te
 	sp.commands = nil
 	sp.armed = true
 
-	err := mgr.StartRuntimeOnly(context.Background(), info.ID, freshCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, freshCmd, runtime.Config{WorkDir: "/tmp"})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly should fail when the start dies and there is no resume shape to strip")
 	}
@@ -259,7 +259,7 @@ func TestEnsureRunning_EmptySessionKeyStripsDivergedSessionIDAndStartsFresh(t *t
 	sp.commands = nil
 	sp.armed = true
 
-	if _, err := mgr.Send(context.Background(), info.ID, "hello", firstStartCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
+	if _, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", firstStartCmd, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Send should strip the diverged session id and start fresh, got: %v", err)
 	}
 

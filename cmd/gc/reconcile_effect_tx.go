@@ -61,6 +61,9 @@ type txCaps struct {
 	create  *createPass               // capCreate
 	creates *createEffects
 	reads   effectReads // capReadStores: read-only, blind writes refused
+	// by is the controller, as a Call's leasing helper (a Manager start or
+	// stop) is handed it, carrying the effect's lease (callWatched).
+	by session.Actor
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
@@ -806,11 +809,13 @@ func rowBasisOf(k rowKey, row session.Info) rowBasis {
 var errPremiseMoved = errors.New("the row moved since the pass")
 
 // callWatched runs sec's Call on the lease's watch, so a Call whose lease
-// is lost, released or past SafeUntil sees its context end, and carries the
-// lease on its context.
+// is lost, released or past SafeUntil sees its context end, and hands it the
+// controller's Actor carrying the lease (txCaps.by).
 func (t *tx) callWatched(ctx context.Context, sec section) (any, error) {
+	c := t.c
+	c.by = sessionActor(session.ActorController, t.p.World.CityPath)
 	if t.lease == nil {
-		return sec.call(ctx, t.c, t.pass)
+		return sec.call(ctx, c, t.pass)
 	}
 	watched, cancel, err := t.lease.Watch(ctx, leaseWatchEvery)
 	if err != nil {
@@ -819,7 +824,8 @@ func (t *tx) callWatched(ctx context.Context, sec section) (any, error) {
 	defer cancel()
 	// A Call through a leasing helper (a Manager start or stop) runs under
 	// this lease instead of finding its own flock busy.
-	return sec.call(session.ContextWithRuntimeLease(watched, t.lease), t.c, t.pass)
+	c.by.Lease = t.lease
+	return sec.call(watched, c, t.pass)
 }
 
 // ended is the failure of an effect that may not write: its context ended

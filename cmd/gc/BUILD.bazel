@@ -825,6 +825,7 @@ go_test(
     size = "large",
     srcs = [
         "acp_route_seed_test.go",
+        "actor_helpers_test.go",
         "adoption_barrier_test.go",
         "agent_home_worktree_cleanup_test.go",
         "allocator_backoff_test.go",
@@ -1135,6 +1136,7 @@ go_test(
         "cmd_runtime_drain_test.go",
         "cmd_runtime_heartbeat_test.go",
         "cmd_service_test.go",
+        "cmd_session_attach_resume_test.go",
         "cmd_session_close_release_test.go",
         "cmd_session_kill_fence_test.go",
         "cmd_session_kill_frontdoor_test.go",

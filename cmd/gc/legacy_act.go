@@ -31,8 +31,8 @@ type legacyAct struct {
 // carries d's facts; otherwise it returns sessionpkg.ErrKillPremiseMoved,
 // which the caller defers like a busy lease.
 func (a legacyAct) Stop(d sessionpkg.Decided) error {
-	ctx := sessionpkg.WithKillDecided(sessionpkg.WithoutLeaseWait(context.Background()), d)
-	return controllerKillRowCtx(ctx, a.cityPath, a.store, a.sp, a.cfg, d.Info().ID)
+	ctx := sessionpkg.WithKillDecided(context.Background(), d)
+	return controllerKillRowCtx(ctx, sessionActor(sessionpkg.ActorController, a.cityPath), a.cityPath, a.store, a.sp, a.cfg, d.Info().ID)
 }
 
 // errActDeferred wraps the error of an act that did not run because its

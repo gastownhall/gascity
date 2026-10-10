@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // TestOperationEventCarriesAgentNameFromMetadata verifies the 1a addition
@@ -25,7 +27,7 @@ func TestOperationEventCarriesAgentNameFromMetadata(t *testing.T) {
 		},
 	}, recorder)
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -50,7 +52,7 @@ func TestOperationEventCarriesAgentNameFromAliasFallback(t *testing.T) {
 		Provider: "claude",
 	}, recorder)
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -77,7 +79,7 @@ func TestOperationEventOmitsAgentNameWhenAliasUnset(t *testing.T) {
 		Provider: "claude",
 	}, recorder)
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -100,7 +102,7 @@ func TestOperationEventNew1aFieldsAreOmitEmpty(t *testing.T) {
 		WorkDir:  t.TempDir(),
 		Provider: "claude",
 	}, recorder)
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	raw := string(lastRecordedWorkerOperation(t, recorder).Payload)

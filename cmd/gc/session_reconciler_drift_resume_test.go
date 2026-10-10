@@ -72,9 +72,11 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
 
+	leased, release := leasedStart(t, env.city, *prepared)
+	defer release()
 	if _, err := startPreparedStartCandidate(
 		context.Background(),
-		*prepared,
+		leased,
 		env.city,
 		env.store,
 		env.sp,
@@ -477,8 +479,10 @@ func TestResetConfiguredNamedSessionForConfigDrift_ResumeOnlyProviderStartsBare(
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
+	leased, release := leasedStart(t, env.city, *prepared)
+	defer release()
 	if _, err := startPreparedStartCandidate(
-		context.Background(), *prepared, env.city, env.store, env.sp, cfg, nil,
+		context.Background(), leased, env.city, env.store, env.sp, cfg, nil,
 		immediateSessionStaleKeyDetectionWaiter, nil,
 	); err != nil {
 		t.Fatalf("startPreparedStartCandidate: %v", err)

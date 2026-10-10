@@ -111,7 +111,7 @@ func sessionHandleRecordedInputTokens(t *testing.T) int64 {
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), managerActor(t, manager, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func sessionHandleRecordedInputTokens(t *testing.T) int64 {
 		claudeUsageEntry("u1", "claude-opus-4-7", 100, 50, 2000, 800),
 	})
 
-	if _, err := handle.Message(context.Background(), worker.MessageRequest{Text: "hello"}); err != nil {
+	if _, err := handle.Message(context.Background(), managerActor(t, manager, sessionpkg.ActorAgent), worker.MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
 
@@ -155,10 +155,10 @@ func runtimeHandleInvocationDatapoints(t *testing.T) int {
 	if err := sp.Start(ctx, sessionName, runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if _, err := handle.Message(ctx, worker.MessageRequest{Text: "summarize the worker contract"}); err != nil {
+	if _, err := handle.Message(ctx, testAgent(t), worker.MessageRequest{Text: "summarize the worker contract"}); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	if _, err := handle.Nudge(ctx, worker.NudgeRequest{Text: "still there?"}); err != nil {
+	if _, err := handle.Nudge(ctx, testAgent(t), worker.NudgeRequest{Text: "still there?"}); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
 

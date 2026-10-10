@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -55,7 +56,7 @@ func (e *killedSeatEnv) readyTicks(t *testing.T, work beads.Bead, name string, n
 func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 	t.Run("API and CLI fallback (Manager.Suspend)", func(t *testing.T) {
 		e, work, name := runningSeatWithWork(t)
-		if err := session.NewManagerWithOptions(e.mem, e.sp, session.WithClock(e.clk), session.WithCityPath(e.city)).Suspend(e.seat.ID); err != nil {
+		if err := session.NewManagerWithOptions(e.mem, e.sp, session.WithClock(e.clk), session.WithCityPath(e.city)).Suspend(context.Background(), testActorIn(t, session.ActorOperator, e.city), e.seat.ID, false); err != nil {
 			t.Fatalf("Suspend: %v", err)
 		}
 		if starts := e.readyTicks(t, work, name, 3); starts != 0 || e.sp.IsRunning(name) {

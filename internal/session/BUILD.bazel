@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "session",
     srcs = [
+        "actor.go",
         "address_directory.go",
         "alias.go",
         "assignee_identities.go",
@@ -92,6 +93,8 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "actor_fence_test.go",
+        "actor_test.go",
         "address_directory_test.go",
         "assignee_identities_test.go",
         "canonical_identity_test.go",
@@ -157,6 +160,7 @@ go_test(
         "sleep_reason_test.go",
         "startup_health_test.go",
         "state_machine_test.go",
+        "stop_fallback_shape_test.go",
         "store_close_backends_test.go",
         "store_close_terminal_test.go",
         "store_close_test.go",

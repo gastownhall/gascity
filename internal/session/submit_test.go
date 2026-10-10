@@ -178,11 +178,11 @@ func TestSubmitDefaultResumesSuspendedClaudeSessionAndWaitsForIdleNudge(t *testi
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -213,11 +213,11 @@ func TestSubmitDefaultResumesSuspendedCodexSessionAndNudgesImmediately(t *testin
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -246,7 +246,7 @@ func TestSubmitDefaultCodexDismissesDeferredDialogsOnFirstDelivery(t *testing.T)
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -284,7 +284,7 @@ func TestSubmitDefaultCodexDismissesDialogsThroughAutoProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault); err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
 	dismissals := 0
@@ -318,7 +318,7 @@ func TestSubmitDefaultCodexLeavesDialogsUnverifiedWhenUnsupported(t *testing.T) 
 		t.Fatalf("Create: %v", err)
 	}
 	sp.DialogErrors[info.SessionName] = runtime.ErrInteractionUnsupported
-	if _, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault); err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
 	updated, err := store.Get(info.ID)
@@ -343,7 +343,7 @@ func TestSubmitDefaultCodexSkipsDeferredDialogsAfterVerification(t *testing.T) {
 		t.Fatalf("SetMetadata(%s): %v", startupDialogVerifiedKey, err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -367,11 +367,11 @@ func TestSubmitDefaultResumesSuspendedGeminiSessionAndNudgesImmediately(t *testi
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -406,7 +406,7 @@ func TestSubmitDefaultToRunningGeminiSessionWaitsForIdleNudge(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -459,7 +459,7 @@ func TestSubmitDefaultConfirmsLiveCreatingSession(t *testing.T) {
 		t.Fatalf("Create bead: %v", err)
 	}
 
-	if _, err := mgr.Submit(context.Background(), created.ID, "hello", "gemini", runtime.Config{WorkDir: workDir}, SubmitIntentDefault, ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), created.ID, "hello", "gemini", runtime.Config{WorkDir: workDir}, SubmitIntentDefault); err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
 
@@ -509,7 +509,7 @@ func TestSubmitFollowUpQueuesDeferredMessageAndStartsCodexPoller(t *testing.T) {
 	}
 	defer func() { startSessionSubmitPoller = origPoller }()
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -915,7 +915,7 @@ func TestSubmitFollowUpQueuesDeferredMessageForPoolManagedSession(t *testing.T) 
 		t.Fatalf("Update: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -941,11 +941,11 @@ func TestSubmitFollowUpOnSuspendedSessionFallsBackToImmediateSend(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "send this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "send this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -991,7 +991,7 @@ func TestSubmitFollowUpOnAsleepSessionFallsBackToImmediateSend(t *testing.T) {
 		t.Fatalf("SetMetadata(state): %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "wake and send", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "wake and send", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("Submit(follow_up): %v", err)
 	}
@@ -1041,7 +1041,7 @@ func TestSubmitDefaultQueuesWhenWakeAlreadyRequested(t *testing.T) {
 	}
 	callsBefore := len(sp.Calls)
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after wake", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "deliver after wake", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestSubmitInterruptNowRejectsAntigravitySession(t *testing.T) {
 	}
 	callsBefore := len(sp.Calls)
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if !errors.Is(err, ErrInteractionUnsupported) {
 		t.Fatalf("Submit(interrupt_now) error = %v, want ErrInteractionUnsupported", err)
 	}
@@ -1165,7 +1165,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForGemini(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1242,7 +1242,7 @@ func TestSubmitInterruptNowAllowsPoolManagedCodexSession(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "take this now", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1295,7 +1295,7 @@ func TestSubmitInterruptNowUsesInterruptAndIdleWaitForClaude(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1351,7 +1351,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnIdleTimeout(t *testing.T) {
 	// WaitForIdle fails → fallback stops session → restart also calls
 	// WaitForIdle which still fails. The error propagates from the restart
 	// path, confirming the fallback was attempted.
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	_, err = mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err == nil {
 		t.Fatal("Submit(interrupt_now) should error when idle wait persistently fails")
 	}
@@ -1384,7 +1384,7 @@ func TestSubmitInterruptNowUsesControlCFallbackAfterSoftEscapeTimeoutForCodex(t 
 	}
 	sp.WaitForIdleSequence[info.SessionName] = []error{fmt.Errorf("not idle yet"), nil}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1433,7 +1433,7 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1475,7 +1475,7 @@ func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
 	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
 	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now) with a downed server on the fallback stop: %v", err)
 	}
@@ -1513,7 +1513,7 @@ func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
 	stopErr := errors.New("permission denied")
 	sp.StopErrors[info.SessionName] = stopErr
 
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	_, err = mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if !errors.Is(err, stopErr) {
 		t.Fatalf("Submit(interrupt_now) with a real fallback stop failure = %v, want %v", err, stopErr)
 	}
@@ -1558,7 +1558,7 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 			"GC_PI_TRANSCRIPT_DIR":        mirrorDir,
 		},
 	}
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1629,17 +1629,17 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 }
 
 func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.T) {
-	testPiRestoreAfterTranscriptResetFailure(t, ResumeOperator, "")
+	testPiRestoreAfterTranscriptResetFailure(t, ActorOperator, "")
 }
 
 // TestPiRestoreKeepsHeartbeatHold is the re-review's N1 on the restore path:
 // a background interrupt_now to a live pi row with a heartbeat held_until
 // restores the runtime it stopped without re-reading the hold.
 func TestPiRestoreKeepsHeartbeatHold(t *testing.T) {
-	testPiRestoreAfterTranscriptResetFailure(t, ResumeIfUnheld, "2099-01-01T00:00:00Z")
+	testPiRestoreAfterTranscriptResetFailure(t, ActorAgent, "2099-01-01T00:00:00Z")
 }
 
-func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy, heldUntil string) {
+func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ActorKind, heldUntil string) {
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -1681,7 +1681,7 @@ func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy,
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, policy)
+	_, err = mgr.Submit(context.Background(), testActor(mgr, policy), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err == nil {
 		t.Fatal("Submit(interrupt_now) error = nil, want transcript reset failure")
 	}
@@ -1766,7 +1766,7 @@ func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1820,7 +1820,7 @@ func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	if _, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator); err == nil || !strings.Contains(err.Error(), "session_key") {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "session_key") {
 		t.Fatalf("Submit(interrupt_now) error = %v, want session_key mismatch error", err)
 	}
 	for _, call := range sp.Calls {
@@ -1873,7 +1873,7 @@ func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	if _, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator); err == nil || !strings.Contains(err.Error(), "ambiguous pi session file") {
+	if _, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "ambiguous pi session file") {
 		t.Fatalf("Submit(interrupt_now) error = %v, want ambiguous pi session file", err)
 	}
 	for _, call := range sp.Calls {
@@ -1910,7 +1910,7 @@ func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
 		},
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -1963,7 +1963,7 @@ func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
 		t.Fatalf("WriteFile pi session: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
 	if err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
@@ -2088,7 +2088,7 @@ func TestSubmitDefaultDeferredResetPendingStampsEmptyEpochToSurviveRotation(t *t
 		t.Fatalf("SetMetadataBatch: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after reset", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "deliver after reset", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}
@@ -2135,7 +2135,7 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 		t.Fatalf("SetMetadataBatch: %v", err)
 	}
 
-	outcome, err := mgr.Submit(context.Background(), info.ID, "deliver after restart", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault, ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActor(mgr, ActorOperator), info.ID, "deliver after restart", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
 	if err != nil {
 		t.Fatalf("Submit(default): %v", err)
 	}

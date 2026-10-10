@@ -88,8 +88,18 @@ func (m managerLeaseFixture) hold(t *testing.T) *RuntimeLease {
 	return l
 }
 
-func (m managerLeaseFixture) start(ctx context.Context) error {
-	return m.mgr.Start(ctx, m.info.ID, BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, ResumeOperator)
+// as is an Actor of kind on the fixture's city.
+func (m managerLeaseFixture) as(kind ActorKind) Actor { return testActor(m.mgr, kind) }
+
+// operator is an operator holding lease, or none.
+func (m managerLeaseFixture) operator(lease *RuntimeLease) Actor {
+	by := m.as(ActorOperator)
+	by.Lease = lease
+	return by
+}
+
+func (m managerLeaseFixture) start(by Actor) error {
+	return m.mgr.Start(context.Background(), by, m.info.ID, BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir})
 }
 
 // releaseWithinTheWait releases l in 200ms and, for the rest of the test, has
@@ -109,7 +119,7 @@ func releaseWithinTheWait(t *testing.T, l *RuntimeLease) {
 // row records the Manager's lease, which the start releases.
 func TestManagerStartRunsUnderTheRuntimeLease(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(m.sp.starts) != 1 || m.sp.starts[0] == "" || !m.sp.watched[0] {
@@ -128,7 +138,7 @@ func TestManagerStartWaitsForTheRuntimeLease(t *testing.T) {
 	held := m.hold(t)
 	began := time.Now()
 	result := make(chan error, 1)
-	go func() { result <- m.start(context.Background()) }()
+	go func() { result <- m.start(m.operator(nil)) }()
 	// Throughout the wait, the session mutation lock stays takeable.
 	for time.Since(began) < 400*time.Millisecond {
 		unlocked := make(chan struct{})
@@ -150,7 +160,7 @@ func TestManagerStartWaitsForTheRuntimeLease(t *testing.T) {
 		t.Fatalf("provider Start ran under another holder's lease: %q", m.sp.starts)
 	}
 	releaseWithinTheWait(t, held)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatalf("Start over a lease released within the wait: %v", err)
 	}
 	if len(m.sp.starts) != 1 {
@@ -159,12 +169,13 @@ func TestManagerStartWaitsForTheRuntimeLease(t *testing.T) {
 }
 
 // TestManagerStartUnderItsCallersLease: a caller holding the lease (D8's
-// resume, an interrupt restart) passes it in ctx; the start takes no other.
+// resume, an interrupt restart) passes it as Actor.Lease; the start takes no
+// other.
 func TestManagerStartUnderItsCallersLease(t *testing.T) {
 	m := newManagerLeaseFixture(t)
 	held := m.hold(t)
 	defer held.Release()
-	if err := m.start(ContextWithRuntimeLease(context.Background(), held)); err != nil {
+	if err := m.start(m.operator(held)); err != nil {
 		t.Fatalf("Start under its caller's lease: %v", err)
 	}
 	if len(m.sp.starts) != 1 || m.sp.starts[0] != held.holder || !m.sp.watched[0] {
@@ -176,32 +187,32 @@ func TestManagerStartUnderItsCallersLease(t *testing.T) {
 // own or its caller's.
 func TestManagerKillTakesTheRuntimeLease(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	held := m.hold(t)
-	if err := m.mgr.Kill(m.info.ID); !errors.Is(err, ErrSessionStarting) {
+	if err := m.mgr.Kill(context.Background(), testActor(m.mgr, ActorOperator), m.info.ID); !errors.Is(err, ErrSessionStarting) {
 		t.Fatalf("Kill under another holder's lease = %v, want ErrSessionStarting", err)
 	}
 	if len(m.sp.stops) != 0 || !m.sp.IsRunning(m.info.SessionName) {
 		t.Fatalf("Kill stopped the runtime under another holder's lease (stops %q)", m.sp.stops)
 	}
-	if err := m.mgr.KillContext(ContextWithRuntimeLease(context.Background(), held), m.info.ID); err != nil {
-		t.Fatalf("KillContext under its caller's lease: %v", err)
+	if err := m.mgr.Kill(context.Background(), m.operator(held), m.info.ID); err != nil {
+		t.Fatalf("Kill under its caller's lease: %v", err)
 	}
 	held.Release()
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	waited := m.hold(t)
 	releaseWithinTheWait(t, waited)
-	if err := m.mgr.Kill(m.info.ID); err != nil {
+	if err := m.mgr.Kill(context.Background(), m.operator(nil), m.info.ID); err != nil {
 		t.Fatalf("Kill over a lease released within the wait: %v", err)
 	}
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.mgr.Kill(m.info.ID); err != nil {
+	if err := m.mgr.Kill(context.Background(), testActor(m.mgr, ActorOperator), m.info.ID); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if len(m.sp.stops) != 3 || m.sp.stops[0] != held.holder || m.sp.stops[2] == "" || m.sp.stops[2] == held.holder {
@@ -214,15 +225,15 @@ func TestManagerKillTakesTheRuntimeLease(t *testing.T) {
 func TestInterruptLeaseCarriesToTheRestart(t *testing.T) {
 	m := newManagerLeaseFixture(t)
 	held := m.hold(t)
-	if _, _, err := m.mgr.leaseForRestartLocked(context.Background(), m.info.ID, m.info.SessionName); !errors.Is(err, ErrSessionStarting) {
+	if _, _, err := m.mgr.leaseForRestartLocked(context.Background(), m.operator(nil), m.info.ID, m.info.SessionName); !errors.Is(err, ErrSessionStarting) {
 		t.Fatalf("interrupt under another holder's lease = %v, want refused", err)
 	}
 	held.Release()
-	ctx, release, err := m.mgr.leaseForRestartLocked(context.Background(), m.info.ID, m.info.SessionName)
+	by, release, err := m.mgr.leaseForRestartLocked(context.Background(), m.operator(nil), m.info.ID, m.info.SessionName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, noop, err := m.mgr.leaseRuntime(ctx, m.info.ID, m.info.SessionName, 0)
+	again, noop, err := m.mgr.leaseRuntime(context.Background(), by, m.info.ID, m.info.SessionName, 0)
 	if err != nil || again == nil || again.holder != m.f.meta(t)[RuntimeLeaseHolderKey] {
 		t.Fatalf("the restart took %v, %v; want the interrupt's lease", again, err)
 	}
@@ -230,10 +241,10 @@ func TestInterruptLeaseCarriesToTheRestart(t *testing.T) {
 	if m.f.meta(t)[RuntimeLeaseHolderKey] == "" {
 		t.Fatal("the restart's release ended the interrupt's lease")
 	}
-	if _, _, err := m.mgr.leaseRuntime(ctx, m.info.ID, "another-runtime", 0); err == nil {
+	if _, _, err := m.mgr.leaseRuntime(context.Background(), by, m.info.ID, "another-runtime", 0); err == nil {
 		t.Fatal("a borrowed lease served another runtime")
 	}
-	if _, _, err := m.mgr.leaseRuntime(ctx, "another-session", m.info.SessionName, 0); err == nil {
+	if _, _, err := m.mgr.leaseRuntime(context.Background(), by, "another-session", m.info.SessionName, 0); err == nil {
 		t.Fatal("a borrowed lease served another session")
 	}
 	release()
@@ -242,17 +253,17 @@ func TestInterruptLeaseCarriesToTheRestart(t *testing.T) {
 	}
 }
 
-// TestControllerKillNeverWaits (M1): under WithoutLeaseWait a busy lease is
+// TestControllerKillNeverWaits (M1): for ActorController a busy lease is
 // the bare ErrRuntimeLeaseBusy at once, not ErrSessionStarting after a wait.
 func TestControllerKillNeverWaits(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	held := m.hold(t)
 	defer held.Release()
 	began := time.Now()
-	err := m.mgr.KillContext(WithoutLeaseWait(context.Background()), m.info.ID)
+	err := m.mgr.Kill(context.Background(), m.as(ActorController), m.info.ID)
 	if !errors.Is(err, ErrRuntimeLeaseBusy) || errors.Is(err, ErrSessionStarting) || time.Since(began) > 300*time.Millisecond {
 		t.Fatalf("controller kill under a held lease = %v after %v, want ErrRuntimeLeaseBusy at once", err, time.Since(began))
 	}
@@ -266,14 +277,14 @@ func TestControllerKillNeverWaits(t *testing.T) {
 // stops under the name's flock alone, which still excludes a holder of it.
 func TestKillFallsBackToTheFlock(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
-	if _, err := m.mgr.leaseForStop(context.Background(), m.info.ID, "renamed", 0); err != nil {
+	if _, err := m.mgr.leaseForStop(context.Background(), m.operator(nil), m.info.ID, "renamed", 0); err != nil {
 		t.Fatalf("stop on a record it cannot take: %v", err)
 	}
 	if !strings.Contains(buf.String(), "under the name's flock alone") {
@@ -284,8 +295,8 @@ func TestKillFallsBackToTheFlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer flock.Release()
-	if _, err := m.mgr.leaseForStop(WithoutLeaseWait(context.Background()), m.info.ID, m.info.SessionName, 0); !errors.Is(err, ErrRuntimeLeaseBusy) {
-		t.Fatalf("stop under a held flock = %v, want busy", err)
+	if _, err := m.mgr.leaseForStop(context.Background(), m.as(ActorController), m.info.ID, m.info.SessionName, 0); !errors.Is(err, ErrRuntimeLeaseBusy) || errors.Is(err, ErrSessionStarting) {
+		t.Fatalf("controller stop under a held flock = %v, want the bare busy", err)
 	}
 }
 
@@ -295,14 +306,14 @@ func TestSuspendAndCloseTakeTheRuntimeLease(t *testing.T) {
 	for _, op := range []string{"suspend", "close"} {
 		t.Run(op, func(t *testing.T) {
 			m := newManagerLeaseFixture(t)
-			if err := m.start(context.Background()); err != nil {
+			if err := m.start(m.operator(nil)); err != nil {
 				t.Fatal(err)
 			}
 			do := func() error {
 				if op == "suspend" {
-					return m.mgr.Suspend(m.info.ID)
+					return m.mgr.Suspend(context.Background(), testActor(m.mgr, ActorOperator), m.info.ID, false)
 				}
-				_, err := m.mgr.CloseDetailed(m.info.ID)
+				_, err := m.mgr.CloseDetailed(context.Background(), testActor(m.mgr, ActorOperator), m.info.ID)
 				return err
 			}
 			held := m.hold(t)
@@ -385,12 +396,12 @@ func TestForceRuntimeLeaseOverridesAHungSharer(t *testing.T) {
 // lease by design.
 func TestCitySweepTakesNoLease(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	held := m.hold(t)
 	defer held.Release()
-	if err := m.mgr.KillContext(CitySweepContext(context.Background()), m.info.ID); err != nil {
+	if err := m.mgr.Kill(context.Background(), m.as(ActorSweep), m.info.ID); err != nil {
 		t.Fatalf("sweep kill under a held lease: %v", err)
 	}
 	if len(m.sp.stops) != 1 || m.sp.stops[0] != held.holder {
@@ -403,12 +414,12 @@ func TestCitySweepTakesNoLease(t *testing.T) {
 // any interrupt.
 func TestInterruptTakesTheLeaseBeforeInterrupting(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	held := m.hold(t)
 	defer held.Release()
-	_, err := m.mgr.Submit(context.Background(), m.info.ID, "stop that", BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	_, err := m.mgr.Submit(context.Background(), testActor(m.mgr, ActorOperator), m.info.ID, "stop that", BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, SubmitIntentInterruptNow)
 	if !errors.Is(err, ErrSessionStarting) {
 		t.Fatalf("interrupt under a held lease = %v, want ErrSessionStarting", err)
 	}
@@ -421,7 +432,7 @@ func TestInterruptTakesTheLeaseBeforeInterrupting(t *testing.T) {
 // whose drain-ack stop is pending sends no interrupt and stops nothing.
 func TestInterruptRefusesAStopPendingRow(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.f.store.SetMetadataBatch(m.info.ID, map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason}); err != nil {
@@ -431,7 +442,7 @@ func TestInterruptRefusesAStopPendingRow(t *testing.T) {
 		return m.sp.CountCalls("Interrupt", m.info.SessionName) + m.sp.CountCalls("SendKeys", m.info.SessionName) + m.sp.CountCalls("Stop", m.info.SessionName)
 	}
 	before := calls()
-	_, err := m.mgr.Submit(context.Background(), m.info.ID, "stop that", BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator)
+	_, err := m.mgr.Submit(context.Background(), testActor(m.mgr, ActorOperator), m.info.ID, "stop that", BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, SubmitIntentInterruptNow)
 	if !errors.Is(err, ErrSessionStopping) {
 		t.Fatalf("interrupt of a stop-pending row = %v, want ErrSessionStopping", err)
 	}
@@ -448,17 +459,17 @@ func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	m := newManagerLeaseFixture(t)
 	mgr := NewManagerWithOptions(m.f.store, m.sp)
 	cmd, hints := BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}
-	if err := mgr.Start(context.Background(), m.info.ID, cmd, hints, ResumeOperator); !errors.Is(err, ErrRuntimeLeaseNoCity) {
+	if err := mgr.Start(context.Background(), Actor{Kind: ActorOperator}, m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("start without a city = %v, want ErrRuntimeLeaseNoCity", err)
 	}
-	if err := mgr.StartRuntimeOnly(context.Background(), m.info.ID, cmd, hints); !errors.Is(err, ErrRuntimeLeaseNoCity) {
-		t.Fatalf("runtime-only start without a city or a lease = %v, want ErrRuntimeLeaseNoCity", err)
+	if err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController}, m.info.ID, cmd, hints); !errors.Is(err, ErrNoCallerLease) {
+		t.Fatalf("runtime-only start without a lease = %v, want ErrNoCallerLease", err)
 	}
 	if m.sp.IsRunning(m.info.SessionName) {
 		t.Fatal("the refused runtime-only start started the runtime")
 	}
 	held := m.hold(t)
-	err := mgr.StartRuntimeOnly(ContextWithRuntimeLease(context.Background(), held), m.info.ID, cmd, hints)
+	err := mgr.StartRuntimeOnly(context.Background(), Actor{Kind: ActorController, Lease: held}, m.info.ID, cmd, hints)
 	held.Release()
 	if err != nil {
 		t.Fatalf("runtime-only start under its caller's lease: %v", err)
@@ -466,25 +477,25 @@ func TestLeaselessManagerFailsAtUse(t *testing.T) {
 	if !m.sp.IsRunning(m.info.SessionName) {
 		t.Fatal("the runtime-only start under its caller's lease did not start the runtime")
 	}
-	if err := mgr.Kill(m.info.ID); !errors.Is(err, ErrRuntimeLeaseNoCity) {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorOperator), m.info.ID); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 		t.Fatalf("kill without a city = %v, want ErrRuntimeLeaseNoCity", err)
 	}
-	if err := mgr.KillContext(CitySweepContext(context.Background()), m.info.ID); err != nil {
+	if err := mgr.Kill(context.Background(), testActor(mgr, ActorSweep), m.info.ID); err != nil {
 		t.Fatalf("a sweep's kill without a city: %v", err)
 	}
 }
 
-// TestControllerSuspendNeverWaits: a suspend under WithoutLeaseWait (the chat
+// TestControllerSuspendNeverWaits: a controller's suspend (the chat
 // auto-suspend tick) neither waits nor retries: busy at once.
 func TestControllerSuspendNeverWaits(t *testing.T) {
 	m := newManagerLeaseFixture(t)
-	if err := m.start(context.Background()); err != nil {
+	if err := m.start(m.operator(nil)); err != nil {
 		t.Fatal(err)
 	}
 	held := m.hold(t)
 	defer held.Release()
 	began := time.Now()
-	err := m.mgr.SuspendContext(WithoutLeaseWait(context.Background()), m.info.ID)
+	err := m.mgr.Suspend(context.Background(), m.as(ActorController), m.info.ID, true)
 	if !errors.Is(err, ErrRuntimeLeaseBusy) || errors.Is(err, ErrSessionStarting) || time.Since(began) > 300*time.Millisecond {
 		t.Fatalf("controller suspend under a held lease = %v after %v, want busy at once", err, time.Since(began))
 	}
@@ -493,14 +504,14 @@ func TestControllerSuspendNeverWaits(t *testing.T) {
 	}
 }
 
-// TestControllerStartNeverWaits: a start under WithoutLeaseWait is refused at
+// TestControllerStartNeverWaits: a controller's start is refused at
 // once, without the operator's retry loop.
 func TestControllerStartNeverWaits(t *testing.T) {
 	m := newManagerLeaseFixture(t)
 	held := m.hold(t)
 	defer held.Release()
 	began := time.Now()
-	err := m.start(WithoutLeaseWait(context.Background()))
+	err := m.start(m.as(ActorController))
 	if !errors.Is(err, ErrRuntimeLeaseBusy) || errors.Is(err, ErrSessionStarting) || time.Since(began) > 300*time.Millisecond {
 		t.Fatalf("controller start under a held lease = %v after %v, want busy at once", err, time.Since(began))
 	}

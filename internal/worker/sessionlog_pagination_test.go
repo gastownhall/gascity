@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -407,7 +408,7 @@ func TestSessionHandleTranscriptAndHistoryPropagateCursorErrors(t *testing.T) {
 	handle.adapter.SearchPaths = []string{
 		filepath.Join("workertest", "testdata", "fixtures", "claude", "fresh"),
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -444,7 +445,7 @@ func TestSessionHandleHistoryCursorPagesBypassContinuityCache(t *testing.T) {
 		Provider: "copilot",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -492,7 +493,7 @@ func TestSessionHandleTranscriptAndHistoryPropagateDuplicateEntryID(t *testing.T
 		Provider: "copilot",
 	})
 	handle.adapter.SearchPaths = []string{root}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 

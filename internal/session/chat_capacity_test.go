@@ -119,7 +119,7 @@ func assertCapacityRefusalKeptConversation(t *testing.T, err error, sp *routeRec
 func TestEnsureRunningRuntimeOnly_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *testing.T) {
 	mgr, sp, store, id, sessName := seedResumableACPSession(t, capacityRefusal)
 
-	err := mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	assertCapacityRefusalKeptConversation(t, err, sp, store, id, sessName)
 }
@@ -128,7 +128,7 @@ func TestEnsureRunningRuntimeOnly_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *t
 func TestEnsureRunning_CapacityRefusalSkipsFreshRetryAndKeepsKey(t *testing.T) {
 	mgr, sp, store, id, sessName := seedResumableACPSession(t, capacityRefusal)
 
-	err := mgr.Start(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	assertCapacityRefusalKeptConversation(t, err, sp, store, id, sessName)
 }
@@ -140,7 +140,7 @@ func TestEnsureRunningRuntimeOnly_PlainStartupDeathStillRetriesFresh(t *testing.
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, sessName)
 	})
 
-	err := mgr.StartRuntimeOnly(context.Background(), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, id), id, capacityTestResumeCmd, runtime.Config{WorkDir: "/tmp"})
 
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded, want the scripted startup death")

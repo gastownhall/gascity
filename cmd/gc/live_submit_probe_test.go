@@ -115,13 +115,13 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	secondToken := "GC_LIVE_CLAUDE_2_" + base
 
 	firstMessage := fmt.Sprintf("Use Bash to run sleep 20. After it finishes, reply with %s and nothing else.", firstToken)
-	if _, err := mgr.Submit(context.Background(), id, firstMessage, resumeCmd, hints, session.SubmitIntentDefault, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, firstMessage, resumeCmd, hints, session.SubmitIntentDefault); err != nil {
 		t.Fatalf("first Submit(default): %v", err)
 	}
 	time.Sleep(4 * time.Second)
 
 	secondMessage := fmt.Sprintf("Reply with %s and nothing else.", secondToken)
-	if _, err := mgr.Submit(context.Background(), id, secondMessage, resumeCmd, hints, session.SubmitIntentInterruptNow, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, secondMessage, resumeCmd, hints, session.SubmitIntentInterruptNow); err != nil {
 		t.Fatalf("second Submit(interrupt_now): %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	base := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	idleToken := "GC_LIVE_GEM_IDLE_" + base
-	if _, err := mgr.Submit(context.Background(), id, fmt.Sprintf("Reply with %s and nothing else.", idleToken), resumeCmd, hints, session.SubmitIntentDefault, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, fmt.Sprintf("Reply with %s and nothing else.", idleToken), resumeCmd, hints, session.SubmitIntentDefault); err != nil {
 		t.Fatalf("idle Submit(default): %v", err)
 	}
 	if err := waitForPane(socket, target, 90*time.Second, isGeminiToken(idleToken)); err != nil {
@@ -204,11 +204,11 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 
 	defaultDone := "GC_LIVE_GEM_DEFAULT_DONE_" + base
 	defaultSecond := "GC_LIVE_GEM_DEFAULT_2_" + base
-	if _, err := mgr.Submit(context.Background(), id, geminiBusyTurnPrompt("default", 180, defaultDone), resumeCmd, hints, session.SubmitIntentDefault, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, geminiBusyTurnPrompt("default", 180, defaultDone), resumeCmd, hints, session.SubmitIntentDefault); err != nil {
 		t.Fatalf("busy Submit(default first): %v", err)
 	}
 	time.Sleep(1 * time.Second)
-	if _, err := mgr.Submit(context.Background(), id, fmt.Sprintf("Reply with %s and nothing else.", defaultSecond), resumeCmd, hints, session.SubmitIntentDefault, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, fmt.Sprintf("Reply with %s and nothing else.", defaultSecond), resumeCmd, hints, session.SubmitIntentDefault); err != nil {
 		t.Fatalf("busy Submit(default second): %v", err)
 	}
 	if err := waitForPane(socket, target, 180*time.Second, func(text string) bool {
@@ -232,11 +232,11 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 
 	followUpDone := "GC_LIVE_GEM_FOLLOW_DONE_" + base
 	followUpSecond := "GC_LIVE_GEM_FOLLOW_2_" + base
-	if _, err := mgr.Submit(context.Background(), id, geminiBusyTurnPrompt("follow", 180, followUpDone), resumeCmd, hints, session.SubmitIntentDefault, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, geminiBusyTurnPrompt("follow", 180, followUpDone), resumeCmd, hints, session.SubmitIntentDefault); err != nil {
 		t.Fatalf("follow_up Submit(default first): %v", err)
 	}
 	time.Sleep(1 * time.Second)
-	outcome, err := mgr.Submit(context.Background(), id, fmt.Sprintf("Reply with %s and nothing else.", followUpSecond), resumeCmd, hints, session.SubmitIntentFollowUp, session.ResumeOperator)
+	outcome, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, fmt.Sprintf("Reply with %s and nothing else.", followUpSecond), resumeCmd, hints, session.SubmitIntentFollowUp)
 	if err != nil {
 		t.Fatalf("follow_up Submit(follow_up second): %v", err)
 	}
@@ -264,11 +264,11 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 
 	interruptDone := "GC_LIVE_GEM_INTERRUPT_DONE_" + base
 	interruptSecond := "GC_LIVE_GEM_INTERRUPT_2_" + base
-	if _, err := mgr.Submit(context.Background(), id, geminiBusyTurnPrompt("interrupt", 180, interruptDone), resumeCmd, hints, session.SubmitIntentDefault, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, geminiBusyTurnPrompt("interrupt", 180, interruptDone), resumeCmd, hints, session.SubmitIntentDefault); err != nil {
 		t.Fatalf("interrupt_now Submit(default first): %v", err)
 	}
 	time.Sleep(1 * time.Second)
-	if _, err := mgr.Submit(context.Background(), id, fmt.Sprintf("Reply with %s and nothing else.", interruptSecond), resumeCmd, hints, session.SubmitIntentInterruptNow, session.ResumeOperator); err != nil {
+	if _, err := mgr.Submit(context.Background(), testActorIn(t, session.ActorOperator, cityPath), id, fmt.Sprintf("Reply with %s and nothing else.", interruptSecond), resumeCmd, hints, session.SubmitIntentInterruptNow); err != nil {
 		t.Fatalf("interrupt_now Submit(interrupt_now second): %v", err)
 	}
 	if err := waitForPane(socket, target, 90*time.Second, isGeminiToken(interruptSecond)); err != nil {
