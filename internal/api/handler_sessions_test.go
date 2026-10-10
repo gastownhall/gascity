@@ -1338,11 +1338,11 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
 
-	// Drain the session directly via the manager (the API surface for drain
-	// lives elsewhere; this test isolates the transition check).
+	// Drain the session the way the controller's drain-ack path does, the
+	// only writer of state=draining (this test isolates the transition check).
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
+	if err := mgr.PersistedStore().ApplyPatch(info.ID, session.DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
 
 	w := httptest.NewRecorder()

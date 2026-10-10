@@ -338,6 +338,21 @@ func configWakeSuppressedInfoWithError(
 	sp runtime.Provider,
 	clk clock.Clock,
 ) (bool, error) {
+	var now time.Time
+	if clk != nil {
+		now = clk.Now()
+	}
+	return configWakeSuppressedAt(info, policy, sp, now)
+}
+
+// configWakeSuppressedAt is configWakeSuppressedInfoWithError at now, which
+// the decide passes so it reads no clock.
+func configWakeSuppressedAt(
+	info sessionpkg.Info,
+	policy resolvedSessionSleepPolicy,
+	sp runtime.Provider,
+	now time.Time,
+) (bool, error) {
 	if !policy.enabled() {
 		return false, nil
 	}
@@ -359,7 +374,7 @@ func configWakeSuppressedInfoWithError(
 	if idleReference.IsZero() {
 		return false, nil
 	}
-	return !clk.Now().Before(idleReference.Add(policy.Duration)), nil
+	return !now.Before(idleReference.Add(policy.Duration)), nil
 }
 
 // sessionKeepWarmEligibleInfo routes the idle-reference read through

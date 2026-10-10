@@ -224,13 +224,12 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 		{"operator set state", "state state_reason", []string{"internal/session/store.go:Store.SetState"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			must(t, sessionFrontDoor(rec).SetState(id, session.StateAsleep, "test"))
 		}},
-		{"operator restart request (dead verb)", "continuation_reset_pending last_woke_at pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash reset_committed_at restart_requested session_key started_config_hash", []string{"internal/session/lifecycle_transition.go:RestartRequestPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			must(t, sessionFrontDoor(rec).RequestRestart(id, "key-3", now))
+		{"operator restart request (the legacy patch)", "continuation_reset_pending last_woke_at pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash reset_committed_at restart_requested session_key started_config_hash", []string{"internal/session/lifecycle_transition.go:RestartRequestPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			must(t, sessionFrontDoor(rec).ApplyPatch(id, session.RestartRequestPatch("key-3", now)))
 		}},
-		{"operator config-drift reset (dead verb)", "continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftResetPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			must(t, sessionFrontDoor(rec).ResetConfigDrift(id, session.StateAsleep, "key-4", now))
+		{"operator config-drift reset (the legacy patch)", "continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftResetPatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			must(t, sessionFrontDoor(rec).ApplyPatch(id, session.ConfigDriftResetPatch(session.StateAsleep, "key-4", now)))
 		}},
-		{"operator archive", "archived_at continuity_eligible pending_create_claim pending_create_started_at state state_reason", []string{"internal/session/manager.go:Manager.Archive"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.Archive(id, "test")) }},
 	}...)
 	declared := map[string]map[string]bool{} // "file:Func" -> the keys it writes or clears
 	for _, f := range session.Fields() {
@@ -344,6 +343,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		"internal/session/kill_fence.go:KillPendingPatch": {
 			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return session.KillPendingPatch(now) }),
+		},
+		"internal/session/resume_user_hold.go:Manager.consumeUserHold": {
+			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute), "provider", "claude"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := session.NewManagerWithOptions(m, runtime.NewFake()).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
 		},
 		"internal/session/manager.go:Manager.suspend": {
 			[]string{"state", "asleep", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},

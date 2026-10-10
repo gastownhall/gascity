@@ -1714,6 +1714,7 @@ go_test(
         "session_refresh_async_gate_test.go",
         "session_resolve_test.go",
         "session_resume_policy_test.go",
+        "session_resume_user_hold_test.go",
         "session_rollback_pending_create_atomic_test.go",
         "session_scaffold_staging_test.go",
         "session_sleep_test.go",
@@ -1891,7 +1892,10 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    shard_count = 15,
+    # No single test runs long (the longest ~10 s); the slowest shard follows
+    # the shard count. At 15 the unit lane's slowest shard ran 40-67 s after
+    # the ~90 s compile-and-link chain; 20 brings it to ~33 s.
+    shard_count = 20,
     deps = [
         "//:gascity",
         "//examples/bd",

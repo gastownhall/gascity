@@ -640,6 +640,13 @@ func cancelRecoveredDrainForAssignedWorkInfo(info sessions.Info, sp runtime.Prov
 	return true
 }
 
+// userHoldDrainReleased reports a user-hold drain whose row no longer carries
+// the operator's intent (HoldUser): a resume consumed the hold after the drain
+// began.
+func userHoldDrainReleased(reason string, info sessions.Info, now time.Time) bool {
+	return reason == string(sessions.SleepReasonUserHold) && sessions.HoldsInfo(info, now).In&sessions.HoldUser == 0
+}
+
 func advanceSessionDrainsWithSessionsTraced(
 	cityPath string,
 	dt *drainTracker,
@@ -689,6 +696,21 @@ func advanceSessionDrainsWithSessionsTraced(
 					"drain_generation":   ds.generation,
 					"session_generation": gen,
 				})
+			}
+			continue
+		}
+
+		// An operator's resume consumed the hold this drain was for: cancel
+		// it, so neither its ack nor its completion acts on the resumed row.
+		if userHoldDrainReleased(ds.reason, info, clk.Now()) {
+			dt.clearIdleProbe(id)
+			if ds.ackSet {
+				_ = clearReconcilerDrainAckMetadata(sp, name)
+			}
+			dt.remove(id)
+			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, nil)
 			}
 			continue
 		}

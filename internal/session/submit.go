@@ -212,12 +212,12 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			// Pi must be stopped before transcript truncation so it cannot race the
 			// write. If truncation fails, restart on the dirty transcript; the
 			// caller's retry will repeat this stop-and-discard sequence.
-			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints); restartErr != nil {
+			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints, policy); restartErr != nil {
 				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
 			}
 			return err
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
@@ -229,13 +229,13 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
 	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return err
@@ -252,9 +252,10 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 // restartAndSendLocked replaces the runtime the interrupt just stopped. The
 // hold was decided before the stop, so the restart does not re-read it: the
 // dead runtime would make a heartbeat or unreadable hold refuse, losing the
-// session and the message.
-func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, ResumeOperator); err != nil {
+// session and the message. Only an operator's resume (policy) consumes a
+// user hold (restartPolicy).
+func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, restartPolicy(policy)); err != nil {
 		return err
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
@@ -517,8 +518,8 @@ func waitsForIdleAfterHardRestart(b beads.Bead) bool {
 
 // restoreAfterHardRestartFailureLocked restarts the runtime the interrupt
 // stopped; like restartAndSendLocked it does not re-read the hold.
-func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, ResumeOperator); err != nil {
+func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, restartPolicy(policy)); err != nil {
 		return err
 	}
 	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
