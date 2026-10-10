@@ -295,6 +295,12 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)
+		// "human" is the canonical operator alias, not a session identity.
+		// The shell orphan sweep has the same exact-match exemption: absence of
+		// a session named human cannot prove that an operator handoff is dead.
+		if assignee == "human" {
+			continue
+		}
 		if assignee == "" && wb.Status == "in_progress" && isCanonicalWorkflowRoot(wb) {
 			continue
 		}
