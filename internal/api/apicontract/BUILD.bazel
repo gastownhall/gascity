@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "apicontract",
+    srcs = [
+        "apicontract.go",
+        "coverage.go",
+        "transport.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/api/apicontract",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_github_pb33f_libopenapi//:libopenapi",
+        "@com_github_pb33f_libopenapi//datamodel/high/v3:high",
+        "@com_github_pb33f_libopenapi_validator//responses",
+    ],
+)
+
+go_test(
+    name = "apicontract_test",
+    srcs = [
+        "apicontract_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":apicontract"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

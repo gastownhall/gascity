@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -74,6 +75,133 @@ func NamedSessionBackingTemplate(spec NamedSessionSpec) string {
 		return spec.Named.TemplateQualifiedName()
 	}
 	return ""
+}
+
+// IsDemandOnlySingletonTemplate reports whether agentCfg is a canonical
+// singleton pool template (max_active_sessions = 1, no namepool) with no
+// session floor (effective min_active_sessions = 0) that no configured
+// [[named_session]] backs. A floor of 1 keeps the one session running without
+// demand, so that template is not demand-only. The controller owns such a template's
+// only session: it starts it while the pool has work for it and drains it when
+// the pool has none. Nothing else can start it or keep it running: not an API
+// create, not pin_awake, not an explicit wake request (#6858). This is the
+// shape `gc config show --validate` warns about.
+func IsDemandOnlySingletonTemplate(cfg *config.City, agentCfg *config.Agent) bool {
+	if cfg == nil || agentCfg == nil || !agentCfg.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	if agentCfg.EffectiveMinActiveSessions() > 0 {
+		return false
+	}
+	template := agentCfg.QualifiedName()
+	cityName := cfg.EffectiveCityName()
+	for i := range cfg.NamedSessions {
+		spec, ok := FindNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if ok && NamedSessionBackingTemplate(spec) == template {
+			return false
+		}
+	}
+	return true
+}
+
+// IsDemandOnlySingletonSession reports whether info is the controller-owned
+// pool capacity of a demand-only singleton template (see
+// IsDemandOnlySingletonTemplate); agentCfg is the agent that owns info's
+// template. The controller keeps such a session only while the pool has work
+// for it, so neither pin_awake nor an explicit wake request can start it or
+// keep it running (#6858). Named and manual sessions of the same template
+// start on their own terms and are excluded. CLI and API refusals share this
+// classification.
+//
+// A singleton template supports neither multiple sessions nor instance
+// expansion, so the session's own origin markers decide it: an explicit
+// session_origin, else the pool markers the controller stamps (pool_managed,
+// pool_slot, dependency_only) or a legacy slot-suffixed name.
+func IsDemandOnlySingletonSession(cfg *config.City, agentCfg *config.Agent, info Info) bool {
+	if !IsDemandOnlySingletonTemplate(cfg, agentCfg) {
+		return false
+	}
+	if info.ConfiguredNamedSession || isManualSessionInfo(info) {
+		return false
+	}
+	if origin := strings.TrimSpace(info.SessionOrigin); origin != "" {
+		return origin == "ephemeral"
+	}
+	if info.PoolManaged || strings.TrimSpace(info.PoolSlot) != "" || info.DependencyOnly {
+		return true
+	}
+	template := strings.TrimSpace(info.Template)
+	if template == "" {
+		return false
+	}
+	return poolSlotFromName(strings.TrimSpace(agentNameInfo(info)), template) > 0 ||
+		poolSlotFromName(strings.TrimSpace(info.SessionNameMetadata), template) > 0
+}
+
+// DemandOnlySingletonWakeRefused reports whether an explicit wake of info
+// cannot start it: info is demand-only singleton pool capacity (see
+// IsDemandOnlySingletonSession) whose runtime is neither up nor already
+// starting (a provider Start in flight). Waking one that is running or starting
+// only clears its blockers, so that wake is not refused. A start-pending one is
+// refused: no Start is in flight, and only pool demand, never the wake, decides
+// whether the controller starts it (an API-created one can sit start-pending
+// forever, #6858).
+func DemandOnlySingletonWakeRefused(cfg *config.City, agentCfg *config.Agent, info Info) bool {
+	if !IsDemandOnlySingletonSession(cfg, agentCfg, info) {
+		return false
+	}
+	switch State(strings.TrimSpace(info.MetadataState)) {
+	case StateActive, StateAwake, StateCreating:
+		return false
+	}
+	return true
+}
+
+// isManualSessionInfo reports whether info was created as a manual session.
+func isManualSessionInfo(info Info) bool {
+	return strings.TrimSpace(info.SessionOrigin) == "manual" || info.ManualSessionMetadata == "true"
+}
+
+// agentNameInfo returns the session's agent name: the agent_name metadata,
+// else the value of its "agent:" label.
+func agentNameInfo(info Info) string {
+	if info.AgentName != "" {
+		return info.AgentName
+	}
+	for _, label := range info.Labels {
+		if strings.HasPrefix(label, "agent:") {
+			return strings.TrimPrefix(label, "agent:")
+		}
+	}
+	return ""
+}
+
+// poolSlotFromName returns the pool slot encoded in a pool member name of
+// template ("<template>-<n>", or the legacy "<template>-gc-<n>"), or 0 when
+// name is not such a member.
+func poolSlotFromName(name, template string) int {
+	if !strings.HasPrefix(name, template+"-") {
+		return 0
+	}
+	suffix := name[len(template)+1:]
+	if slot, err := strconv.Atoi(suffix); err == nil {
+		return slot
+	}
+	if strings.HasPrefix(suffix, "gc-") {
+		slot, _ := strconv.Atoi(suffix[3:])
+		return slot
+	}
+	return 0
+}
+
+// DemandOnlySingletonExplanation says why a session of the demand-only
+// singleton template cannot be started or kept running on request, and what
+// to do instead. API and CLI refusals share it so they read the same.
+func DemandOnlySingletonExplanation(template string) string {
+	return fmt.Sprintf("agent %q is a pool agent with max_active_sessions = 1 and no [[named_session]]: "+
+		"the controller starts its one session only while there is work for it and drains it when there is none; "+
+		"sling work to %q to start it, or declare a [[named_session]] for it to keep a session running",
+		template, template)
 }
 
 // ResolveNamedSessionSpecForConfigTarget resolves a config-facing token to a named session spec when possible.

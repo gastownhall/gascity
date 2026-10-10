@@ -25,6 +25,21 @@ func remoteTestTarget(url string) *remoteTarget {
 	return &remoteTarget{BaseURL: url, CityName: "mc", Source: remoteSourceURLFlag}
 }
 
+// newCannedSlingServer serves resp as the JSON answer to every request and
+// records the last request body. It is closed when the test ends.
+func newCannedSlingServer(t *testing.T, resp string) (*httptest.Server, *string) {
+	t.Helper()
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(resp))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &gotBody
+}
+
 func TestParseSlingVars(t *testing.T) {
 	m, err := parseSlingVars([]string{"a=1", "b=two=parts"})
 	if err != nil {
@@ -208,16 +223,12 @@ func TestCmdSlingRemote_ForwardsMetadataFlags(t *testing.T) {
 	}
 }
 
-// TestCmdSlingRemote_RefusesOn proves --on stays refused for a remote city: its
-// per-child convoy expansion is local-only, so the server would attach the wisp
-// to a convoy container instead of each child (a silent divergence a red-team
-// caught). A clear refusal is safer until the server expands containers.
+// TestCmdSlingRemote_RefusesOn proves --on stays refused for a remote city in
+// the 1.5.x line. The server now expands a convoy per child on the attach path
+// too, but forwarding --on is a separate behavior change kept out of the patch
+// release; the refusal must not contact the server.
 func TestCmdSlingRemote_RefusesOn(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("server must not be contacted for a refused --on")
-		w.WriteHeader(500)
-	}))
-	defer srv.Close()
+	srv, gotBody := newCannedSlingServer(t, `{"status":"slung","target":"mayor"}`)
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-3"},
@@ -227,5 +238,81 @@ func TestCmdSlingRemote_RefusesOn(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "--on") {
 		t.Fatalf("stderr = %q, want --on refusal", errb.String())
+	}
+	if *gotBody != "" {
+		t.Fatalf("server received %q; a refused --on must not reach the server", *gotBody)
+	}
+}
+
+// TestCmdSlingRemote_JSONCarriesConvoyAndBatch proves the remote --json output
+// carries the convoy_id, molecule_id and batch fields POST /sling now returns,
+// under the same names the local `gc sling --json` uses.
+func TestCmdSlingRemote_JSONCarriesConvoyAndBatch(t *testing.T) {
+	srv, _ := newCannedSlingServer(t, `{"status":"slung","target":"mayor","bead":"BL-1","mode":"direct","molecule_id":"BL-m","convoy_id":"BL-c","batch":{"container_type":"convoy","total":3,"routed":2,"failed":0,"skipped":1,"idempotent":1}}`)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-1"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stderr=%q", code, errb.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output not JSON: %v (%q)", err, out.String())
+	}
+	if got["molecule_id"] != "BL-m" || got["convoy_id"] != "BL-c" {
+		t.Errorf("json = %v, want molecule_id BL-m and convoy_id BL-c", got)
+	}
+	batch, ok := got["batch"].(map[string]any)
+	if !ok {
+		t.Fatalf("json batch = %v, want an object", got["batch"])
+	}
+	if batch["container_type"] != "convoy" || batch["total"] != float64(3) || batch["routed"] != float64(2) || batch["skipped"] != float64(1) || batch["idempotent"] != float64(1) {
+		t.Errorf("batch = %v", batch)
+	}
+}
+
+// TestCmdSlingRemote_PartialConvoyExitsNonZero pins that a remote convoy sling
+// where some children failed renders like the local `gc sling`: the routed
+// children are reported, each failed child is named with its reason, and the
+// command exits 1. With --json the payload carries success=false and the
+// per-child failures.
+func TestCmdSlingRemote_PartialConvoyExitsNonZero(t *testing.T) {
+	const partial = `{"status":"partial","target":"mayor","bead":"BL-c","mode":"direct","batch":{"container_type":"convoy","total":2,"routed":1,"failed":1,"skipped":0,"idempotent":0,"failures":[{"bead_id":"BL-2","reason":"setting gc.routed_to on BL-2: boom"}]}}`
+	srv, _ := newCannedSlingServer(t, partial)
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", false, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 for a partial convoy; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	for _, want := range []string{"BL-2", "boom", "1/2 children failed"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("stderr %q missing %q", errb.String(), want)
+		}
+	}
+
+	out.Reset()
+	errb.Reset()
+	code = cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL), []string{"mayor", "BL-c"},
+		false, false, false, "", nil, "", false, false, false, "", false, false, false, "", "", true /*json*/, &out, &errb)
+	if code != 1 {
+		t.Fatalf("--json exit %d, want 1 for a partial convoy; stderr=%q", code, errb.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output not JSON: %v (%q)", err, out.String())
+	}
+	if got["success"] != false || got["status"] != "partial" {
+		t.Errorf("json = %v, want success=false status=partial", got)
+	}
+	batch, _ := got["batch"].(map[string]any)
+	failures, _ := batch["failures"].([]any)
+	if len(failures) != 1 {
+		t.Fatalf("json batch failures = %v, want one", batch["failures"])
+	}
+	if f, _ := failures[0].(map[string]any); f["bead_id"] != "BL-2" {
+		t.Errorf("failure = %v, want bead_id BL-2", failures[0])
 	}
 }

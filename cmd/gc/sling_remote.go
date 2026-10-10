@@ -12,10 +12,10 @@ import (
 // cmdSlingRemote routes a sling mutation to a REMOTE city over the control
 // plane. The remote server does all config and store resolution, so this
 // forwards the raw sling parameters (target, bead-or-formula, vars, scope,
-// force, title) and renders the result. Modes that require local state are
-// refused with a clear message: inline text (needs a locally-created bead), the
-// 1-arg form (infers the target from local rig config), and the local
-// batch/dry-run flags the server API does not model.
+// force, title) and renders the result. Modes that require local state or are
+// not forwarded are refused with a clear message: inline text (needs a
+// locally-created bead), the 1-arg form (infers the target from local rig
+// config), --on, and the --dry-run/--nudge flags the server API does not model.
 func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
 	fail := func(code, message string) int {
 		if jsonOutput {
@@ -32,17 +32,15 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		return fail("unsupported_remote", "gc sling: --dry-run is not supported for a remote city")
 	}
 	// --nudge and --on stay refused for a remote city. --nudge needs server-side
-	// delivery wiring. --on's per-child convoy expansion is local-only: the remote
-	// handler would attach the wisp to a convoy CONTAINER instead of each child (a
-	// silent orchestration divergence a Fable red-team caught), so a clear refusal
-	// is safer until the server expands containers on the attach path. The metadata
-	// flags (--merge/--no-convoy/--owned/--no-formula) are server-expressible and
+	// delivery wiring. --on is not forwarded in the 1.5.x line: forwarding it is
+	// a behavior change kept out of the patch release. The metadata flags
+	// (--merge/--no-convoy/--owned/--no-formula) are server-expressible and
 	// forwarded below.
 	if doNudge {
 		return fail("unsupported_remote", "gc sling: --nudge delivery for a remote city lands separately; sling without --nudge")
 	}
 	if onFormula != "" {
-		return fail("unsupported_remote", "gc sling: --on for a remote city lands separately (per-child convoy expansion is local-only); attach the formula from the local city, or sling the bead without --on")
+		return fail("unsupported_remote", "gc sling: --on is not supported for a remote city; attach the formula from the local city, or sling the bead without --on")
 	}
 
 	// A remote city cannot infer the default target from local rig config, so an
@@ -116,20 +114,29 @@ func parseSlingVars(vars []string) (map[string]string, error) {
 // renderRemoteSlingResult prints a remote sling outcome. Warnings go to stderr;
 // the result goes to stdout (a compact JSON object with --json, otherwise a
 // one-line summary).
+//
+// A partial convoy result (some children routed, some failed) exits 1, like
+// the local `gc sling`: each failed child is named on stderr, and the --json
+// payload reports success=false with the per-child failures.
 func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stderr io.Writer) int {
 	for _, w := range res.Warnings {
 		fmt.Fprintln(stderr, "warning:", w) //nolint:errcheck // best-effort stderr
 	}
+	partial := res.Status == api.SlingStatusPartial
+	exitCode := 0
+	if partial {
+		exitCode = 1
+	}
 	if jsonOutput {
 		// Keep the automation-critical fields aligned with the local `sling --json`
-		// shape (schema_version, success, target, bead_id, formula, workflow_id,
-		// warnings) so a script repointed at a remote city keeps working. Fields
-		// with no server-side analog (molecule_id, convoy_id, batch, routed/queued/
-		// dry_run) are omitted; server-only detail (status, root_bead_id, mode) is
-		// added.
+		// shape (schema_version, success, target, bead_id, formula, molecule_id,
+		// workflow_id, convoy_id, batch, warnings) so a script repointed at a
+		// remote city keeps working. Fields with no server-side analog (routed/
+		// queued/dry_run) are omitted; server-only detail (status, root_bead_id,
+		// mode) is added.
 		payload := map[string]any{
 			"schema_version": "1",
-			"success":        true,
+			"success":        !partial,
 			"status":         res.Status,
 			"target":         res.Target,
 		}
@@ -139,6 +146,26 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 		putIfSet(payload, "root_bead_id", res.RootBeadID)
 		putIfSet(payload, "attached_bead_id", res.AttachedBeadID)
 		putIfSet(payload, "mode", res.Mode)
+		putIfSet(payload, "molecule_id", res.MoleculeID)
+		putIfSet(payload, "convoy_id", res.ConvoyID)
+		if b := res.Batch; b != nil {
+			batch := map[string]any{
+				"total":      b.Total,
+				"routed":     b.Routed,
+				"failed":     b.Failed,
+				"skipped":    b.Skipped,
+				"idempotent": b.Idempotent,
+			}
+			putIfSet(batch, "container_type", b.ContainerType)
+			if len(b.Failures) > 0 {
+				failures := make([]map[string]any, 0, len(b.Failures))
+				for _, f := range b.Failures {
+					failures = append(failures, map[string]any{"bead_id": f.BeadID, "reason": f.Reason})
+				}
+				batch["failures"] = failures
+			}
+			payload["batch"] = batch
+		}
 		if len(res.Warnings) > 0 {
 			payload["warnings"] = res.Warnings
 		}
@@ -148,7 +175,7 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 			return 1
 		}
 		fmt.Fprintln(stdout, string(enc)) //nolint:errcheck // best-effort stdout
-		return 0
+		return exitCode
 	}
 	line := res.Status + " → " + res.Target
 	switch {
@@ -158,7 +185,13 @@ func renderRemoteSlingResult(res api.SlingResult, jsonOutput bool, stdout, stder
 		line += " (" + res.Bead + ")"
 	}
 	fmt.Fprintln(stdout, line) //nolint:errcheck // best-effort stdout
-	return 0
+	if partial && res.Batch != nil {
+		for _, f := range res.Batch.Failures {
+			fmt.Fprintf(stderr, "  %s: %s\n", f.BeadID, f.Reason) //nolint:errcheck // best-effort stderr
+		}
+		fmt.Fprintf(stderr, "%d/%d children failed\n", res.Batch.Failed, res.Batch.Failed+res.Batch.Routed+res.Batch.Idempotent) //nolint:errcheck // best-effort stderr
+	}
+	return exitCode
 }
 
 func putIfSet(m map[string]any, key, val string) {

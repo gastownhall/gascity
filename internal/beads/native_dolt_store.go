@@ -1585,7 +1585,7 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 			// Applying the full predicate would re-block both of those. Only
 			// the closed-and-blocked case — invisible to the store's own
 			// check — may override that verdict.
-			if string(dep.Status) == "closed" && depMetadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked {
+			if string(dep.Status) == "closed" && ReadinessWorkOutcome(depMetadata) == beadmeta.WorkOutcomeBlocked {
 				blocked = true
 				break
 			}
@@ -1663,7 +1663,7 @@ func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependency
 			malformed[b.ID] = err
 			continue
 		}
-		vetoes[b.ID] = string(b.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+		vetoes[b.ID] = string(b.Status) == "closed" && ReadinessWorkOutcome(metadata) == beadmeta.WorkOutcomeBlocked
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {

@@ -218,6 +218,7 @@ filegroup(
         "//internal/agent:bazel_repo_srcs",
         "//internal/agentutil:bazel_repo_srcs",
         "//internal/api:bazel_repo_srcs",
+        "//internal/api/apicontract:bazel_repo_srcs",
         "//internal/api/apierr:bazel_repo_srcs",
         "//internal/api/dashboardbff:bazel_repo_srcs",
         "//internal/api/dashboardspa:bazel_repo_srcs",

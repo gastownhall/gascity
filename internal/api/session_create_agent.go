@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -23,6 +24,33 @@ func agentSessionCreateMetadata(metadata map[string]string, identity string) map
 	metadata["agent_name"] = identity
 	metadata["session_origin"] = "ephemeral"
 	return metadata
+}
+
+// demandOnlySingletonCreateRefusal returns the message refusing an agent
+// session create for a demand-only singleton agent, or "" when the create may
+// proceed. The reconciler treats such a bead as pool capacity and never starts
+// it on request, so accepting the create would return 202 for a session that
+// sits start-pending forever (#6858).
+func demandOnlySingletonCreateRefusal(cfg *config.City, agentCfg config.Agent) string {
+	if !session.IsDemandOnlySingletonTemplate(cfg, &agentCfg) {
+		return ""
+	}
+	return "cannot create a session: " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
+}
+
+// demandOnlySingletonWakeRefusal returns the message refusing an explicit wake
+// of info, or "" when the wake may proceed. info is the session as it was
+// before the wake. The wake is recorded first (holds and quarantine cleared),
+// exactly as `gc session wake` does, but a demand-only singleton's pool session
+// that is not running is started by the reconciler only from pool demand, so
+// reporting success would be false (#6858, SESSION-RECON-019). The
+// classification is shared with the CLI (session.DemandOnlySingletonWakeRefused).
+func demandOnlySingletonWakeRefusal(cfg *config.City, info session.Info) string {
+	agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template)
+	if !ok || !session.DemandOnlySingletonWakeRefused(cfg, &agentCfg, info) {
+		return ""
+	}
+	return "wake recorded for session " + info.ID + ", but it will not start: " + session.DemandOnlySingletonExplanation(agentCfg.QualifiedName())
 }
 
 func (s *Server) resolveAgentCreateContext(template, alias string) (agentCreateContext, error) {

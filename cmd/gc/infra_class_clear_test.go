@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -266,6 +267,45 @@ func TestTheClearReleasesSatisfiedCrossStoreBlocksAndKeepsTheRest(t *testing.T) 
 	}
 	if dependents != 3 {
 		t.Fatalf("the backup records %d cross-store dependents, want all 3", dependents)
+	}
+}
+
+// TestTheClearJudgesTheBindingCopyAsReadyDoes pins the release rule to the one
+// Ready applies: a closed relocated bead releases its dependents unless typed
+// blocked, and a formula step whose control-plane step passed releases them
+// even when its work outcome says blocked. A plain work bead's gc.outcome=pass
+// is not a dispatch verdict, so its blocked work outcome still holds them.
+func TestTheClearJudgesTheBindingCopyAsReadyDoes(t *testing.T) {
+	held := map[string]beads.Bead{
+		"open":   {ID: "open", Status: "open"},
+		"closed": {ID: "closed", Status: "closed"},
+		"blocked": {ID: "blocked", Status: "closed", Metadata: beads.StringMap{
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}},
+		"passed-step": {ID: "passed-step", Status: "closed", Metadata: beads.StringMap{
+			beadmeta.StepRefMetadataKey:     "mol-review.apply",
+			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}},
+		"passed-work": {ID: "passed-work", Status: "closed", Metadata: beads.StringMap{
+			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}},
+	}
+	for _, tt := range []struct {
+		id   string
+		want bool
+	}{
+		{"collected", true},
+		{"open", false},
+		{"closed", true},
+		{"blocked", false},
+		{"passed-step", true},
+		{"passed-work", false},
+	} {
+		if got := infraBindingCopySatisfies(held, tt.id); got != tt.want {
+			t.Errorf("infraBindingCopySatisfies(%s) = %v, want %v", tt.id, got, tt.want)
+		}
 	}
 }
 

@@ -76,6 +76,7 @@ go_test(
     deps = [
         "//internal/events/eventstest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

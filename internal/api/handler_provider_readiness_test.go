@@ -405,6 +405,21 @@ func TestClaudeProbeCommandEnvForwardsConfigDirAndOAuthToken(t *testing.T) {
 	}
 }
 
+func TestClaudeProbeCommandEnvForwardsGatewayLogin(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "https://gateway.example/api")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api-test")
+
+	env := claudeProbeCommandEnv()
+	for _, want := range []string{"ANTHROPIC_BASE_URL=https://gateway.example/api", "ANTHROPIC_AUTH_TOKEN=gateway-token"} {
+		if !slices.Contains(env, want) {
+			t.Fatalf("claudeProbeCommandEnv missing %s: %v", want, env)
+		}
+	}
+	// API-key auth stays unsupported for onboarding, so the key is not forwarded.
+	assertEnvOmitsPrefix(t, env, "ANTHROPIC_API_KEY=")
+}
+
 func TestClaudeProbeCommandEnvOmitsUnsetValues(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")

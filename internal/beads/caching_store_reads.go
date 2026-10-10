@@ -26,6 +26,9 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		items, err := c.backing.List(query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, items)
+			// A live list is often the first reader to see a close made by
+			// another process (bd close); announce what it installed.
+			c.announceUnannouncedCloses()
 		}
 		return items, err
 	}
@@ -489,6 +492,9 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close made by another process.
+	defer c.announceUnannouncedCloses()
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
@@ -583,7 +589,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 					continue
 				}
 				statusByID[b.ID] = b.Status
-				workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 				if IsReadyCandidate(b, now) {
 					if c.readyProjectionUnknownLocked(b.ID) {
 						unanswerable = true
@@ -661,7 +667,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if IsReadyCandidate(b, now) {
 			if c.readyProjectionUnknownLocked(b.ID) {
 				return nil, false

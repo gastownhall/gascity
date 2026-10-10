@@ -23,6 +23,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5,000 beads per scope took about 1.5s. A failed repair only warns, and gc
   retries it on the next start. If you upgrade bd while the supervisor is
   running, the repair waits for the next `gc start`.
+- **A formula step that means "blocked, stop the graph" must close with
+  `gc.outcome=fail`.** A formula step bead (one carrying `gc.step_ref`) that
+  closes with `gc.outcome=pass` now satisfies its dependents even when it also
+  records `gc.work_outcome=blocked`. Plain work beads are unchanged: a blocked
+  work outcome still withholds their dependents.
+- **`bead.closed` is emitted for every close gc observes.** A
+  `Update(status=closed)` now emits `bead.closed` instead of `bead.updated`,
+  re-closing an already-closed bead no longer re-emits, and orders and
+  autoclose now fire for closes made with `bd` or `gc bd` (#6860).
+- **API session creates for a demand-only singleton are refused.** `POST
+  /sessions` with `kind: "agent"` for a pool agent with
+  `max_active_sessions = 1`, `min_active_sessions = 0` and no
+  `[[named_session]]` now returns 400 `demand-only-singleton` instead of 202
+  and a session that never started. An API wake of such a session records the
+  wake (clearing holds) and returns the same error unless the session is
+  running or its start is already in flight (#6858).
+- **A partially routed convoy sling answers 200 with status `partial`.**
+  `POST /v0/city/{city}/sling` reports a convoy whose children were routed
+  only in part as 200 with `status: "partial"` and the failed children in
+  `batch.failures`, so API clients must check `status`, not only the HTTP
+  code. A remote `gc sling` older than 1.5.1 does not check `status`: it
+  exits 0, and its `--json` output reports `success: true`. Upgrade remote
+  `gc` clients alongside the server.
+- **Supervisor API status codes and payload shapes changed for several
+  edits and reads.** API clients that branch on the old codes or on `null`
+  fields need updating:
+  - Edits to a rig-qualified agent served by a generic `scope = "rig"`
+    template (`PATCH`, `suspend`, `resume` on `/agent/{rig}/{name}`) now
+    apply to the template, and so to that agent in every rig the template
+    serves, and return 200 instead of 404; `DELETE` on such an agent returns
+    409 (delete the template instead).
+  - A config edit whose `[patches]` entry names a target missing from the
+    merged config returns 400 instead of 500.
+  - Closed sessions report `state: "closed"` instead of an empty state.
+  - Unset optional fields are omitted instead of sent as `null`: the map and
+    struct fields of agent, rig and provider patches (`Env`,
+    `OptionDefaults`, `Pool`, `ContextAdvisory`, `FormulaVars`), and the
+    absent records and `Metadata` of external-messaging inbound/outbound
+    results. The OpenAPI spec no longer lists them as required.
 
 ### Fixed
 
@@ -35,6 +74,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- `gc stop` stops the city's nudge pollers and never reopens a stopped city's
+  store (#6857).
+- The supervisor event stream includes cities started after the client
+  connected (#6861). Delivery is at-least-once when a city's watcher is
+  re-attached mid-connection, for example after the city stops and starts
+  again: events already buffered for that city can be delivered again, and
+  its seq in the composite SSE id can move back. Dedupe on city and seq.
+- Workflows no longer stall after a formula step that passed but recorded a
+  blocked work outcome.
+- Claude Code's feedback-survey dismissal no longer submits a stray `0` into
+  the session (#6859; backport of #7013).
+- A gateway login reaches the Claude provider readiness probe.
+- `POST /v0/city/{city}/sling` routes and cooks formulas exactly like
+  `gc sling`: a rig bead's default formula is cooked in the rig store, title
+  and vars reach the default formula, and a convoy's children are routed one
+  by one. When some convoy children fail, the response is 200 with status
+  `partial` and `batch.failures`; `gc sling` against a remote city exits 1 for
+  it. `gc sling --on` stays refused for a remote city.
+- A session can close a bead it claimed under its session bead id without
+  `--force`; `gc bd close` runs bd as that id. Claims recorded under a session
+  name or alias still need `--force` (#6324). The close's audit actor is the
+  assignee string.
+- `gc session pin` and `gc session wake` report a demand-only singleton's pool
+  session honestly instead of succeeding: pin is refused, and wake records the
+  wake but exits non-zero unless the session is running or its start is
+  already in flight (#6858).
+- An API config edit is no longer lost when it lands while the controller is
+  reloading config: a load hashes the city's convention trees before reading
+  them, and a runtime reload can no longer publish an older config over a
+  concurrent API mutation (ga-opn27h; backport of #7084).
+- `GET /v0/city/{city}/patches/...` returns the patches declared in
+  `city.toml` instead of 404/empty after they were applied (ga-8hk1fe).
+- Edits to a rig-qualified agent served by a generic rig-scoped template reach
+  that template, and so every rig it serves, instead of answering 404
+  (ga-l24lrx).
+- `GET /v0/city/{city}/agents` reflects a config change right away instead of
+  serving a cached list keyed only on session state (ga-79peco).
 
 ## [1.5.0] - 2026-10-05
 

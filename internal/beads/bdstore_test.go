@@ -2690,6 +2690,40 @@ func TestBdStoreReadyKeepsDependentWhenBlockerClosedWithNoWorkOutcome(t *testing
 	}
 }
 
+// TestBdStoreReadyKeepsDependentWhenBlockerStepPassedDespiteWorkOutcomeBlocked
+// is the shape that stalled real builds: a graph.v2 step closed with the
+// control-plane result gc.outcome=pass, which dispatch advances on, while its
+// worker recorded gc.work_outcome=blocked (a plan review that found required
+// changes). Vetoing the dependent here leaves the workflow waiting on work the
+// controller never counts as demand.
+func TestBdStoreReadyKeepsDependentWhenBlockerStepPassedDespiteWorkOutcomeBlocked(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.step_ref":"review","gc.outcome":"pass","gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "bd-dependent" {
+		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker whose step passed must satisfy the dependency whatever its gc.work_outcome", got)
+	}
+}
+
+// TestBdStoreReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked
+// pins the default worker path: core mol-do-work stamps gc.outcome=pass on the
+// work bead itself (no gc.step_ref) even when the work is blocked, so the pass
+// must not release the blocked work's dependents.
+func TestBdStoreReadyExcludesDependentWhenWorkBeadPassedWithWorkOutcomeBlocked(t *testing.T) {
+	runner, _ := bdStoreWorkOutcomeReadyRunner(`,"metadata":{"gc.outcome":"pass","gc.work_outcome":"blocked"}`)
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Ready() = %+v, want empty: a non-step work bead closed with gc.outcome=pass and gc.work_outcome=blocked must not satisfy its dependent", got)
+	}
+}
+
 func TestBdStoreReadyEmpty(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte

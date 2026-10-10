@@ -607,11 +607,35 @@ func IsReadyBlockingDependencyType(t string) bool {
 // no gc.work_outcome yet (work_record_gate.go is warn-only), so the empty
 // value stays backward-compatible, and an unrecognized future value fails
 // open rather than newly stalling dependents it doesn't understand.
+//
+// Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
+// so a dependency whose control-plane step passed is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
 	}
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
+}
+
+// ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
+// closed dependency by. gc.outcome is the control-plane step result that
+// internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
+// work-record disposition (ADR-0009); the two vocabularies are disjoint and can
+// disagree. A step that closed with gc.outcome=pass has already been advanced
+// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
+// strands them: the graph waits on work that readiness never offers to any
+// worker. When the step passed, its work outcome does not gate readiness.
+//
+// The override applies only to formula step beads (those carrying
+// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
+// mol-do-work formula stamps it on the work bead it closes, blocked or not —
+// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
+// keeps withholding dependents.
+func ReadinessWorkOutcome(metadata map[string]string) string {
+	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+		return ""
+	}
+	return metadata[beadmeta.WorkOutcomeMetadataKey]
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from
