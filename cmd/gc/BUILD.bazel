@@ -1855,6 +1855,7 @@ go_test(
         "warm_bind_nudge_test.go",
         "wisp_autoclose_test.go",
         "wisp_gc_batch_test.go",
+        "wisp_gc_closed_read_test.go",
         "wisp_gc_fenced_delete_test.go",
         "wisp_gc_test.go",
         "wisp_step_inject_prewake_test.go",

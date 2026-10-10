@@ -524,6 +524,111 @@ func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	}
 }
 
+// The ready blocker check (filterReadyByWorkOutcome) lists closed blockers by
+// id. The ids go to bd as --id so the read is bounded by them; an IDs query
+// must never ask bd for the whole closed set and keep the ids in Go, which on
+// a large store reads tens of thousands of rows to find a handful.
+func TestBdStoreListRendersIDFilterServerSide(t *testing.T) {
+	var listCalls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name %q", name)
+		}
+		joined := strings.Join(args, " ")
+		if len(args) > 0 && args[0] == "list" {
+			listCalls = append(listCalls, joined)
+			if !strings.Contains(joined, "--id bd-a,bd-b") {
+				return nil, fmt.Errorf("bd list without --id: %s", joined)
+			}
+			return []byte(`[
+				{"id":"bd-a","title":"a","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","metadata":{"gc.work_outcome":"blocked"}},
+				{"id":"bd-b","title":"b","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}
+			]`), nil
+		}
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{IDs: []string{"bd-b", "bd-a"}, TierMode: beads.TierBoth, Status: "closed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(IDs) returned %d beads, want 2: %+v", len(got), got)
+	}
+	if len(listCalls) == 0 {
+		t.Fatal("no bd list call was made")
+	}
+	for _, call := range listCalls {
+		if !strings.Contains(call, "--id bd-a,bd-b") {
+			t.Fatalf("bd list call without a server-side id filter: %s", call)
+		}
+		if !strings.Contains(call, "--status=closed") || !strings.Contains(call, "--all") {
+			t.Fatalf("bd list call lost the closed-inclusive flags: %s", call)
+		}
+	}
+}
+
+// An IDs query too large for one argv string is split across bd list calls,
+// each carrying at most one chunk of the sorted, deduplicated ids, and the
+// rows of every chunk reach the caller.
+func TestBdStoreListSplitsLargeIDFilterAcrossCalls(t *testing.T) {
+	const total = 2500
+	ids := make([]string, 0, total+1)
+	for i := 0; i < total; i++ {
+		ids = append(ids, fmt.Sprintf("bd-%05d", i))
+	}
+	ids = append(ids, "bd-00000") // a duplicate must not be fetched twice
+	var idArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" || len(args) == 0 || args[0] != "list" {
+			return []byte(`[]`), nil
+		}
+		var idArg string
+		for i, a := range args {
+			if a == "--id" && i+1 < len(args) {
+				idArg = args[i+1]
+			}
+		}
+		if idArg == "" {
+			return nil, fmt.Errorf("bd list without --id: %s", strings.Join(args, " "))
+		}
+		idArgs = append(idArgs, idArg)
+		var rows []string
+		for _, id := range strings.Split(idArg, ",") {
+			rows = append(rows, fmt.Sprintf(`{"id":%q,"title":"t","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z"}`, id))
+		}
+		return []byte("[" + strings.Join(rows, ",") + "]"), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{IDs: ids, Status: "closed"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(idArgs) != 3 {
+		t.Fatalf("bd list calls = %d, want 3 chunks for %d ids", len(idArgs), total)
+	}
+	seen := make(map[string]int, total)
+	for _, arg := range idArgs {
+		if n := len(strings.Split(arg, ",")); n > 1000 {
+			t.Fatalf("one --id argument carries %d ids, want at most 1000", n)
+		}
+		for _, id := range strings.Split(arg, ",") {
+			seen[id]++
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("--id arguments named %d distinct ids, want %d", len(seen), total)
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Fatalf("id %s was sent in %d chunks, want 1", id, n)
+		}
+	}
+	if len(got) != total {
+		t.Fatalf("List returned %d beads, want %d", len(got), total)
+	}
+}
+
 func TestBdIssueToBeadFallsBackToMetadataFrom(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -2670,6 +2775,11 @@ func TestBdStoreReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked(t *t
 		if !strings.Contains(args, "--all") {
 			t.Fatalf("blocker lookup %q is not closed-inclusive: want --all", args)
 		}
+		// The lookup names its blocker. Without --id it reads every closed
+		// row in the store to keep one.
+		if !strings.Contains(args, "--id bd-blocker") {
+			t.Fatalf("blocker lookup %q reads the whole closed set: want --id bd-blocker", args)
+		}
 	}
 }
 
@@ -3247,9 +3357,10 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+		// bd filters by id; the read stays unbounded (--limit 0) so a
+		// bd-side limit cannot cut a matching id.
+		`bd list --json --label=bounded-caller --id bd-b --include-infra --include-gates --limit 0`: {
 			out: []byte(`[
-				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
 				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
 			]`),
 		},
@@ -3260,7 +3371,7 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "bd-b" {
-		t.Fatalf("got = %+v, want single bd-b matched Go-side after unbounded fetch", got)
+		t.Fatalf("got = %+v, want single bd-b from an id-filtered unbounded fetch", got)
 	}
 }
 
@@ -4867,44 +4978,88 @@ func TestBdStoreCreateOmitsEphemeralFlagByDefault(t *testing.T) {
 	}
 }
 
-func TestBdStoreListWispsUsesBdListWithClientTierFilter(t *testing.T) {
+// The wisp tier is read as its two halves with bd query and never with a bd
+// list of the whole store: on a large store a bd list --status=closed --all
+// reads tens of thousands of issue rows to keep a few wisps.
+func TestBdStoreListWispsReadsBothHalvesWithBdQuery(t *testing.T) {
 	var calls []string
 	runner := func(_, name string, args ...string) ([]byte, error) {
 		gotCmd := name + " " + strings.Join(args, " ")
 		calls = append(calls, gotCmd)
-		if strings.HasPrefix(gotCmd, "bd query ") {
+		switch {
+		case strings.HasPrefix(gotCmd, "bd query ") && strings.Contains(gotCmd, "no_history=true"):
+			return []byte(`[
+				{"id":"bd-nh","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","no_history":true,"labels":["order-tracking"]}
+			]`), nil
+		case strings.HasPrefix(gotCmd, "bd query "):
 			return []byte(`[
 				{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","ephemeral":true,"labels":["order-tracking"]}
 			]`), nil
 		}
-		return []byte(`[
-			{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-tracking"]},
-			{"id":"bd-nh","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","no_history":true,"labels":["order-tracking"]}
-		]`), nil
+		t.Fatalf("unexpected command %q: the wisp tier reads with bd query only", gotCmd)
+		return nil, nil
 	}
 	s := beads.NewBdStore("/city", runner)
 	got, err := s.List(beads.ListQuery{Label: "order-tracking", TierMode: beads.TierWisps})
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotCmd := firstCommandWithPrefix(calls, "bd list ")
-	if !strings.HasPrefix(gotCmd, "bd list --json ") {
-		t.Fatalf("cmd = %q, want bd list prefix", gotCmd)
+	var sawNoHistory, sawEphemeral bool
+	for _, c := range calls {
+		sawNoHistory = sawNoHistory || strings.Contains(c, "no_history=true AND label=order-tracking")
+		sawEphemeral = sawEphemeral || strings.Contains(c, "ephemeral=true AND label=order-tracking")
 	}
-	if strings.Contains(gotCmd, "--include-ephemeral") {
-		t.Fatalf("cmd = %q, bd list does not support --include-ephemeral", gotCmd)
-	}
-	if !strings.Contains(gotCmd, "--include-templates") {
-		t.Fatalf("cmd = %q, want --include-templates for wisp-aware list", gotCmd)
-	}
-	if !strings.Contains(gotCmd, "--label=order-tracking") {
-		t.Fatalf("cmd = %q, want label flag", gotCmd)
-	}
-	if queryCmd := firstCommandWithPrefix(calls, "bd query "); !strings.Contains(queryCmd, "ephemeral=true AND label=order-tracking") {
-		t.Fatalf("calls = %#v, want matching bd query ephemeral read", calls)
+	if !sawNoHistory || !sawEphemeral {
+		t.Fatalf("calls = %#v, want a no_history and an ephemeral bd query, each with the label", calls)
 	}
 	if len(got) != 2 || got[0].ID != "bd-nh" || got[1].ID != "bd-w" || !got[0].NoHistory || !got[1].Ephemeral {
 		t.Fatalf("got = %+v, want no-history and ephemeral rows only", got)
+	}
+}
+
+// A bd whose query language has no no_history field refuses the expression;
+// the no-history half then falls back to the bd list read it used before.
+func TestBdStoreListWispsFallsBackToBdListWhenBdLacksNoHistoryField(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd := name + " " + strings.Join(args, " ")
+		calls = append(calls, gotCmd)
+		switch {
+		case strings.HasPrefix(gotCmd, "bd query ") && strings.Contains(gotCmd, "no_history=true"):
+			return nil, fmt.Errorf("exit status 1: invalid query expression: unknown field: no_history")
+		case strings.HasPrefix(gotCmd, "bd query "):
+			return []byte(`[]`), nil
+		}
+		return []byte(`[
+			{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z"},
+			{"id":"bd-nh","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","no_history":true}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Status: "open", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if firstCommandWithPrefix(calls, "bd list ") == "" {
+		t.Fatalf("calls = %#v, want the bd list fallback after bd refused no_history", calls)
+	}
+	if len(got) != 1 || got[0].ID != "bd-nh" {
+		t.Fatalf("got = %+v, want only the no-history row", got)
+	}
+
+	// The refusal is latched: a second read on the same store goes straight
+	// to the bd list read and does not ask bd for no_history again.
+	calls = nil
+	if _, err := s.List(beads.ListQuery{Status: "open", TierMode: beads.TierWisps}); err != nil {
+		t.Fatalf("second List: %v", err)
+	}
+	for _, c := range calls {
+		if strings.Contains(c, "no_history=true") {
+			t.Fatalf("second read asked bd for no_history again after it refused: %q", c)
+		}
+	}
+	if firstCommandWithPrefix(calls, "bd list ") == "" {
+		t.Fatalf("calls = %#v, want the latched bd list read", calls)
 	}
 }
 
@@ -4929,9 +5084,10 @@ func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotCmd := firstCommandWithPrefix(calls, "bd list ")
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("cmd = %q, want explicit --limit 0 so bd list does not apply its default page size", gotCmd)
+	for _, gotCmd := range calls {
+		if !strings.HasPrefix(gotCmd, "bd query ") || !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("cmd = %q, want bd query with explicit --limit 0 so bd does not apply its default page size", gotCmd)
+		}
 	}
 	if len(got) != 55 {
 		t.Fatalf("got %d wisps, want all 55 rows", len(got))
@@ -4962,9 +5118,10 @@ func TestBdStoreListWispsAppliesMetadataBeforeClientLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotCmd := firstCommandWithPrefix(calls, "bd list ")
-	if !strings.Contains(gotCmd, "--limit 0") {
-		t.Fatalf("wisps query = %q, want --limit 0 before client-side metadata filtering", gotCmd)
+	for _, gotCmd := range calls {
+		if !strings.Contains(gotCmd, "--limit 0") {
+			t.Fatalf("wisps query = %q, want --limit 0 before client-side metadata filtering", gotCmd)
+		}
 	}
 	if len(got) != 1 || got[0].ID != "bd-old" {
 		t.Fatalf("got = %+v, want metadata-matching wisp after client filter then Limit", got)
@@ -4976,7 +5133,7 @@ func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.
 		out []byte
 		err error
 	}{
-		`bd list --json --include-infra --include-gates --include-templates --limit 0`: {
+		`bd query --json no_history=true --limit 0`: {
 			out: []byte(`[
 				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
 				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time","ephemeral":true}
@@ -5311,8 +5468,8 @@ func TestBdStoreListWispAwareTiersTolerateAdaptersWithoutBdQuery(t *testing.T) {
 }
 
 // TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues pins the
-// bd list storage-tier contract: bd list has no ephemeral-only flag, so wisp
-// reads use normal list flags and then filter the storage tier client-side.
+// bd query contract: a value that is not safe to put in a bd query expression
+// is left out of it, and the rows are filtered client-side instead.
 func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -5353,15 +5510,8 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}
-			gotCmd := firstCommandWithPrefix(calls, "bd list ")
-			if !strings.Contains(gotCmd, "bd list --json") {
-				t.Fatalf("cmd = %q, want wisps bd list", gotCmd)
-			}
-			if strings.Contains(gotCmd, "--include-ephemeral") {
-				t.Fatalf("cmd = %q, bd list does not support --include-ephemeral", gotCmd)
-			}
-			if !strings.Contains(gotCmd, "--include-templates") {
-				t.Fatalf("cmd = %q, want --include-templates for wisp-aware list", gotCmd)
+			if listCmd := firstCommandWithPrefix(calls, "bd list "); listCmd != "" {
+				t.Fatalf("cmd = %q, the wisp tier reads with bd query only", listCmd)
 			}
 			queryCmd := firstCommandWithPrefix(calls, "bd query ")
 			switch tc.name {
