@@ -6,6 +6,9 @@ go_library(
         "dolt.go",
         "failure_artifacts.go",
         "git.go",
+        "loopback_port.go",
+        "loopback_port_lease_linux.go",
+        "loopback_port_lease_other.go",
         "path.go",
         "timeout.go",
     ],
@@ -18,6 +21,7 @@ go_test(
     name = "testutil_test",
     srcs = [
         "failure_artifacts_test.go",
+        "loopback_port_test.go",
         "testenv_import_test.go",
     ],
     embed = [":testutil"],
