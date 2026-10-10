@@ -489,7 +489,7 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, names: processNamesFor(p.World, row.Info), facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
 	t.needs.Lease = t.needs.Lease || spec.needs.Lease // a per-intent needsFor cannot drop the record
 	if t.needs.locksName(spec) {
 		var front *session.Store
@@ -547,6 +547,7 @@ type tx struct {
 	name    string                // the runtime name, when the name lock is held
 	lease   *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
 	expect  session.Info          // the row the premise expects
+	names   []string              // its template's process names, keyed on the pass's row
 	facts0  session.Facts         // its premise facts
 	basis   rowBasis              // its incarnation and token
 	started bool                  // a callStart ran, and no callStop since
@@ -579,7 +580,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		// A provider call is a write: an effect the executor abandoned first
 		// never calls, and one abandoned during it is ambiguous.
 		if ctx.Err() != nil || !t.c.latch.begin() {
-			s = ended(ctx)
+			if s.Outcome != settledLanded || i != len(sections)-1 {
+				s = ended(ctx) // a landed last section stays landed: its Call never fails the effect
+			}
 			break
 		}
 		t.view.prev, t.view.prevErr = t.callWatched(ctx, sec)
@@ -716,7 +719,7 @@ func (t *tx) done(step txStep) settlement {
 func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 	t.view.Now = t.p.Clock.Now()
 	if t.needs.Runtime {
-		rt, cause := readRuntime(ctx, t.p.Runtime, processNamesFor(t.p.World, t.expect), t.name, t.view.Now, t.p.Clock.Now)
+		rt, cause := readRuntime(ctx, t.p.Runtime, t.names, t.name, t.view.Now, t.p.Clock.Now)
 		if cause != "" {
 			return refused(cause), false
 		}

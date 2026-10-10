@@ -386,7 +386,7 @@ func (p *planner) backoffSettled(s settlement) {
 	case key == "":
 	case s.Outcome == settledLanded || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate:
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

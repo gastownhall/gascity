@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -51,21 +52,25 @@ type launchRow struct {
 	tp  TemplateParams
 }
 
-// startTicket is the endpoint ticket the admit Call took, and the verdict
-// the launch leaves for it.
+// startTicket is the endpoint ticket the admit Call took, the verdict the
+// launch leaves for it, and the verb section's row and template, on which
+// the Launch's later sections key (a PreWake binding changes the row's
+// template memo key).
 type startTicket struct {
 	t       *capacityTicket
 	verdict startVerdict
+	launch  launchRow
 }
 
-// admitTicket admits the endpoint ticket and resolves it at every exit:
-// success once the commit lands.
+// admitTicket admits the endpoint ticket at the intent's endpoint, the one
+// the planner gated it on, and resolves it at every exit: success once the
+// commit lands.
 func admitTicket(_ context.Context, c txCaps, in launchRow) (*startTicket, error) {
-	t, ok := c.start.capacity.Admit(resolvedEndpointKey(in.tp, in.row), in.row.ID, startCandidate{info: in.row, tp: in.tp}.logicalTemplate(in.w.Env.Cfg))
+	t, ok := c.start.capacity.Admit(c.it.Endpoint, in.row.ID, startCandidate{info: in.row, tp: in.tp}.logicalTemplate(in.w.Env.Cfg))
 	if !ok {
 		return nil, errEndpointGate
 	}
-	st := &startTicket{t: t, verdict: verdictNotAttempted}
+	st := &startTicket{t: t, verdict: verdictNotAttempted, launch: in}
 	c.onExit(func(final settlement) {
 		if st.verdict == verdictInconclusive && final.Outcome == settledLanded {
 			st.verdict = verdictSuccess
@@ -96,6 +101,11 @@ var verifyWorktree = worktree.Verify
 // the concrete-pool repair, the key's transcript probed in the launch's work
 // dir (S-1), and a fresh token and key.
 func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error) {
+	ticket, err := callResult[*startTicket](v)
+	if err != nil {
+		return preWakeFold{}, nil // Decide refuses on the ticket
+	}
+	tp := ticket.launch.tp
 	f := preWakeFold{token: session.NewInstanceToken()}
 	if key, err := session.GenerateSessionKey(); err == nil {
 		f.key = key
@@ -117,35 +127,14 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 			}
 		}
 	}
-	res, _ := v.World.Templates.lookup(v.Row)
 	_, _, patch := preWakePatch(v.Row, v.Now, f.token)
 	next := foldInfo(foldInfo(v.Row, patch), f.bind)
-	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: res.TP}, v.World.CityPath, v.World.Env.Cfg)
+	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
-	if sk := strings.TrimSpace(next.SessionKey); sk != "" {
-		if dir := launchWorkDir(r, v.World, next, res.TP); dir != "" {
-			present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(res.TP.ResolvedProvider, next), dir, sk)
-			switch {
-			case probeable && present:
-				f.transcript = sessTranscriptPresent
-			case probeable:
-				f.transcript, f.reset = sessTranscriptAbsent, clearStaleResumeKeyMetadata("", nil) // its patch only
-			}
-		}
+	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent {
+		f.reset = clearStaleResumeKeyMetadata("", nil) // its patch only
 	}
 	return f, nil
-}
-
-// launchWorkDir is the work dir prepare launches row in: the task's, the
-// row's, the template's.
-func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
-		return dir
-	}
-	if dir := preparedStartSessionWorkDir(row); dir != "" {
-		return resolveWorkDirAgainstCity(w.CityPath, dir)
-	}
-	return tp.WorkDir
 }
 
 // launchPass is what the PreWake hands the launch Call.
@@ -155,10 +144,20 @@ type launchPass struct {
 	ticket     *startTicket
 }
 
+// preWakeHolds are the holds that refuse a PreWake (S1: not held or
+// quarantined). A wait hold does not: the allocation wakes a wait-held row
+// whose wait is ready, and the hold clears only once its nudge reaches the
+// running session (POOL-077/080). Nor does an unparseable timer, which no
+// heal clears.
+const preWakeHolds = session.HoldTimer | session.HoldQuarantine | session.HoldUser | session.HoldSuspended
+
 // preWakeStep is the PreWake's Decide: the ticket admitted, START-012's
-// name, no hold or kill fence, the runtime still absent; then PreWakePatch
-// with the binding, the stop request cleared (D1), the repair, the
-// stale-resume clear and the set-once key fill (R1).
+// name, no hold (preWakeHolds) or kill fence, the runtime still absent; then
+// PreWakePatch with the binding, the stop request cleared (D1), the repair,
+// the stale-resume clear with its continuation rotation (legacy's
+// commitPendingContinuationReset at the start) and the set-once key fill
+// (R1). The Launch runs the verb section's template with its trigger env
+// taken from the bound row.
 func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	ticket, err := callResult[*startTicket](v)
 	switch {
@@ -172,28 +171,56 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return txStep{Refuse: causeSessionName}
-	case session.HoldsInfo(v.Row, v.Now).BlocksConsume() || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
+	case session.HoldsInfo(v.Row, v.Now).In&preWakeHolds != 0 || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
 		return txStep{Refuse: causeHeld}
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
 	}
-	res, _ := v.World.Templates.lookup(v.Row)
+	tp := ticket.launch.tp
 	_, _, patch := preWakePatch(v.Row, v.Now, f.token)
 	for _, more := range []session.MetadataPatch{f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
+	if len(f.reset) > 0 {
+		epoch, _ := strconv.Atoi(patch["continuation_epoch"])
+		patch["continuation_epoch"], patch["continuation_reset_pending"] = strconv.Itoa(epoch+1), ""
+	}
 	next := foldInfo(v.Row, patch)
 	transcript := f.transcript
-	if next.SessionKey == "" && res.TP.ResolvedProvider != nil && res.TP.ResolvedProvider.SessionIDFlag != "" && f.key != "" {
+	if next.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" && f.key != "" {
 		patch["session_key"], transcript = f.key, sessTranscriptAbsent
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
-	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: launchPass{launchRow: launchRow{w: v.World, row: next, tp: res.TP}, transcript: transcript, ticket: ticket}}
+	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next)}
+	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: launchPass{launchRow: launch, transcript: transcript, ticket: ticket}}
+}
+
+// triggerEnvKeys are the template env keys a row's trigger stamps
+// (resolveTemplateForSessionBeadInfo, sessionTriggerBeadEnv).
+var triggerEnvKeys = []string{"GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF"}
+
+// boundTemplate is tp with its trigger env derived from row, as legacy binds
+// and then resolves: none when the row has no trigger.
+func boundTemplate(tp TemplateParams, row session.Info) TemplateParams {
+	env := maps.Clone(tp.Env)
+	for _, k := range triggerEnvKeys {
+		delete(env, k)
+	}
+	if trigger := sessionTriggerBeadEnv(row); trigger != nil {
+		if env == nil {
+			env = make(map[string]string, len(trigger)+1)
+		}
+		env["GC_SPAWN_ORIGIN"] = "demand"
+		maps.Copy(env, trigger)
+	}
+	tp.Env = env
+	return tp
 }
 
 // startOutcome is the launch Call's typed output for the commit.
 type startOutcome struct {
 	err      error
+	tp       TemplateParams // the template launched
 	prepared *preparedStart
 	mcp      session.MetadataPatch
 	health   string
@@ -215,7 +242,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	leaf, _, _ := runtime.ResolveBackend(c.start.sp, name)
 	prepared.cfg.FreshOnly = true
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
-	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), prepared: prepared}
+	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), tp: in.tp, prepared: prepared}
 	stop()
 	in.ticket.verdict = verdictInconclusive
 	switch {
@@ -229,7 +256,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 		}
 		t.Stop()
 	}
-	if out.mcp, err = startCommitMCPPatch(prepared, in.row); err == nil {
+	if out.mcp, err = startCommitMCPPatch(prepared, in.row); err == nil && out.err == nil { // legacy persists on success only
 		err = session.PersistRuntimeMCPServersSnapshot(prepared.cfg.Env["GC_CITY_PATH"], in.row.ID, prepared.cfg.MCPServers)
 	}
 	if err != nil {
@@ -241,21 +268,22 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 }
 
 // commitStep is the commit's Decide on the read after the Start: only a
-// runtime alive with the PreWake token commits (I3), with the MCP keys, the
-// #46 mirror cleared and session.woke; a death is died during startup (S3).
+// runtime alive with the PreWake token commits (I3), whatever the Start
+// returned, with the MCP keys, the #46 mirror cleared and session.woke; a
+// death is died during startup (S3).
 func commitStep(v txView) txStep {
 	out, err := callResult[startOutcome](v)
-	switch {
-	case err != nil:
+	if err != nil {
 		return txStep{Fail: causeCallError, Err: err}
+	}
+	died := out.err == nil || errors.Is(out.err, runtime.ErrSessionDiedDuringStartup)
+	cause := runtimeCause(v.Row, v.RT)
+	switch {
+	case cause == "": // whatever S2's states the row is in
 	case errors.Is(out.err, runtime.ErrSessionInitializing) || errors.Is(out.err, runtime.ErrRuntimeUnavailable):
 		return txStep{Fail: causeStartDeferred, Err: out.err}
 	case runtime.IsProviderCapacity(out.err):
 		return txStep{Fail: causeCapacity, Err: out.err}
-	}
-	died := out.err == nil || errors.Is(out.err, runtime.ErrSessionDiedDuringStartup)
-	switch {
-	case v.RT.Alive() && compareIdentity(v.Row, v.RT.Identity) == identityCurrent: // whatever S2's states the row is in
 	case died && (v.RT.Class == rtAbsent || v.RT.Class == rtCorpse || v.RT.Class == rtZombie):
 		return txStep{Fail: causeDiedDuringStartup, Err: out.err} // C5a2's abandon class
 	case errors.Is(out.err, runtime.ErrSessionExists) && (v.RT.Class == rtCorpse || v.RT.Class == rtZombie):
@@ -263,17 +291,16 @@ func commitStep(v txView) txStep {
 	case out.err != nil && !errors.Is(out.err, runtime.ErrSessionExists):
 		return txStep{Fail: causeStartError, Err: out.err}
 	default:
-		return txStep{Refuse: verbStep(true)(v, nil, nil).Refuse}
+		return txStep{Refuse: cause}
 	}
 	patch := startCommitPatch(out.prepared, v.Row, v.Now)
 	maps.Copy(patch, out.mcp)
 	if out.accrued {
 		patch[startupHealthActiveCountMetadataKey], patch[startupHealthActiveKindMetadataKey] = "0", ""
 	}
-	res, _ := v.World.Templates.lookup(v.Row)
-	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: res.TP.DisplayName(), SessionID: v.Row.ID}
+	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: out.tp.DisplayName(), SessionID: v.Row.ID}
 	noted := &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now}
-	return txStep{Write: patch, Facts: effectFacts{Events: []events.Event{woke}, Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: res.TP.DisplayName()}}
+	return txStep{Write: patch, Facts: effectFacts{Events: []events.Event{woke}, Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}
 }
 
 // landedCommit is what a landed commit hands the after-commit Call.

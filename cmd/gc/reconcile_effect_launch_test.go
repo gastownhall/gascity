@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,14 +78,6 @@ func (k *txKit) mutate(mark func(*simRuntime)) {
 	k.sp.touch("s-gc-1")
 }
 
-// stubTranscript makes every keyed transcript present or absent.
-func stubTranscript(t *testing.T, present bool) {
-	t.Helper()
-	old := staleResumeKeyProbe
-	staleResumeKeyProbe = func(string, string, string) (bool, bool) { return present, true }
-	t.Cleanup(func() { staleResumeKeyProbe = old })
-}
-
 // Kills a launch that commits a token the runtime does not carry, a commit
 // without legacy's session.woke, a Start without FreshOnly (I24), and a
 // reused incarnation: a gone runtime launches under generation 4 and a new
@@ -147,6 +142,9 @@ func TestPreWakeRefusesWhatHoldsOrMovedSinceThePass(t *testing.T) {
 		refuse string
 	}{
 		{"held at the pass", []string{"held_until", future}, nil, causeHeld},
+		{"user-hold at the pass", []string{"sleep_intent", "user-hold"}, nil, causeHeld},
+		{"quarantined at the pass", []string{"quarantined_until", future}, nil, causeHeld},
+		{"suspended at the pass", []string{"state", "suspended"}, nil, causeHeld},
 		{"held since", nil, []string{"held_until", future}, causePremise},
 		{"quarantined since", nil, []string{"quarantined_until", future}, causePremise},
 		{"kill fence since", nil, []string{"state", "asleep", "state_reason", session.KillPendingReason, "sleep_reason", string(session.SleepReasonKilled), "slept_at", gatherNow.Format(time.RFC3339)}, causePremise},
@@ -233,6 +231,10 @@ func TestLaunchDeathsAndHeldDeadNames(t *testing.T) {
 	}{
 		{"gone after a nil start", func(k *txKit) { k.on(seamAfterCall, func() {}); k.on(seamAfterCall, func() { k.mutate(nil) }) }, causeDiedDuringStartup},
 		{"the provider's died error", func(k *txKit) { k.sp.nextStart = runtime.ErrSessionDiedDuringStartup }, causeDiedDuringStartup},
+		{"a zombie after a nil start", func(k *txKit) {
+			k.on(seamAfterCall, func() {})
+			k.on(seamAfterCall, func() { k.mutate(func(r *simRuntime) { r.zombie = true }) })
+		}, causeDiedDuringStartup},
 		{"runtime unavailable", func(k *txKit) { k.sp.nextStart = runtime.ErrRuntimeUnavailable }, causeStartDeferred},
 		{"another start error", func(k *txKit) { k.sp.nextStart = errors.New("boom") }, causeStartError},
 		{"a dead held name", func(k *txKit) {
@@ -333,6 +335,7 @@ func TestEndpointTicketOnlyOnLaunch(t *testing.T) {
 		tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
 		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
 		k.p.held.start.capacity = guard
+		k.it.Endpoint = k0
 	}
 	noop, _ := launchKit(t, "active")
 	withGuard(noop)
@@ -445,6 +448,10 @@ func TestACPLaunchRoutesBeforeStart(t *testing.T) {
 	if s := k.runKind(); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
 	}
+	tmux, leaf := launchKit(t, "asleep")
+	if s := tmux.runKind(); s.Outcome != settledLanded || len(leaf.routed) != 0 {
+		t.Fatalf("a non-ACP template: settlement %+v, routes %v; want landed with nothing routed to ACP", s, leaf.routed)
+	}
 }
 
 // Kills a launch commit that drops legacy's MCP keys, the runtime snapshot
@@ -509,14 +516,21 @@ func TestLaunchCommitPremise(t *testing.T) {
 	}
 }
 
-// Kills an endpoint-gate refusal backed off as a row failure: it is a
-// deferral the breaker paces, as a swap pause is.
+// Kills an endpoint-gate refusal or a provider capacity failure backed off
+// as a row failure: each is a deferral the breaker paces, as a swap pause
+// is (legacy keeps the row's place).
 func TestEndpointGateRefusalDoesNotBackOffRow(t *testing.T) {
-	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, nil)
-	k := rowKey{Leg: rowLeg, ID: "a"}
-	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledRefused, Cause: causeEndpointGate, At: plannerT0})
-	if r, ok := p.backoff.Snapshot()[rowBackoffKey(k)]; ok {
-		t.Fatalf("row backoff %+v after an endpoint-gate refusal, want none", r)
+	for _, s := range []settlement{
+		{Outcome: settledRefused, Cause: causeEndpointGate},
+		{Outcome: settledFailed, Cause: causeCapacity},
+	} {
+		p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, nil)
+		k := rowKey{Leg: rowLeg, ID: "a"}
+		s.Key, s.Kind, s.At = k, intentStart, plannerT0
+		p.backoffSettled(s)
+		if r, ok := p.backoff.Snapshot()[rowBackoffKey(k)]; ok {
+			t.Fatalf("row backoff %+v after %s, want none", r, s.Cause)
+		}
 	}
 }
 
@@ -560,6 +574,7 @@ func TestEndpointTicketVerdicts(t *testing.T) {
 			tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
 			k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
 			k.p.held.start.capacity = guard
+			k.it.Endpoint = k0
 			c.hook(k)
 			s := k.runKind()
 			if st := guard.breaker(k0).Status(); st.State != c.state || st.Trips != c.trips {
@@ -598,7 +613,275 @@ func TestLaunchRefusedByAnOpenEndpoint(t *testing.T) {
 	tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
 	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
 	k.p.held.start.capacity = guard
+	k.it.Endpoint = k0
 	if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeEndpointGate || len(k.starts()) != 0 || k.meta("generation") != "3" {
 		t.Fatalf("settlement %+v, starts %d; want refused endpoint-gate, nothing written or started", s, len(k.starts()))
+	}
+}
+
+// Kills a PreWake that refuses a wait-ready wake (POOL-077/080: the
+// allocation wakes a wait-held row whose wait is ready; its hold clears only
+// once the nudge reaches the running session) or wedges on an unparseable
+// timer no heal clears: each launches.
+func TestPreWakeLaunchesWaitHeldAndUnparseableTimerRows(t *testing.T) {
+	for _, meta := range [][]string{
+		{"wait_hold", "true", "sleep_intent", "wait-hold", "sleep_reason", "wait-hold"},
+		{"held_until", "not-a-time"},
+		{"quarantined_until", "not-a-time"},
+	} {
+		k, _ := launchKit(t, "asleep", meta...)
+		if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 {
+			t.Errorf("%v: settlement %+v, starts %d; want one launch", meta, s, len(k.starts()))
+		}
+	}
+}
+
+// Kills a PreWake that trusts the verb section's read of what is under the
+// name: a corpse, a zombie or an unreadable runtime that appears after the
+// ticket is admitted refuses runtime-present, writing nothing.
+func TestPreWakeRefusesWhateverAppearedUnderTheName(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		mark func(*simRuntime)
+	}{
+		{"a corpse", func(r *simRuntime) { r.corpse = true }},
+		{"a zombie", func(r *simRuntime) { r.zombie = true }},
+		{"an unreadable runtime", func(r *simRuntime) { r.probeErr = true }},
+	} {
+		k, _ := launchKit(t, "asleep")
+		k.on(seamAfterCall, func() { k.runtimeAs("gc-1", "tok", c.mark) })
+		if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeRuntimePresent || len(k.starts()) != 0 || k.meta("generation") != "3" {
+			t.Errorf("%s: settlement %+v, starts %d; want refused %s, nothing written or started", c.name, s, len(k.starts()), causeRuntimePresent)
+		}
+	}
+}
+
+// Kills a commit on an identity read off a runtime object that changed
+// across it (I3, O2): the commit refuses liveness-unknown and commits
+// nothing.
+func TestLaunchCommitNeedsTheSameObject(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	leaf.onStart = func(context.Context) {
+		reads := 0
+		k.leaf.during = func() {
+			if reads++; reads == 2 { // between the bracketing liveness reads
+				token := k.meta("instance_token")
+				k.sp.mu.Lock()
+				k.sp.put("s-gc-1", "gc-1", "4", token)
+				k.sp.mu.Unlock()
+			}
+		}
+	}
+	if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeLivenessUnknown || k.meta("started_config_hash") != "" {
+		t.Fatalf("settlement %+v, want refused %s and nothing committed", s, causeLivenessUnknown)
+	}
+}
+
+// Kills a commit that a capacity or deferred error vetoes over a runtime
+// that is already up and Current: the commit decides on the runtime first.
+func TestLaunchCommitsAnAliveRuntimeWhateverTheStartReturned(t *testing.T) {
+	for _, startErr := range []error{fmt.Errorf("quota: %w", runtime.ErrProviderCapacity), runtime.ErrSessionInitializing} {
+		k, leaf := launchKit(t, "asleep")
+		k.sp.nextStart = startErr
+		leaf.onStart = func(context.Context) {
+			token := k.meta("instance_token")
+			k.sp.mu.Lock()
+			k.sp.put("s-gc-1", "gc-1", "4", token)
+			k.sp.mu.Unlock()
+		}
+		if s := k.runKind(); s.Outcome != settledLanded || k.meta("started_config_hash") == "" {
+			t.Errorf("%v: settlement %+v, want the alive Current runtime committed", startErr, s)
+		}
+	}
+}
+
+// Kills a stale-key wait deaf to the effect's context (START-019): a context
+// that ends during the wait ends the effect without the clock moving.
+func TestStaleKeyWaitEndsWithTheContext(t *testing.T) {
+	stubTranscript(t, true)
+	k, _ := launchKit(t, "asleep", "session_key", "k-1")
+	clk := k.p.Clock.(*fakePlannerClock)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan settlement, 1)
+	go func() { done <- k.run(ctx, effectSpecs[intentStart]) }()
+	clk.waitTimerAt(t, gatherNow.Add(staleKeyDetectDelay))
+	cancel()
+	select {
+	case s := <-done:
+		if s.Outcome == settledLanded {
+			t.Fatalf("settlement %+v, want the effect ended by its context", s)
+		}
+	case <-time.After(plannerTestGuard):
+		t.Fatal("the stale-key wait outlived its context")
+	}
+}
+
+// Kills a landed commit settled as failed when the context ends before the
+// after-commit Call (it never fails the effect): the settlement stays landed
+// and the ticket is credited a success.
+func TestLaunchCommitLandedThenContextEnds(t *testing.T) {
+	now := gatherNow
+	guard := newEndpointCapacityGuard(func() time.Time { return now })
+	k0 := endpointKey("provider:test-agent")
+	trip, _ := guard.Admit(k0, "outside", "outside")
+	trip.Resolve(verdictCapacity)
+	now = now.Add(guard.breaker(k0).Status().BackoffCap)
+	k, _ := launchKit(t, "asleep")
+	k.p.held.start.capacity, k.it.Endpoint = guard, k0
+	ctx, cancel := context.WithCancelCause(context.Background())
+	k.on(seamAfterWrite, func() {})                                   // PreWake's write
+	k.on(seamAfterWrite, func() { cancel(context.DeadlineExceeded) }) // the commit's write
+	s := k.run(ctx, effectSpecs[intentStart])
+	if s.Outcome != settledLanded || k.meta("state") != "active" || guard.breaker(k0).Status().State != resilience.StateClosed {
+		t.Fatalf("settlement %+v, state %q, breaker %v; want landed, active, closed", s, k.meta("state"), guard.breaker(k0).Status().State)
+	}
+}
+
+// Kills a runtime MCP snapshot written after a failed Start (legacy persists
+// it on success only): a failed Start leaves the prior snapshot, and a
+// capacity refusal settles capacity even when the snapshot could not be
+// cleared.
+func TestLaunchPersistsTheMCPSnapshotOnSuccessOnly(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		startErr error
+		cause    string
+		blocked  bool // the snapshot path is a non-empty dir: a clear would fail
+	}{
+		{"a failed start", errors.New("boom"), causeStartError, false},
+		{"a capacity refusal", fmt.Errorf("quota: %w", runtime.ErrProviderCapacity), causeCapacity, true},
+	} {
+		k, _ := launchKit(t, "asleep")
+		row := k.p.World.Census.Rows[k.it.Key]
+		tp := TemplateParams{TemplateName: "worker", Env: map[string]string{"GC_CITY_PATH": k.p.World.CityPath}}
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		snapshot := citylayout.RuntimePath(k.p.World.CityPath, "session-mcp", "gc-1.json")
+		if c.blocked {
+			if err := os.MkdirAll(filepath.Join(snapshot, "x"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err := os.MkdirAll(filepath.Dir(snapshot), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(snapshot, []byte(`[{"name":"prior"}]`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		k.sp.nextStart = c.startErr
+		s := k.runKind()
+		if _, err := os.Stat(snapshot); s.Cause != c.cause || err != nil {
+			t.Errorf("%s: settlement %+v, snapshot %v; want %s and the prior snapshot kept", c.name, s, err, c.cause)
+		}
+	}
+}
+
+// Kills a stale resume key cleared without rotating the continuation
+// (legacy's commitPendingContinuationReset at the start, chat.go): the
+// PreWake bumps continuation_epoch and clears the pending mark in its own
+// write, and the runtime starts under the new epoch.
+func TestStaleKeyResetRotatesTheContinuation(t *testing.T) {
+	stubTranscript(t, false)
+	k, leaf := launchKit(t, "asleep", "session_key", "stale", "continuation_epoch", "5", "started_config_hash", "h0")
+	k.p.Clock.(*fakePlannerClock).auto = true
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(), ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	s := k.runKind()
+	if s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+		t.Fatalf("settlement %+v, want one launch", s)
+	}
+	if env := leaf.cfgs[0].Env["GC_CONTINUATION_EPOCH"]; env != "6" || k.meta("continuation_epoch") != "6" || k.meta("continuation_reset_pending") != "" {
+		t.Fatalf("runtime epoch %q, row epoch %q, reset pending %q; want 6, 6 and cleared", env, k.meta("continuation_epoch"), k.meta("continuation_reset_pending"))
+	}
+}
+
+// Kills later sections keyed on the bound row, which a PreWake binding takes
+// out of the pass's template memo: the commit's read still carries the
+// template's process names, session.woke its subject, and a name taken
+// during the Start still refuses occupied.
+func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
+	k, _ := launchKit(t, "asleep")
+	k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{Patch: session.MetadataPatch{"gc.trigger_bead_id": "w-1"}}}
+	s := k.runKind()
+	k.leaf.mu.Lock()
+	names := slices.Clone(k.leaf.names)
+	k.leaf.mu.Unlock()
+	if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || s.Facts.Events[0].Subject != "worker" || len(names[len(names)-1]) == 0 {
+		t.Fatalf("settlement %+v, process names per read %v; want landed, session.woke for worker, the commit read with process names", s, names)
+	}
+	k, leaf := launchKit(t, "asleep")
+	k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{Patch: session.MetadataPatch{"gc.trigger_bead_id": "w-1"}}}
+	leaf.onStart = func(context.Context) { k.runtimeAs("gc-2", "theirs", nil) }
+	if s := k.runKind(); s.Cause != causeOccupied {
+		t.Fatalf("a name taken during the Start: cause %q, want %s", s.Cause, causeOccupied)
+	}
+}
+
+// Kills a launch env carrying the trigger the template was resolved under
+// after PreWake cleared or re-pointed it: the trigger env and the demand
+// origin follow the bound row (legacy binds, then resolves).
+func TestLaunchTriggerEnvFollowsTheBoundRow(t *testing.T) {
+	stale := map[string]string{"GC_TRIGGER_BEAD_ID": "w-old", "GC_TRIGGER_WORK_BEAD_ID": "w-old", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}
+	for _, c := range []struct {
+		name, bind string
+		want       map[string]string
+	}{
+		{"cleared", "", map[string]string{"GC_TRIGGER_BEAD_ID": "", "GC_SPAWN_ORIGIN": "", "GC_KEEP": "1"}},
+		{"re-pointed", "w-new", map[string]string{"GC_TRIGGER_BEAD_ID": "w-new", "GC_TRIGGER_WORK_BEAD_ID": "w-new", "GC_SPAWN_ORIGIN": "demand", "GC_KEEP": "1"}},
+	} {
+		k, leaf := launchKit(t, "asleep", "gc.trigger_bead_id", "w-old")
+		row := k.p.World.Census.Rows[k.it.Key]
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: TemplateParams{TemplateName: "worker", Env: maps.Clone(stale)}}}}
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{Patch: session.MetadataPatch{"gc.trigger_bead_id": c.bind}}}
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
+			t.Fatalf("%s: settlement %+v, want one launch", c.name, s)
+		}
+		for key, want := range c.want {
+			if got := leaf.cfgs[0].Env[key]; got != want {
+				t.Errorf("%s: launch %s = %q, want %q", c.name, key, got, want)
+			}
+		}
+	}
+}
+
+// Kills breaker transitions left unflushed and a planner that drops the
+// controller's guard on the way to its effects: the host's guard reaches the
+// pass's start caps, and a ticket's resolution flushes its transition to the
+// recorder.
+func TestPlannerHandsItsGuardToTheStartAndFlushes(t *testing.T) {
+	now := gatherNow
+	guard := newEndpointCapacityGuard(func() time.Time { return now })
+	rec := events.NewFake()
+	k, _ := launchKit(t, "asleep")
+	k0 := endpointKey("provider:test-agent")
+	trip, _ := guard.Admit(k0, "outside", "outside")
+	trip.Resolve(verdictCapacity)
+	guard.flush(nil, nil)
+	now = now.Add(guard.breaker(k0).Status().BackoffCap)
+	k.p.held.start.capacity, k.p.held.start.rec, k.it.Endpoint = guard, rec, k0
+	if s := k.runKind(); s.Outcome != settledLanded || len(rec.Events) == 0 {
+		t.Fatalf("settlement %+v, events %v: the ticket's breaker transition was not flushed to the recorder", s, rec.Events)
+	}
+
+	rt := newDefaultPlanner(io.Discard)
+	rt.bindHost(plannerHost{gather: gatherEnv{CityPath: t.TempDir(), Capacity: func() *endpointCapacityGuard { return guard }}})
+	if rt.planner.capacity == nil || rt.planner.capacity() != guard {
+		t.Fatal("bindHost dropped the host's capacity guard")
+	}
+	var handed *endpointCapacityGuard
+	withSpecs(t, func(specs map[string]effectSpec) {
+		specs[intentStart] = effectSpec{class: capStarts, caps: capProviderStart, body: func(_ context.Context, c txCaps) settlement {
+			handed = c.start.capacity
+			return settlement{Outcome: settledNoop}
+		}}
+	})
+	x := newEffectExecutor(func(settlement) {}, io.Discard)
+	x.spawn = func(f func()) { f() }
+	rt.planner.effects = x
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, censusStore()))}
+	rt.planner.submit(w, &allocDecision{}, []intent{{Kind: intentStart, Key: rowKeyOf("gc-1")}})
+	if handed != guard {
+		t.Fatalf("the pass's start caps carry guard %p, want the host's %p", handed, guard)
 	}
 }

@@ -114,33 +114,13 @@ func taskWorkDirs(w *World) taskWorkDirResolver {
 func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 	return func(v txView, prepared *preparedStart, prepErr error) txStep {
 		res, ok := v.World.Templates.lookup(v.Row)
-		if !ok || res.Err != nil {
+		switch cause := runtimeCause(v.Row, v.RT); {
+		case !ok || res.Err != nil:
 			return txStep{Refuse: causeTemplate, Err: res.Err}
-		}
-		switch v.RT.Class {
-		case rtUnsupported:
-			return txStep{Refuse: causeLivenessUnsupported}
-		case rtAbsent:
-			if adopt {
-				return txStep{Refuse: causeNotPresent}
-			}
+		case cause == causeNotPresent && !adopt:
 			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP}}
-		case rtCorpse, rtZombie:
-			return txStep{Refuse: causeDead}
-		}
-		if !v.RT.Alive() { // unknown, or the session object changed around the identity read
-			return txStep{Refuse: causeLivenessUnknown}
-		}
-		switch compareIdentity(v.Row, v.RT.Identity) {
-		case identityCurrent:
-		case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's S7 exit is C5a3's
-			return txStep{Refuse: causeTokenDrift}
-		case identityNewerSelf:
-			return txStep{Refuse: causeNewerSelf}
-		case identityForeign: // a pending create's rollback is C5a2's
-			return txStep{Refuse: causeOccupied}
-		default:
-			return txStep{Refuse: causeAttribution}
+		case cause != "":
+			return txStep{Refuse: cause}
 		}
 		noted := effectFacts{Noted: &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now}}
 		switch {
@@ -151,6 +131,33 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		}
 		return txStep{Write: startCommitPatch(prepared, v.Row, v.Now), Done: true, Facts: noted}
 	}
+}
+
+// runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""
+// when the runtime is alive and Current; causeNotPresent when it is absent.
+func runtimeCause(row session.Info, rt *txRuntime) string {
+	switch rt.Class {
+	case rtUnsupported:
+		return causeLivenessUnsupported
+	case rtAbsent:
+		return causeNotPresent
+	case rtCorpse, rtZombie:
+		return causeDead
+	}
+	if !rt.Alive() { // unknown, or the session object changed around the identity read
+		return causeLivenessUnknown
+	}
+	switch compareIdentity(row, rt.Identity) {
+	case identityCurrent:
+		return ""
+	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's S7 exit is C5a3's
+		return causeTokenDrift
+	case identityNewerSelf:
+		return causeNewerSelf
+	case identityForeign: // a pending create's rollback is C5a2's
+		return causeOccupied
+	}
+	return causeAttribution
 }
 
 // creating reports a row in the creating state: S1's uncommitted intent.
