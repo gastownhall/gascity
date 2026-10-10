@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
@@ -739,6 +740,39 @@ func TestBeadListCrossRig(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp.Total != 2 {
 		t.Errorf("cross-rig: Total = %d, want 2", resp.Total)
+	}
+}
+
+func TestBeadListReportsOldestParticipatingRigCacheAge(t *testing.T) {
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
+	defer restore()
+
+	state := newFakeState(t)
+	city := livenessMemStore{MemStore: beads.NewMemStore(), live: true, lastFresh: base.Add(-2 * time.Second)}
+	fastRig := livenessMemStore{MemStore: beads.NewMemStore(), live: true, lastFresh: base.Add(-7 * time.Second)}
+	staleRig := livenessMemStore{MemStore: beads.NewMemStore(), live: true, lastFresh: base.Add(-19 * time.Second)}
+	state.cityBeadStore = city
+	state.stores = map[string]beads.Store{
+		state.cityName: city,
+		"fast":         fastRig,
+		"stale":        staleRig,
+	}
+	h := newTestCityHandler(t, state)
+
+	// all=true exercises both the rebuilt response and the response-cache hit
+	// path, which must expose the same federated cache-health signal.
+	for attempt := 1; attempt <= 2; attempt++ {
+		req := httptest.NewRequest("GET", cityURL(state, "/beads?all=true"), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attempt %d: status = %d, want 200; body=%s", attempt, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("X-Gc-Cache-Age-S"); got != "19" {
+			t.Errorf("attempt %d: X-GC-Cache-Age-S = %q, want oldest participating cache age 19", attempt, got)
+		}
 	}
 }
 

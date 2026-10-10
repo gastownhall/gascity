@@ -105,6 +105,18 @@ func (s stubLivenessReporter) Stats() beads.CacheStats {
 	return beads.CacheStats{LastFreshAt: s.lastFresh}
 }
 
+// livenessMemStore is a queryable cache-health fixture for handler tests.
+type livenessMemStore struct {
+	*beads.MemStore
+	live      bool
+	lastFresh time.Time
+}
+
+func (s livenessMemStore) IsLive() bool { return s.live }
+func (s livenessMemStore) Stats() beads.CacheStats {
+	return beads.CacheStats{LastFreshAt: s.lastFresh}
+}
+
 func TestCacheAgeSeconds_ClockInjectedStates(t *testing.T) {
 	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
@@ -127,6 +139,21 @@ func TestCacheAgeSeconds_ClockInjectedStates(t *testing.T) {
 				t.Errorf("cacheAgeSeconds(%s) = %v, want %v", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCacheAgeSecondsForStoresReportsOldestParticipatingCache(t *testing.T) {
+	base := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	restore := SetLivenessClockForTest(&clock.Fake{Time: base})
+	defer restore()
+
+	stores := map[string]beads.Store{
+		"city":  stubLivenessReporter{live: true, lastFresh: base.Add(-2 * time.Second)},
+		"rig-a": stubLivenessReporter{live: true, lastFresh: base.Add(-19 * time.Second)},
+		"rig-b": stubLivenessReporter{live: true, lastFresh: base.Add(-7 * time.Second)},
+	}
+	if got := cacheAgeSecondsForStores(stores); got != 19 {
+		t.Errorf("cacheAgeSecondsForStores = %v, want oldest participating cache age 19", got)
 	}
 }
 
