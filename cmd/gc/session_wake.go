@@ -57,6 +57,39 @@ func preWakeCommit(
 	sessFront *sessions.Store,
 	clk clock.Clock,
 ) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		return sessFront.ApplyPatch(info.ID, batch)
+	})
+}
+
+// errPreWakeSuperseded refuses a PreWake whose row moved since it was read.
+var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved since it was read, or its runtime lease was taken over")
+
+// preWakeCommitUnder is preWakeCommit as a compare-and-swap (NEW-6): the
+// incarnation lands only on a re-read row whose lifecycle facts are still
+// info's and that still records lease, fenced at that read's revision. A
+// moved row writes nothing and returns errPreWakeSuperseded. Without a
+// conditional writer the check is the re-read alone.
+func preWakeCommitUnder(
+	info sessions.Info,
+	sessFront *sessions.Store,
+	clk clock.Clock,
+	lease *sessions.RuntimeLease,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
+	return preWakeCommitWith(info, clk, func(batch sessions.MetadataPatch) error {
+		applied, err := sessFront.ApplyPatchIfLifecycleUnchangedUnder(info, batch, lease)
+		if err == nil && !applied {
+			err = errPreWakeSuperseded
+		}
+		return err
+	})
+}
+
+func preWakeCommitWith(
+	info sessions.Info,
+	clk clock.Clock,
+	write func(sessions.MetadataPatch) error,
+) (newGen int, token string, fold sessions.MetadataPatch, err error) {
 	name := info.SessionNameMetadata
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
@@ -92,7 +125,7 @@ func preWakeCommit(
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
+	if writeErr := write(batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
 	}
 	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
