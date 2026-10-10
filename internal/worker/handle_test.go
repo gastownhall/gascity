@@ -1878,6 +1878,59 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleNudgeWaitIdleGrokWrapsReminder(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "grok",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true")
+	}
+
+	var waitCalls, nudgeNow int
+	var delivered string
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitCalls++
+		case "NudgeNow":
+			nudgeNow++
+			delivered = call.Message
+		}
+	}
+	if waitCalls != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", waitCalls)
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
+	}
+	if !strings.Contains(delivered, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system reminder", delivered)
+	}
+	if !strings.Contains(delivered, "[mail] check deploy status") {
+		t.Fatalf("delivered message = %q, want mail-tagged reminder", delivered)
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {

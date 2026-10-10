@@ -3140,6 +3140,11 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 		want  bool
 	}{
 		{"empty", nil, false},
+		{"grok busy footer", []string{"│ ❯ │", "  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts"}, true},
+		{"grok idle footer", []string{"│ ❯ │", "  Shift+Tab:mode  │  Ctrl+x:shortcuts"}, false},
+		{"grok queued startup footer", []string{"Shift+Tab:mode  │  Ctrl+;:queue  │  Ctrl+x:shortcuts"}, false},
+		{"grok cancel prose", []string{"Use Ctrl+c:cancel to stop a request."}, false},
+
 		{"idle prompt", []string{"❯ ", ""}, false},
 		{"busy status bar", []string{"❯ ", "  esc to interrupt  "}, true},
 		{"busy mid-line", []string{"some output", "Press esc to interrupt generation"}, true},

@@ -423,30 +423,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamAPIKeyEnv: "XAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
-			"model":           "grok-composer-2.5-fast",
+			"model":           "grok-4.7",
 		},
-		// The grok TUI accepts no positional or flag-delivered initial
-		// prompt (`-p/--single` is print-and-exit), so prompts are
-		// delivered via tmux send-keys once the TUI is ready.
-		//
-		// grok's input handler does not accept send-keys until ~5-6s after
-		// launch (TUI init: auth check + model-list load). Its prompt box
-		// renders earlier (~3s) but silently drops keystrokes until then, so
-		// ReadyPromptPrefix-based readiness detection can't be used here — the
-		// box would match and we'd send into a not-yet-listening TUI. A blind
-		// 5000ms delay raced that window: the initial nudge was lost and the
-		// worker idled forever at the welcome screen (never running `gc hook`).
-		// 12000ms clears the ready threshold with margin for spawn-time load.
-		// Empirically verified against grok 0.2.32: send-keys is dropped at 5s
-		// and lands reliably from ~6s onward.
-		PromptMode:       "none",
-		ReadyDelayMs:     12000,
+		// Grok Build 1.0.50 accepts the initial prompt as a positional
+		// argument. This queues it through startup rather than racing TUI
+		// readiness with send-keys and the legacy 12-second blind delay.
+		PromptMode:       "arg",
 		ProcessNames:     []string{"grok"},
 		InstructionsFile: "AGENTS.md",
 		ResumeFlag:       "--resume",
 		ResumeStyle:      "flag",
 		PrintArgs:        []string{"-p"},
-		TitleModel:       "grok-composer-2.5-fast",
+		TitleModel:       "grok-4.7",
 		PermissionModes: map[string]string{
 			"default":      "--permission-mode default",
 			"auto-edit":    "--permission-mode acceptEdits",
@@ -473,13 +461,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				modelChoice("grok-build", "Grok Build"),
 				modelChoice("grok-composer-2.5", "Grok Composer 2.5"),
 				modelChoice("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
-				// Frontier coding ids. Gasburger pins grok-4.6 on refinery and
-				// gorkcats; this enum had not been touched since grok was added
-				// and carried none of them, so the launch path found no
-				// FlagArgs and silently omitted --model (ga-fyh). grok-4.7 is
-				// listed ahead of its rollout.
+				modelChoice("grok-4.5", "Grok 4.5"),
 				modelChoice("grok-4.6", "Grok 4.6"),
 				modelChoice("grok-4.7", "Grok 4.7"),
+				modelChoice("grok-4.7-build-fast", "Grok 4.7 Build Fast"),
 			),
 		},
 	},

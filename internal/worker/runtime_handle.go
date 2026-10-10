@@ -464,7 +464,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	// property of the runtime rather than a transient miss. Reporting it as a
 	// bare Delivered:false is how `gc session nudge` came to print an
 	// unqualified success line for a delivery path that is a no-op end to end.
-	if h.providerName != "claude" {
+	if h.providerName != "claude" && h.providerName != "grok" {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)

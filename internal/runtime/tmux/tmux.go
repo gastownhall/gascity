@@ -2729,7 +2729,8 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // submitVerifyEligibleFamilies are the provider families whose busy indicator
 // paneContainsBusyIndicator can actually read: claude (its spinner/elapsed-timer
 // footer, the confirmed ga-bwm failure) and codex, whose TUI shows the same
-// "esc to interrupt" string that function has always matched.
+// "esc to interrupt" string that function has always matched. Grok Build
+// exposes Ctrl+c:cancel only in its busy footer (verified on 1.0.50).
 //
 // Eligibility is what makes an unconfirmed submit an ERROR instead of a silent
 // success, and that is the point for codex: the best-effort fallback reports
@@ -2741,7 +2742,7 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // Adding a family here is a promise about its busy indicator: a provider whose
 // indicator is unreadable would report every delivery as unconfirmed and burn
 // the queue's attempts re-pasting messages that already landed.
-var submitVerifyEligibleFamilies = []string{"claude", "codex"}
+var submitVerifyEligibleFamilies = []string{"claude", "codex", "grok"}
 
 func submitVerifyEligibleFamily(family string) bool {
 	for _, eligible := range submitVerifyEligibleFamilies {
@@ -4803,6 +4804,12 @@ var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
 // own cancel / shell-tool strings.
 func paneContainsBusyIndicator(lines []string) bool {
 	for _, line := range lines {
+		// Require Grok's footer prefix, not a mention of the cancel key in
+		// ordinary output. Its idle footer lacks the cancel action.
+		footer := strings.TrimSpace(line)
+		if strings.HasPrefix(footer, "Shift+Tab:mode") && strings.Contains(footer, "Ctrl+c:cancel") {
+			return true
+		}
 		if strings.Contains(line, "esc to interrupt") ||
 			strings.Contains(line, "Press Esc or Ctrl+C to cancel") ||
 			strings.Contains(line, "[current working directory ") ||

@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -226,5 +227,45 @@ func TestNudgeConfirmBudgetThreshold(t *testing.T) {
 				t.Errorf("submits = %d, want exactly 1 (the message reached the agent regardless of verdict)", n)
 			}
 		})
+	}
+}
+
+// This fixture uses the boxed composer and footer captured from Grok 1.0.50.
+func TestGrokNudgeConfirmsSubmitAndObservesBusy(t *testing.T) {
+	if os.Getenv("GC_TMUX_INTEGRATION") != "1" {
+		t.Skip("set GC_TMUX_INTEGRATION=1")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 required")
+	}
+	script := fakeTUIScript(t)
+	logPath := filepath.Join(t.TempDir(), "submits.log")
+	tm := NewTmuxWithConfig(Config{SocketName: fmt.Sprintf("gcgrok%d", time.Now().UnixNano()), NudgeReadyTimeout: 5 * time.Second, NudgeLockTimeout: 5 * time.Second})
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	cmd := fmt.Sprintf("GC_FAKE_TUI_FAMILY=grok python3 %s %s 0.1 30", shellQuote(script), shellQuote(logPath))
+	if _, err := tm.run("new-session", "-d", "-s", "grok", "-x", "100", "-y", "30", cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.SetEnvironment("grok", "GC_PROVIDER", "grok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.WaitForIdle(context.Background(), "grok", 5*time.Second); err != nil {
+		t.Fatalf("initial idle: %v", err)
+	}
+	if err := tm.NudgeSession("grok", "grok-nudge-probe"); err != nil {
+		t.Fatalf("confirmed submit: %v", err)
+	}
+	if idle, err := tm.SnapshotIdle("grok"); err != nil || idle {
+		t.Fatalf("busy snapshot = %v, %v", idle, err)
+	}
+	if err := tm.WaitForIdle(context.Background(), "grok", 250*time.Millisecond); !errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("busy wait = %v, want timeout", err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(raw), "\tSUBMIT\t"); got != 1 {
+		t.Fatalf("submits = %d, want exactly one: %s", got, raw)
 	}
 }

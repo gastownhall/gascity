@@ -511,8 +511,8 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.Command != "grok" {
 		t.Errorf("Command = %q, want %q", p.Command, "grok")
 	}
-	if p.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	if p.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
 	}
 	if p.InstructionsFile != "AGENTS.md" {
 		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
@@ -532,24 +532,24 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, "--resume")
 	}
-	if p.TitleModel != "grok-composer-2.5-fast" {
-		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-composer-2.5-fast")
+	if p.TitleModel != "grok-4.7" {
+		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-4.7")
 	}
-	if p.ReadyDelayMs != 12000 {
-		t.Errorf("ReadyDelayMs = %d, want 12000", p.ReadyDelayMs)
+	if p.ReadyDelayMs != 0 {
+		t.Errorf("ReadyDelayMs = %d, want 0", p.ReadyDelayMs)
 	}
 
 	rp := specToResolved("grok", &p)
 	if got := rp.ProviderSessionCreateTransport(); got != "" {
 		t.Fatalf("ProviderSessionCreateTransport() = %q, want \"\" (no ACP)", got)
 	}
-	if p.OptionDefaults["model"] != "grok-composer-2.5-fast" {
-		t.Errorf("OptionDefaults[model] = %q, want grok-composer-2.5-fast", p.OptionDefaults["model"])
+	if p.OptionDefaults["model"] != "grok-4.7" {
+		t.Errorf("OptionDefaults[model] = %q, want grok-4.7", p.OptionDefaults["model"])
 	}
-	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
+	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-4.7"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
 	}
-	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "grok-4.7"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
 	}
 }

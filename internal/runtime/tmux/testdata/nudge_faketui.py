@@ -12,6 +12,8 @@ logpath = sys.argv[1]
 busy_delay = float(sys.argv[2])   # seconds after submit before the spinner shows
 busy_hold = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
 
+grok = os.environ.get("GC_FAKE_TUI_FAMILY") == "grok"
+
 state = {"draft": [], "busy_at": None, "done_at": None}
 lock = threading.Lock()
 
@@ -27,13 +29,18 @@ def render():
             busy = ba is not None and now >= ba and (da is None or now < da)
             draft = "".join(state["draft"])
         out = ["\x1b[2J\x1b[H", "fake-claude-tui\r\n", "\r\n"]
-        if busy:
+        if busy and not grok:
             el = int(now - ba) + 1
             out.append("✻ Thinking… (%ds · ↑ 0 tokens · esc to interrupt)\r\n" % el)
         else:
             out.append("\r\n")
-        out.append("❯ %s\r\n" % draft)
-        out.append("  bypass permissions on\r\n")
+        if grok:
+            out.append("│ ❯ %s │\r\n" % draft)
+            cancel = "  │  Ctrl+c:cancel" if busy else ""
+            out.append("  Shift+Tab:mode%s  │  Ctrl+x:shortcuts\r\n" % cancel)
+        else:
+            out.append("❯ %s\r\n" % draft)
+            out.append("  bypass permissions on\r\n")
         sys.stdout.write("".join(out)); sys.stdout.flush()
         time.sleep(0.05)
 
