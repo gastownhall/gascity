@@ -44,10 +44,21 @@ type idleLatchedNamedHolderResult struct {
 	starts       []string
 	postSessions []beads.Bead
 	routed       map[string]bool
+	namedDemand  map[string]bool
 	holder       beads.Bead
 }
 
-func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, routedWork bool, holderMeta map[string]string) idleLatchedNamedHolderResult {
+// idleLatchedHolderWork is the work seeded around the idle-latched holder.
+type idleLatchedHolderWork struct {
+	// routed seeds unassigned gc.routed_to work on the backing template.
+	routed bool
+	// blockedAssigned seeds a blocked in_progress bead assigned to the
+	// holder's identity: NamedSessionDemand counts it, the awake set's
+	// assigned-work pass does not.
+	blockedAssigned bool
+}
+
+func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, work idleLatchedHolderWork, holderMeta map[string]string) idleLatchedNamedHolderResult {
 	t.Helper()
 	const identity = "olivia"
 	cfg := &config.City{
@@ -70,7 +81,7 @@ func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, routedWork bool, h
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 9, 22, 21, 52, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
-	if routedWork {
+	if work.routed {
 		if _, err := store.Create(beads.Bead{
 			Title:    "Publish or reconcile canonical PR",
 			Type:     "task",
@@ -78,6 +89,18 @@ func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, routedWork bool, h
 			Metadata: map[string]string{"gc.routed_to": identity},
 		}); err != nil {
 			t.Fatalf("Create(work): %v", err)
+		}
+	}
+	if work.blockedAssigned {
+		blocked := true
+		if _, err := store.Create(beads.Bead{
+			Title:     "Waiting on an upstream decision",
+			Type:      "task",
+			Status:    "in_progress",
+			Assignee:  identity,
+			IsBlocked: &blocked,
+		}); err != nil {
+			t.Fatalf("Create(blocked assigned work): %v", err)
 		}
 	}
 	holder, err := store.Create(beads.Bead{
@@ -168,6 +191,7 @@ func reconcileIdleLatchedInteractiveNamedHolder(t *testing.T, routedWork bool, h
 		starts:       starts,
 		postSessions: postSessions,
 		routed:       dsResult.NamedSessionRoutedDemand,
+		namedDemand:  dsResult.NamedSessionDemand,
 		holder:       gotHolder,
 	}
 }
@@ -191,15 +215,41 @@ func assertIdleLatchedHolderWoke(t *testing.T, res idleLatchedNamedHolderResult)
 }
 
 func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderWakesOnRoutedDemand(t *testing.T) {
-	res := reconcileIdleLatchedInteractiveNamedHolder(t, true, nil)
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{routed: true}, nil)
 	if !res.routed["olivia"] {
 		t.Fatalf("precondition: NamedSessionRoutedDemand[olivia] = false, want true")
 	}
 	assertIdleLatchedHolderWoke(t, res)
 }
 
+// Blocked in_progress work assigned to the holder sets NamedSessionDemand,
+// which wins the awake set's reason switch as "named-demand". Live routed work
+// must still override the idle latch in that combined case, or the template
+// wedge survives whenever the holder also parks blocked work.
+func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderWakesOnRoutedDemandDespiteBlockedAssignedWork(t *testing.T) {
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{routed: true, blockedAssigned: true}, nil)
+	if !res.routed["olivia"] {
+		t.Fatalf("precondition: NamedSessionRoutedDemand[olivia] = false, want true")
+	}
+	if !res.namedDemand["olivia"] {
+		t.Fatalf("precondition: NamedSessionDemand[olivia] = false, want true (blocked in_progress assigned work)")
+	}
+	assertIdleLatchedHolderWoke(t, res)
+}
+
+// Blocked assigned work alone is not demand the idle latch yields to.
+func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderStaysAsleepOnBlockedAssignedWorkAlone(t *testing.T) {
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{blockedAssigned: true}, nil)
+	if !res.namedDemand["olivia"] {
+		t.Fatalf("precondition: NamedSessionDemand[olivia] = false, want true (blocked in_progress assigned work)")
+	}
+	if res.woken != 0 || res.running || len(res.starts) != 0 {
+		t.Fatalf("idle-latched holder woke on blocked assigned work alone: woken=%d running=%v starts=%v", res.woken, res.running, res.starts)
+	}
+}
+
 func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderHonorsExplicitWake(t *testing.T) {
-	res := reconcileIdleLatchedInteractiveNamedHolder(t, false, map[string]string{
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{}, map[string]string{
 		"wake_request":      string(sessionpkg.WakeCauseExplicit),
 		"wake_requested_at": "2026-09-22T21:52:00Z",
 	})
@@ -209,7 +259,7 @@ func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderHonorsExplicitWa
 // The idle latch itself stays intact: with no routed work and no explicit wake,
 // the interactive holder remains asleep.
 func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderStaysAsleepWithoutDemand(t *testing.T) {
-	res := reconcileIdleLatchedInteractiveNamedHolder(t, false, nil)
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{}, nil)
 	if res.woken != 0 || res.running || len(res.starts) != 0 {
 		t.Fatalf("idle-latched holder woke with no demand: woken=%d running=%v starts=%v", res.woken, res.running, res.starts)
 	}
@@ -221,7 +271,7 @@ func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderStaysAsleepWitho
 // sleep). It must not re-wake the idle-latched holder, or a stale flag would
 // keep bouncing it out of every idle sleep.
 func TestReconcileSessionBeads_IdleLatchedNamedHolderIgnoresExplicitWakeOlderThanItsSleep(t *testing.T) {
-	res := reconcileIdleLatchedInteractiveNamedHolder(t, false, map[string]string{
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, idleLatchedHolderWork{}, map[string]string{
 		"wake_request":      string(sessionpkg.WakeCauseExplicit),
 		"wake_requested_at": "2026-09-21T22:00:00Z", // slept_at is 2026-09-21T23:52:00Z
 	})

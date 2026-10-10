@@ -10,15 +10,39 @@ import (
 	"time"
 )
 
-// BackstopSpeedupEnv is a test-only knob: a whole number N >= 2 divides the
-// cadence of each periodic backstop a city controller times through Backstop
-// (its callers: the patrol tick, cooldown orders, the bead caches'
-// reconcile, the order-tracking watchdog, the autoclose sweep, the order
-// rescan, and the backstop lanes' polls) by N, clamped to
-// MaxBackstopSpeedup. Cadences that do not go through Backstop keep their
-// real periods; among them are the supervisor's patrol, the proxied guard
-// tick, the managed Dolt scope watchdog, and the backstop lanes' intervals
-// and retries.
+// BackstopSpeedupEnv is a test-only knob: a whole number N >= 2 divides by N,
+// clamped to MaxBackstopSpeedup, every duration a city controller times
+// through Backstop. The lists below are the one inventory of what it divides
+// and what it leaves alone: TESTING.md, test/acceptance/BUILD.bazel and
+// config.DaemonConfig.PatrolIntervalDuration point here rather than repeat
+// them, so a cadence that starts or stops going through Backstop is listed
+// here.
+//
+// Divided, as direct callers of Backstop:
+//   - cooldown orders' intervals
+//   - the bead caches' reconcile poll and full-scan interval
+//   - the order-tracking watchdog and the order rescan
+//   - the autoclose sweep's passes, grace and re-defers
+//   - the backstop lanes' polls
+//
+// Divided, as derived from the city's patrol interval, which
+// config.DaemonConfig.PatrolIntervalDuration returns divided (a window of
+// several patrols is divided with it):
+//   - the patrol tick and the startup retry
+//   - the orders lane's pace
+//   - the runtime-inventory lane's pace, observation max age and read-budget
+//     window
+//   - the drain restart timeout, above its 5 minute floor only
+//   - the admission bucket's refill, so the controller admits N times as
+//     many wakes per real second
+//   - the reconcile planner's patrol pass, observation max age, boot-gate
+//     alert and pass-record dedupe window
+//   - the external-reads lane's pace and its sources' freshness
+//
+// Durations that go through neither keep their real periods; among them are
+// the supervisor's patrol, the proxied guard tick, the managed Dolt scope
+// watchdog, the backstop lanes' intervals and retries, and the external-reads
+// lane's demand-repairs step, which runs at most once a real minute.
 //
 // It exists for acceptance tests that assert what a running city does NOT
 // do over a window long enough for its backstops to come round several
@@ -58,10 +82,12 @@ var announceOnce sync.Once
 var announceTo io.Writer = os.Stderr
 
 // BackstopSpeedup returns the factor in force: BackstopSpeedupEnv clamped to
-// [1, MaxBackstopSpeedup] in a test-hooks binary, 1 otherwise. The first
-// call in a process that sees the variable set prints one loud notice on
-// stderr saying whether it took effect; the controller's first cadence read
-// is at startup, so the notice heads its log.
+// [1, MaxBackstopSpeedup] in a test-hooks binary, 1 otherwise. It reads the
+// variable on every call, on purpose (tests vary it case by case); only the
+// notice is once per process. The first call in a process that sees the
+// variable set prints one loud notice on stderr saying whether it took
+// effect; the controller's first cadence read is at startup, so the notice
+// heads its log.
 func BackstopSpeedup() int {
 	raw, set := os.LookupEnv(BackstopSpeedupEnv)
 	if !set || strings.TrimSpace(raw) == "" {

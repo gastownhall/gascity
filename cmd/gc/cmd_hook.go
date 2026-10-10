@@ -1427,28 +1427,29 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // labels:null for an unlabeled bead — so this fails open exactly like the
 // is_blocked projection above it.
 //
-// Scope (ga-5736js): this filters what the hook SERVES as work. It does not
-// touch the assignee-scoped demand/liveness tiers, which stay hold-transparent
-// by design so a held assignment still keeps its owner visible to the pool and
-// to crash recovery.
+// Scope (ga-5736js): this filters what the hook SERVES as work, on every hook
+// path. The controller applies the same predicate (beadmeta.HasDispatchHold)
+// to assigned OPEN work, so a held OPEN row carries no wake readiness, does not
+// keep its assignee awake, and is not a drain-ack strand. The rest of the
+// assignment's accounting stays hold-transparent: the assigned-work snapshot,
+// orphan release, pool accounting and the in_progress tiers still count it, so
+// a held assignment keeps its owner visible to the pool and to crash recovery.
 func isHeldHookCandidate(item map[string]any) bool {
 	raw, ok := item["labels"].([]any)
 	if !ok {
 		return false
 	}
+	labels := make([]string, 0, len(raw))
 	for _, entry := range raw {
-		label, ok := entry.(string)
-		if !ok {
-			continue
-		}
-		label = strings.TrimSpace(label)
-		for _, hold := range beadmeta.DispatchHoldLabels {
-			if strings.EqualFold(label, hold) {
-				return true
-			}
+		if label, ok := entry.(string); ok {
+			labels = append(labels, label)
 		}
 	}
-	return false
+	// One predicate for "held": the controller's wake-demand and drain-ack
+	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
+	// answer with the same function, so they cannot drift from what the hook
+	// actually refuses to serve.
+	return beadmeta.HasDispatchHold(labels)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth

@@ -24,19 +24,19 @@ func TestLockRuntimeNameTakesTheNameFlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := &World{CityPath: city}
-	if _, unlock, ok := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"}); ok || unlock != nil {
+	if _, lease, cause, _ := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"}, nil, 0); cause != causeNameBusy || lease != nil {
 		t.Fatal("lockRuntimeName ignored the name's flock")
 	}
 	flock.Release()
-	_, unlock, ok := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"})
-	if !ok {
-		t.Fatal("lockRuntimeName refused a free name")
+	_, lease, cause, _ := lockRuntimeName(w, sessionpkg.Info{SessionName: "named-1"}, nil, 0)
+	if cause != "" {
+		t.Fatalf("lockRuntimeName refused a free name: %q", cause)
 	}
 	if _, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: city, Name: "named-1"}); !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) {
 		t.Fatalf("flock under an effect's lock = %v, want busy", err)
 	}
-	unlock()
-	unlock()
+	lease.Release()
+	lease.Release()
 }
 
 // TestControllerKillsNeverWait (M1): the controller's kill takes the runtime
@@ -110,7 +110,7 @@ func TestControllerStopSequencesDeferOnABusyLease(t *testing.T) {
 			var stderr synchronizedBuffer
 			tracker := &asyncStartTracker{}
 			if seq == "async stop" {
-				queueDrainAckAsyncStop(city, beads.NewMemStore(), sp, &config.City{}, "sess-1", "worker", "", "", nil, tracker, nil, &stderr)
+				queueDrainAckAsyncStop(city, beads.NewMemStore(), sp, &config.City{}, sessionpkg.Decide(sessionpkg.Info{ID: "sess-1"}, sessionpkg.FactsLegacyDrainStop), "worker", nil, tracker, nil, &stderr)
 			} else {
 				done, _ := tracker.startDrainAckStop("escalate:sess-1")
 				queueDrainAckForcedTermination(city, beads.NewMemStore(), sp, &config.City{}, sessionpkg.Info{ID: "sess-1"}, "worker",
@@ -172,7 +172,7 @@ func TestVerifiedStopNeverWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	began := time.Now()
-	if err := verifiedStop(city, info, store, sp, nil); !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || time.Since(began) > time.Second {
+	if err := verifiedStop(city, sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), store, sp, nil); !errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) || time.Since(began) > time.Second {
 		t.Fatalf("verifiedStop under a held lease = %v after %v, want busy at once", err, time.Since(began))
 	}
 }
@@ -216,17 +216,17 @@ func TestDeadCorpseCleanupSkipsAHeldName(t *testing.T) {
 	sp := newDeadRuntimeArtifactProvider()
 	sp.visible["dead-worker"] = true
 	sp.dead["dead-worker"] = true
-	snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "s1", Status: "open", Metadata: map[string]string{"session_name": "dead-worker", "template": "worker"}}})
+	store, snapshot := corpseRowsForTest(t, []beads.Bead{{ID: "s1", Status: "open", Metadata: map[string]string{"session_name": "dead-worker", "template": "worker"}}})
 	held, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: city, Name: "dead-worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var stderr strings.Builder
-	if got := cleanupDeadRuntimeSessionCorpses(city, nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
+	if got := cleanupDeadRuntimeSessionCorpses(city, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
 		t.Fatalf("cleanup under a held name = %d (stopped %v), want none", got, sp.stopped)
 	}
 	held.Release()
-	if got := cleanupDeadRuntimeSessionCorpses(city, nil, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
+	if got := cleanupDeadRuntimeSessionCorpses(city, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
 		t.Fatalf("cleanup of a free name = %d, want 1; stderr %q", got, stderr.String())
 	}
 }
@@ -256,15 +256,15 @@ func TestTickPoolRuntimeReleaseTakesTheFlock(t *testing.T) {
 
 // drainAckStopPendingForTest makes row id in store drain-ack stop-pending at
 // token, creating it (runtime name) when absent, and returns its generation:
-// an async drain-ack stop kills only such a row (drainAckStopStillPending).
-func drainAckStopPendingForTest(t *testing.T, store beads.Store, id, name, token string) string {
+// an async drain-ack stop kills only such a row, as it decided on it.
+func drainAckStopPendingForTest(t *testing.T, store beads.Store, id, name, token string) sessionpkg.Decided {
 	t.Helper()
 	patch := map[string]string{"state": string(sessionpkg.StateDraining), "state_reason": sessionpkg.DrainAckStopPendingReason, "instance_token": token}
-	if b, err := store.Get(id); err == nil {
+	if _, err := store.Get(id); err == nil {
 		if err := store.SetMetadataBatch(id, patch); err != nil {
 			t.Fatal(err)
 		}
-		return b.Metadata["generation"]
+		return sessionpkg.Decide(sessionInfoFromBead(mustGetBead(t, store, id)), sessionpkg.FactsLegacyDrainStop)
 	}
 	patch["session_name"], patch["generation"] = name, "1"
 	if mem, ok := store.(*beads.MemStore); ok {
@@ -275,7 +275,7 @@ func drainAckStopPendingForTest(t *testing.T, store beads.Store, id, name, token
 	if _, err := store.Create(beads.Bead{ID: id, Title: name, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: patch}); err != nil {
 		t.Fatal(err)
 	}
-	return "1"
+	return sessionpkg.Decide(sessionInfoFromBead(mustGetBead(t, store, id)), sessionpkg.FactsLegacyDrainStop)
 }
 
 // TestOperatorResumeOfAStopPendingRowIsRefused is the two-tick attach race
@@ -290,7 +290,7 @@ func TestOperatorResumeOfAStopPendingRowIsRefused(t *testing.T) {
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	gen := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "tok-1")
+	d := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "tok-1")
 	mgr := newSessionManagerWithConfig(city, store, sp, nil)
 	err := mgr.Start(context.Background(), "gc-worker", "resume-cmd", runtime.Config{}, sessionpkg.ResumeOperator)
 	if !errors.Is(err, sessionpkg.ErrSessionStopping) {
@@ -301,7 +301,7 @@ func TestOperatorResumeOfAStopPendingRowIsRefused(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "tok-1", gen, nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, d, "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the async stop never finished")
 	}
@@ -320,17 +320,17 @@ func TestAsyncDrainAckStopSkipsAMovedRow(t *testing.T) {
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	gen := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "tok-1")
+	d := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "tok-1")
 	if err := store.SetMetadataBatch("gc-worker", map[string]string{"generation": "2", "instance_token": "tok-2"}); err != nil {
 		t.Fatal(err)
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "tok-1", gen, nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, d, "worker", nil, tracker, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the async stop never finished")
 	}
-	if sp.CountCalls("Stop", "worker") != 0 || !strings.Contains(stderr.String(), "no longer stop-pending") {
+	if sp.CountCalls("Stop", "worker") != 0 || !strings.Contains(stderr.String(), "moved since its stop was decided") {
 		t.Fatalf("stops %d, stderr %q; want the moved row spared", sp.CountCalls("Stop", "worker"), stderr.String())
 	}
 }
@@ -386,10 +386,10 @@ func TestAsyncDrainAckReKillDecidesAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp.StopLeavesRunning["worker"] = true
-	gen := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "")
+	d := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "")
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(city, store, sp, &config.City{}, "gc-worker", "worker", "", gen, []string{"claude"}, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(city, store, sp, &config.City{}, d, "worker", []string{"claude"}, tracker, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the async stop never finished")
 	}
@@ -408,19 +408,19 @@ func TestDrainAckEscalationSparesAMovedRow(t *testing.T) {
 	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	gen := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
+	d := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
 	if err := store.SetMetadataBatch("sess-1", map[string]string{"state": string(sessionpkg.StateActive)}); err != nil {
 		t.Fatal(err)
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	done, _ := tracker.startDrainAckStop("escalate:sess-1")
-	queueDrainAckForcedTermination(city, store, sp, &config.City{}, sessionpkg.Info{ID: "sess-1", Generation: gen}, "worker",
+	queueDrainAckForcedTermination(city, store, sp, &config.City{}, d.Info(), "worker",
 		"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the escalation never finished")
 	}
-	if sp.CountCalls("Stop", "worker") != 0 || !strings.Contains(stderr.String(), "no longer stop-pending") {
+	if sp.CountCalls("Stop", "worker") != 0 || !strings.Contains(stderr.String(), "moved since") {
 		t.Fatalf("stops %d, stderr %q; want the moved row spared", sp.CountCalls("Stop", "worker"), stderr.String())
 	}
 }
@@ -439,11 +439,11 @@ func TestDrainAckEscalationRechecksBeforeItsProcessKill(t *testing.T) {
 		t.Fatal(err)
 	}
 	sp.StopLeavesRunning["worker"] = true
-	gen := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "")
+	d := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "")
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	done, _ := tracker.startDrainAckStop("escalate:gc-worker")
-	queueDrainAckForcedTermination(city, store, sp, &config.City{}, sessionpkg.Info{ID: "gc-worker", Generation: gen}, "worker",
+	queueDrainAckForcedTermination(city, store, sp, &config.City{}, d.Info(), "worker",
 		"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, 0, done, nil, &stderr)
 	if !tracker.wait(5 * time.Second) {
 		t.Fatal("the escalation never finished")
@@ -512,7 +512,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 	t.Run("verifiedStop", func(t *testing.T) {
 		env := newReconcilerTestEnv()
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
-		if err := verifiedStop(t.TempDir(), sessionInfoFromBead(mustGetBead(t, env.store, b.ID)), env.store, env.sp, env.cfg); err != nil {
+		if err := verifiedStop(t.TempDir(), sessionpkg.Decide(sessionInfoFromBead(mustGetBead(t, env.store, b.ID)), sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); err != nil {
 			t.Fatalf("verifiedStop: %v", err)
 		}
 		stopped(t, env)
@@ -528,7 +528,8 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 }
 
 // TestVerifiedStopDecidesAgainUnderTheLease: the drain's timeout kill spares
-// a row whose hold moved since the tick read it.
+// a row an operator suspended since the drain read it (an agent's heartbeat,
+// held_until alone, does not move the drain's basis).
 func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -536,8 +537,10 @@ func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	b := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&b)
 	decided := sessionInfoFromBead(mustGetBead(t, env.store, b.ID))
-	env.setSessionMetadata(&b, map[string]string{"held_until": "2099-01-01T00:00:00Z"})
-	if err := verifiedStop(t.TempDir(), decided, env.store, env.sp, env.cfg); !errors.Is(err, sessionpkg.ErrKillPremiseMoved) || !env.sp.IsRunning("worker") {
+	if err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifiedStop(t.TempDir(), sessionpkg.Decide(decided, sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); !errors.Is(err, sessionpkg.ErrKillPremiseMoved) || !env.sp.IsRunning("worker") {
 		t.Fatalf("verifiedStop of a moved row = %v (running %v), want ErrKillPremiseMoved", err, env.sp.IsRunning("worker"))
 	}
 }

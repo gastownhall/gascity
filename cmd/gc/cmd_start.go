@@ -1058,6 +1058,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
 	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
+	// The one-shot pass reads work through the same legs a controller does: the
+	// work store it opened, not the sessions store it leads with (censusWorkLeg,
+	// mc-3ixn3.16). It registers them for its own run, as a controller does.
+	if _, served := registeredResidencyEntry(cityPath); !served && cityPath != "" {
+		routes := cliStorageRoutes(cityPath)
+		registerResidencyRoutes(cityPath, routes, func() beads.Store { return oneShotStore })
+		defer unregisterResidencyRoutes(cityPath, routes)
+	}
 
 	// One-shot bead reconciliation: same code path as the daemon.
 	sessionQueryPartial := false

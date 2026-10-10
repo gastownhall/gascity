@@ -492,37 +492,3 @@ func TestControllerStartNeverWaits(t *testing.T) {
 		t.Fatalf("controller start under a held lease = %v after %v, want busy at once", err, time.Since(began))
 	}
 }
-
-// TestSameKillFacts: a controller kill's premise holds only while the row
-// keeps its incarnation, its hold, and, when it was decided dormant, its
-// dormancy.
-func TestSameKillFacts(t *testing.T) {
-	base := Info{Generation: "2", InstanceToken: "tok", MetadataState: string(StateAsleep)}
-	for _, c := range []struct {
-		name  string
-		move  func(*Info)
-		holds bool
-	}{
-		{"unmoved", func(*Info) {}, true},
-		{"closed", func(i *Info) { i.Closed = true }, false},
-		{"new generation", func(i *Info) { i.Generation = "3" }, false},
-		{"new token", func(i *Info) { i.InstanceToken = "tok-2" }, false},
-		{"hold set", func(i *Info) { i.HeldUntil = "2099-01-01T00:00:00Z" }, false},
-		{"sleep intent", func(i *Info) { i.SleepIntent = "operator-hold" }, false},
-		{"dormant woken", func(i *Info) { i.MetadataState = string(StateActive) }, false},
-		{"dormant to dormant", func(i *Info) { i.MetadataState = string(StateSuspended) }, true},
-	} {
-		fresh := base
-		c.move(&fresh)
-		if got := SameKillFacts(base, fresh); got != c.holds {
-			t.Errorf("%s: SameKillFacts = %v, want %v", c.name, got, c.holds)
-		}
-	}
-	live := base
-	live.MetadataState = string(StateActive)
-	draining := live
-	draining.MetadataState = string(StateDraining)
-	if !SameKillFacts(live, draining) {
-		t.Error("a live row the controller moved to draining must keep its premise")
-	}
-}
