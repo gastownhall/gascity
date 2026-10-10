@@ -4898,7 +4898,7 @@ func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *test
 		published := make(chan struct{})
 		var armed atomic.Bool
 		armed.Store(true)
-		newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
+		newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode, nativeTransport beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 			if armed.CompareAndSwap(true, false) {
 				started := make(chan struct{})
 				go func() {
@@ -4908,7 +4908,7 @@ func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *test
 				}()
 				<-started
 			}
-			return prevOpen(cityPath, mode)
+			return prevOpen(cityPath, mode, nativeTransport)
 		}
 		if want {
 			err = cs.SuspendAgent("worker")

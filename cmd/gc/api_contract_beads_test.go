@@ -100,7 +100,8 @@ func contractBeadsFamily(t *testing.T, h *contractHarness) {
 	}
 
 	closed, err := c.PostV0CityByCityNameBeadByIdCloseWithResponse(ctx, city, childBead.Id,
-		&genclient.PostV0CityByCityNameBeadByIdCloseParams{XGCRequest: contractCSRF})
+		&genclient.PostV0CityByCityNameBeadByIdCloseParams{XGCRequest: contractCSRF},
+		genclient.BeadCloseBody{})
 	expectStatus(t, "close bead", closed, err, http.StatusOK)
 	h.expectBeadStatus(t, childBead.Id, "closed")
 	reopened, err := c.PostV0CityByCityNameBeadByIdReopenWithResponse(ctx, city, childBead.Id,

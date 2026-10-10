@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"mime"
 	"net/http"
 	"strings"
@@ -169,6 +170,12 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 	reset, err := c.PostV0CityByCityNameSessionByIdResetWithResponse(ctx, city, sess.Id,
 		&genclient.PostV0CityByCityNameSessionByIdResetParams{XGCRequest: contractCSRF})
 	expectStatus(t, "reset session", reset, err, http.StatusOK)
+	// Wake and reset only request a start; the reconciler restarts the
+	// runtime asynchronously. Kill acts on a live runtime, so wait for it.
+	h.backoff(t, "session running again after wake and reset", func() (bool, string) {
+		got := h.getSession(t, sess.Id)
+		return h.sp.IsRunning(sess.SessionName), fmt.Sprintf("state=%q running=%v", got.State, got.Running)
+	})
 	stopped, err := c.PostV0CityByCityNameSessionByIdStopWithResponse(ctx, city, sess.Id,
 		&genclient.PostV0CityByCityNameSessionByIdStopParams{XGCRequest: contractCSRF})
 	expectStatus(t, "stop session", stopped, err, http.StatusOK)
