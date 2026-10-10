@@ -37,6 +37,7 @@ func TestBazelNightlyFreshOnDriftWiring(t *testing.T) {
 	var raw struct {
 		Jobs map[string]struct {
 			Needs any            `yaml:"needs"`
+			If    string         `yaml:"if"`
 			Uses  string         `yaml:"uses"`
 			With  map[string]any `yaml:"with"`
 		} `yaml:"jobs"`
@@ -45,11 +46,13 @@ func TestBazelNightlyFreshOnDriftWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	bazel := raw.Jobs["bazel"]
-	if bazel.Uses != "./.github/workflows/bazel.yml" || bazel.Needs != "decide" {
-		t.Errorf("bazel job uses %q needs %v, want bazel.yml after decide", bazel.Uses, bazel.Needs)
+	//nolint:misspell // GitHub Actions spells it cancelled()
+	if bazel.Uses != "./.github/workflows/bazel.yml" || bazel.Needs != "decide" || bazel.If != "${{ !cancelled() }}" {
+		t.Errorf("bazel job uses %q needs %v if %q, want bazel.yml after decide, run unless the workflow is canceled", bazel.Uses, bazel.Needs, bazel.If)
 	}
-	if got := bazel.With["fresh-test-results"]; got != "${{ needs.decide.outputs.fresh == 'true' }}" {
-		t.Errorf("bazel fresh-test-results %v, want the decide job's output", got)
+	// Fail open: a failed decide (empty output) is fresh, never a skipped nightly.
+	if got := bazel.With["fresh-test-results"]; got != "${{ needs.decide.outputs.fresh != 'false' }}" {
+		t.Errorf("bazel fresh-test-results %v, want fresh unless decide said false", got)
 	}
 
 	remember := wf.Jobs["remember"]
@@ -74,7 +77,7 @@ func TestRBEWorkerEnvCanaryRecordsTheHostFingerprint(t *testing.T) {
 	const cond = "always() && steps.measure.outcome != 'skipped'"
 	fAt, f := findStep(measure, runs(`host-fingerprint.txt`))
 	if f == nil || f.If != cond || f.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" ||
-		!strings.Contains(f.Run, `worker-env.raw.txt`) || !strings.Contains(f.Run, "uname -r") {
+		!strings.Contains(f.Run, `worker-env.raw.txt`) || !strings.Contains(f.Run, "uname -r") || !strings.Contains(f.Run, "${ImageVersion:-}") {
 		t.Fatalf("no fingerprint step over the raw listing, the kernel and the rbe-worker revision: %+v", f)
 	}
 	uAt, u := findStep(measure, func(s ghStep) bool { return s.With["name"] == "host-fingerprint" })
@@ -121,7 +124,7 @@ case "$1 $2" in
 "run list") [ -n "$STUB_RUN" ] || exit 1; echo "$STUB_RUN" ;;
 "run download") d=""; while [ $# -gt 0 ]; do [ "$1" = -D ] && d=$2; shift; done
   mkdir -p "$d" && printf '%s\n' "$STUB_FP" >"$d/host-fingerprint.txt" ;;
-"cache list") printf '%s\n' $STUB_CACHE ;;
+"cache list") echo "$*" >>"$STUB_LOG"; case " $* " in *" --ref refs/heads/main "*) printf '%s\n' $STUB_CACHE ;; *) printf '%s\n' $STUB_PR_CACHE ;; esac ;;
 *) exit 2 ;;
 esac
 `
@@ -135,6 +138,8 @@ esac
 				"GITHUB_STEP_SUMMARY=" + summary, "GITHUB_REPOSITORY=gastownhall/gascity",
 				"GITHUB_EVENT_NAME=" + c.event, "SHADOW=" + c.shadow, "GH_TOKEN=x",
 				"STUB_RUN=" + c.runID, "STUB_FP=" + c.fingerprint, "STUB_CACHE=" + c.cacheKeys,
+				// Without --ref the stub would also list a PR's entry for the key.
+				"STUB_PR_CACHE=" + key, "STUB_LOG=" + filepath.Join(dir, "gh.log"),
 			}
 			if b, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("decide script failed: %v\n%s", err, b)
@@ -142,6 +147,9 @@ esac
 			got := readFile(t, dir, "out")
 			if !strings.Contains(got, "fresh="+c.wantFresh+"\n") || !strings.Contains(got, "key="+c.wantKey+"\n") {
 				t.Errorf("outputs %q, want fresh=%s key=%s", got, c.wantFresh, c.wantKey)
+			}
+			if calls, err := os.ReadFile(filepath.Join(dir, "gh.log")); err == nil && !strings.Contains(string(calls), "--ref refs/heads/main") {
+				t.Errorf("gh cache list without --ref refs/heads/main: %s", calls)
 			}
 			if log := readFile(t, dir, "summary"); !strings.Contains(log, c.wantLog) {
 				t.Errorf("summary %q, want %q", log, c.wantLog)

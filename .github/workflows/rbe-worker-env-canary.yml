@@ -58,15 +58,16 @@ jobs:
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       # Fresh-on-drift (rbe-reexecution-design.md S3c): what the pool's host is,
       # finer than worker-env, which keys some tools at major version only: every
-      # package version as installed (the raw listing), the kernel, and the
-      # rbe-worker revision. bazel-nightly.yml re-executes every test only when this
-      # moves, and at least once an ISO week.
+      # package version as installed (the raw listing), the kernel, the runner
+      # image's own version where the image sets ImageOS/ImageVersion (empty
+      # otherwise), and the rbe-worker revision. bazel-nightly.yml re-executes every
+      # test only when this moves, and at least once an ISO week.
       - name: Record the host fingerprint
         if: always() && steps.measure.outcome != 'skipped'
         env:
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
         run: |
-          { cat "$RUNNER_TEMP/worker-env.raw.txt"; uname -r; echo "rbe-worker $RBE_WORKER_REVISION"; } |
+          { cat "$RUNNER_TEMP/worker-env.raw.txt"; uname -r; echo "image ${ImageOS:-} ${ImageVersion:-}"; echo "rbe-worker $RBE_WORKER_REVISION"; } |
             sha256sum | cut -c1-64 >"$RUNNER_TEMP/host-fingerprint.txt"
           echo "host fingerprint: $(cat "$RUNNER_TEMP/host-fingerprint.txt")"
       - name: Upload the host fingerprint

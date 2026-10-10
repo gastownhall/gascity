@@ -67,7 +67,9 @@ jobs:
             reason="no host fingerprint from rbe-worker-env-canary.yml: fresh (fail safe)"
           else
             key="fresh-$fp-$(date -u +%G-W%V)"
-            if gh cache list -R "$GITHUB_REPOSITORY" --key "$key" --json key -q '.[].key' | grep -qx "$key"; then
+            # Only main's entries: a PR's cache (refs/pull/N/merge) is the PR
+            # author's to write, and must never suppress a fresh run.
+            if gh cache list -R "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$key" --json key -q '.[].key' | grep -qx "$key"; then
               decision=false reason="a green fresh run already covered this host this week"
             else
               reason="a new host fingerprint or a new week"
@@ -84,6 +86,9 @@ jobs:
   bazel:
     name: "bazel (nightly: integration + coverage)"
     needs: decide
+    # A failed or cancelled decide job never skips the nightly: its empty
+    # output is "not false", so the run is fresh (fail open, the safe side).
+    if: ${{ !cancelled() }}
     # A called workflow's jobs get at most the caller job's token
     # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
     # write), its lanes read worker-env drift issues (issues: read) and its
@@ -112,7 +117,7 @@ jobs:
       # own results regardless, .bazelrc build:remote-exec
       # --noremote_upload_local_results). Only on host drift and weekly
       # (decide, above), and on every dispatch.
-      fresh-test-results: ${{ needs.decide.outputs.fresh == 'true' }}
+      fresh-test-results: ${{ needs.decide.outputs.fresh != 'false' }}
     secrets: inherit
 
   # A green fresh run covers its (host fingerprint, ISO week): the marker cache
