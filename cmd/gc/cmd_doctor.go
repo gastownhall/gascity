@@ -296,6 +296,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
+		register(doctor.NewCitySuspensionCheck(cfg))
 		reconcilerCheck = newSessionReconcilerDoctorCheck(cfg, reconcilerModeLookupEnv)
 		register(reconcilerCheck)
 		// Rollout gates section: one advisory line per registered gate (value +
