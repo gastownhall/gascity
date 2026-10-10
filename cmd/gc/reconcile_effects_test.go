@@ -265,6 +265,12 @@ func TestExecutorCausesCarryTheFinalizePrefix(t *testing.T) {
 			t.Fatalf("%s: cause %q, want %q", c.it.Key.ID, s.Cause, c.want)
 		}
 	}
+	// The effects above share the deadline's instant, and each stops its two
+	// timers only after it posts (its settlement timer) or after Run returns
+	// (its context's). Wait for that teardown, or the count below can match
+	// their stale timers before the next effect arms its own, and Advance
+	// then runs ahead of that effect's timers, which never fire.
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 0)
 	if err := x.submitIntent(&effectPass{}, finalize(intentStop, "deadline"), 9); err != nil {
 		t.Fatal(err)
 	}
