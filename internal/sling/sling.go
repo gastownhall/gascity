@@ -169,6 +169,18 @@ type SlingDeps struct {
 	// DirectSessionResolver optionally materializes direct graph assignee
 	// targets to concrete session bead IDs.
 	DirectSessionResolver func(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error)
+	// WorkQueryProbe runs the target agent's own work_query the way `gc hook`
+	// polls it and returns the raw output. It returns an error instead of a
+	// no-work answer when any store the query covers failed; finalize records
+	// probe errors without failing the sling. After a single-bead route to a
+	// target with a custom work_query, finalize fails the sling with a
+	// *WorkQueryInvisibleError when that query returns no work while the bead
+	// is ready, unassigned and not on hold. Targets on the built-in work_query
+	// are never probed: it serves the next bead rather than listing a queue,
+	// and their route is checked before it is written. nil skips the check.
+	// Batch and convoy slings, API slings, graph workflow launches, and a
+	// custom sling_query on the built-in work_query are not covered.
+	WorkQueryProbe func(a config.Agent) (output string, err error)
 }
 
 // graphStore returns the store that owns the graph (workflow/v2) beads this
@@ -799,6 +811,23 @@ func (e *CrossStoreRouteError) Error() string {
 			"re-file the bead in %s (or pick a target reachable from %s). "+
 			"Cross-store routes silently wedge pools — see tr-6s7yx",
 		e.BeadID, source, e.Target, reachable, reachable, source)
+}
+
+// WorkQueryInvisibleError reports a bead routed to a target whose own
+// work_query returns no work while the bead is ready, unassigned and not on
+// hold, so nothing polling that query will claim it. The route was written and
+// stays in place.
+type WorkQueryInvisibleError struct {
+	BeadID string
+	Target string
+}
+
+// Error returns the stranded-route diagnostic.
+func (e *WorkQueryInvisibleError) Error() string {
+	return fmt.Sprintf(
+		"gc sling: bead %s was routed to %s, but %s's work_query returns no work while the bead is ready, "+
+			"unassigned and not on hold; check the query's label and metadata filters against the bead",
+		e.BeadID, e.Target, e.Target)
 }
 
 func routeStoreLabel(storeRef string) string {

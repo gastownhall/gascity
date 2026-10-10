@@ -1099,6 +1099,314 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	}
 }
 
+// testCustomWorkQuery stands in for a pack.toml work_query override. The probe
+// is faked in these tests, so only its presence matters: the postcondition
+// runs for agents that override work_query and for no others.
+const testCustomWorkQuery = "bd ready --label=lane:custom --unassigned --json"
+
+// TestDoSlingFailsWhenBeadNotVisibleToTargetWorkQuery covers the stranded-bead
+// bug (gastownhall/gascity issue behind ga-wvtgnv): routing succeeds but the
+// target's own work_query — e.g. a pack.toml override that filters on a label
+// this bead lacks — never surfaces the bead, so no worker ever picks it up.
+// DoSling must fail loudly instead of returning success.
+func TestDoSlingFailsWhenBeadNotVisibleToTargetWorkQuery(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		// Simulates a work_query whose label filter excludes this bead.
+		return "[]", nil
+	}
+	_, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err == nil {
+		t.Fatal("DoSling error = nil, want error: bead routed but not visible to target's work_query")
+	}
+	var invisible *WorkQueryInvisibleError
+	if !errors.As(err, &invisible) {
+		t.Fatalf("DoSling error = %T %q, want *WorkQueryInvisibleError", err, err)
+	}
+	if invisible.BeadID != "BL-42" || invisible.Target != "mayor" {
+		t.Errorf("WorkQueryInvisibleError = %+v, want BeadID BL-42 and Target mayor", *invisible)
+	}
+	if !strings.Contains(err.Error(), "BL-42") || !strings.Contains(err.Error(), "mayor") || !strings.Contains(err.Error(), "work_query") {
+		t.Errorf("DoSling error = %q, want it to name the bead, the target, and work_query", err.Error())
+	}
+	if !strings.Contains(err.Error(), "was routed") {
+		t.Errorf("DoSling error = %q, want it to say the bead was routed", err.Error())
+	}
+}
+
+// TestDoSlingSucceedsWhenBeadVisibleToTargetWorkQuery guards against a false
+// positive from the new postcondition check: when the target's work_query
+// output does include the routed bead, DoSling must succeed exactly as it
+// did before the postcondition check existed.
+func TestDoSlingSucceedsWhenBeadVisibleToTargetWorkQuery(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		return `[{"id":"BL-42","status":"open"}]`, nil
+	}
+	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.BeadID != "BL-42" {
+		t.Errorf("BeadID = %q, want BL-42", result.BeadID)
+	}
+	if len(result.BeadWarnings) != 0 || len(result.MetadataErrors) != 0 {
+		t.Errorf("BeadWarnings = %q, MetadataErrors = %q, want neither", result.BeadWarnings, result.MetadataErrors)
+	}
+}
+
+// TestDoSlingSkipsWorkQueryProbeForBuiltInWorkQuery pins the probe's scope. The
+// built-in work_query is a serve-next selector: it prints the target's
+// in-progress bead, or the first of a bounded routed tier, and exits. A bead
+// correctly routed to a busy target is routinely absent from that output, so
+// probing it would fail correct slings. Built-in targets are covered instead
+// by the pre-route store-reachability check.
+func TestDoSlingSkipsWorkQueryProbeForBuiltInWorkQuery(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	probed := 0
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		probed++
+		return "[]", nil
+	}
+	if _, err := DoSling(testOpts(a, "BL-42"), deps, nil); err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if probed != 0 {
+		t.Errorf("WorkQueryProbe called %d times, want 0 for a target on the built-in work_query", probed)
+	}
+}
+
+// TestDoSlingWarnsWhenWorkQueryListsOtherWork covers a busy target: its
+// work_query returns work, just not the routed bead. A serve-next query does
+// that legitimately, so the sling succeeds and only warns.
+func TestDoSlingWarnsWhenWorkQueryListsOtherWork(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		return `[{"id":"BL-7","status":"in_progress"}]`, nil
+	}
+	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if len(result.BeadWarnings) != 1 {
+		t.Fatalf("BeadWarnings = %q, want exactly one work_query warning", result.BeadWarnings)
+	}
+	if w := result.BeadWarnings[0]; !strings.Contains(w, "BL-42") || !strings.Contains(w, "mayor") || !strings.Contains(w, "work_query") {
+		t.Errorf("BeadWarnings[0] = %q, want it to name the bead, the target, and work_query", w)
+	}
+}
+
+// TestDoSlingToleratesWorkQueryMissForBeadThatIsNotUnclaimedReadyWork covers
+// every state in which a correctly routed bead is legitimately absent from a
+// work_query that reports no work: it is waiting on a blocker, deferred, held
+// for a person or an external condition, or a pool worker claimed it while the
+// probe ran. Only an open, unassigned, unheld, ready bead is stranded.
+func TestDoSlingToleratesWorkQueryMissForBeadThatIsNotUnclaimedReadyWork(t *testing.T) {
+	bead := func(mutate func(*beads.Bead)) beads.Bead {
+		b := beads.Bead{ID: "BL-42", Title: "BL-42", Type: "task", Status: "open", Metadata: map[string]string{}}
+		if mutate != nil {
+			mutate(&b)
+		}
+		return b
+	}
+	tests := []struct {
+		name string
+		seed []beads.Bead
+		deps []beads.Dep
+		// duringProbe runs inside the probe, after routing has committed.
+		duringProbe func(*testing.T, *beads.MemStore)
+	}{
+		{
+			name: "blocked by an open dependency",
+			seed: []beads.Bead{bead(nil), {ID: "BL-1", Title: "BL-1", Type: "task", Status: "open", Metadata: map[string]string{}}},
+			deps: []beads.Dep{{IssueID: "BL-42", DependsOnID: "BL-1", Type: "blocks"}},
+		},
+		{
+			name: "deferred",
+			seed: []beads.Bead{bead(func(b *beads.Bead) { b.IndefinitelyDeferred = true })},
+		},
+		{
+			name: "held for an external condition",
+			seed: []beads.Bead{bead(func(b *beads.Bead) { b.Labels = []string{beadmeta.HoldExternalLabel} })},
+		},
+		{
+			name: "claimed while the probe ran",
+			seed: []beads.Bead{bead(nil)},
+			duringProbe: func(t *testing.T, store *beads.MemStore) {
+				t.Helper()
+				if err := store.Update("BL-42", beads.UpdateOpts{Status: stringPtr("in_progress"), Assignee: stringPtr("worker-1")}); err != nil {
+					t.Fatalf("claiming BL-42: %v", err)
+				}
+			},
+		},
+		{
+			name: "assigned while the probe ran",
+			seed: []beads.Bead{bead(nil)},
+			duringProbe: func(t *testing.T, store *beads.MemStore) {
+				t.Helper()
+				if err := store.Update("BL-42", beads.UpdateOpts{Assignee: stringPtr("worker-1")}); err != nil {
+					t.Fatalf("assigning BL-42: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			sp := runtime.NewFake()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
+
+			store := beads.NewMemStoreFrom(0, tt.seed, tt.deps)
+			deps := testDeps(cfg, sp, runner.run)
+			deps.Store = store
+			deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+				if tt.duringProbe != nil {
+					tt.duringProbe(t, store)
+				}
+				return "[]", nil
+			}
+			result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling error = %v, want nil: the bead is not unclaimed ready work", err)
+			}
+			if len(result.BeadWarnings) != 0 {
+				t.Errorf("BeadWarnings = %q, want none", result.BeadWarnings)
+			}
+		})
+	}
+}
+
+// TestDoSlingRecordsWorkQueryProbeErrorWithoutFailing pins the fail-open
+// contract for probe infrastructure errors. By the time the probe runs the
+// route is written and the controller poked, so a timeout or a flaky store
+// read must not report the committed dispatch as a failure.
+func TestDoSlingRecordsWorkQueryProbeErrorWithoutFailing(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		return "", errors.New("work query timed out")
+	}
+	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error = %v, want nil: a probe failure must not fail a committed route", err)
+	}
+	if result.BeadID != "BL-42" {
+		t.Errorf("BeadID = %q, want BL-42", result.BeadID)
+	}
+	if len(result.MetadataErrors) != 1 {
+		t.Fatalf("MetadataErrors = %q, want exactly one probe error", result.MetadataErrors)
+	}
+	if e := result.MetadataErrors[0]; !strings.Contains(e, "BL-42") || !strings.Contains(e, "mayor") || !strings.Contains(e, "work query timed out") {
+		t.Errorf("MetadataErrors[0] = %q, want it to name the bead, the target, and the probe error", e)
+	}
+}
+
+// readyErrStore fails Ready while delegating everything else.
+type readyErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s *readyErrStore) Ready(_ ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+// TestDoSlingWarnsWhenReadinessOfUnsurfacedBeadIsUnknown covers the fallback
+// when the store cannot say whether the unsurfaced bead is ready: the strand
+// is unproven, so the sling succeeds with a warning instead of an error.
+func TestDoSlingWarnsWhenReadinessOfUnsurfacedBeadIsUnknown(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = &readyErrStore{Store: seededStore("BL-42"), err: errors.New("ready read failed")}
+	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
+		return "[]", nil
+	}
+	result, err := DoSling(testOpts(a, "BL-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error = %v, want nil: readiness is unknown", err)
+	}
+	if len(result.BeadWarnings) != 1 {
+		t.Fatalf("BeadWarnings = %q, want exactly one readiness warning", result.BeadWarnings)
+	}
+	if w := result.BeadWarnings[0]; !strings.Contains(w, "BL-42") || !strings.Contains(w, "ready read failed") {
+		t.Errorf("BeadWarnings[0] = %q, want it to name the bead and the store error", w)
+	}
+}
+
+// TestClassifyWorkQueryOutput pins how a work_query's raw output is read. The
+// no-work verdicts are exactly the outputs gc hook treats as no ready work.
+// JSON output is matched structurally on each entry's id, so a bead id that
+// appears in another field or prefixes a longer id is not a match. Output gc
+// hook cannot parse is matched on the bead id as a whole token instead of
+// failing closed.
+func TestClassifyWorkQueryOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   workQueryVerdict
+	}{
+		{name: "empty", output: "", want: workQueryNoWork},
+		{name: "whitespace", output: "  \n\t", want: workQueryNoWork},
+		{name: "bd no-work line", output: "No ready work found\n", want: workQueryNoWork},
+		{name: "empty array", output: "[]", want: workQueryNoWork},
+		{name: "null", output: "null", want: workQueryNoWork},
+		{name: "empty object", output: "{}", want: workQueryNoWork},
+		{name: "single object is the bead", output: `{"id":"BL-42","status":"open"}`, want: workQueryListsBead},
+		{name: "single object is another bead", output: `{"id":"BL-7"}`, want: workQueryListsOther},
+		{name: "array lists the bead", output: `[{"id":"BL-7"},{"id":"BL-42"}]`, want: workQueryListsBead},
+		{name: "array lists a longer id", output: `[{"id":"BL-421"}]`, want: workQueryListsOther},
+		{name: "array mentions the bead outside id", output: `[{"id":"BL-7","parent":"BL-42"}]`, want: workQueryListsOther},
+		{name: "plain id", output: "BL-42\n", want: workQueryListsBead},
+		{name: "plain text naming the bead", output: "next: BL-42 (open)", want: workQueryListsBead},
+		{name: "plain text ending a sentence with the bead", output: "serving BL-42.", want: workQueryListsBead},
+		{name: "plain text naming a longer id", output: "next: BL-421", want: workQueryListsOther},
+		{name: "plain text naming another bead", output: "next: BL-7", want: workQueryListsOther},
+		{name: "json behind stray stdout", output: "cache warm\n[{\"id\":\"BL-42\"}]", want: workQueryListsBead},
+		{name: "json string scalar", output: `"BL-42"`, want: workQueryListsBead},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyWorkQueryOutput(tt.output, "BL-42"); got != tt.want {
+				t.Errorf("classifyWorkQueryOutput(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

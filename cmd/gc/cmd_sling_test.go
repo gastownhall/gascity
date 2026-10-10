@@ -510,6 +510,164 @@ func TestDoSlingPinnedDefaultSlingQueryUsesBuiltInRouting(t *testing.T) {
 	}
 }
 
+// TestDoSlingChecksRoutedBeadAgainstCustomWorkQuery runs the real
+// cliWorkQueryProbe: the target's own work_query executes through the hook's
+// shell path after the route is written. Only output that proves the ready bead
+// invisible fails the sling; the route stays in place either way.
+func TestDoSlingChecksRoutedBeadAgainstCustomWorkQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		workQuery  string
+		wantCode   int
+		wantStderr string
+	}{
+		{name: "query lists the bead", workQuery: `printf '[{"id":"BL-42"}]'`, wantCode: 0},
+		{
+			name:       "query returns no work",
+			workQuery:  `printf '[]'`,
+			wantCode:   1,
+			wantStderr: "bead BL-42 was routed to worker, but worker's work_query returns no work",
+		},
+		{
+			name:       "query lists other work",
+			workQuery:  `printf '[{"id":"BL-7"}]'`,
+			wantCode:   0,
+			wantStderr: `warning: bead BL-42 routed to "worker", but worker's work_query output does not list it`,
+		},
+		{
+			name:       "query fails",
+			workQuery:  `echo query broke >&2; exit 3`,
+			wantCode:   0,
+			wantStderr: "gc sling: checking bead BL-42 against worker's work_query:",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A file store keeps the hook's query-env resolution off the managed
+			// bd/Dolt discovery scripts; the work_query still runs through sh.
+			t.Setenv("GC_BEADS", "file")
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), WorkQuery: tc.workQuery}
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps.Store = seededStore("BL-42")
+
+			code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr)
+
+			if code != tc.wantCode {
+				t.Fatalf("doSling returned %d, want %d; stderr: %s", code, tc.wantCode, stderr.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want to contain %q", stderr.String(), tc.wantStderr)
+			}
+			bead, err := deps.Store.Get("BL-42")
+			if err != nil {
+				t.Fatalf("store.Get(BL-42): %v", err)
+			}
+			if bead.Metadata["gc.routed_to"] != "worker" {
+				t.Errorf("gc.routed_to = %q, want worker", bead.Metadata["gc.routed_to"])
+			}
+		})
+	}
+}
+
+// TestDoSlingChecksEveryFederatedLegOfACityScopedTarget runs the real probe over
+// two legs: a city-scoped target's work_query runs against the city store and
+// then the rig store, as `gc hook` federates it. A bead listed only by the rig
+// leg is visible, and a failed rig leg leaves the city leg's empty answer
+// unproven, so the sling records the failure instead of reporting a strand.
+func TestDoSlingChecksEveryFederatedLegOfACityScopedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rigLeg     string
+		wantCode   int
+		wantStderr []string
+	}{
+		{name: "only the rig leg lists the bead", rigLeg: `printf '[{"id":"BL-42"}]'`, wantCode: 0},
+		{
+			name:       "rig leg fails",
+			rigLeg:     `echo rig store down >&2; exit 3`,
+			wantCode:   0,
+			wantStderr: []string{"gc sling: checking bead BL-42 against worker's work_query:", "rig store down"},
+		},
+		{
+			name:       "every leg returns no work",
+			rigLeg:     `printf '[]'`,
+			wantCode:   1,
+			wantStderr: []string{"bead BL-42 was routed to worker, but worker's work_query returns no work"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: t.TempDir()}},
+			}
+			// The city leg runs with GC_RIG empty, the rig leg with GC_RIG=riga.
+			workQuery := `if [ "$GC_RIG" = riga ]; then ` + tc.rigLeg + `; else printf '[]'; fi`
+			a := config.Agent{Name: "worker", Scope: "city", MaxActiveSessions: intPtr(1), WorkQuery: workQuery}
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps.Store = seededStore("BL-42")
+
+			code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr)
+
+			if code != tc.wantCode {
+				t.Fatalf("doSling returned %d, want %d; stderr: %s", code, tc.wantCode, stderr.String())
+			}
+			if len(tc.wantStderr) == 0 && strings.Contains(stderr.String(), "work_query") {
+				t.Errorf("stderr = %q, want no work_query diagnostic", stderr.String())
+			}
+			for _, want := range tc.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want to contain %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestProbeWorkQueryStoresReplacesUnprovenNoWorkWithLegErrors pins the probe's
+// one departure from the hook's leg selection: a failed leg turns an empty
+// answer into an error, and only an empty answer.
+func TestProbeWorkQueryStoresReplacesUnprovenNoWorkWithLegErrors(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	for _, tc := range []struct {
+		name    string
+		legs    map[string]string // output per store dir; a dir with no entry fails
+		wantOut string
+		wantErr string
+	}{
+		{name: "secondary fails behind an empty primary", legs: map[string]string{"city": `[]`}, wantErr: "store riga: store timed out"},
+		{name: "only the secondary lists work", legs: map[string]string{"city": `[]`, "riga": `[{"id":"BL-42"}]`}, wantOut: `[{"id":"BL-42"}]`},
+		{name: "secondary fails behind primary work", legs: map[string]string{"city": `[{"id":"BL-7"}]`}, wantOut: `[{"id":"BL-7"}]`},
+		{name: "every leg answers no work", legs: map[string]string{"city": `[]`, "riga": `[]`}, wantOut: `[]`},
+		{name: "primary fails", legs: map[string]string{"riga": `[]`}, wantErr: "store city: store timed out"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(_, dir string, _ []string) (string, error) {
+				out, ok := tc.legs[dir]
+				if !ok {
+					return "", errTestStoreTimeout
+				}
+				return out, nil
+			}
+
+			out, err := probeWorkQueryStores("q", stores, run)
+
+			if tc.wantErr != "" {
+				if !errors.Is(err, errTestStoreTimeout) || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q wrapping errTestStoreTimeout", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if out != tc.wantOut {
+				t.Fatalf("out = %q, want %q", out, tc.wantOut)
+			}
+		})
+	}
+}
+
 func TestDoSlingEnvPassthrough(t *testing.T) {
 	// Fixed agent (max=1): env should contain GC_SLING_TARGET with resolved session name.
 	t.Run("fixed agent", func(t *testing.T) {
