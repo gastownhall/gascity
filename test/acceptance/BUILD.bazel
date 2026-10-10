@@ -47,6 +47,7 @@ ACCEPTANCE_ENV = {
 # table. A test may appear under several targets, each running a disjoint
 # share of its subtests (SOLO_SUBTESTS).
 SOLO_TESTS = {
+    "beads_proxied_default_start_test": "TestBeadsProxiedDefaultStart",
     "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
