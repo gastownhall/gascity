@@ -233,6 +233,7 @@ go_test(
         "sqlite_store_schema_test.go",
         "sqlite_store_sequence_floor_process_linux_test.go",
         "sqlite_store_test.go",
+        "sqlite_store_tx_retry_test.go",
         "testenv_import_test.go",
         "unread_store_notice_internal_test.go",
         "unread_store_notice_test.go",
