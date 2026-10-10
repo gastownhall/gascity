@@ -307,10 +307,11 @@ func WriteSupervisorConfig(gcHome string) error {
 	return os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(cfg), 0o644)
 }
 
-// reservePort returns a loopback port no other process on the host is
-// handed while this test binary lives (testutil.ReserveLoopbackPort). A
-// listen-then-close reservation let concurrent shards on one rbe-west worker
-// share a supervisor port (ga-96smfk.45).
+// reservePort returns a loopback port that, on Linux, no other
+// ReserveLoopbackPort caller in the network namespace is handed while this
+// test binary lives (testutil.ReserveLoopbackPort). A listen-then-close
+// reservation let concurrent shards on one rbe-west worker share a
+// supervisor port (ga-96smfk.45).
 func reservePort() (int, error) {
 	return testutil.ReserveLoopbackPort()
 }

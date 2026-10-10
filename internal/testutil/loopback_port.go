@@ -29,9 +29,9 @@ var (
 )
 
 // ReserveLoopbackPort returns a 127.0.0.1 TCP port for a server a test
-// starts later in a child process (a supervisor's API, an external Dolt), and
-// keeps it from every other process on the host for as long as this one
-// lives.
+// starts later in a child process (a supervisor's API, an external Dolt). On
+// Linux the port is leased: no other ReserveLoopbackPort caller in the network
+// namespace is handed it while this process lives.
 //
 // The usual listen-on-":0"-then-close reservation is a race on a shared host:
 // the kernel hands the freed port to the next bind(":0") or outgoing connect
@@ -41,12 +41,20 @@ var (
 // supervisor port, and each supervisor exited at startup on "address already
 // in use" while the other held it (ga-96smfk.45, ga-vnycm2.15).
 //
-// So the port comes from below the kernel's ephemeral range, which neither
-// bind(":0") nor connect ever assigns, and is leased under a name scoped to
-// the network namespace (a Linux abstract socket) that this process holds
-// until it exits: another caller, in this or any other process, skips a
-// leased port. A port that something else has bound is skipped too. The
-// kernel drops the lease with the process, so nothing goes stale.
+// So the port comes from below the kernel's ephemeral range, which bind(":0")
+// and connect draw from, and on Linux is leased under a name scoped to the
+// network namespace (an abstract socket) that this process holds until it
+// exits: another caller, in this or any other process, skips a leased port.
+// The kernel drops the lease with the process, so nothing goes stale. A port
+// that something else has bound is skipped too, which covers a server child
+// that outlives the test binary that leased its port.
+//
+// Two gaps remain. Other platforms have no namespace-scoped name to lease, so
+// there a reservation rests on the range and the bound-port skip alone
+// (portLeasesEnforced). And where the live ephemeral range cannot be read or
+// starts at or below reservedPortRangeStart, the range ends at the Linux
+// default floor instead and may overlap the ephemeral range, leaving the lease
+// and the bound-port skip as the only protection.
 func ReserveLoopbackPort() (int, error) {
 	return reserveLoopbackPortIn(reservedPortRangeStart, ephemeralPortRangeStart()-1)
 }
@@ -80,7 +88,7 @@ func reserveLoopbackPortIn(lo, hi int) (int, error) {
 		if !ok {
 			continue
 		}
-		lis, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		lis, err := listenLoopbackProbe(port)
 		if err != nil {
 			if lease != nil {
 				_ = lease.Close()
@@ -101,6 +109,13 @@ func reserveLoopbackPortIn(lo, hi int) (int, error) {
 		return port, nil
 	}
 	return 0, fmt.Errorf("reserving a loopback port: no free unleased port in [%d, %d] after %d attempts", lo, hi, attempts)
+}
+
+// listenLoopbackProbe binds 127.0.0.1:port, so reserveLoopbackPortIn can skip
+// a port that something outside the lease already holds. Tests replace it to
+// stand in for that holder.
+var listenLoopbackProbe = func(port int) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 }
 
 // ephemeralPortRangeStart returns the lower bound of the kernel's ephemeral

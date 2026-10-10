@@ -2151,8 +2151,9 @@ func restartIsolatedSupervisor(t *testing.T, env []string) {
 	startIsolatedSupervisor(t, env, gcHome)
 }
 
-// reserveLoopbackPort returns a loopback port no other process on the host
-// is handed while this test binary lives (testutil.ReserveLoopbackPort).
+// reserveLoopbackPort returns a loopback port that, on Linux, no other
+// ReserveLoopbackPort caller in the network namespace is handed while this
+// test binary lives (testutil.ReserveLoopbackPort).
 func reserveLoopbackPort() (int, error) {
 	return testutil.ReserveLoopbackPort()
 }
