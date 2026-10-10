@@ -1812,6 +1812,7 @@ go_test(
         "supervisor_boot_phases_test.go",
         "supervisor_boot_schedule_test.go",
         "supervisor_dashboard_test.go",
+        "supervisor_handoff_test.go",
         "supervisor_init_retry_test.go",
         "supervisor_log_rotation_test.go",
         "supervisor_systemd_delegate_test.go",

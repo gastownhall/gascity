@@ -4659,6 +4659,11 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close() //nolint:errcheck // test cleanup
+	// A lock holder that never answers on the control socket is waited for
+	// (ga-96smfk.85) only as long as the readiness budget.
+	oldTimeout := supervisorReadyTimeout
+	supervisorReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { supervisorReadyTimeout = oldTimeout })
 
 	var stdout, stderr bytes.Buffer
 	code := doSupervisorStart(&stdout, &stderr)
@@ -7735,5 +7740,123 @@ func TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl(t *testing.
 		if got[key] != want {
 			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
 		}
+	}
+}
+
+// A forked supervisor that exits during startup fails `gc supervisor start`
+// at once, naming the exit and the log lines that explain it, instead of
+// polling the socket of a dead process for supervisorReadyTimeout and
+// pointing at a log file that, in CI, is gone with the test's temp dir
+// (ga-96smfk.45: the cause, "API address ... is already in use", was only in
+// that log).
+func TestWaitForStartedSupervisorReportsAnEarlyExitAtOnce(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	logLines := "gc supervisor: started: previous_exit=clean\ngc supervisor: API address 127.0.0.1:42509 is already in use.\n"
+	if err := os.WriteFile(supervisorLogPath(), []byte(logLines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldAlive := supervisorAliveHook
+	oldTimeout := supervisorReadyTimeout
+	oldPoll := supervisorReadyPollInterval
+	supervisorAliveHook = func() int { return 0 }
+	supervisorReadyTimeout = time.Minute
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyTimeout = oldTimeout
+		supervisorReadyPollInterval = oldPoll
+	})
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := waitForStartedSupervisor(&stdout, &stderr, false, "see "+supervisorLogPath(), exited)
+	if code == 0 {
+		t.Fatalf("waitForStartedSupervisor = 0 for an exited supervisor; stdout=%q", stdout.String())
+	}
+	if waited := time.Since(start); waited > 10*time.Second {
+		t.Fatalf("waited %s for a supervisor that had already exited", waited)
+	}
+	got := stderr.String()
+	for _, want := range []string{"exited before it became ready", "exit status 1", "is already in use"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// A supervisor that answers on its socket is reported started even when the
+// launcher also watches the forked process.
+func TestWaitForStartedSupervisorReportsAReadySupervisor(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorReadyPollInterval
+	calls := 0
+	supervisorAliveHook = func() int {
+		calls++
+		if calls < 3 {
+			return 0
+		}
+		return 4242
+	}
+	supervisorReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyPollInterval = oldPoll
+	})
+	var stdout, stderr bytes.Buffer
+	if code := waitForStartedSupervisor(&stdout, &stderr, false, "", make(chan error)); code != 0 {
+		t.Fatalf("waitForStartedSupervisor = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Supervisor started (PID 4242)") {
+		t.Fatalf("stdout = %q, want the started PID", stdout.String())
+	}
+}
+
+// When the forked child exits because a concurrent start's instance holds the
+// single-instance lock, the start keeps waiting for that instance's socket,
+// as it did before the launcher watched its child.
+func TestWaitForStartedSupervisorWaitsForAConcurrentInstance(t *testing.T) {
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorReadyPollInterval
+	oldHeld := supervisorInstanceLockHeld
+	var calls atomic.Int32
+	supervisorAliveHook = func() int {
+		if calls.Add(1) < 20 {
+			return 0
+		}
+		return 4343
+	}
+	supervisorReadyPollInterval = time.Millisecond
+	supervisorInstanceLockHeld = func() bool { return true }
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorReadyPollInterval = oldPoll
+		supervisorInstanceLockHeld = oldHeld
+	})
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+	var stdout, stderr bytes.Buffer
+	if code := waitForStartedSupervisor(&stdout, &stderr, false, "", exited); code != 0 {
+		t.Fatalf("waitForStartedSupervisor = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "PID 4343") {
+		t.Fatalf("stdout = %q, want the concurrent instance's PID", stdout.String())
+	}
+}
+
+// The log tail keeps the last lines and tolerates a log without a trailing
+// newline.
+func TestSupervisorLogTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.log")
+	if got := supervisorLogTail(path, 2); got != "" {
+		t.Fatalf("tail of a missing log = %q, want empty", got)
+	}
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := supervisorLogTail(path, 2), "two\nthree\n"; got != want {
+		t.Fatalf("tail = %q, want %q", got, want)
 	}
 }
