@@ -116,8 +116,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 319
-baseline_files = 67
+baseline_calls = 320
+baseline_files = 68
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-cp3hwi"
@@ -469,6 +469,17 @@ resources = ["http_test_server"]
 owner_bead = "ga-cp3hwi"
 invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
 resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCacheRRCProbe"
+resources = ["http_test_server"]
+owner_bead = "ga-cp3hwi"
+invariant = "the anonymous-cache repo contents cache probe's behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheRRCProbe, which exists to run tools/rbe/cache-rrc-probe.sh against a stand-in rbe-cache GetCapabilities (an answer or none, gRPC and HTTP errors, malformed answers, a timeout, the kill switch off): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache lanes read the remote repo contents cache"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 

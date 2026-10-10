@@ -75,39 +75,77 @@ echo probe >>probe.log
 [ "${BAZEL_TEST_PROBE:-}" = zstd ]
 `
 
-// runBazelRCLocalStep runs a step's script as Actions does (bash -eo
-// pipefail) in a scratch directory with env and a stub zstd probe, and
-// returns the .bazelrc.local lines it writes (none if it writes no file) and
-// how often it ran the probe (no test reaches rbe-cache).
-func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) ([]string, int) {
+// bazelCacheRRCProbeStub stands in for cache-rrc-probe.sh: it counts its
+// runs in rrc-probe.log, says why on stderr as the real probe does, and
+// passes only for BAZEL_TEST_RRC_PROBE=ok (rbe-cache answering, the kill
+// switch on). TestCacheRRCProbe runs the real probe.
+const bazelCacheRRCProbeStub = `#!/usr/bin/env bash
+echo probe >>rrc-probe.log
+if [ "${BAZEL_TEST_RRC_PROBE:-}" = ok ]; then
+	echo "rbe-cache rrc probe: stub answers" >&2
+	exit 0
+fi
+echo "rbe-cache rrc probe: stub refused" >&2
+exit 1
+`
+
+// bazelRCLocalStepRun is what runBazelRCLocalStepProbes saw: the
+// .bazelrc.local lines a step wrote (none if it wrote no file), how often
+// it ran each probe stub, and its combined output.
+type bazelRCLocalStepRun struct {
+	lines                 []string
+	zstdProbes, rrcProbes int
+	out                   string
+}
+
+// runBazelRCLocalStepProbes runs a step's script as Actions does (bash -eo
+// pipefail) in a scratch directory with env and stub zstd and rrc probes
+// (no test reaches rbe-cache).
+func runBazelRCLocalStepProbes(t *testing.T, script string, env map[string]string) bazelRCLocalStepRun {
 	t.Helper()
 	dir := t.TempDir()
-	probe := filepath.Join(dir, bazelCacheZstdProbe)
-	if err := os.MkdirAll(filepath.Dir(probe), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(probe, []byte(bazelCacheZstdProbeStub), 0o644); err != nil {
-		t.Fatal(err)
+	for path, body := range map[string]string{bazelCacheZstdProbe: bazelCacheZstdProbeStub, bazelCacheRRCProbe: bazelCacheRRCProbeStub} {
+		probe := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(probe), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(probe, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	out, err := runWorkflowStepScript(t, dir, script, env)
 	if err != nil {
 		t.Fatalf("step script with %v: %v\n%s", env, err, out)
 	}
+	run := bazelRCLocalStepRun{out: out}
 	probes, _ := os.ReadFile(filepath.Join(dir, "probe.log"))
+	run.zstdProbes = strings.Count(string(probes), "probe\n")
+	probes, _ = os.ReadFile(filepath.Join(dir, "rrc-probe.log"))
+	run.rrcProbes = strings.Count(string(probes), "probe\n")
 	rc, err := os.ReadFile(filepath.Join(dir, ".bazelrc.local"))
 	if os.IsNotExist(err) {
-		return nil, strings.Count(string(probes), "probe\n")
+		return run
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	return strings.Split(strings.TrimSuffix(string(rc), "\n"), "\n"), strings.Count(string(probes), "probe\n")
+	run.lines = strings.Split(strings.TrimSuffix(string(rc), "\n"), "\n")
+	return run
+}
+
+// runBazelRCLocalStep is runBazelRCLocalStepProbes for the zstd probe alone:
+// the .bazelrc.local lines and how often the step ran that probe.
+func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) ([]string, int) {
+	t.Helper()
+	run := runBazelRCLocalStepProbes(t, script, env)
+	return run.lines, run.zstdProbes
 }
 
 // bazelRCLocalLaneSteps are the only steps anywhere in bazel.yml that may
 // write .bazelrc.local, all in the lane job: the fork cache's zstd line and
-// the remote repo contents cache reader (bazel_rrc_test.go).
-var bazelRCLocalLaneSteps = []string{bazelCacheZstdStep, bazelRRCReadStep}
+// the remote repo contents cache readers, trusted and fork-cache
+// (bazel_rrc_test.go).
+var bazelRCLocalLaneSteps = []string{bazelCacheZstdStep, bazelRRCReadStep, bazelForkRRCReadStep}
 
 // bazelRCLocalLaneStep returns bazel.yml's lane step name (one of
 // bazelRCLocalLaneSteps), after checking that no step outside

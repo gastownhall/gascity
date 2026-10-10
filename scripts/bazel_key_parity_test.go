@@ -282,15 +282,26 @@ func TestBazelKeyParity(t *testing.T) {
 	}
 }
 
-// TestBazelCIRCLocalCarriesOnlyTransport runs bazel.yml's lane step that
-// writes .bazelrc.local, with rbe-cache advertising zstd and without:
-// whatever it writes must be transport-only, so fork-cache lanes hash
-// actions like trusted, rbe-fork and developer runs.
+// TestBazelCIRCLocalCarriesOnlyTransport runs bazel.yml's lane steps that
+// write .bazelrc.local: both repo contents cache readers (the fork-cache one
+// with rbe-cache answering and without) and the zstd step (with rbe-cache
+// advertising zstd and without). Whatever they write must be transport-only,
+// so fork-cache lanes hash actions like trusted, rbe-fork and developer runs.
 func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
 	rrc := bazelRCLocalLaneStep(t, bazelRRCReadStep)
 	lines, _ := runBazelRCLocalStep(t, rrc.Run, nil)
 	for _, err := range checkBazelRCLocalLines(lines) {
 		t.Errorf("%q: %v", rrc.Name, err)
+	}
+	fork := bazelRCLocalLaneStep(t, bazelForkRRCReadStep)
+	for _, probe := range []string{"", "ok"} {
+		run := runBazelRCLocalStepProbes(t, fork.Run, map[string]string{"BAZEL_TEST_RRC_PROBE": probe})
+		for _, err := range checkBazelRCLocalLines(run.lines) {
+			t.Errorf("%q, rrc probe %q: %v", fork.Name, probe, err)
+		}
+		if probe == "ok" && !slices.Equal(run.lines, bazelRRCReadLines) {
+			t.Errorf("%q with rbe-cache answering wrote %q, so this test no longer classifies the reader's lines", fork.Name, run.lines)
+		}
 	}
 	step := bazelCacheZstdLaneStep(t)
 	for _, probe := range []string{"", "zstd"} {
