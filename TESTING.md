@@ -522,10 +522,13 @@ To re-pin, anyone with write access:
    failed run's step summary.
 2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
    `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
-   checks that they agree with each other and with `go.mod`; rbe-worker's
-   `cmd/product-check` checks them against the worker (its measured
-   package list, its dolt, the test `PATH`), and its CI runs that against
-   gascity's main.
+   checks that they agree with each other and with `go.mod`. The PR's
+   `worker-host` job runs the pinned rbe-worker's `cmd/product-check`
+   (worker items) against this checkout on every PR, and fails if the
+   manifest does not match the worker: its measured package list, its
+   dolt, the test `PATH`, the pin.
+   rbe-worker's own CI runs the same check against gascity's main, but
+   only as information, and it gates nothing here.
    Make the same change in gastownhall/beads (its
    `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
    together: once the pool workers serve the new pin, beads' actions on
@@ -583,13 +586,15 @@ manifest pin above). Bumping it is a one-line PR titled
    on the merge, and new pool runs pick the pin up at their next dispatch.
    Workers already running keep their revision until they retire.
 
-`bazel.yml`'s `worker-host` job measures the bump before it lands. It
-fetches the PR's pinned commit anonymously (no secret, `refs/heads/main`
-only) and, because the pin moved, measures this Blacksmith host against the
-PR's manifest. H5 then walks every commit between the default branch's pin
-and the PR's: each one must be a GitHub-verified, signed commit, authored by
-`web-flow` (GitHub's merge-button identity), with an associated pull
-request merged into `rbe-worker`'s main. A direct push to `rbe-worker`
+`bazel.yml`'s `worker-host` job checks the bump before it lands, in this
+order. It fetches the PR's pinned commit anonymously (no secret,
+`refs/heads/main` only). H5 then walks every commit between the default
+branch's pin and the PR's: each one must be a GitHub-verified, signed
+commit, authored by `web-flow` (GitHub's merge-button identity), with an
+associated pull request merged into `rbe-worker`'s main. Because the pin
+moved, the job then measures this Blacksmith host against the PR's
+manifest. Last, it runs the new commit's `cmd/product-check` against this
+checkout. A direct push to `rbe-worker`
 main, however it's signed, fails this check: only a squash-merged PR
 reaches it. A rollback (a new pin that is not a descendant of the old one)
 warns instead of failing, so reverting a bad rbe-worker commit isn't
@@ -597,8 +602,10 @@ blocked on rewriting its own history. To roll the pools back, revert the
 bump PR.
 
 The range check is dormant on a PR that doesn't move the pin: H5 has
-nothing to walk. Every `worker-host` run still fetches the pin, and
-measures when the change touches the worker host.
+nothing to walk. Every `worker-host` run still fetches the pin and runs
+its `cmd/product-check`, which is stdlib-only and quick. It measures only
+when the change touches the worker host. product-check is skipped if H5 or
+the fetch failed, and still runs if the measurement failed.
 
 ## The outcome: protected PR feedback in under five minutes
 

@@ -188,7 +188,10 @@ type multiLaneJob struct {
 	RunsOn      string            `yaml:"runs-on"`
 	Permissions map[string]string `yaml:"permissions"`
 	Outputs     map[string]string `yaml:"outputs"`
-	Strategy    struct {
+	Env         map[string]string `yaml:"env"`
+	// A string: some jobs set it from an expression.
+	ContinueOnError string `yaml:"continue-on-error"`
+	Strategy        struct {
 		FailFast *bool          `yaml:"fail-fast"`
 		Matrix   map[string]any `yaml:"matrix"`
 	} `yaml:"strategy"`
@@ -1101,12 +1104,20 @@ func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
 // silently stop fetching once nobody notices a tightened measure-only
 // gate; pin the exact conditions instead. The worker code is the pinned
 // rbe-worker's alone (S5): the fetch takes no source input, and no step
-// reads or compares against a gascity copy of it.
+// reads or compares against a gascity copy of it. On every run, after H5
+// and the fetch, the pinned rbe-worker's product-check (§5.6) checks this
+// checkout's side of the contract, even when the measurement failed.
 func TestBazelWorkerHostFetchAlwaysRuns(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	job, ok := wf.Jobs["worker-host"]
 	if !ok {
 		t.Fatalf("%s: no worker-host job", bazelMultiLaneWorkflow)
+	}
+	// Fetched rbe-worker code runs in this job: no job-wide env (a token
+	// there would reach it) and no job-level continue-on-error (the gate
+	// requires the job's own success).
+	if len(job.Env) != 0 || job.ContinueOnError != "" {
+		t.Errorf("worker-host: job env %v, continue-on-error %q; want neither", job.Env, job.ContinueOnError)
 	}
 	byName := map[string]multiLaneStep{}
 	for _, s := range job.Steps {
@@ -1137,6 +1148,62 @@ func TestBazelWorkerHostFetchAlwaysRuns(t *testing.T) {
 	}
 	if measure.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
 		t.Errorf("worker-host measure step: RBE_WORKER_REVISION %q, want the fetched sha", measure.Env["RBE_WORKER_REVISION"])
+	}
+	// The script it runs is the fetched tree's, never a path in this
+	// checkout.
+	if measure.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" || measure.Env["WORKER_MODE"] != "measure" {
+		t.Errorf("worker-host measure step: RBE_WORKER_DIR %q WORKER_MODE %q, want the fetched dir and measure", measure.Env["RBE_WORKER_DIR"], measure.Env["WORKER_MODE"])
+	}
+	if got := strings.TrimSpace(measure.Run); got != `"$RBE_WORKER_DIR/blacksmith-worker.sh"` {
+		t.Errorf("worker-host measure step: run %q, want \"$RBE_WORKER_DIR/blacksmith-worker.sh\"", got)
+	}
+
+	if measure.ID != "measure" {
+		t.Errorf("worker-host measure step: id %q, want measure (product-check reads its outcome)", measure.ID)
+	}
+
+	// §5.6: the pinned rbe-worker's product-check, worker items, against
+	// this checkout, on the Go of go.mod. On every run, not only when the
+	// host moved, so a .bazelrc or manifest change that breaks the contract
+	// fails; never after H5 or the fetch failed (a non-empty fetched dir is
+	// fetch.sh's last output), but still after a failed measurement.
+	const contractIf = "${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}"
+	h5At, measureAt, contractAt, setupGoAt, setupGos := -1, -1, -1, -1, 0
+	for i, s := range job.Steps {
+		switch {
+		case s.Name == "Every commit in the bump range is signed, merged and verified (H5)":
+			h5At = i
+		case s.Name == measure.Name:
+			measureAt = i
+		case s.Name == "Product contract against the pinned rbe-worker":
+			contractAt = i
+		case strings.HasPrefix(s.Uses, "actions/setup-go@"):
+			setupGoAt = i
+			setupGos++
+		}
+	}
+	if contractAt < 0 || setupGos != 1 {
+		t.Fatalf("worker-host: %d setup-go steps, product-check step %d; want exactly one setup-go and the product-check step", setupGos, contractAt)
+	}
+	if h5At < 0 || h5At >= measureAt || measureAt >= setupGoAt || setupGoAt >= contractAt {
+		t.Errorf("worker-host: H5 %d, measure %d, setup-go %d, product-check %d; want them in that order", h5At, measureAt, setupGoAt, contractAt)
+	}
+	setupGo, contract := job.Steps[setupGoAt], job.Steps[contractAt]
+	// Neither may swallow a failure: a broken contract must fail the job.
+	if setupGo.ContinueOnError != "" || contract.ContinueOnError != "" {
+		t.Errorf("worker-host: setup-go continue-on-error %q, product-check continue-on-error %q; want neither", setupGo.ContinueOnError, contract.ContinueOnError)
+	}
+	if setupGo.If != contractIf || setupGo.With["go-version-file"] != "go.mod" || setupGo.With["cache"] != "false" {
+		t.Errorf("worker-host setup-go: if %q with %v; want if %q, go-version-file go.mod, cache false", setupGo.If, setupGo.With, contractIf)
+	}
+	if contract.If != contractIf {
+		t.Errorf("worker-host product-check step: if %q, want %q", contract.If, contractIf)
+	}
+	if len(contract.Env) != 1 || contract.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" {
+		t.Errorf("worker-host product-check step: env %v, want RBE_WORKER_DIR from the fetch step alone (no token)", contract.Env)
+	}
+	if want := `cd "$RBE_WORKER_DIR/.." && go run ./cmd/product-check -product-root "$GITHUB_WORKSPACE" -skip-client`; strings.TrimSpace(contract.Run) != want {
+		t.Errorf("worker-host product-check step: run %q, want %q", contract.Run, want)
 	}
 
 	h5, ok := byName["Every commit in the bump range is signed, merged and verified (H5)"]

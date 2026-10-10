@@ -736,9 +736,11 @@ var rbeWorkerFetchJobs = map[string][]string{
 
 // TestRBEWorkerAlwaysPinned: the worker code is gastownhall/rbe-worker at
 // ./pin and nothing else (S5 deleted gascity's in-tree copy, and with it the
-// S3-S5 cutover switch): every fetch step takes no input, no workflow reads
-// an RBE_WORKER_SOURCE_* variable, the action declares no source input and
-// fetch.sh has no branch that returns this checkout's tools/rbe.
+// S3-S5 cutover switch): every fetch step takes no input and no env (a
+// SOURCE env would reach fetch.sh as directly as an input), is id
+// rbe-worker (what every run step's RBE_WORKER_DIR reads), no workflow
+// reads an RBE_WORKER_SOURCE_* variable, the action declares no source
+// input and fetch.sh has no branch that returns this checkout's tools/rbe.
 func TestRBEWorkerAlwaysPinned(t *testing.T) {
 	root := repoRoot(t)
 	for path, wantJobs := range rbeWorkerFetchJobs {
@@ -750,8 +752,10 @@ func TestRBEWorkerAlwaysPinned(t *testing.T) {
 			var wf struct {
 				Jobs map[string]struct {
 					Steps []struct {
-						Uses string         `yaml:"uses"`
-						With map[string]any `yaml:"with"`
+						ID   string            `yaml:"id"`
+						Uses string            `yaml:"uses"`
+						With map[string]any    `yaml:"with"`
+						Env  map[string]string `yaml:"env"`
 					} `yaml:"steps"`
 				} `yaml:"jobs"`
 			}
@@ -767,6 +771,12 @@ func TestRBEWorkerAlwaysPinned(t *testing.T) {
 					found = append(found, id)
 					if len(step.With) != 0 {
 						t.Errorf("%s job %s: fetch step with %v, want no inputs", path, id, step.With)
+					}
+					if len(step.Env) != 0 {
+						t.Errorf("%s job %s: fetch step env %v, want none", path, id, step.Env)
+					}
+					if step.ID != "rbe-worker" {
+						t.Errorf("%s job %s: fetch step id %q, want rbe-worker", path, id, step.ID)
 					}
 				}
 			}
@@ -825,8 +835,18 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 		// The worker-env measure step runs the script too, without a worker.
 		if strings.Contains(step.Run, "blacksmith-worker.sh") && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
+			// The fetched tree's script, never a path in this checkout.
+			if got, want := strings.TrimSpace(step.Run), `"$RBE_WORKER_DIR/blacksmith-worker.sh"`; got != want {
+				t.Errorf("worker step run = %q, want %q", got, want)
+			}
+			if got, want := step.Env["WORKER_MODE"], "pool"; got != want {
+				t.Errorf("worker step WORKER_MODE = %q, want %q", got, want)
+			}
 			if got, want := step.Env["RBE_WORKER_DIR"], "${{ steps.rbe-worker.outputs.dir }}"; got != want {
 				t.Errorf("worker step RBE_WORKER_DIR = %q, want %q", got, want)
+			}
+			if got, want := step.Env["RBE_WORKER_REVISION"], "${{ steps.rbe-worker.outputs.sha }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_REVISION = %q, want %q", got, want)
 			}
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.

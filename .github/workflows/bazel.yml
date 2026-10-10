@@ -1212,17 +1212,36 @@ jobs:
           NEW_SHA: ${{ steps.rbe-worker.outputs.sha }}
         run: .github/actions/rbe-worker/h5.sh "$WORKER_REPO_DIR/.." "$OLD_SHA" "$NEW_SHA"
 
-      # §5.6, run against the PR's pinned rbe-worker once rbe-worker ships
-      # cmd/product-check (S2). Until then this step has nothing to run
-      # against and is intentionally absent; adding it is part of landing S2.
-
       - name: Measure this Blacksmith host against the PR's manifest
+        id: measure
         if: steps.host.outputs.measure == 'true' || steps.pins.outputs.pin-changed == 'true'
         env:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+
+      # §5.6: the pinned rbe-worker's cmd/product-check, worker items only,
+      # against this checkout (its manifest's package set is worker-env's
+      # measured list, its dolt line the worker's DOLT_VERSION, the
+      # .bazelrc test PATH the one worker-env measures, the platform pin the
+      # manifest's sha256). Stdlib-only and quick, so it runs on every run,
+      # whether or not the host moved: a .bazelrc or manifest change that
+      # breaks the contract fails here. It runs after H5 and the fetch
+      # succeeded (a non-empty dir is fetch.sh's last output, written only
+      # after every refusal check and the checkout), and also when the
+      # measurement itself failed, so a drifted host still reports the
+      # contract. No secret reaches these steps.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: ${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Product contract against the pinned rbe-worker
+        if: ${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}
+        env:
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: cd "$RBE_WORKER_DIR/.." && go run ./cmd/product-check -product-root "$GITHUB_WORKSPACE" -skip-client
 
   # The required check "bazel test (side-by-side)" (main ruleset, branch
   # protection): the one job of that name. It passes only when the rbe job,

@@ -30,9 +30,12 @@ import (
 // with its own tests. The contract between the two (the manifest's package
 // set is worker-env's measured list, its dolt line is the worker's
 // DOLT_VERSION, the .bazelrc test PATH is the one worker-env measures) is
-// rbe-worker's cmd/product-check, which its CI runs against gascity main; the
-// worker-host job (bazel.yml) measures a Blacksmith host against this
-// checkout's manifest whenever the pin or the host moves.
+// rbe-worker's cmd/product-check. The worker-host job (bazel.yml) runs the
+// pinned commit's product-check against this checkout on every PR, and
+// measures a Blacksmith host against its manifest whenever the worker host
+// or the rbe-worker pin changes. rbe-worker's own CI also runs
+// product-check against gascity main, but only as information; it gates
+// nothing here.
 //
 // The manifest is the host's toolchain, not its image: arch, OS release, Go,
 // dolt, and the upstream releases of the libraries and tools actions reach,
