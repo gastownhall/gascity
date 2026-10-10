@@ -427,6 +427,7 @@ filegroup(
         "//internal/hooks:bazel_repo_srcs",
         "//internal/hostboot:bazel_repo_srcs",
         "//internal/importsvc:bazel_repo_srcs",
+        "//internal/lease:bazel_repo_srcs",
         "//internal/logutil:bazel_repo_srcs",
         "//internal/mail:bazel_repo_srcs",
         "//internal/mail/beadmail:bazel_repo_srcs",
