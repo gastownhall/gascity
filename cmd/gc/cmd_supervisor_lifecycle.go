@@ -139,6 +139,7 @@ var (
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
+	supervisorReadProcessCgroup                         = readSupervisorProcessCgroup
 	supervisorGetpgid                                   = syscall.Getpgid
 	supervisorGetpgrp                                   = syscall.Getpgrp
 	supervisorKill                                      = syscall.Kill
@@ -763,10 +764,12 @@ func supervisorPreForkOwnershipWarning() string {
 // supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
 // gc's own systemd user unit, for `gc supervisor status` and the doctor
 // check. Status is one of:
-//   - "owned": the unit is installed and active, and its MainPID equals the
-//     live supervisor PID — systemd's Restart=always is protecting it.
-//   - "outside_unit": the unit is installed but does not own the live PID
-//     (inactive, or a MainPID mismatch) — the ga-s434i0 defect shape.
+//   - "owned": the unit is installed and active, and the live supervisor PID
+//     equals its MainPID or sits in its cgroup (an sg wrapper is MainPID and gc
+//     runs as its descendant) — systemd's Restart=always is protecting it.
+//   - "outside_unit": the unit is installed but the live PID is neither its
+//     MainPID nor in its cgroup (inactive unit, or a process forked from a tmux
+//     pane) — the ga-s434i0 defect shape.
 //   - "no_unit": no unit is installed; the supervisor is intentionally
 //     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
 //     `gc supervisor install`).
@@ -789,10 +792,39 @@ func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus
 	if !ok {
 		pid = 0
 	}
-	if ok && pid != 0 && pid == livePID {
+	cgroup, err := supervisorReadProcessCgroup(livePID)
+	if err != nil {
+		cgroup = nil
+	}
+	if supervisorUnitOwnsProcess(true, livePID, pid, cgroup, unit) {
 		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
 	}
 	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid}
+}
+
+func readSupervisorProcessCgroup(pid int) ([]byte, error) {
+	return supervisorProcReadFile(filepath.Join(supervisorProcRoot, strconv.Itoa(pid), "cgroup"))
+}
+
+func supervisorUnitOwnsProcess(unitActive bool, livePID, mainPID int, cgroup []byte, unit string) bool {
+	if !unitActive {
+		return false
+	}
+	if livePID > 0 && livePID == mainPID {
+		return true
+	}
+	for _, line := range bytes.Split(cgroup, []byte{'\n'}) {
+		fields := bytes.SplitN(line, []byte{':'}, 3)
+		if len(fields) != 3 {
+			continue
+		}
+		for _, component := range strings.Split(string(fields[2]), "/") {
+			if component == unit {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
