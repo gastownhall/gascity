@@ -156,9 +156,11 @@ go_test(
         "//internal/formula",
         "//internal/fsys",
         "//internal/orders",
+        "//internal/pidutil",
         "//internal/testenv",
         "//internal/testutil",
         "//internal/workdir",
+        "//test/dolttest",
     ],
 )
 

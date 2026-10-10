@@ -1979,6 +1979,7 @@ go_test(
         "//internal/workspacesvc",
         "//internal/worktree",
         "//pkg/eventexport",
+        "//test/dolttest",
         "//test/tmuxtest",
         "//test/toolhome",
         "@com_github_burntsushi_toml//:toml",

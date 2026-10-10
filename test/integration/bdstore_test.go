@@ -5,7 +5,6 @@ package integration
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,19 +17,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
-const (
-	bdInitTimeout          = 60 * time.Second
-	doltServerStartupLimit = 10 * time.Second
-	// doltServerReadyTimeout budgets startDoltServerOnAllInterfaces's
-	// TCP-dial readiness wait (dolt_config_test.go). Kept separate from
-	// doltServerStartupLimit — same shape of wait, but a distinct call
-	// site — so a future tuning of one doesn't silently retune the other;
-	// that kind of implicit coupling is what let runBDInitCompat's timeout
-	// drift out of sync with bdInitTimeout in the first place (ga-gajll3).
-	doltServerReadyTimeout = 60 * time.Second
-)
+const bdInitTimeout = 60 * time.Second
 
 // TestBdStoreConformance runs the beads conformance suite against BdStore
 // backed by a real dolt server. This proves the full stack works:
@@ -106,58 +96,19 @@ func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 		t.Fatalf("creating dolt data dir: %v", err)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocating dolt port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("creating dolt log file: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "-H", "127.0.0.1", "-P", port, "--data-dir", dataDir)
-	cmd.Env = env
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("starting dolt sql-server: %v", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-
-	deadline := time.Now().Add(doltServerStartupLimit)
-	addr := net.JoinHostPort("127.0.0.1", port)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			t.Cleanup(func() {
-				cancel()
-				<-waitCh
-				_ = logFile.Close()
-			})
-			return port
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	cancel()
-	<-waitCh
-	_ = logFile.Close()
-	logBytes, _ := os.ReadFile(logPath)
-	t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerStartupLimit, logBytes)
-	return ""
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltBinary,
+		Args: func(port int) []string {
+			return []string{"sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir}
+		},
+		Env:     env,
+		LogPath: filepath.Join(dataDir, "sql-server.log"),
+	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	return strconv.Itoa(srv.Port)
 }
 
 // runBDInit initializes beads against the shared Dolt server with a bounded wait.

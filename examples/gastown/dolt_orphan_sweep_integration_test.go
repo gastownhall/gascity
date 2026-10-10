@@ -4,7 +4,6 @@ package gastown_test
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/doltorphan"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // TestSweep_ReapsRealDoltDataDirAfterSIGKILL exercises acceptance criterion 3
@@ -99,52 +99,34 @@ func TestSweep_ReapsRealDoltDataDirAfterSIGKILL(t *testing.T) {
 // for free if the test never reaches its own call (e.g. an earlier Fatalf).
 func startSweepDoltServer(t *testing.T, doltPath, dataDir string) (pid, port int, killAndWait func() bool) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	port = listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("Close listener: %v", err)
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("Create(%s): %v", logPath, err)
-	}
-
-	cmd := exec.Command(doltPath, "sql-server",
-		"-H", "127.0.0.1",
-		"-P", fmt.Sprintf("%d", port),
-		"--data-dir", dataDir,
-		"--loglevel", "warning",
-	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("Start dolt sql-server: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltPath,
+		Args: func(listenPort int) []string {
+			return []string{
+				"sql-server",
+				"-H", "127.0.0.1",
+				"-P", fmt.Sprintf("%d", listenPort),
+				"--data-dir", dataDir,
+				"--loglevel", "warning",
+			}
+		},
+		LogPath: filepath.Join(dataDir, "sql-server.log"),
+	})
 
 	var once sync.Once
 	var exited bool
 	killAndWait = func() bool {
 		once.Do(func() {
-			_ = cmd.Process.Kill()
+			_ = srv.Process.Kill()
 			select {
-			case <-done:
+			case <-srv.Exited:
 				exited = true
 			case <-time.After(10 * time.Second):
 				exited = false
 			}
-			_ = logFile.Close()
 		})
 		return exited
 	}
 	t.Cleanup(func() { killAndWait() })
-	return cmd.Process.Pid, port, killAndWait
+	return srv.PID, srv.Port, killAndWait
 }

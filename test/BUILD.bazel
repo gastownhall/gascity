@@ -44,6 +44,7 @@ test_suite(
         "//internal/storebinding/beadsworkspace:beadsworkspace_test",
         "//test/containerhost:containerhost_test",
         "//test/dashport:dashport_test",
+        "//test/dolttest:dolttest_test",
     ],
 )
 

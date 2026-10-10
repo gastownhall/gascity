@@ -281,6 +281,7 @@ go_test(
         "//internal/runproj",
         "//internal/testenv",
         "//internal/testutil",
+        "//test/dolttest",
         "//test/toolhome",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_steveyegge_beads//:beads",

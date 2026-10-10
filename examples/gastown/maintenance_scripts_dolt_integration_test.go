@@ -5,7 +5,6 @@ package gastown_test
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 func TestReaperWorkflowRootCleanupRealDoltSemantics(t *testing.T) {
@@ -304,51 +305,25 @@ func runDoltSQLForMaintenanceTest(t *testing.T, doltPath, dir, query string) str
 
 func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string, extraEnv ...string) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("Close listener: %v", err)
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("Create(%s): %v", logPath, err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltPath, "sql-server",
-		"-H", "127.0.0.1",
-		"-P", fmt.Sprintf("%d", port),
-		"--data-dir", dataDir,
-		"--loglevel", "warning",
-	)
-	cmd.Env = append(os.Environ(), extraEnv...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("Start dolt sql-server: %v", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-waitCh:
-		case <-time.After(10 * time.Second):
-			_ = cmd.Process.Kill()
-			<-waitCh
-		}
-		_ = logFile.Close()
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltPath,
+		Args: func(port int) []string {
+			return []string{
+				"sql-server",
+				"-H", "127.0.0.1",
+				"-P", fmt.Sprintf("%d", port),
+				"--data-dir", dataDir,
+				"--loglevel", "warning",
+			}
+		},
+		Env:     append(os.Environ(), extraEnv...),
+		LogPath: filepath.Join(dataDir, "sql-server.log"),
 	})
-	return port
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	return srv.Port
 }
 
 func waitForDoltServerForMaintenanceTest(t *testing.T, doltPath string, port int, db string) {

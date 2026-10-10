@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 func TestCompactScriptRealDoltRemotePush(t *testing.T) {
@@ -187,56 +188,25 @@ func TestStartRealDoltServerForCompactTestOwnsItsPort(t *testing.T) {
 
 func startRealDoltServerForCompactTest(t *testing.T, doltPath, dataDir string) (int, int) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocating dolt port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("closing dolt port probe: %v", err)
-	}
-	if compactDoltPortPicker != nil {
-		if port, err = compactDoltPortPicker(); err != nil {
-			t.Fatalf("picking dolt port: %v", err)
-		}
-	}
-
-	logPath := filepath.Join(dataDir, "sql-server.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("create dolt server log: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, doltPath, "sql-server",
-		"-H", "127.0.0.1",
-		"-P", fmt.Sprintf("%d", port),
-		"--data-dir", dataDir,
-		"--loglevel", "warning",
-	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("start dolt sql-server: %v", err)
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	cleanup := func() {
-		cancel()
-		select {
-		case <-waitCh:
-		case <-time.After(10 * time.Second):
-			_ = cmd.Process.Kill()
-			<-waitCh
-		}
-		_ = logFile.Close()
-	}
-	t.Cleanup(cleanup)
-	return port, cmd.Process.Pid
+	srv := dolttest.StartSQLServer(t, dolttest.SQLServerSpec{
+		Dolt: doltPath,
+		Args: func(port int) []string {
+			return []string{
+				"sql-server",
+				"-H", "127.0.0.1",
+				"-P", fmt.Sprintf("%d", port),
+				"--data-dir", dataDir,
+				"--loglevel", "warning",
+			}
+		},
+		LogPath:  filepath.Join(dataDir, "sql-server.log"),
+		PickPort: compactDoltPortPicker,
+	})
+	t.Cleanup(func() {
+		_ = srv.Process.Kill()
+		<-srv.Exited
+	})
+	return srv.Port, srv.PID
 }
 
 func waitForDoltServerQueryForCompactTest(t *testing.T, doltPath string, port int) {
