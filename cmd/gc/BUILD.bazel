@@ -1346,6 +1346,7 @@ go_test(
         "graph_dispatch_mem_test.go",
         "hangbudget_helpers_test.go",
         "hangbudget_test.go",
+        "hook_budget_test.go",
         "hook_claim_assigned_federation_test.go",
         "hook_claim_class_fanout_test.go",
         "hook_claim_drain_reason_schema_test.go",

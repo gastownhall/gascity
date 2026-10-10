@@ -369,6 +369,10 @@ type NativeDoltStore struct {
 	// backend; see row_witness.go for what a caller may conclude from it.
 	sawRows atomic.Bool
 
+	// listCounters counts the backend listing requests List issues; see
+	// ListRequestCounter.
+	listCounters nativeListCounters
+
 	// poolStale marks a handle whose pooled connections point at a proxy
 	// generation that has already been replaced, so the next read must reconnect
 	// BEFORE it is served rather than after it fails.
@@ -2436,14 +2440,7 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
 func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
-	query := ListQuery{AllowScan: true}
-	if len(status) > 0 {
-		query.Status = status[0]
-		if status[0] == "closed" {
-			query.IncludeClosed = true
-		}
-	}
-	return s.List(query)
+	return s.List(ListOpenQuery(status...))
 }
 
 // Children returns all beads whose parent-child dependency points at parentID.
@@ -2455,12 +2452,7 @@ func (s *NativeDoltStore) ListOpen(status ...string) ([]Bead, error) {
 // backing answer is a superset and ListQuery.Matches cuts it to the exact set —
 // which is what it did for the raw filter's parent predicate too.
 func (s *NativeDoltStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		ParentID:      parentID,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ChildrenQuery(parentID, opts...))
 }
 
 // WaitForParentProjection blocks until native dependency queries reflect a
@@ -2523,29 +2515,17 @@ func (s *NativeDoltStore) parentProjectionMatches(id, oldParentID, newParentID s
 
 // ListByLabel returns beads with an exact label match.
 func (s *NativeDoltStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		Label:         label,
-		Limit:         limit,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ListByLabelQuery(label, limit, opts...))
 }
 
 // ListByAssignee returns beads assigned to assignee with the requested status.
 func (s *NativeDoltStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
-	return s.List(ListQuery{Assignee: assignee, Status: status, Limit: limit, AllowScan: true})
+	return s.List(ListByAssigneeQuery(assignee, status, limit))
 }
 
 // ListByMetadata returns beads whose metadata contains all filters.
 func (s *NativeDoltStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
-	return s.List(ListQuery{
-		Metadata:      filters,
-		Limit:         limit,
-		IncludeClosed: HasOpt(opts, IncludeClosed),
-		AllowScan:     true,
-		TierMode:      TierModeFromOpts(opts),
-	})
+	return s.List(ListByMetadataQuery(filters, limit, opts...))
 }
 
 // SetMetadata sets a single metadata key on a bead.

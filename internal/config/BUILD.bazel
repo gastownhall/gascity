@@ -176,6 +176,7 @@ go_test(
         "validate_durations_test.go",
         "validate_semantics_test.go",
         "webhook_test.go",
+        "workquery_budget_test.go",
         "workquery_ephemeral_blocked_test.go",
         "workquery_ephemeral_inprogress_hold_test.go",
         "workquery_ephemeral_scan_reuse_test.go",
