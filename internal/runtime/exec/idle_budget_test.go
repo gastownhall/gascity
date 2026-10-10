@@ -5,36 +5,21 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// fakeClock is a manually advanced clock.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
+// The in-memory carrier tests run under testing/synctest: time inside the
+// bubble only advances when every goroutine is durably blocked, so the
+// deadlines below are exact rather than raced against the scheduler.
 
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-// slowCarrier is a runtime.Carrier whose every capture takes perCapture on
-// clock. A capture that would end past the capture context's deadline runs
-// until that deadline and is canceled there, as a real exec op killed by its
-// context is. Only Peek is used by WaitForIdle.
+// slowCarrier is a runtime.Carrier whose every capture takes perCapture,
+// or until the capture context ends, as a real exec op killed by its
+// context does. Only Peek is used by WaitForIdle.
 type slowCarrier struct {
 	runtime.Carrier
-	clock      *fakeClock
 	perCapture time.Duration
 	pane       string
 
@@ -46,17 +31,14 @@ func (c *slowCarrier) Peek(ctx context.Context, _ string, _ int) (string, error)
 	c.mu.Lock()
 	c.captures++
 	c.mu.Unlock()
-	if deadline, ok := ctx.Deadline(); ok {
-		if left := time.Until(deadline); left < c.perCapture {
-			// The real wait is what remains of the deadline; the fake clock
-			// moves to the deadline with it.
-			<-ctx.Done()
-			c.clock.advance(left)
-			return "", ctx.Err()
-		}
+	timer := time.NewTimer(c.perCapture)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-timer.C:
+		return c.pane, nil
 	}
-	c.clock.advance(c.perCapture)
-	return c.pane, nil
 }
 
 func (c *slowCarrier) count() int {
@@ -66,14 +48,20 @@ func (c *slowCarrier) count() int {
 }
 
 // hungCarrier never answers a capture until release is closed; when
-// honorCtx is set it returns on cancellation instead.
+// honorCtx is set it returns on cancellation instead. started, when set, is
+// closed as the first capture begins.
 type hungCarrier struct {
 	runtime.Carrier
 	honorCtx bool
 	release  chan struct{}
+	started  chan struct{}
+	once     sync.Once
 }
 
 func (c *hungCarrier) Peek(ctx context.Context, _ string, _ int) (string, error) {
+	if c.started != nil {
+		c.once.Do(func() { close(c.started) })
+	}
 	if c.honorCtx {
 		select {
 		case <-ctx.Done():
@@ -97,34 +85,32 @@ func TestWaitForIdleSlowCarrierHonorsHardBound(t *testing.T) {
 	fastIdlePoll(t)
 
 	t.Run("1s timeout", func(t *testing.T) {
-		clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-		start := clock.Now()
-		c := &slowCarrier{clock: clock, perCapture: 900 * time.Millisecond, pane: idleClaudePane}
-		realStart := time.Now()
-		err := waitForPaneIdle(context.Background(), c, clock.Now, "s", "❯ ", time.Second)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("waitForPaneIdle = %v, want DeadlineExceeded", err)
-		}
-		if elapsed := clock.Now().Sub(start); elapsed > time.Second {
-			t.Fatalf("clock advanced %v, past the 1s deadline", elapsed)
-		}
-		if wall := time.Since(realStart); wall > time.Second {
-			t.Fatalf("wall time %v, past the 1s deadline", wall)
-		}
-		if got := c.count(); got != 2 {
-			t.Fatalf("captures = %d, want 2 (the second canceled at the deadline)", got)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			c := &slowCarrier{perCapture: 900 * time.Millisecond, pane: idleClaudePane}
+			err := waitForPaneIdle(context.Background(), c, time.Now, "s", "❯ ", time.Second)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("waitForPaneIdle = %v, want DeadlineExceeded", err)
+			}
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("returned after %v, past the 1s deadline", elapsed)
+			}
+			if got := c.count(); got != 2 {
+				t.Fatalf("captures = %d, want 2 (the second canceled at the deadline)", got)
+			}
+		})
 	})
 
 	t.Run("5s budget", func(t *testing.T) {
-		clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-		c := &slowCarrier{clock: clock, perCapture: 900 * time.Millisecond, pane: idleClaudePane}
-		if err := waitForPaneIdle(context.Background(), c, clock.Now, "s", "❯ ", execIdleProbeBudget); err != nil {
-			t.Fatalf("waitForPaneIdle with the exec budget: %v", err)
-		}
-		if got := c.count(); got != 2 {
-			t.Fatalf("captures = %d, want exactly 2", got)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			c := &slowCarrier{perCapture: 900 * time.Millisecond, pane: idleClaudePane}
+			if err := waitForPaneIdle(context.Background(), c, time.Now, "s", "❯ ", execIdleProbeBudget); err != nil {
+				t.Fatalf("waitForPaneIdle with the exec budget: %v", err)
+			}
+			if got := c.count(); got != 2 {
+				t.Fatalf("captures = %d, want exactly 2", got)
+			}
+		})
 	})
 }
 
@@ -135,19 +121,47 @@ func TestWaitForIdleSlowCarrierHonorsHardBound(t *testing.T) {
 func TestWaitForIdleHungCaptureIsCanceledAtDeadline(t *testing.T) {
 	fastIdlePoll(t)
 	for _, honorCtx := range []bool{true, false} {
-		c := &hungCarrier{honorCtx: honorCtx, release: make(chan struct{})}
-		t.Cleanup(func() { close(c.release) })
-		const timeout = 100 * time.Millisecond
-		start := time.Now()
-		err := waitForPaneIdle(context.Background(), c, time.Now, "s", "❯ ", timeout)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("honorCtx=%v: waitForPaneIdle = %v, want DeadlineExceeded", honorCtx, err)
-		}
-		// The bound is the deadline itself; the slack only absorbs scheduling.
-		if elapsed := time.Since(start); elapsed > timeout+time.Second {
-			t.Fatalf("honorCtx=%v: returned after %v, want about %v", honorCtx, elapsed, timeout)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			c := &hungCarrier{honorCtx: honorCtx, release: make(chan struct{})}
+			defer close(c.release)
+			const timeout = 100 * time.Millisecond
+			start := time.Now()
+			err := waitForPaneIdle(context.Background(), c, time.Now, "s", "❯ ", timeout)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("honorCtx=%v: waitForPaneIdle = %v, want DeadlineExceeded", honorCtx, err)
+			}
+			if elapsed := time.Since(start); elapsed != timeout {
+				t.Fatalf("honorCtx=%v: returned after %v, want exactly %v", honorCtx, elapsed, timeout)
+			}
+		})
 	}
+}
+
+// Canceling the caller's context while a capture is in flight ends the wait
+// at once, not at the deadline.
+// Kills: a capture context derived from context.Background() instead of the
+// caller's (a reconciler shutdown or a canceled nudge would wait out the
+// whole timeout).
+func TestWaitForIdleCancelDuringCapture(t *testing.T) {
+	fastIdlePoll(t)
+	synctest.Test(t, func(t *testing.T) {
+		c := &hungCarrier{honorCtx: true, release: make(chan struct{}), started: make(chan struct{})}
+		defer close(c.release)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			<-c.started
+			cancel()
+		}()
+		start := time.Now()
+		err := waitForPaneIdle(ctx, c, time.Now, "s", "❯ ", 10*time.Second)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waitForPaneIdle = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("returned after %v, want at once", elapsed)
+		}
+	})
 }
 
 // Only a pack with an idle boundary asks for the larger budget, through the
