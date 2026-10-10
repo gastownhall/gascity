@@ -1314,12 +1314,12 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// Only after the result was delivered: an undelivered claim is released
 	// above, and a nudge for a claim this session no longer holds would wake it
 	// for work it does not own.
-	// gc.kind==workflow is the correct predicate here: only formula/compile.go
-	// sets this value (single writer), and preassignHookContinuationGroup only
-	// returns non-empty results for pool-routed graph.v2 beads
-	// (internal/graphroute/graphroute.go), so the two invariants together are
-	// equivalent to the narrower "formula_contract==graph.v2 &&
-	// continuation_group==pool-workflow" check.
+	// The gate is "a workflow root was delivered AND this claim freshly pinned
+	// at least one continuation sibling to this session". gc.kind=workflow has
+	// several writers (formula compile, API convoy dispatch, orders feed), and
+	// continuation groups are formula-declared (internal/graphroute), so the
+	// len(assigned) conjunct is what scopes this: the nudge only ever reaches a
+	// session that now owns pinned sibling work.
 	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
 		ops.EnqueueContinuationNudge(opts.Assignee)
 	}

@@ -106,3 +106,7 @@ The suite ran as a session-independent systemd service, with the official load g
 
 `test_log_dir: /var/tmp/gc-heavy-gate/runs/ga-3oog6w-rekey-fresh.c3/logs`
 Full proof: `/var/tmp/gc-heavy-gate/runs/ga-3oog6w-rekey-fresh.c3/FULL_SUITE_VERIFIED.json`; SHA-256 `05b2bb3ec2bafd3225b9c03973ba79d227dfde4c037721695788ff5bd5dd69c2`.
+
+## Post-gate delta
+
+This gate certifies source `839e1ff`. PR head `8c0beff` follows it and changes continuation-nudge target resolution: the production helper now resolves the claim assignee to its session bead (session-class store), fences the queued nudge to that session's ID and continuation epoch, and closes only the store handle it opened. It adds `TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle`, which is covered by CI on head rather than by the full-suite run recorded above.
