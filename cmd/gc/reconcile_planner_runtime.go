@@ -114,7 +114,7 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		return nil
 	}
 	rt.host = h
-	rt.planner.rec, rt.planner.observations = h.rec, h.gather.Observations
+	rt.planner.rec, rt.planner.observations, rt.planner.capacity = h.rec, h.gather.Observations, h.gather.Capacity
 	rt.planner.emitRecord = rt.emitPassRecord
 	creates, err := newCreateEffects(createEffectHost{cityPath: h.gather.CityPath, cityName: h.gather.CityName, lookPath: h.gather.LookPath, stderr: h.stderr})
 	if err != nil {

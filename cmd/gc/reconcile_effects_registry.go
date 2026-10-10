@@ -47,6 +47,8 @@ type effectReads struct {
 type heldCaps struct {
 	create  *createPass
 	creates *createEffects
+	start   startCaps           // the breaker and its recorder; capsFor adds the provider and clock
+	episode startupHealthRecord // over the sessions store
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -60,6 +62,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	}
 	if w.SessionsStore != nil {
 		p.reads.city = readOnlyStore{blindWriteRefusingStore{inner: w.SessionsStore}}
+		p.held.episode = startupHealthRecord{store: w.SessionsStore}
 	}
 	p.reads.rigs = make(map[string]beads.Store, len(w.RigStores))
 	for rig, store := range w.RigStores {
@@ -82,7 +85,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 // (v2purity reaches a function stored in a field only through a read of
 // that field):
 var effectSpecs = map[string]effectSpec{
-	intentStart:           {class: capStarts, tokens: 1, needs: needs{Lease: true}},
+	intentStart:           {class: capStarts, tokens: 1, needs: needs{Runtime: true, Lease: true}, caps: capReadStores | capProviderStart | capEpisode, sections: startSections},
 	intentAdopt:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capReadStores, sections: adoptSections},
 	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                 // C1, C2
 	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections}, // A3: writes the incarnation under the row's lease record

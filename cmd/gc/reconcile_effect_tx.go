@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -45,8 +47,10 @@ type effectSpec struct {
 type caps uint8
 
 const (
-	capCreate     caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
-	capReadStores                  // the read-only city and rig stores (reads)
+	capCreate        caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
+	capReadStores                     // the read-only city and rig stores (reads)
+	capProviderStart                  // the start's provider, endpoint breaker and clock (a Call's)
+	capEpisode                        // the #46 startup-health episode record (a Call's)
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -60,7 +64,21 @@ type txCaps struct {
 	exits   *[]func(final settlement) // onExit's, run at every exit
 	create  *createPass               // capCreate
 	creates *createEffects
-	reads   effectReads // capReadStores: read-only, blind writes refused
+	reads   effectReads         // capReadStores: read-only, blind writes refused
+	start   startCaps           // capProviderStart
+	episode startupHealthRecord // capEpisode
+}
+
+// startCaps are what the start's Calls hold to admit the endpoint ticket and
+// start a runtime: the composite provider, which the Call routes (RouteACP)
+// and resolves to its leaf itself, since capsFor runs before the name lock;
+// the breaker; the recorder and stderr its transitions go to; the clock.
+type startCaps struct {
+	sp       runtime.Provider
+	capacity *endpointCapacityGuard
+	rec      events.Recorder
+	stderr   io.Writer
+	clock    plannerClock
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
@@ -79,6 +97,13 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capReadStores != 0 {
 		c.reads = p.reads
+	}
+	if grant&capProviderStart != 0 {
+		c.start = p.held.start
+		c.start.sp, c.start.clock = p.Runtime, p.Clock
+	}
+	if grant&capEpisode != 0 {
+		c.episode = p.held.episode
 	}
 	return c
 }
@@ -464,7 +489,7 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, names: processNamesFor(p.World, row.Info), facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
 	t.needs.Lease = t.needs.Lease || spec.needs.Lease // a per-intent needsFor cannot drop the record
 	if t.needs.locksName(spec) {
 		var front *session.Store
@@ -522,6 +547,7 @@ type tx struct {
 	name    string                // the runtime name, when the name lock is held
 	lease   *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
 	expect  session.Info          // the row the premise expects
+	names   []string              // its template's process names, keyed on the pass's row
 	facts0  session.Facts         // its premise facts
 	basis   rowBasis              // its incarnation and token
 	started bool                  // a callStart ran, and no callStop since
@@ -554,7 +580,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		// A provider call is a write: an effect the executor abandoned first
 		// never calls, and one abandoned during it is ambiguous.
 		if ctx.Err() != nil || !t.c.latch.begin() {
-			s = ended(ctx)
+			if s.Outcome != settledLanded || i != len(sections)-1 {
+				s = ended(ctx) // a landed last section stays landed: its Call never fails the effect
+			}
 			break
 		}
 		t.view.prev, t.view.prevErr = t.callWatched(ctx, sec)
@@ -691,7 +719,7 @@ func (t *tx) done(step txStep) settlement {
 func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 	t.view.Now = t.p.Clock.Now()
 	if t.needs.Runtime {
-		rt, cause := readRuntime(ctx, t.p.Runtime, processNamesFor(t.p.World, t.expect), t.name, t.view.Now, t.p.Clock.Now)
+		rt, cause := readRuntime(ctx, t.p.Runtime, t.names, t.name, t.view.Now, t.p.Clock.Now)
 		if cause != "" {
 			return refused(cause), false
 		}
