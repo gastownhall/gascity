@@ -272,21 +272,6 @@ func transportStatus(status int, contentType, body string) scriptedTransport {
 	}
 }
 
-// closedLoopbackURL is a loopback URL nothing listens on: a server that is
-// down.
-func closedLoopbackURL(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return "http://" + addr
-}
-
 // TestRemoteBootGateTransportFailuresWarnAndStart: a server that cannot be
 // reached at boot is an outage, not a structural mismatch. The gate WARNs,
 // naming the scope, and the city starts; the store open deals with the outage
@@ -319,7 +304,9 @@ func TestRemoteBootGateTransportFailuresWarnAndStart(t *testing.T) {
 	}
 
 	t.Run("server down", func(t *testing.T) {
-		scope := scopeAt(t, closedLoopbackURL(t), false)
+		// A real dial through the default transport to the loopback discard
+		// port, where nothing listens: connection refused.
+		scope := scopeAt(t, "http://127.0.0.1:9", false)
 		result, remote, err := CheckRemoteScopeBootGate(context.Background(), "", scope)
 		assertWarns(t, scope, result, remote, err)
 	})
