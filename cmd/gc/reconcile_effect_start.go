@@ -118,7 +118,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case !ok || res.Err != nil:
 			return txStep{Refuse: causeTemplate, Err: res.Err}
 		case cause == causeNotPresent && !adopt:
-			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP}}
+			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}
 		case cause != "":
 			return txStep{Refuse: cause}
 		}

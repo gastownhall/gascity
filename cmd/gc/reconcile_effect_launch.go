@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -47,9 +48,10 @@ var startSections = []section{
 
 // launchRow is the row, template and pass a Launch's Calls act on.
 type launchRow struct {
-	w   *World
-	row session.Info
-	tp  TemplateParams
+	w     *World
+	row   session.Info
+	tp    TemplateParams
+	agent *config.Agent // whose side effects the launch installs
 }
 
 // startTicket is the endpoint ticket the admit Call took, the verdict the
@@ -191,7 +193,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		patch["session_key"], transcript = f.key, sessTranscriptAbsent
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
-	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next)}
+	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
 	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: launchPass{launchRow: launch, transcript: transcript, ticket: ticket}}
 }
 
@@ -228,8 +230,10 @@ type startOutcome struct {
 }
 
 // startLaunch is the launch Call: prepare of the PreWaked row, RouteACP, the
-// routed leaf's FreshOnly Start (LL6, I24) by the deadline less its slack,
-// the stale-key wait after a start with a key, and the commit's reads.
+// agent's side effects (hooks and ACP route, as legacy installs them every
+// tick), the routed leaf's FreshOnly Start (LL6, I24) by the deadline less
+// its slack, the stale-key wait after a start with a key, and the commit's
+// reads.
 func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, error) {
 	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.transcript)
 	if err != nil {
@@ -241,6 +245,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	}
 	leaf, _, _ := runtime.ResolveBackend(c.start.sp, name)
 	prepared.cfg.FreshOnly = true
+	in.w.Templates.installSideEffects(in.agent, in.tp)
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), tp: in.tp, prepared: prepared}
 	stop()

@@ -1546,6 +1546,7 @@ go_test(
         "reconcile_enqueue_test.go",
         "reconcile_fenced_store_test.go",
         "reconcile_gather_demand_test.go",
+        "reconcile_gather_templates_test.go",
         "reconcile_gather_test.go",
         "reconcile_identity_lint_test.go",
         "reconcile_identity_test.go",

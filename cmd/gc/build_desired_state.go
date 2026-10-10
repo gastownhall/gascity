@@ -3370,70 +3370,83 @@ func discoverSessionBeadsWithRoots(
 		if !ok {
 			continue
 		}
-		var (
-			resolveAgent         *config.Agent
-			sessionQualifiedName string
-		)
-		if isManualSessionInfoForAgent(info, cfgAgent) {
-			sessionQualifiedName = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, bInfo)
-			resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
-		} else {
-			// Canonicalize agent identity before calling resolveTemplate so a
-			// pool-managed bead with pool_slot stamped resolves as the
-			// pool-instance form here — the same shape realizePoolDesiredSessions
-			// uses. Before GC_ALIAS was excluded from CoreFingerprint, this
-			// identity mismatch caused config-drift drains; the canonical shape
-			// still keeps routing/display identity and remaining fingerprint
-			// inputs aligned across buildDesiredState paths. Named beads
-			// resolve to their own stored alias so this seam reproduces the
-			// identity the named-session loop assigned (see
-			// canonicalSessionIdentity).
-			resolveAgent, sessionQualifiedName = canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, bInfo)
-		}
-		fpExtra := buildFingerprintExtra(resolveAgent)
-		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, sessionQualifiedName, fpExtra, bInfo)
+		tp, err := resolveDiscoveredSessionTemplate(bp, cfg, cfgAgent, bInfo)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: bead %s template %q: %v (skipping)\n", info.ID, template, err) //nolint:errcheck
 			continue
-		}
-		tp.ManualSession = isManualSessionInfoForAgent(info, cfgAgent)
-		if tp.ManualSession {
-			if manualAlias := strings.TrimSpace(info.Alias); manualAlias != "" {
-				// Explicit aliases from `gc session new --alias ...` are
-				// user-chosen command targets and must survive controller sync.
-				tp.Alias = manualAlias
-			}
-		}
-		if isEphemeralSessionInfoForAgent(info, cfgAgent) {
-			if !tp.ManualSession || strings.TrimSpace(info.Alias) == "" {
-				tp.Alias = ""
-			}
-			if tp.ManualSession && sessionQualifiedName != "" {
-				tp.InstanceName = sessionQualifiedName
-			} else {
-				tp.InstanceName = sn
-			}
-		}
-		if isNamedSessionInfo(info) {
-			// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
-			// (build_desired_state.go ~1130-1139) did not populate this bead into
-			// desired this tick — e.g. during city suspend, which gates only that
-			// primary build and not this backfill. resolveTemplateForSessionBeadInfo
-			// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
-			// but never sets these three fields, so without this the named-session
-			// markers session_beads.go and templateParamsSessionOrigin key off go
-			// missing and the bead is wrongly treated as non-named.
-			tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
-			tp.ConfiguredNamedMode = info.ConfiguredNamedMode
-			if tp.Env == nil {
-				tp.Env = make(map[string]string)
-			}
-			tp.Env["GC_SESSION_ORIGIN"] = "named"
 		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}
 	return roots
+}
+
+// resolveDiscoveredSessionTemplate is the overlay's resolution of one open
+// session row of cfgAgent. Manual rows keep the concrete identity persisted
+// on the row (sessionBeadQualifiedNameInfo); pool-managed rows canonicalize
+// it (canonicalSessionIdentityWithConfigInfo). The v2 start's resolver
+// resolves manual and pool rows through it.
+func resolveDiscoveredSessionTemplate(bp *agentBuildParams, cfg *config.City, cfgAgent *config.Agent, info session.Info) (TemplateParams, error) {
+	var (
+		resolveAgent         *config.Agent
+		sessionQualifiedName string
+	)
+	if isManualSessionInfoForAgent(info, cfgAgent) {
+		sessionQualifiedName = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, info)
+		resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
+	} else {
+		// Canonicalize agent identity before calling resolveTemplate so a
+		// pool-managed bead with pool_slot stamped resolves as the
+		// pool-instance form here — the same shape realizePoolDesiredSessions
+		// uses. Before GC_ALIAS was excluded from CoreFingerprint, this
+		// identity mismatch caused config-drift drains; the canonical shape
+		// still keeps routing/display identity and remaining fingerprint
+		// inputs aligned across buildDesiredState paths. Named beads
+		// resolve to their own stored alias so this seam reproduces the
+		// identity the named-session loop assigned (see
+		// canonicalSessionIdentity).
+		resolveAgent, sessionQualifiedName = canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, info)
+	}
+	fpExtra := buildFingerprintExtra(resolveAgent)
+	tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, sessionQualifiedName, fpExtra, info)
+	if err != nil {
+		return TemplateParams{}, err
+	}
+	tp.ManualSession = isManualSessionInfoForAgent(info, cfgAgent)
+	if tp.ManualSession {
+		if manualAlias := strings.TrimSpace(info.Alias); manualAlias != "" {
+			// Explicit aliases from `gc session new --alias ...` are
+			// user-chosen command targets and must survive controller sync.
+			tp.Alias = manualAlias
+		}
+	}
+	if isEphemeralSessionInfoForAgent(info, cfgAgent) {
+		if !tp.ManualSession || strings.TrimSpace(info.Alias) == "" {
+			tp.Alias = ""
+		}
+		if tp.ManualSession && sessionQualifiedName != "" {
+			tp.InstanceName = sessionQualifiedName
+		} else {
+			tp.InstanceName = info.SessionNameMetadata
+		}
+	}
+	if isNamedSessionInfo(info) {
+		// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
+		// (build_desired_state.go ~1130-1139) did not populate this bead into
+		// desired this tick — e.g. during city suspend, which gates only that
+		// primary build and not this backfill. resolveTemplateForSessionBeadInfo
+		// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
+		// but never sets these three fields, so without this the named-session
+		// markers session_beads.go and templateParamsSessionOrigin key off go
+		// missing and the bead is wrongly treated as non-named.
+		tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
+		tp.ConfiguredNamedMode = info.ConfiguredNamedMode
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
+		}
+		tp.Env["GC_SESSION_ORIGIN"] = "named"
+	}
+	return tp, nil
 }
 
 // overlayVerdict is classifyOverlaySession's answer for one open session row.
