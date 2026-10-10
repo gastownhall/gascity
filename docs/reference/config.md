@@ -527,6 +527,27 @@ K8sConfig holds native K8s session provider settings.
 | `cpu_limit` | string |  | `2` | CPULimit is the pod CPU limit. Default: "2". |
 | `mem_limit` | string |  | `4Gi` | MemLimit is the pod memory limit. Default: "4Gi". |
 | `prebaked` | boolean |  |  | Prebaked skips init container staging and EmptyDir volumes when true. Use with images built by `gc build-image` that have city content baked in. |
+| `secret_env` | []K8sSecretEnv |  |  | SecretEnv projects Kubernetes Secret keys into named container env vars. A non-empty list replaces the default GITHUB_TOKEN projection. |
+| `secret_mounts` | []K8sSecretMount |  |  | SecretMounts mounts Kubernetes Secrets read-only into the agent container. A non-empty list replaces the default claude-credentials mount. |
+
+## K8sSecretEnv
+
+K8sSecretEnv describes a Secret key projected into a container environment variable.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **yes** |  |  |
+| `secret` | string | **yes** |  |  |
+| `key` | string | **yes** |  |  |
+
+## K8sSecretMount
+
+K8sSecretMount describes a Secret mounted read-only into an agent container.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `secret` | string | **yes** |  |  |
+| `mount_path` | string | **yes** |  |  |
 
 ## LocalDoctorCheck
 

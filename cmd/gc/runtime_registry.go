@@ -10,7 +10,6 @@ import (
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionherdr "github.com/gastownhall/gascity/internal/runtime/herdr"
-	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/registry"
 	sessionssh "github.com/gastownhall/gascity/internal/runtime/ssh"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
@@ -70,8 +69,8 @@ func buildRuntimeRegistry() *registry.Registry {
 	// resolves per city via runtimeRegistryForCity. A city without that pack
 	// that selects session = "cloudflare" falls through to the tmux fallback
 	// (RUNTIME-SEL-006) — the delivery-independence boundary (RUNTIME-PLAN-004).
-	must(r.Register("k8s", func(_ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
-		return sessionk8s.NewSeamBacked()
+	must(r.Register("k8s", func(_ string, sc config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		return k8sProviderFromSession(sc.K8s)
 	}))
 	// herdr (https://herdr.dev): opt-in multiplexer backend. One shared herdr
 	// session-server per city; one workspace per rig/town, one tab per agent.

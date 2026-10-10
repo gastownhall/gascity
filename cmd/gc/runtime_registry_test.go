@@ -358,3 +358,45 @@ func TestRuntimeRegistryACPConfigCarriesStopGrace(t *testing.T) {
 		t.Errorf("default acp config = %+v, want 30s handshake, 60s nudge busy, 1000 buffer lines", def)
 	}
 }
+
+func TestK8sSecretProjectionReachesBuiltinAndHybridProviders(t *testing.T) {
+	oldConstructor := newSeamBackedK8sProvider
+	t.Cleanup(func() { newSeamBackedK8sProvider = oldConstructor })
+
+	wantEnv := []runtime.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}}
+	wantMounts := []runtime.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}}
+	var calls int
+	newSeamBackedK8sProvider = func(env []runtime.K8sSecretEnv, mounts []runtime.K8sSecretMount) (runtime.Provider, error) {
+		calls++
+		if len(env) != len(wantEnv) || env[0] != wantEnv[0] {
+			t.Errorf("K8s constructor call %d secret env = %#v, want %#v", calls, env, wantEnv)
+		}
+		if len(mounts) != len(wantMounts) || mounts[0] != wantMounts[0] {
+			t.Errorf("K8s constructor call %d secret mounts = %#v, want %#v", calls, mounts, wantMounts)
+		}
+		return runtime.NewFake(), nil
+	}
+
+	sc := config.SessionConfig{RemoteMatch: "remote", K8s: config.K8sConfig{
+		SecretEnv:    []config.K8sSecretEnv{{Name: "SERVICE_TOKEN", Secret: "service-auth", Key: "token"}},
+		SecretMounts: []config.K8sSecretMount{{Secret: "service-files", MountPath: "/run/service"}},
+	}}
+
+	if _, err := buildRuntimeRegistry().New("k8s", sc, "city", t.TempDir()); err != nil {
+		t.Fatalf("builtin K8s provider construction: %v", err)
+	}
+	hybridProvider, err := newHybridProvider(sc, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("hybrid provider construction: %v", err)
+	}
+	router, ok := hybridProvider.(runtime.Router)
+	if !ok {
+		t.Fatalf("hybrid provider type %T does not expose routing", hybridProvider)
+	}
+	if route := router.RouteFor("worker-remote"); route.Label != "remote" {
+		t.Fatalf("hybrid route = %+v, want remote K8s leg", route)
+	}
+	if calls != 2 {
+		t.Fatalf("K8s provider constructor called %d times, want builtin and hybrid calls", calls)
+	}
+}

@@ -1928,11 +1928,63 @@
         "prebaked": {
           "type": "boolean",
           "description": "Prebaked skips init container staging and EmptyDir volumes when true.\nUse with images built by `gc build-image` that have city content baked in."
+        },
+        "secret_env": {
+          "items": {
+            "$ref": "#/$defs/K8sSecretEnv"
+          },
+          "type": "array",
+          "description": "SecretEnv projects Kubernetes Secret keys into named container env vars.\nA non-empty list replaces the default GITHUB_TOKEN projection."
+        },
+        "secret_mounts": {
+          "items": {
+            "$ref": "#/$defs/K8sSecretMount"
+          },
+          "type": "array",
+          "description": "SecretMounts mounts Kubernetes Secrets read-only into the agent container.\nA non-empty list replaces the default claude-credentials mount."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "K8sConfig holds native K8s session provider settings."
+    },
+    "K8sSecretEnv": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "secret": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "secret",
+        "key"
+      ],
+      "description": "K8sSecretEnv describes a Secret key projected into a container environment variable."
+    },
+    "K8sSecretMount": {
+      "properties": {
+        "secret": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "secret",
+        "mount_path"
+      ],
+      "description": "K8sSecretMount describes a Secret mounted read-only into an agent container."
     },
     "LocalDoctorCheck": {
       "properties": {

@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"maps"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -204,6 +206,9 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 // Same labels, annotations, container names, volumes, and tmux-inside-pod
 // pattern so mixed-mode migration works.
 func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error) {
+	if err := validateSecretProjection(p.secretEnv, p.secretMounts); err != nil {
+		return nil, err
+	}
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
 	agentName := cfg.Env["GC_ALIAS"]
@@ -291,7 +296,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 
 	// Build environment, remapping K8s-specific vars.
-	env, err := buildPodEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort)
+	env, err := buildPodEnvWithSecretEnv(cfg.Env, podWorkDir, p.managedServiceHost, p.managedServicePort, p.secretEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -310,17 +315,28 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		})
 	}
 
-	mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
-		Name: "claude-config", MountPath: "/tmp/claude-secret", ReadOnly: true,
-	})
-	volumes = append(volumes, corev1.Volume{
-		Name: "claude-config", VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: "claude-credentials",
-				Optional:   boolPtr(true),
+	secretMounts := p.secretMounts
+	defaultSecretMounts := len(secretMounts) == 0
+	if len(secretMounts) == 0 {
+		secretMounts = []runtime.K8sSecretMount{{Secret: "claude-credentials", MountPath: "/tmp/claude-secret"}}
+	}
+	for i, projection := range secretMounts {
+		volumeName := fmt.Sprintf("gc-secret-%d", i)
+		if defaultSecretMounts {
+			volumeName = "claude-config"
+		}
+		mainVolMounts = append(mainVolMounts, corev1.VolumeMount{
+			Name: volumeName, MountPath: projection.MountPath, ReadOnly: true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeName, VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: projection.Secret,
+					Optional:   boolPtr(true),
+				},
 			},
-		},
-	})
+		})
+	}
 
 	// If GC_CITY differs from work_dir, add a city volume (not needed when prebaked).
 	if !p.prebaked && ctrlCity != "" && ctrlCity != cfg.WorkDir {
@@ -442,6 +458,10 @@ func agentSecurityContext(linuxUsername string) *corev1.SecurityContext {
 // Removes controller-only vars, strips deprecated K8s compatibility inputs,
 // and remaps pod-visible ones.
 func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) ([]corev1.EnvVar, error) {
+	return buildPodEnvWithSecretEnv(cfgEnv, podWorkDir, managedServiceHost, managedServicePort, nil)
+}
+
+func buildPodEnvWithSecretEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string, secretEnv []runtime.K8sSecretEnv) ([]corev1.EnvVar, error) {
 	// Start with cfg.Env, removing controller-only vars.
 	// Auth creds (GC_DOLT_USER, GC_DOLT_PASSWORD, BEADS_DOLT_*_USER/PASSWORD) intentionally pass through.
 	skip := map[string]bool{
@@ -507,19 +527,55 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		env = append(env, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: "/home/gcagent/.claude"})
 	}
 
-	// Inject GITHUB_TOKEN from optional K8s secret for git push in pods.
-	env = append(env, corev1.EnvVar{
-		Name: "GITHUB_TOKEN",
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "git-credentials"},
-				Key:                  "token",
-				Optional:             boolPtr(true),
+	if len(secretEnv) == 0 {
+		secretEnv = []runtime.K8sSecretEnv{{Name: "GITHUB_TOKEN", Secret: "git-credentials", Key: "token"}}
+	}
+	for _, projection := range secretEnv {
+		env = append(env, corev1.EnvVar{
+			Name: projection.Name,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: projection.Secret},
+					Key:                  projection.Key,
+					Optional:             boolPtr(true),
+				},
 			},
-		},
-	})
+		})
+	}
 
 	return env, nil
+}
+
+var secretProjectionEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validateSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) error {
+	seenEnv := make(map[string]struct{}, len(secretEnv))
+	for i, projection := range secretEnv {
+		if strings.TrimSpace(projection.Name) == "" || strings.TrimSpace(projection.Secret) == "" || strings.TrimSpace(projection.Key) == "" {
+			return fmt.Errorf("k8s secret_env[%d] requires non-blank name, secret, and key", i)
+		}
+		if !secretProjectionEnvName.MatchString(projection.Name) {
+			return fmt.Errorf("k8s secret_env[%d].name %q is not a valid environment variable name", i, projection.Name)
+		}
+		if _, exists := seenEnv[projection.Name]; exists {
+			return fmt.Errorf("k8s secret_env[%d].name %q is duplicated", i, projection.Name)
+		}
+		seenEnv[projection.Name] = struct{}{}
+	}
+	seenMount := make(map[string]struct{}, len(secretMounts))
+	for i, projection := range secretMounts {
+		if strings.TrimSpace(projection.Secret) == "" || strings.TrimSpace(projection.MountPath) == "" {
+			return fmt.Errorf("k8s secret_mounts[%d] requires non-blank secret and mount_path", i)
+		}
+		if !path.IsAbs(projection.MountPath) {
+			return fmt.Errorf("k8s secret_mounts[%d].mount_path %q must be absolute", i, projection.MountPath)
+		}
+		if _, exists := seenMount[projection.MountPath]; exists {
+			return fmt.Errorf("k8s secret_mounts[%d].mount_path %q is duplicated", i, projection.MountPath)
+		}
+		seenMount[projection.MountPath] = struct{}{}
+	}
+	return nil
 }
 
 // needsStaging returns true if the session config requires file staging

@@ -49,8 +49,10 @@ type Provider struct {
 	tolerations        []corev1.Toleration // GC_K8S_TOLERATIONS (JSON)
 	affinity           *corev1.Affinity    // GC_K8S_AFFINITY (JSON)
 	priorityClassName  string              // GC_K8S_PRIORITY_CLASS_NAME
-	postStartSettle    time.Duration       // settle time before post-start liveness check
-	stderr             io.Writer           // warning output (default os.Stderr)
+	secretEnv          []runtime.K8sSecretEnv
+	secretMounts       []runtime.K8sSecretMount
+	postStartSettle    time.Duration // settle time before post-start liveness check
+	stderr             io.Writer     // warning output (default os.Stderr)
 }
 
 type schedulingFields struct {
@@ -77,6 +79,13 @@ type schedulingFields struct {
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
 func NewProvider() (*Provider, error) {
+	return NewProviderWithSecretProjection(nil, nil)
+}
+
+// NewProviderWithSecretProjection creates a provider with optional,
+// configuration-backed Kubernetes Secret projections. Existing GC_K8S_*
+// environment settings retain their normal behavior.
+func NewProviderWithSecretProjection(secretEnv []runtime.K8sSecretEnv, secretMounts []runtime.K8sSecretMount) (*Provider, error) {
 	namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
 	image := os.Getenv("GC_K8S_IMAGE")
 	k8sContext := os.Getenv("GC_K8S_CONTEXT")
@@ -124,6 +133,8 @@ func NewProvider() (*Provider, error) {
 		tolerations:        scheduling.tolerations,
 		affinity:           scheduling.affinity,
 		priorityClassName:  scheduling.priorityClassName,
+		secretEnv:          append([]runtime.K8sSecretEnv(nil), secretEnv...),
+		secretMounts:       append([]runtime.K8sSecretMount(nil), secretMounts...),
 	}, nil
 }
 
