@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -1805,9 +1807,80 @@ func ProviderTerminalErrorReason(content string) string {
 		return "quota_exceeded"
 	case strings.Contains(lower, "quota exceeded") && !strings.Contains(lower, "disk quota"):
 		return "quota_exceeded"
+	case containsCreditBalanceTooLow(lower):
+		// Anthropic's empty-credit error ("Credit balance too low · Add
+		// funds: ..." as Claude Code displays it, "Your credit balance is too
+		// low to access ..." from the API) is the same class as
+		// insufficient_quota: it needs credit or a different key, not a
+		// retry. Claude's spend-limit modal ("Usage credit balance: ...")
+		// does not contain either phrase and stays a rate-limit screen.
+		return "quota_exceeded"
 	default:
 		return ""
 	}
+}
+
+// containsCreditBalanceTooLow reports whether lowercased pane content shows
+// the empty-credit error itself rather than the phrase quoted in ordinary
+// output: a line that, once Claude Code's leading "⎿" marker and indentation
+// are trimmed, is an API 4xx error carrying the full sentence ("api error:
+// 4... credit balance is too low to access"), starts with "credit balance is
+// too low", or is Claude Code's displayed stop ("credit balance too low",
+// alone or followed by " · "). The indentation is trimmed as Unicode space
+// because Claude Code pads an error "⎿" with a no-break space. The full
+// sentence counts only after a leading "api error: 4" so that a grep hit or a
+// quote of it is not mistaken for the error. Because the sentence sits far
+// into the error's JSON body, a narrow pane wraps it onto the error's
+// indented continuation lines, so it is looked for in the error line joined
+// with those lines, whitespace removed. The shorter form without "is" must
+// end there or continue with " · " so that wrapped prose which happens to
+// start a line with the phrase is not mistaken for the stop.
+func containsCreditBalanceTooLow(lower string) bool {
+	lines := strings.Split(lower, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimRightFunc(strings.TrimLeftFunc(line, func(r rune) bool {
+			return unicode.IsSpace(r) || r == '⎿'
+		}), unicode.IsSpace)
+		if strings.HasPrefix(trimmed, "api error: 4") &&
+			strings.Contains(apiErrorBlockWithoutSpace(lines, i), "creditbalanceistoolowtoaccess") {
+			return true
+		}
+		if strings.HasPrefix(trimmed, "credit balance is too low") ||
+			trimmed == "credit balance too low" ||
+			strings.HasPrefix(trimmed, "credit balance too low · ") {
+			return true
+		}
+	}
+	return false
+}
+
+// maxAPIErrorContinuationLines bounds how many wrapped lines after an API
+// error line apiErrorBlockWithoutSpace joins to it.
+const maxAPIErrorContinuationLines = 6
+
+// apiErrorBlockWithoutSpace returns lines[start] joined with the indented,
+// non-blank lines that follow it (at most maxAPIErrorContinuationLines), with
+// all whitespace removed, so that text a pane wrapped across those lines,
+// even mid-word, reads as one string. A blank or unindented line ends the
+// block.
+func apiErrorBlockWithoutSpace(lines []string, start int) string {
+	var b strings.Builder
+	end := min(start+1+maxAPIErrorContinuationLines, len(lines))
+	for i := start; i < end; i++ {
+		line := lines[i]
+		if i > start {
+			first, _ := utf8.DecodeRuneInString(line)
+			if strings.TrimSpace(line) == "" || !unicode.IsSpace(first) {
+				break
+			}
+		}
+		for _, r := range line {
+			if !unicode.IsSpace(r) {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
 }
 
 // lineContainsAll reports whether any single line of content contains every

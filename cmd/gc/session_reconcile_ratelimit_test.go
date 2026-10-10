@@ -415,3 +415,43 @@ func TestCheckStability_TerminalErrorScreen_MarksTerminalNotCrash(t *testing.T) 
 		t.Errorf("last_woke_at = %q, want cleared after terminal classification", got)
 	}
 }
+
+// TestCheckStabilityCreditBalancePaneMarksTerminal pins that a dead session
+// whose pane shows an exhausted API credit balance is marked terminal rather
+// than counted as a wake failure: every retry would hit the same empty balance.
+func TestCheckStabilityCreditBalancePaneMarksTerminal(t *testing.T) {
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":  now.Add(-10 * time.Second).Format(time.RFC3339),
+		"wake_attempts": "3", // a real crash would push us to 4
+	})
+
+	peek := func(_ int) (string, error) {
+		return "> hello\n  ⎿  Credit balance is too low\n", nil
+	}
+
+	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, peek)
+	syncBeadFromStore(&session, store)
+	if !stab {
+		t.Fatal("checkStability should return true when it records a terminal provider error")
+	}
+	if got := session.Metadata["wake_attempts"]; got != "3" {
+		t.Errorf("wake_attempts = %q, want 3; an empty credit balance must not count as a crash", got)
+	}
+	if got := session.Metadata["quarantined_until"]; got != "" {
+		t.Errorf("quarantined_until = %q, want empty", got)
+	}
+	if got := session.Metadata["sleep_reason"]; got != string(sessionpkg.SleepReasonProviderTerminalError) {
+		t.Errorf("sleep_reason = %q, want %q", got, string(sessionpkg.SleepReasonProviderTerminalError))
+	}
+	if got := session.Metadata[sessionProviderTerminalErrorMetadataKey]; got != "quota_exceeded" {
+		t.Errorf("%s = %q, want quota_exceeded", sessionProviderTerminalErrorMetadataKey, got)
+	}
+	if got := session.Metadata[sessionHealthStateMetadataKey]; got != "unhealthy" {
+		t.Errorf("%s = %q, want unhealthy", sessionHealthStateMetadataKey, got)
+	}
+}
