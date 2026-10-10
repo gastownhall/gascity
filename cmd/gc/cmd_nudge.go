@@ -140,9 +140,18 @@ type queuedNudge = nudgequeue.Item
 type nudgeQueueState = nudgequeue.State
 
 type nudgeTarget struct {
-	cityPath          string
-	cityName          string
-	cfg               *config.City
+	cityPath string
+	cityName string
+	cfg      *config.City
+	// store is the nudge store resolveNudgeTarget opened to resolve the
+	// session; the drain reuses it for its maintenance, delivery and ack
+	// opens (each open runs the bd-context preflight and a config load).
+	// handle is the work store that open actually opened — the only handle the
+	// drain may close (see openOwnedNudgeBeadStore); store.Store may be the
+	// storage routes' shared engine on a relocated city and must never be
+	// closed by this frame.
+	store             beads.NudgesStore
+	handle            beads.Store
 	alias             string
 	aliasHistory      []string
 	identity          string
@@ -397,6 +406,7 @@ func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	defer discardNudgeTargetStore(&target)
 
 	pending, inFlight, dead, err := listQueuedNudgesForTarget(target.cityPath, target, time.Now())
 	if err != nil {
@@ -561,7 +571,7 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	// reported as dropped.
 	dropped := make(map[string]bool, len(droppable))
 	if len(droppable) > 0 {
-		store, opened, err := openNudgeBeadStoreOwned(cityPath)
+		store, opened, err := openNudgeBeadStoreOwned(cityPath, nil)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 			return 1
@@ -749,10 +759,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// The drain owns the store resolveNudgeTarget opened: it borrows it for
+	// every maintenance, delivery and ack pass below and closes the work
+	// handle — never the class store — exactly once at return.
+	defer closeBeadStoreHandle(target.handle) //nolint:errcheck // best-effort
 	if inject {
 		injectPrefix += contextInjectLineForSample(contextUsage, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
 		if !wispPrefetched {
-			wispExtra = wispStepInjectionContent(target.cityPath)
+			wispExtra = wispStepInjectionContentWithStore(target.cityPath, target.cfg, target.store.Store)
 		}
 	}
 
@@ -771,7 +785,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 		return 1
 	}
-	deliveryStore := openNudgeBeadStore(target.cityPath)
+	deliveryStore := target.store
+	if deliveryStore.Store == nil {
+		deliveryStore = openNudgeBeadStoreWithConfig(target.cityPath, target.cfg)
+		defer closeBeadStoreHandle(deliveryStore.Store) //nolint:errcheck // best-effort
+	}
 	// Two-store split: the nudge-queue delivery store stays on the nudges class
 	// (openNudgeBeadStore), while the session-class ops — wait-bead reads in
 	// splitQueuedNudgesForDelivery and the last-nudge-delivered stamp — route
@@ -843,7 +861,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	if inject {
-		if err := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "accepted_for_injection", "", "hook-transport-accepted"); err != nil {
+		if err := ackQueuedNudgesWithOutcomeUsingStore(target.cityPath, target.cfg, target.store, queuedNudgeIDs(items), "accepted_for_injection", "", "hook-transport-accepted"); err != nil {
 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
 			return 0
 		}
@@ -951,6 +969,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	// The poller is a long-lived sidecar: release the store the resolution
+	// opened right away; the loop below opens its own per iteration.
+	discardNudgeTargetStore(&target)
 	if sessionName != "" {
 		target.sessionName = sessionName
 	}
@@ -978,7 +999,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	store, err := openNudgeBeadStoreErr(target.cityPath)
+	store, err := openNudgeBeadStoreErrWithConfig(target.cityPath, target.cfg)
 	if err != nil || store.Store == nil {
 		fmt.Fprintf(stderr, "gc nudge poll: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
 		return 1
@@ -1142,7 +1163,7 @@ func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time)
 }
 
 func deliverSessionNudge(target nudgeTarget, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, err := openNudgeBeadStoreErr(target.cityPath)
+	store, err := openNudgeBeadStoreErrWithConfig(target.cityPath, target.cfg)
 	if err != nil || store.Store == nil {
 		fmt.Fprintf(stderr, "gc session nudge: opening the nudge store for %q: %v\n", target.agentKey(), err) //nolint:errcheck
 		return 1
@@ -1546,7 +1567,7 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 }
 
 func sendMailNotify(target nudgeTarget, sender, messageID string) error {
-	store, err := openNudgeBeadStoreErr(target.cityPath)
+	store, err := openNudgeBeadStoreErrWithConfig(target.cityPath, target.cfg)
 	if err != nil {
 		return err
 	}
@@ -1649,7 +1670,7 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	if err != nil {
 		return nudgeTarget{}, err
 	}
-	store := openNudgeBeadStore(cityPath)
+	store, opened := openOwnedNudgeBeadStoreWithConfig(cityPath, cfg)
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store
@@ -1659,15 +1680,33 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
 			if getErr != nil {
+				closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 				return nudgeTarget{}, getErr
 			}
-			return resolveNudgeTargetFromSessionInfo(cityPath, cfg, info), nil
+			target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+			// The store this resolution opened travels with the target: the
+			// per-prompt drain reuses it for claim/delivery/ack and closes it.
+			// Other callers discard it as before via discardNudgeTargetStore.
+			target.store = store
+			target.handle = opened
+			return target, nil
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
+			closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 			return nudgeTarget{}, err
 		}
 	}
+	closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	return nudgeTarget{}, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+}
+
+// discardNudgeTargetStore releases the store a resolved target carries for
+// callers that use the target's metadata only and never drain through it. The
+// drain closes its target's handle itself.
+func discardNudgeTargetStore(t *nudgeTarget) {
+	closeBeadStoreHandle(t.handle) //nolint:errcheck // best-effort
+	t.handle = nil
+	t.store = beads.NudgesStore{}
 }
 
 // nudgeTargetFields carries the pre-extracted session attributes buildNudgeTarget
@@ -1814,7 +1853,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	}
 	deliveryStore := store
 	if deliveryStore == nil {
-		deliveryStore = openNudgeBeadStore(target.cityPath).Store
+		deliveryStore = openNudgeBeadStoreWithConfig(target.cityPath, target.cfg).Store
 	}
 	// sessStore is the SESSION-class store the caller resolved from the WORK store
 	// (the dispatcher threads cr.sessionsBeadStore().Store; the CLI poll derives it
@@ -2517,7 +2556,13 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge, liveSes
 // engine, which this frame holds but must never close (openOwnedNudgeBeadStore).
 type nudgeMaintenanceStore struct {
 	cityPath string
-	opened   bool
+	cfg      *config.City // optional; reused by ensureOpen so the open skips a config load
+	// shared is an optional caller-owned handle (the drain's target store);
+	// when set, ensureOpen borrows it instead of opening, and close leaves it.
+	shared beads.NudgesStore
+	opened bool
+	// borrowed marks a shared borrow: close must not release the caller's store.
+	borrowed bool
 	store    beads.NudgesStore
 	// handle is what ensureOpen actually opened, which is not always
 	// store.Store: see openOwnedNudgeBeadStore. close releases this and
@@ -2545,7 +2590,12 @@ func (m *nudgeMaintenanceStore) frontForState(state *nudgeQueueState) *nudgequeu
 func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 	if !m.opened {
 		m.opened = true
-		m.store, m.handle = openOwnedNudgeBeadStore(m.cityPath)
+		if m.shared.Store != nil {
+			m.borrowed = true
+			m.store = m.shared
+		} else {
+			m.store, m.handle = openOwnedNudgeBeadStoreWithConfig(m.cityPath, m.cfg)
+		}
 		if m.store.Store != nil {
 			m.front = nudgeFrontDoor(m.store)
 		}
@@ -2554,10 +2604,11 @@ func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 }
 
 // close releases the handle this frame opened (if any). It never touches a
-// caller-passed store because this type only ever opens its own, and never the
-// storage routes' shared engine, which it may hold but does not own.
+// caller-passed store: a borrowed shared store is the caller's to close, and
+// this type never closes the storage routes' shared engine, which it may hold
+// but does not own.
 func (m *nudgeMaintenanceStore) close() error {
-	if !m.opened {
+	if !m.opened || m.borrowed {
 		return nil
 	}
 	return closeBeadStoreHandle(m.handle)
@@ -2600,13 +2651,21 @@ func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time
 		})
 		return liveIDs
 	}
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
+	return claimDueQueuedNudgesMatchingUsingStore(cityPath, target.cfg, target.store, now, func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item, liveSessions)
 	})
 }
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
-	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	return claimDueQueuedNudgesMatchingUsingStore(cityPath, nil, beads.NudgesStore{}, now, match)
+}
+
+// claimDueQueuedNudgesMatchingUsingStore is claimDueQueuedNudgesMatching for a
+// caller that already loaded the city config and/or holds an open nudge store
+// (the drain path): a supplied store is borrowed, not reopened, so the
+// maintenance pass pays neither a config load nor a bd-context preflight.
+func claimDueQueuedNudgesMatchingUsingStore(cityPath string, cfg *config.City, shared beads.NudgesStore, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+	maint := nudgeMaintenanceStore{cityPath: cityPath, cfg: cfg, shared: shared}
 	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
@@ -2958,10 +3017,17 @@ func ackQueuedNudges(cityPath string, ids []string) error {
 }
 
 func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, commitBoundary string) error {
+	return ackQueuedNudgesWithOutcomeUsingStore(cityPath, nil, beads.NudgesStore{}, ids, outcome, reason, commitBoundary)
+}
+
+// ackQueuedNudgesWithOutcomeUsingStore is ackQueuedNudgesWithOutcome for a caller
+// that already loaded the city config and/or holds an open nudge store (the
+// drain path); a supplied store is borrowed, not reopened.
+func ackQueuedNudgesWithOutcomeUsingStore(cityPath string, cfg *config.City, shared beads.NudgesStore, ids []string, outcome, reason, commitBoundary string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	maint := nudgeMaintenanceStore{cityPath: cityPath}
+	maint := nudgeMaintenanceStore{cityPath: cityPath, cfg: cfg, shared: shared}
 	defer maint.close() //nolint:errcheck // best-effort
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {

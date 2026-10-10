@@ -122,6 +122,7 @@ func newMailNudgeFunc(sender string) nudgeFunc {
 		if err != nil {
 			return err
 		}
+		defer discardNudgeTargetStore(&target)
 		return sendMailNotify(target, sender, messageID)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestNudgeMaintenanceFrameLeavesTheStorageRoutesServingALiveStore pins the
@@ -139,8 +140,8 @@ func countNudgeWorkStoreOpens(t *testing.T) *[]*closeCountingWorkStore {
 	t.Helper()
 	var opened []*closeCountingWorkStore
 	prev := openNudgeWorkStore
-	openNudgeWorkStore = func(storePath, cityPath string) (beads.Store, error) {
-		store, err := prev(storePath, cityPath)
+	openNudgeWorkStore = func(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+		store, err := prev(storePath, cityPath, cfg)
 		if err != nil {
 			return nil, err
 		}
