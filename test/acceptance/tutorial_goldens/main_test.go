@@ -347,6 +347,8 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 	env.supervisorLog = logFile
 
 	deadline := time.Now().Add(tutorialSupervisorReadyTimeout)
+	var lastOut string
+	var lastErr error
 	for time.Now().Before(deadline) {
 		// Ready means the control socket answers with this supervisor's PID:
 		// the only liveness signal `gc init`/`gc start` trust, and the last
@@ -355,6 +357,7 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 		if err == nil && helpers.SupervisorStatusConfirmsPID(out, cmd.Process.Pid) {
 			return nil
 		}
+		lastOut, lastErr = out, err
 		select {
 		case err := <-done:
 			env.supervisor = nil
@@ -372,7 +375,8 @@ func startTutorialSupervisor(env *tutorialEnv) error {
 	}
 
 	logData, _ := os.ReadFile(logPath)
-	return fmt.Errorf("tutorial supervisor did not become ready:\n%s", string(logData))
+	return fmt.Errorf("tutorial supervisor did not become ready within %s: want %q from gc supervisor status; last probe (err: %v):\n%s\nsupervisor log:\n%s",
+		tutorialSupervisorReadyTimeout, helpers.SupervisorStatusPIDLine(cmd.Process.Pid), lastErr, lastOut, string(logData))
 }
 
 func TestStartTutorialSupervisorUsesAcceptanceBinaryForStatus(t *testing.T) {
@@ -421,6 +425,19 @@ esac
 		Env:        helpers.NewEnv(fakeGC, home, runtimeDir).With("PATH", "/does/not/exist"),
 	}
 
+	// Registered before the start so every failure exit below still kills
+	// the fake supervisor; its loop otherwise outlives the test.
+	t.Cleanup(func() {
+		if tutorial.supervisor != nil && tutorial.supervisor.Process != nil {
+			_ = tutorial.supervisor.Process.Kill()
+		}
+		if tutorial.supervisorDone != nil {
+			<-tutorial.supervisorDone
+		}
+		if tutorial.supervisorLog != nil {
+			_ = tutorial.supervisorLog.Close()
+		}
+	})
 	if err := startTutorialSupervisor(tutorial); err != nil {
 		t.Fatalf("startTutorialSupervisor: %v", err)
 	}
@@ -431,17 +448,6 @@ esac
 	if n, _ := strconv.Atoi(strings.TrimSpace(string(calls))); n < 3 {
 		t.Fatalf("startTutorialSupervisor returned after %d status probe(s), want it to wait for the control socket to report the supervisor's PID", n)
 	}
-	defer func() {
-		if tutorial.supervisor != nil && tutorial.supervisor.Process != nil {
-			_ = tutorial.supervisor.Process.Kill()
-		}
-		if tutorial.supervisorDone != nil {
-			<-tutorial.supervisorDone
-		}
-		if tutorial.supervisorLog != nil {
-			_ = tutorial.supervisorLog.Close()
-		}
-	}()
 }
 
 func TestNewTutorialBaseEnvSetsIsolatedTmuxTmpDir(t *testing.T) {

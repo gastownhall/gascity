@@ -16,11 +16,18 @@ func SupervisorStatusConfirmsPID(out string, pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	want := fmt.Sprintf("Supervisor is running (PID %d)", pid)
+	want := SupervisorStatusPIDLine(pid)
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == want {
 			return true
 		}
 	}
 	return false
+}
+
+// SupervisorStatusPIDLine is the line `gc supervisor status` prints when its
+// control socket answers with pid, the line SupervisorStatusConfirmsPID
+// looks for.
+func SupervisorStatusPIDLine(pid int) string {
+	return fmt.Sprintf("Supervisor is running (PID %d)", pid)
 }
