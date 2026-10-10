@@ -39,7 +39,7 @@ These facts were measured with a probe `go_test` on rbe-west, instance
 | Fact | Evidence | Consequence |
 |---|---|---|
 | The `oss` worker tier has public internet egress. Only private ranges are blocked, by nftables, with `NETNS=0`. | A test dialing `github.com:443` PASSED. Its rerun printed `(cached) PASSED`. | Network-dependent tests are cached today with no signal. |
-| The fork tier (`oss-fork`) runs every action with loopback only (`NETNS=1`). It caches nothing. | `tools/rbe/blacksmith-worker.sh` `WORKER_TIER=fork`. CI skipped acceptance there while `gc init` needed github.com (#6976); it runs there again since #7005. | A network-less executor already exists. |
+| The fork tier (`oss-fork`) runs every action with loopback only (`NETNS=1`). It caches nothing. | `gastownhall/rbe-worker` `worker/blacksmith-worker.sh` `WORKER_TIER=fork`. CI skipped acceptance there while `gc init` needed github.com (#6976); it runs there again since #7005. | A network-less executor already exists. |
 | `HOME` is `TEST_TMPDIR`, which is per action. `TMPDIR` is unset, so `os.TempDir()` is `/tmp`. | Probe: `HOME="/tmp/bt/_tmp/<hash>"`, `TMPDIR=""`. | `$HOME` reads are hermetic under Bazel. Remotely, `/tmp` is private to each action (isolation hides other mounts). Locally it is the shared host `/tmp`. |
 | Actions run as an isolated slot user, not root. | Probe: `uid=59001 USER=rbe-a01`. | Root-only `t.Skip` paths (about 25 sites) do run. |
 | `PATH` is `.:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin`. It comes from the client wrapper and CI `--test_env`. | Probe. | The PATH string is keyed. The binaries it points to are not, which is the image-pin effort's concern. |
@@ -128,7 +128,7 @@ These facts were measured with a probe `go_test` on rbe-west, instance
      but not a `127.0.0.1` one). No DNS is involved. With that, the whole
      integration tier (`--config=integration`, both go_tests) ran on the `oss`
      tier with the test action's `network` property set to `off` (loopback
-     only, `tools/rbe/rbe-action-launch`), and the package left the ledger:
+     only, rbe-worker's `worker/rbe-action-launch`), and the package left the ledger:
      it is no longer tagged `external` or `requires-network`, so its results
      are cached like every other test's.
 
