@@ -85,12 +85,13 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 }
 
 // openControlBdStoreThroughFactory routes a control-plane bd store through
-// the beads factory so it carries the conditional-writes stamp. No
-// PreflightChecker is supplied, so the factory can never select the native
-// store for the control path (the zero checker fails preflight and the
-// factory takes the bd fallback — pinned by
-// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd); the store comes
-// back raw, matching the control path's deliberately unwrapped handles.
+// the beads factory so it carries the conditional-writes stamp. The control
+// path never takes a native or library-backend store: NativeTransportOff
+// makes the factory's transport gate return the bd fallback before any
+// native arm (the library-backend arm included) is consulted, so the store
+// comes back raw, matching the control path's deliberately unwrapped
+// handles. That pinned fallback logs at debug under gate
+// native_transport_off, so the control plane does not warn on every open.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
 	flags, resolved := resolvedConditionalWritesFlags(cfg)
 	mode := gate.ModeUnset
@@ -104,7 +105,8 @@ func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg 
 		ConditionalWrites: mode,
 		OnConditionalWritesDegraded: lazyConditionalWritesDegradeEmitter(
 			cityPath, conditionalWritesStoreID(scopeRoot, cityPath), flags, resolved),
-		OpenBdStore: openBd,
+		OpenBdStore:     openBd,
+		NativeTransport: beads.NativeTransportOff,
 	})
 	if err != nil {
 		return nil, err

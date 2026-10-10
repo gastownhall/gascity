@@ -105,22 +105,28 @@ func RecognizeBackend(backend string) error {
 // implement. The name must also be one whose library open is self-sufficient
 // (selfSufficientLibraryBackends); a library registration alone is not enough.
 //
-// The library's registry is consulted directly rather than mirrored into gc's,
-// so the two cannot disagree: whatever a build's distribution wiring registers
-// with the library (process-start wiring that precedes every metadata read) is
-// exactly what gc recognizes here, and a build that wires nothing — OSS — sees
-// no extension names at all. gc treats such a workspace as opaque: the library
-// opens it, bd reads its own metadata and credentials, and gc projects no
-// backend environment and manages no runtime for it. A name in the compiled
-// bundle is never an extension, even if a library also registers it.
+// Registration is read from the library's registry directly rather than
+// mirrored into gc's: a build that wires nothing — OSS — sees no extension
+// names at all, and a name a build's distribution wiring registers with the
+// library (process-start wiring that precedes every metadata read) needs no
+// gc-side copy. Self-sufficiency is not read from the library: the
+// selfSufficientLibraryBackends allowlist is a deliberate gc-side vetting
+// gate, so a backend a library newly registers keeps the preflight verdict and
+// the bd front door until gc vets its open and lists it there. gc treats an
+// extension workspace as opaque: the library opens it, bd reads its own
+// metadata and credentials, and gc projects no backend environment and manages
+// no runtime for it. A name in the compiled bundle is never an extension, even
+// if a library also registers it.
 func IsLibraryExtensionBackend(backend string) bool {
 	if backend == "" {
 		return false
 	}
 	registry, err := compiledBackendRegistry()
 	if err != nil {
-		// Not an answer this predicate can give; RecognizeBackend surfaces it
-		// on the metadata read every caller of this predicate also makes.
+		// The registry is built once from a static list, so this does not fail
+		// at runtime. Were it to, false keeps the scope off every extension
+		// path and on the preflight one, and the metadata loader, which builds
+		// the same registry, reports the error on the scope's next read.
 		return false
 	}
 	if registry.Lookup(BackendName(backend)) == nil {

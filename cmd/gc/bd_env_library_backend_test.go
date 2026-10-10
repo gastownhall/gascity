@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	beadsbackend "github.com/steveyegge/beads/backend"
 )
@@ -187,6 +188,25 @@ func TestStartBeadsLifecycleSkipsManagedDoltForALibraryBackendCity(t *testing.T)
 		if got := string(mustReadFile(t, filepath.Join(cityPath, ".beads", name))); got != want {
 			t.Fatalf("%s changed at city start:\n got %s\nwant %s", name, got, want)
 		}
+	}
+}
+
+// The control dispatcher keeps the raw bd store for a converted workspace.
+// Control paths never take a native or library-backend store, so the
+// library-backend arm, whose failed open is a hard error rather than a bd
+// fallback, is never consulted for them.
+func TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope(t *testing.T) {
+	cityPath := writeLibraryBackendScope(t)
+	setScopedBeadsProviderForTest(t, cityPath, "bd")
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	store, err := openControlStoreAtForCity(cityPath, cityPath, cfg)
+	if err != nil {
+		t.Fatalf("openControlStoreAtForCity: %v", err)
+	}
+	if _, ok := store.(*beads.BdStore); !ok {
+		t.Fatalf("store = %T, want the raw control bd store", store)
 	}
 }
 

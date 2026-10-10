@@ -166,6 +166,39 @@ func TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff(t *te
 	}
 }
 
+// An executable bd hook would miss every write the library store makes in
+// process, so the scope keeps the bd front door exactly as a Dolt scope does.
+// The hook gate answers before any open, so preflight still does not run.
+func TestOpenStoreAtForCityLibraryExtensionBackendWithExecutableHooksKeepsTheBdFrontDoor(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := libraryBackendScopeFixture(t)
+	hooksDir := filepath.Join(scope, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "on_create"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bd := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: preflightMustNotRun(t),
+		OpenBdStore:      func() (Store, error) { return bd, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for a library extension backend with an executable bd hook")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != Store(bd) || result.Diagnostic.PreflightGate != nativeHooksGate {
+		t.Fatalf("result = (%T, %+v), want the bd store under %s", result.Store, result.Diagnostic, nativeHooksGate)
+	}
+}
+
 // A backend name nothing registered is not an extension: the scope takes the
 // path it took before, through preflight.
 func TestOpenStoreAtForCityUnregisteredBackendStillRunsPreflight(t *testing.T) {
@@ -193,6 +226,40 @@ func TestOpenStoreAtForCityUnregisteredBackendStillRunsPreflight(t *testing.T) {
 	}
 	if result.Store != Store(bd) || result.Diagnostic.PreflightGate != string(contract.PreflightCheckMetadataBackend) {
 		t.Fatalf("result = (%T, %+v), want the bd store under the metadata_backend gate", result.Store, result.Diagnostic)
+	}
+}
+
+// Only the scope's own metadata is read. A rig that inherits a library-backend
+// city's endpoint carries no metadata.json of its own, so it is not an
+// extension scope: it keeps the preflight verdict, which reports the missing
+// metadata, and the bd front door.
+func TestOpenStoreAtForCityRigInheritingALibraryBackendCityKeepsTheBdFrontDoor(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	city := libraryBackendScopeFixture(t)
+	rig := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("issue_prefix: frontend\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bd := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        rig,
+		CityPath:         city,
+		Provider:         "bd",
+		PreflightChecker: contract.PreflightChecker{FS: fsys.OSFS{}, Provider: "bd"},
+		OpenBdStore:      func() (Store, error) { return bd, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for a rig with no metadata of its own")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != Store(bd) || result.Diagnostic.PreflightGate != "preflight_unavailable" {
+		t.Fatalf("result = (%T, %+v), want the bd front door under preflight_unavailable", result.Store, result.Diagnostic)
 	}
 }
 
