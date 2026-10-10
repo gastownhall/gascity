@@ -53,9 +53,21 @@ func newFormulaListCmd(stdout, stderr io.Writer) *cobra.Command {
 Formulas are discovered from the well-known formulas/ directories of
 city and rig pack layers, the city's own formulas/ directory, and the
 rig-local formulas_dir directory. Later layers win for same-named
-formulas.`,
+formulas.
+
+With --rig, only that rig's scope is listed: the city layers beneath the
+rig's own, the same search paths "gc formula show --rig" compiles against
+and the supervisor's formulas route serves for scope_kind=rig. Without
+--rig, every city and rig layer is listed.
+
+Examples:
+  gc formula list
+  gc formula list --rig mo --json`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cityPath, paths, rows := listFormulaRows(stderr)
+			cityPath, paths, rows, err := listFormulaRows(stderr)
+			if err != nil {
+				return formulaCommandError(stderr, "gc formula list", jsonOutput, err)
+			}
 			if jsonOutput {
 				return writeCLIJSONLine(stdout, formulaListJSON{
 					SchemaVersion: "1",
@@ -397,19 +409,29 @@ type jsonContractWarning struct {
 	Message string `json:"message"`
 }
 
-func listFormulaRows(warningWriter ...io.Writer) (string, []string, []formulaListRowJSON) {
+// listFormulaRows lists every city and rig layer, or only the --rig scope
+// when one is named. A city that does not resolve or load lists nothing; an
+// explicit --rig the city does not bind is an error, never an empty list.
+func listFormulaRows(stderr io.Writer) (string, []string, []formulaListRowJSON, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	cfg, err := loadCityConfig(cityPath, warningWriter...)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		return cityPath, nil, nil
+		return cityPath, nil, nil, nil
 	}
 	paths := formulaSearchPathsForList(cfg)
+	if strings.TrimSpace(rigFlag) != "" {
+		scope, err := resolveFormulaScope(cfg, cityPath, stderr)
+		if err != nil {
+			return cityPath, nil, nil, err
+		}
+		paths = scope.searchPaths
+	}
 
 	rows := formulaRowsForSearchPaths(paths)
-	return cityPath, paths, rows
+	return cityPath, paths, rows, nil
 }
 
 func formulaRowsForSearchPaths(paths []string) []formulaListRowJSON {
