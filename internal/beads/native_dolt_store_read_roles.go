@@ -149,27 +149,39 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	s.listCounters.noteList()
+	plan := NativeListPlan(query)
 	var out []Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
 		reader, err := storage.IssueReader()
 		if err != nil {
 			return err
 		}
-		page, err := reader.List(ctx, nativeListRequestFromListQuery(query))
-		if err != nil {
-			return err
-		}
-		s.noteRows(len(page.Items))
-		beads := make([]Bead, 0, len(page.Items))
-		for _, row := range page.Items {
-			bead, err := beadFromNativeIssueRow(row)
+		var beads []Bead
+		seen := make(map[string]bool)
+		for _, req := range plan {
+			page, err := reader.List(ctx, req)
 			if err != nil {
-				if isNativeIssueMetadataParseError(err) {
-					continue
-				}
 				return err
 			}
-			beads = append(beads, bead)
+			s.listCounters.noteRequest(req, len(page.Items))
+			s.noteRows(len(page.Items))
+			for _, row := range page.Items {
+				bead, err := beadFromNativeIssueRow(row)
+				if err != nil {
+					if isNativeIssueMetadataParseError(err) {
+						continue
+					}
+					return err
+				}
+				if len(plan) > 1 {
+					if seen[bead.ID] {
+						continue
+					}
+					seen[bead.ID] = true
+				}
+				beads = append(beads, bead)
+			}
 		}
 		out = ApplyListQuery(beads, query)
 		return nil
