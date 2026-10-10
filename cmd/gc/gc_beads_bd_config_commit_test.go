@@ -538,16 +538,21 @@ func TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore(t *testing.T) {
 	harnessPath := filepath.Join(dir, "harness.sh")
 	required := strings.Join(doctor.RequiredCustomTypes, ",")
 	writeExecutable(t, harnessPath, customTypesHarness(t, `
-q() { dolt --host 127.0.0.1 --port "$DOLT_PORT" --user "$DOLT_USER" --password "$DOLT_PASSWORD" --no-tls sql -r csv -q "$1" | tail -n 1 | tr -d '"'; }
 server_sql "USE fe; INSERT IGNORE INTO custom_types (name) VALUES ('table-only'); CALL DOLT_ADD('custom_types'); CALL DOLT_COMMIT('-m', 'test: table-only extra', '--author', 'gascity-test <test@gascity.local>')" >/dev/null || exit 1
 server_sql "CREATE DATABASE fresh; USE fresh; CREATE TABLE config (`+"\\`key\\`"+` VARCHAR(255) PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE custom_types (name VARCHAR(64) PRIMARY KEY); INSERT INTO config VALUES ('types.custom', '[\"molecule\", \"ops-extra\"]'); CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-m', 'test: fresh', '--author', 'gascity-test <test@gascity.local>')" >/dev/null || exit 1
 ensure_bd_runtime_custom_types fe `+shellSingleQuote(required)+`
 ensure_bd_runtime_custom_types fresh `+shellSingleQuote(required)+`
-echo "FE_ROW=$(q "USE fe; SELECT value FROM config WHERE `+"\\`key\\`"+` = 'types.custom'")"
-echo "FE_TABLE=$(q "USE fe; SELECT GROUP_CONCAT(name ORDER BY name) AS n FROM custom_types")"
-echo "FE_DIRTY=$(q "USE fe; SELECT COUNT(*) AS c FROM dolt_status WHERE table_name IN ('config', 'custom_types')")"
-echo "FRESH_ROW=$(q "USE fresh; SELECT value FROM config WHERE `+"\\`key\\`"+` = 'types.custom'")"
-echo "FRESH_TABLE=$(q "USE fresh; SELECT COUNT(*) AS c FROM custom_types")"
+dolt --host 127.0.0.1 --port "$DOLT_PORT" --user "$DOLT_USER" --password "$DOLT_PASSWORD" --no-tls sql -r csv -q "
+SELECT CONCAT('FE_ROW=', value) FROM fe.config WHERE `+"\\`key\\`"+` = 'types.custom'
+UNION ALL
+SELECT CONCAT('FE_TABLE=', IFNULL(GROUP_CONCAT(name ORDER BY name), '')) FROM fe.custom_types
+UNION ALL
+SELECT CONCAT('FE_DIRTY=', COUNT(*)) FROM fe.dolt_status WHERE table_name IN ('config', 'custom_types')
+UNION ALL
+SELECT CONCAT('FRESH_ROW=', value) FROM fresh.config WHERE `+"\\`key\\`"+` = 'types.custom'
+UNION ALL
+SELECT CONCAT('FRESH_TABLE=', COUNT(*)) FROM fresh.custom_types
+" | tr -d '"'
 `))
 	out := runShHarness(t, harnessPath, "ensure_bd_runtime_custom_types (real dolt)", sanitizedBaseEnv(
 		"GC_DOLT_PORT="+strconv.Itoa(port),
@@ -590,8 +595,17 @@ echo "FRESH_TABLE=$(q "USE fresh; SELECT COUNT(*) AS c FROM custom_types")"
 		t.Errorf("empty custom_types table was written (%q rows); it must be left to bd's backfill", got["FRESH_TABLE"])
 	}
 
+	postStore, err := beads.OpenNativeDoltStoreAt(ctx, rigPath, nativeEnv)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt (post-heal): %v", err)
+	}
+	defer func() {
+		if err := postStore.CloseStore(); err != nil {
+			t.Errorf("close post-heal native store: %v", err)
+		}
+	}()
 	for _, typ := range []string{"startup-health-episode", "ops-extra", "table-only"} {
-		if err := createType(typ); err != nil {
+		if _, err := postStore.Create(beads.Bead{Title: "type probe " + typ, Type: typ}); err != nil {
 			t.Errorf("post-heal create --type %s: %v", typ, err)
 		}
 	}

@@ -21,7 +21,7 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 # TestPackCommandCobraHelpAndUnknownParity skip under GC_FAST_UNIT.
 # scripts/cmd_gc_shards_test.go reads this table.
 INTEGRATION_SOLO_TESTS = {
-    "gc_bd_runtime_custom_types_heal_test": "TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore",  # 36 s
+    "gc_bd_runtime_custom_types_heal_test": "TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore",  # 23 s
     "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",  # 32 s
     "gc_managed_bd_rig_hard_kill_test": "TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",  # 26 s
     "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # 22 s
