@@ -174,3 +174,41 @@ func TestDoRuntimeHeartbeatSessionNotFound(t *testing.T) {
 		t.Errorf("expected error about resolving session, got: %s", stderr.String())
 	}
 }
+
+// TestDoRuntimeHeartbeatNeverShortensAHold: a shorter heartbeat leaves a
+// later one in place (the disposition's Heartbeat cell, SR1-4c), and a
+// longer one extends it.
+func TestDoRuntimeHeartbeatNeverShortensAHold(t *testing.T) {
+	const sessionName = "testpack__beater"
+	const beadID = "bead-789"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{makeSessionBead(beadID, sessionName)}, nil)
+	heldUntil := func() time.Time {
+		t.Helper()
+		b, err := store.Get(beadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at, err := time.Parse(time.RFC3339, b.Metadata["held_until"])
+		if err != nil {
+			t.Fatalf("held_until %q: %v", b.Metadata["held_until"], err)
+		}
+		return at
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doRuntimeHeartbeat(store, 2*time.Hour, sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("2h heartbeat: exit %d; %s", code, stderr.String())
+	}
+	long := heldUntil()
+	if code := doRuntimeHeartbeat(store, 10*time.Minute, sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("10m heartbeat: exit %d; %s", code, stderr.String())
+	}
+	if got := heldUntil(); !got.Equal(long) {
+		t.Fatalf("a shorter heartbeat moved held_until %v -> %v", long, got)
+	}
+	if code := doRuntimeHeartbeat(store, 3*time.Hour, sessionName, sessionName, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("3h heartbeat: exit %d; %s", code, stderr.String())
+	}
+	if got := heldUntil(); !got.After(long) {
+		t.Fatalf("a longer heartbeat left held_until at %v, want past %v", got, long)
+	}
+}

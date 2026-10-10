@@ -77,6 +77,13 @@ const (
 	// FactsLegacyExitAccrual is a tick's wake-failure or churn accrual for a
 	// dead runtime.
 	FactsLegacyExitAccrual FactsSite = "legacy.exit-accrual"
+	// FactsOperatorAct is an operator's or agent's own act on a row as read
+	// just before it (Store.DecideFresh): a suspend, a kill, a resume, a
+	// heartbeat.
+	FactsOperatorAct FactsSite = "op.act"
+	// FactsResumeConsume is an operator's resume consuming the suspend it
+	// read before its start.
+	FactsResumeConsume FactsSite = "op.resume-consume"
 )
 
 // factsSite is how a site compares Facts: without Drop's keys, or only
@@ -130,6 +137,14 @@ var factsSites = map[FactsSite]factsSite{
 	FactsLegacyExitAccrual: {
 		Only:   []string{"generation", "instance_token", "last_woke_at", "sleep_reason"},
 		Reason: "the death is the decided incarnation's, inside the wake the tick read: an operator's kill clears last_woke_at and records sleep_reason=killed, a new start moves the incarnation, and either makes the dead runtime no crash and no churn of that wake (mc-uhvqj)",
+	},
+	FactsOperatorAct: {
+		Only:   []string{"generation", "instance_token"},
+		Reason: "the act is on the incarnation it read; what it does to the row's holds the disposition table decides on the fresh read itself (ApplyDisposition), so no other fact gates it",
+	},
+	FactsResumeConsume: {
+		Only:   []string{"held_until", "sleep_intent", "quarantined_until", "wait_hold", "suspended_at", "generation", "instance_token"},
+		Reason: "the facts the resume read before its start: a write to any since (a newer suspend, kill, wait or quarantine, or another start) refuses the consume; state is left out, as legacy's heal moves it under a dormant row",
 	},
 	FactsLegacyResetEvict: {
 		Only:   []string{"continuation_reset_pending", "reset_committed_at"},

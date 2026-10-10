@@ -141,24 +141,26 @@ func doRuntimeHeartbeat(sessStore beads.Store, duration time.Duration, display, 
 		return 1
 	}
 
-	// An operator's suspend owns held_until: the heartbeat never shortens or
-	// replaces it. Decided from a fresh read and fenced.
-	heldUntil := time.Now().Add(duration).UTC().Format(time.RFC3339)
-	operatorHeld := false
-	ok, err := sessionFrontDoor(sessStore).UpdateMetadataFenced(sessionID, 3, func(info session.Info, _ session.PersistedResponse) session.MetadataPatch {
-		if operatorHeld = session.HoldsInfo(info, time.Now()).In&session.HoldUser != 0; operatorHeld {
-			return nil
-		}
-		return session.MetadataPatch{"held_until": heldUntil}
-	})
+	// The disposition's Heartbeat cell, decided from a fresh read and fenced:
+	// an operator's suspend owns held_until, and a heartbeat never shortens
+	// it or a later heartbeat.
+	now := time.Now()
+	front := sessionFrontDoor(sessStore)
+	d, err := front.DecideFresh(sessionID, session.FactsOperatorAct)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	res, held, err := front.ApplyDisposition(d, session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: now.Add(duration)}, nil, now)
+	heldUntil := held.Heartbeat.UTC().Format(time.RFC3339)
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: %v\n", err) //nolint:errcheck
 		return 1
-	case operatorHeld:
+	case held.KeepsSlot():
 		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is suspended by an operator; its hold is left as it is\n", display) //nolint:errcheck
 		return 1
-	case !ok:
+	case res != session.CommitLanded:
 		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: lost to concurrent writes; retry\n") //nolint:errcheck
 		return 1
 	}

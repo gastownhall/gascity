@@ -428,28 +428,43 @@ func (s *Store) Sleep(id, reason string, now time.Time) error {
 // write competes with every controller write to the row.
 const operatorSuspendAttempts = 8
 
-// OperatorSuspend writes an operator's suspend, OperatorSuspendPatch(now),
-// decided from a fresh read of the row and fenced on its revision where the
-// store can (UpdateMetadataFenced). A row closed since the caller read it is
-// refused with an illegal-transition error and written nothing; a CAS lost on
-// every attempt writes nothing and returns an error to retry.
-func (s *Store) OperatorSuspend(id string, now time.Time) error {
-	closed := false
-	ok, err := s.UpdateMetadataFenced(id, operatorSuspendAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
-		if closed = info.Closed; closed {
-			return nil
-		}
-		return OperatorSuspendPatch(now)
-	})
+// OperatorSuspend writes an operator's suspend: the disposition table's
+// Suspend cell, decided on a fresh read of the row and written with
+// operatorSuspendLife's lifecycle by ApplyDisposition. A suspend already in
+// force is left as it is. A row closed since the caller read it is refused
+// with an illegal-transition error and written nothing; a row whose
+// incarnation moved, or a CAS lost on every attempt, writes nothing and
+// returns an error to retry. It returns the disposition the row was left
+// with.
+func (s *Store) OperatorSuspend(id string, now time.Time) (Disposition, error) {
+	d, err := s.DecideFresh(id, FactsOperatorAct)
+	if err != nil {
+		return Disposition{}, err
+	}
+	res, to, err := s.ApplyDisposition(d, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
 	switch {
 	case err != nil:
-		return err
-	case closed:
-		return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
-	case !ok:
-		return fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
+		return Disposition{}, err
+	case res == CommitClosed:
+		return Disposition{}, &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+	case res != CommitLanded:
+		return Disposition{}, fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
 	}
-	return nil
+	return to, nil
+}
+
+// operatorSuspendLife is the lifecycle of an operator's suspend that took
+// hold: state=suspended stamped now, and the pending wake cleared as newer
+// intent (D7). A suspend already in force writes none.
+func operatorSuspendLife(from, to Disposition, _ Info) MetadataPatch {
+	if from.Operator == OperatorSuspended && from.Until.Equal(to.Until) {
+		return nil
+	}
+	patch := ClearWakeRequestPatch()
+	patch["state"] = string(StateSuspended)
+	patch["slept_at"] = ""
+	patch["sleep_reason"] = ""
+	return patch
 }
 
 // ApplyKeepingUserHold writes a sleep patch decided from an older read,

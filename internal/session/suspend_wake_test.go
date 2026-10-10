@@ -67,7 +67,7 @@ func TestOperatorSuspendClearsPendingWake(t *testing.T) {
 }
 
 // TestOperatorSuspendHoldsTheRow is mc-esqo7: every operator suspend writes
-// OperatorSuspendPatch's user hold, so legacy's assigned-work wake cannot undo
+// the Suspend cell's user hold, so legacy's assigned-work wake cannot undo
 // it. Manager.Suspend (the CLI fallback and the API) holds an active row and a
 // row the shutdown sweep left suspended without the hold; the sweep itself
 // holds nothing.
@@ -116,7 +116,7 @@ func TestOperatorSuspendRefusesARowClosedSinceRead(t *testing.T) {
 	if err := store.Close(b.ID); err != nil {
 		t.Fatal(err)
 	}
-	err := NewStore(beads.SessionStore{Store: store}).OperatorSuspend(b.ID, time.Now())
+	_, err := NewStore(beads.SessionStore{Store: store}).OperatorSuspend(b.ID, time.Now())
 	var illegal *IllegalTransitionError
 	if !errors.As(err, &illegal) {
 		t.Fatalf("OperatorSuspend on a closed row = %v, want an illegal transition", err)
@@ -284,7 +284,7 @@ func TestApplyKeepingUserHoldReadsTheRowFresh(t *testing.T) {
 	store := beads.NewMemStore()
 	b := wakeRow(t, store)
 	front := NewStore(beads.SessionStore{Store: store})
-	if err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
+	if _, err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	written, err := front.ApplyKeepingUserHold(b.ID, CompleteDrainPatch(time.Now(), "user-hold", false))

@@ -265,3 +265,13 @@ func TestLiveResumeConsumeDefersOnABusyLease(t *testing.T) {
 		t.Fatal("the retried attach did not consume the hold")
 	}
 }
+
+// consumeUserHoldPatch is what a consume writes over an operator's suspend
+// with no other hold: the class unheld, and the resumed runtime's lifecycle.
+func consumeUserHoldPatch() MetadataPatch {
+	patch := consumeUserHoldLife(Disposition{}, Disposition{}, Info{})
+	for k, v := range (Disposition{}).Encode() {
+		patch[k] = v
+	}
+	return patch
+}

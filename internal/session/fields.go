@@ -165,9 +165,11 @@ var (
 	// opConsumeHold is an operator's resume consuming a user hold (#7424's
 	// interim D8 consume; D8 B's lease-fenced consume replaces it).
 	opConsumeHold = op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")
-	legacyCreate  = legacy(srcBeads, "syncCreateMetadata")
-	waitHold      = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
-	sleepPolicy   = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
+	// opEncode is the disposition class's one encoder (R7).
+	opEncode     = op("internal/session/disposition.go", "Disposition.Encode")
+	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
+	waitHold     = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
+	sleepPolicy  = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
 	// leaseAcquire is the record's one writer, in session; legacy's starters
 	// and stoppers (L1b) and v2's leased effects (runTx, B-a4) call it.
 	leaseAcquire = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord")
@@ -275,11 +277,11 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(op(srcTransition, "OperatorSuspendPatch")), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
-	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(op(srcTransition, "OperatorSuspendPatch"), legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold)},
-	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold)},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
+	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold)},
+	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold)},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.

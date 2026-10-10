@@ -16,7 +16,7 @@ import (
 
 // mc-esqo7: an operator's suspend of a session holding started work sticks
 // across legacy ticks. Every operator suspend writes the user hold
-// (session.OperatorSuspendPatch), and a drain the suspend began completes
+// (the disposition's Suspend cell), and a drain the suspend began completes
 // without clearing sleep_intent=user-hold, so the far-future held_until never
 // reads as a heartbeat hold that legacy's crash recovery restarts through.
 
@@ -72,7 +72,7 @@ func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 
 	t.Run("managed, drain completes by timeout", func(t *testing.T) {
 		e, work, name := runningSeatWithWork(t)
-		if err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
+		if _, err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
 			t.Fatalf("OperatorSuspend: %v", err)
 		}
 		e.tick(t, []beads.Bead{work}, withReadyAssignedFlags([]bool{true})) // begins the user-hold drain
@@ -86,7 +86,7 @@ func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 
 	t.Run("managed, drain-ack completes with assigned work", func(t *testing.T) {
 		e, work, name := runningSeatWithWork(t)
-		if err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
+		if _, err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
 			t.Fatalf("OperatorSuspend: %v", err)
 		}
 		// The agent acked the user-hold drain and its runtime stopped: the
@@ -140,7 +140,7 @@ func TestHeldPoolSeatKeepsItsSlotAndWork(t *testing.T) {
 				t.Fatal("seat was not woken (test premise)")
 			}
 			e.advance(30 * time.Minute)
-			if err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
+			if _, err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
 				t.Fatal(err)
 			}
 			starts := e.sp.CountCalls("Start", name)
@@ -167,7 +167,7 @@ func TestDrainAckFinalizeKeepsAHeldSeatOpen(t *testing.T) {
 		b := env.createSessionBead("worker", "worker")
 		front := sessionFrontDoor(env.store)
 		if held {
-			if err := front.OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+			if _, err := front.OperatorSuspend(b.ID, env.clk.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -218,7 +218,19 @@ func assertDrainedUserHold(t *testing.T, row beads.Bead, sleepReason string) {
 // suspend is not, before or after its drain completes.
 func TestHeartbeatHeldExcludesOperatorSuspend(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-	suspended := session.Info{}.ApplyPatch(session.OperatorSuspendPatch(now))
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"state": "active"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := session.NewStore(beads.SessionStore{Store: mem})
+	if _, err := front.OperatorSuspend(b.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	suspended, err := front.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, tc := range map[string]struct {
 		info session.Info
 		want bool
@@ -249,7 +261,7 @@ func TestWaitAndHeartbeatKeepAUserHold(t *testing.T) {
 		}
 		front := sessionFrontDoor(store)
 		if held {
-			if err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
+			if _, err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -312,7 +324,7 @@ func TestSnapshotSleepsKeepAUserHoldThatLandedSince(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := front.OperatorSuspend(b.ID, now); err != nil {
+		if _, err := front.OperatorSuspend(b.ID, now); err != nil {
 			t.Fatal(err)
 		}
 		folded := sleep(front, snap)
@@ -339,7 +351,7 @@ func TestIdleStopPendingClearKeepsAUserHold(t *testing.T) {
 		front := sessionFrontDoor(store)
 		snap, _ := front.Get(b.ID)
 		if suspended {
-			if err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
+			if _, err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -364,7 +376,7 @@ func TestLegacyStartSkipsAUserHeldRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, _ := sessionFrontDoor(store).Get(b.ID)
-	if err := sessionFrontDoor(store).OperatorSuspend(b.ID, time.Now()); err != nil {
+	if _, err := sessionFrontDoor(store).OperatorSuspend(b.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := store.Get(b.ID)

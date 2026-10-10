@@ -1743,8 +1743,8 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
 		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend: the operator
-			// hold (session.OperatorSuspendPatch), which the reconciler drains.
-			if err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
+			// hold (the disposition's Suspend cell), which the reconciler drains.
+			if _, err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}

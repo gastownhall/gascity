@@ -46,14 +46,20 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		if b.Status == "closed" {
 			return nil, false
 		}
-		// The kill clears a user-hold intent (SleepPatch); its held_until goes
-		// too, so no heartbeat-shaped hold is left behind.
-		write := make(map[string]string, len(patch)+1)
+		// The kill is the disposition's Kill cell: an operator suspend goes
+		// whole, its held_until with it, so no heartbeat-shaped hold is left
+		// behind; a wait or a heartbeat stays.
+		class, _, err := session.MoveDisposition(b.Metadata, session.Info{MetadataState: b.Metadata["state"]},
+			session.ActorOperator, session.DispEvent{Kind: session.EvKill}, nil, now)
+		if err != nil {
+			return nil, false
+		}
+		write := make(map[string]string, len(patch)+len(class))
 		for key, value := range patch {
 			write[key] = value
 		}
-		if session.Holds(b.Metadata, now).In&session.HoldUser != 0 {
-			write["held_until"] = ""
+		for key, value := range class {
+			write[key] = value
 		}
 		// Capture the pre-image from the same observation the fenced write is
 		// conditioned on, so a rollback restores the row the kill replaced.

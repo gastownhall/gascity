@@ -1120,7 +1120,7 @@ func operatorTimeline() []timelineFixture {
 	restamped := map[string]string{"row:gc-1:suspended_at": "A18 start", "row:gc-1:slept_at": "A18 start"}
 	// gc session suspend with no controller to own it (Manager.Suspend): the
 	// runtime stops and the row takes the operator hold
-	// (session.OperatorSuspendPatch) in one step, so its work, assigned by
+	// (the disposition's Suspend cell) in one step, so its work, assigned by
 	// session name, no longer restarts it (mc-esqo7, fixed by #7417). gc
 	// session wake 20s later restarts it.
 	suspend := tlFixture("suspend, then wake", tlCity,
@@ -1151,7 +1151,7 @@ func operatorTimeline() []timelineFixture {
 		[]parityStep{
 			{Name: "suspend", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
-				if err := session.NewStore(beads.SessionStore{Store: st}).OperatorSuspend("gc-1", tw.now); err != nil {
+				if _, err := session.NewStore(beads.SessionStore{Store: st}).OperatorSuspend("gc-1", tw.now); err != nil {
 					tw.t.Fatal(err)
 				}
 			}},

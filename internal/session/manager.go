@@ -1317,8 +1317,9 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			// suspended without the user hold (by the shutdown sweep) writes
 			// the hold: a suspended state alone does not stop legacy's
 			// assigned-work wake.
-			if intent == suspendIntentOperator && Holds(b.Metadata, m.now()).In&HoldUser == 0 {
-				return m.PersistedStore().OperatorSuspend(id, m.now())
+			if intent == suspendIntentOperator && !DecodeDisposition(b.Metadata).KeepsSlot() {
+				_, err := m.PersistedStore().OperatorSuspend(id, m.now())
+				return err
 			}
 			return nil
 		}
@@ -1392,7 +1393,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			return err
 		}
 
-		// An operator's suspend is OperatorSuspendPatch's one shape, fenced,
+		// An operator's suspend is the disposition's Suspend cell, fenced,
 		// and written BEFORE the runtime goes: the user hold keeps legacy's
 		// assigned-work wake and its heartbeat crash recovery from undoing it,
 		// so a tick between the write and the stop drains the row instead of
@@ -1400,7 +1401,8 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// stop restores the row.
 		if intent == suspendIntentOperator {
 			now := m.now()
-			if err := m.PersistedStore().OperatorSuspend(id, now); err != nil {
+			suspended, err := m.PersistedStore().OperatorSuspend(id, now)
+			if err != nil {
 				return fmt.Errorf("updating suspension state: %w", err)
 			}
 			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
@@ -1408,7 +1410,10 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				// a failed kill's rollback does, so the row never reads
 				// suspended over a live runtime. Fenced, and only while the row
 				// still carries this suspend's hold and stamp.
-				written := OperatorSuspendPatch(now)
+				written := suspended.Encode()
+				for k, v := range operatorSuspendLife(Disposition{}, suspended, Info{}) {
+					written[k] = v
+				}
 				prior := MetadataPatch{}
 				for k := range written {
 					prior[k] = b.Metadata[k]
