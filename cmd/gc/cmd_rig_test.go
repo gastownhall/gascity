@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1296,6 +1298,125 @@ func TestDoRigResume(t *testing.T) {
 	if suspensionstate.EffectiveRigSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
 		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
 	}
+}
+
+// A supervisor-managed city has a controller socket but no standalone API
+// port. Both direct state changes must reload the store's refresh gate.
+func TestCmdRigSuspensionDirectPathReloadsController(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+		run       func([]string, io.Writer, io.Writer) int
+	}{
+		{"resume", true, cmdRigResume},
+		{"suspend", false, cmdRigSuspend},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := setupRegisteredRigFixture(t, true, tc.suspended)
+			setCwd(t, fx.workDir)
+			reloadReqCh := make(chan reloadControlRequest, 1)
+			reloadReplyCh := make(chan reloadControlReply, 1)
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() {
+				reloadReplyCh <- reloadControlReply{Outcome: reloadOutcomeFailed}
+				sendReloadControlRequestHook = oldSend
+			})
+			sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+				if cityPath != fx.cityPath {
+					return reloadControlReply{}, fmt.Errorf("reload city = %q, want %q", cityPath, fx.cityPath)
+				}
+				reloadReqCh <- req
+				return <-reloadReplyCh, nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			result := make(chan int, 1)
+			go func() { result <- tc.run(nil, &stdout, &stderr) }()
+			var req reloadControlRequest
+			select {
+			case req = <-reloadReqCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("direct rig change did not request a reload")
+			}
+			if !req.Wait || req.Timeout != "5m" {
+				t.Fatal("direct rig change requested an asynchronous reload")
+			}
+			select {
+			case <-result:
+				t.Fatal("rig command returned before reload completion")
+			default:
+			}
+			reloadReplyCh <- reloadControlReply{Outcome: reloadOutcomeApplied}
+			select {
+			case code := <-result:
+				if code != 0 {
+					t.Fatalf("gc rig %s = %d; stderr=%q", tc.name, code, stderr.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("rig command did not return after reload completion")
+			}
+		})
+	}
+}
+
+func TestDirectRigSuspensionRejectsUnconfirmedReload(t *testing.T) {
+	cityPath := t.TempDir()
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{Outcome: reloadOutcomeFailed, Error: "store reload failed"}, nil
+	}
+	var stderr bytes.Buffer
+	if code := finishDirectRigSuspension(cityPath, "resume", 0, &stderr); code != 1 {
+		t.Fatalf("finishDirectRigSuspension = %d, want failure; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "run gc reload") {
+		t.Fatalf("stderr = %q, want recovery instruction", stderr.String())
+	}
+}
+
+func TestFinishDirectRigSuspensionOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reply      reloadControlReply
+		err        error
+		want       int
+		wantStderr string
+	}{
+		{name: "missing socket", err: fmt.Errorf("dial: %w", os.ErrNotExist), want: 0},
+		{name: "stale socket", err: controllerCommandError{op: "connecting to controller", err: syscall.ECONNREFUSED, unavailable: true}, want: 0},
+		{name: "unresponsive", err: controllerCommandError{op: "reading response", err: io.ErrUnexpectedEOF, unresponsive: true}, want: 1, wantStderr: "run gc reload"},
+		{name: "no change", reply: reloadControlReply{Outcome: reloadOutcomeNoChange}, want: 0},
+		{name: "busy", reply: reloadControlReply{Outcome: reloadOutcomeBusy}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+			sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+				return tc.reply, tc.err
+			}
+			var stderr bytes.Buffer
+			if code := finishDirectRigSuspension(t.TempDir(), "resume", 0, &stderr); code != tc.want {
+				t.Fatalf("finishDirectRigSuspension = %d, want %d; stderr=%q", code, tc.want, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+
+	t.Run("failed mutation skips reload", func(t *testing.T) {
+		oldSend := sendReloadControlRequestHook
+		t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+		sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+			t.Error("failed direct mutation sent a controller reload")
+			return reloadControlReply{Outcome: reloadOutcomeApplied}, nil
+		}
+		var stderr bytes.Buffer
+		if code := finishDirectRigSuspension(t.TempDir(), "suspend", 1, &stderr); code != 1 {
+			t.Fatalf("finishDirectRigSuspension = %d, want 1; stderr=%q", code, stderr.String())
+		}
+	})
 }
 
 func TestDoRigResumeNotFound(t *testing.T) {

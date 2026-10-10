@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1009,7 +1010,31 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
+	return finishDirectRigSuspension(cityPath, "suspend", doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
+}
+
+// Direct writes bypass the API's mutateAndPoke path. Reload the running
+// controller so its rig store picks up the changed background-refresh gate.
+func finishDirectRigSuspension(cityPath, action string, code int, stderr io.Writer) int {
+	if code != 0 {
+		return code
+	}
+	// A running controller must finish reloading before new work can use the
+	// rig's refreshed store.
+	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
+	// No reachable controller (no socket, or a stale socket that refuses
+	// connections). A later controller start reads the saved state.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errControllerUnavailable) {
+		return 0
+	}
+	if err == nil && reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		err = fmt.Errorf("controller reload did not complete: outcome=%q error=%q message=%q", reply.Outcome, reply.Error, reply.Message)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig %s: state saved but controller reload failed: %v; run gc reload\n", action, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
 }
 
 // doRigSuspend records rig suspension in the runtime state file.
@@ -1128,7 +1153,7 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigResume(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
+	return finishDirectRigSuspension(cityPath, "resume", doRigResume(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
 }
 
 // doRigResume removes rig suspension from the runtime state file.
