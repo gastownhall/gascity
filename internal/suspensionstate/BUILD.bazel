@@ -2,18 +2,29 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "suspensionstate",
-    srcs = ["suspensionstate.go"],
+    srcs = [
+        "fence.go",
+        "fence_unix.go",
+        "fence_windows.go",
+        "suspensionstate.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/suspensionstate",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
         "//internal/fsys",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "suspensionstate_test",
     srcs = [
+        "fence_test.go",
         "suspensionstate_test.go",
         "testenv_import_test.go",
     ],
