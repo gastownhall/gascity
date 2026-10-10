@@ -187,6 +187,17 @@ func TestDecideSessionExitChurnBand(t *testing.T) {
 				return f
 			}, ExitNone,
 		},
+		{
+			// mc-5a1ma: a start a crashed controller abandoned between
+			// PreWake and Start is relaunched, never churned, whenever the
+			// next controller reads it.
+			"an uncommitted start suppresses churn",
+			func(f ExitFacts) ExitFacts {
+				f = withWokeAge(f, 90*time.Second)
+				f.StartUncommitted = true
+				return f
+			}, ExitNone,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
