@@ -376,7 +376,7 @@ var stateWriters = map[string]string{
 	"internal/session/lifecycle_transition.go:SleepPatch":                     "patch builder (gc session kill, idle sleep)",
 	"internal/session/manager.go:Manager.createBeadOnly":                      "create's initial metadata",
 	"internal/session/manager.go:Manager.createStarted":                       "create's initial metadata",
-	"internal/session/manager.go:Manager.suspend":                             "operator: suspend",
+	"internal/session/manager.go:Manager.Suspend":                             "operator: suspend",
 	"internal/session/store.go:Store.SetState":                                "operator verbs' blind setter",
 	"internal/session/wait_store.go:Store.CancelWait":                         "wait bead, not a row",
 	"internal/session/wait_store.go:Store.CloseWaitFromNudge":                 "wait bead, not a row",

@@ -877,6 +877,15 @@ func parityFixtures() []parityFixture {
 	created := func(id string) map[string]string { return map[string]string{"row:" + id + ":*sync": "A7 row-metadata"} }
 	return []parityFixture{
 		{
+			// INC-024: a heal never reverts a durable suspend; the row write
+			// re-decides in its CAS (R2). (Legacy's own state heal turns the
+			// stopped suspended row asleep under its hold: mc-92clf.)
+			Name: "an expired quarantine heals on a suspended row, which stays suspended", Behaviors: []string{"INC-024"},
+			City:    chat(false),
+			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "state", "suspended", "sleep_intent", "user-hold", "held_until", at(time.Hour), "quarantined_until", at(-time.Minute))},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:state": "suspended-row-heal"},
+		},
+		{
 			Name: "an expired hold heals on an awake row with assigned work", Behaviors: []string{"SESS-009", "SESS-613"},
 			Rows: []parityRow{awake("held_until", at(-time.Minute), "sleep_reason", "user-hold")}, Work: assigned, Runtimes: []simRuntime{live},
 			Explain: explain(nil),
@@ -1152,14 +1161,15 @@ var parityProposers = []string{"decideRow", "createIntent"}
 
 // parityKindTables are the kind tables a walk from a proposer must not
 // enter: they name every kind and propose none.
-var parityKindTables = map[string]bool{"intentKinds": true, "effectRegistry": true}
+var parityKindTables = map[string]bool{"effectSpecs": true}
 
 // proposedKinds is the value of every intent-kind constant (a key of
-// intentKinds) the proposers in dir's v2 files (reconcile_*, allocator_*)
+// effectSpecs, the kind table) the proposers in dir's v2 files (reconcile_*, allocator_*)
 // reference, following the package functions and variables they name and
 // the methods they select, never a local, so a kind an arm returns counts
-// once the arm is in rowArms. It over-approximates: a kind an arm only
-// compares against counts too.
+// once the arm is in rowArms. A kind code only compares against (==, !=, a
+// switch case) proposes nothing and does not count; any other reference
+// does, so it still over-approximates.
 func proposedKinds(t *testing.T, dir string) map[string]bool {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
@@ -1216,7 +1226,7 @@ func proposedKinds(t *testing.T, dir string) map[string]bool {
 		return "", false
 	}
 	kindNames := map[string]bool{}
-	for _, d := range funcs["intentKinds"] {
+	for _, d := range funcs["effectSpecs"] {
 		for _, v := range d.(*ast.ValueSpec).Values {
 			for _, elt := range v.(*ast.CompositeLit).Elts {
 				if id, ok := elt.(*ast.KeyValueExpr).Key.(*ast.Ident); ok {
@@ -1228,9 +1238,33 @@ func proposedKinds(t *testing.T, dir string) map[string]bool {
 	out, seen := map[string]bool{}, map[string]bool{}
 	var walk func(method bool, name string)
 	var inspect func(root ast.Node)
+	compared := func(e ast.Expr) bool { // a kind constant only compared against
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		return ok && kindNames[id.Name]
+	}
 	inspect = func(root ast.Node) {
 		ast.Inspect(root, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.BinaryExpr:
+				if n.Op != token.EQL && n.Op != token.NEQ {
+					return true
+				}
+				for _, side := range []ast.Expr{n.X, n.Y} {
+					if !compared(side) {
+						inspect(side)
+					}
+				}
+				return false
+			case *ast.CaseClause:
+				for _, e := range n.List {
+					if !compared(e) {
+						inspect(e)
+					}
+				}
+				for _, st := range n.Body {
+					inspect(st)
+				}
+				return false
 			case *ast.SelectorExpr:
 				walk(true, n.Sel.Name)
 				inspect(n.X)
@@ -1326,8 +1360,7 @@ const (
 	intentFake = "fake"
 	intentLaunch = intentFake
 )
-var effectRegistry = map[string]int{intentFake: 1}
-var intentKinds = map[string]int{intentLaunch: 1}
+var effectSpecs = map[string]int{intentLaunch: 1}
 func decideRow() { _ = rowArms }
 func createIntent() {}
 `
@@ -1337,10 +1370,15 @@ func createIntent() {}
 		reachable := parityReachable(map[string]bool{"A1": true}, map[string]bool{"fake": true}, proposedKinds(t, dir))
 		return keptGate(owners, phrases, reachable)
 	}
-	// armOther names the registry, which names every kind and proposes none.
-	write(kinds + "var rowArms = []rowArm{{\"A1\", armOther}}\nfunc armOther() { _ = effectRegistry }\n")
+	// armOther names the kind table, which names every kind and proposes none.
+	write(kinds + "var rowArms = []rowArm{{\"A1\", armOther}}\nfunc armOther() { _ = effectSpecs }\n")
 	if got := gate(); len(got) != 0 {
 		t.Fatalf("a registered kind no arm proposes gated %v", got)
+	}
+	// An arm that only compares against the kind proposes nothing.
+	write(kinds + "var rowArms = []rowArm{{\"A1\", armOther}}\nfunc armOther(k string) bool { switch k { case intentLaunch: return true }; return k == intentLaunch }\n")
+	if got := gate(); len(got) != 0 {
+		t.Fatalf("a kind an arm only compares against gated %v", got)
 	}
 	write(kinds + "var rowArms = []rowArm{{\"A1\", armFake}}\nfunc armFake() { launch() }\nfunc launch() { _ = intentLaunch }\n")
 	if got := gate(); !maps.Equal(got, map[string]string{"FAKE-1": "S1 fake start (PreWake)"}) {

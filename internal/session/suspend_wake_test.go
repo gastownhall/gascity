@@ -38,8 +38,8 @@ func TestOperatorSuspendClearsPendingWake(t *testing.T) {
 		suspend func(m *Manager, id string) error
 		cleared bool
 	}{
-		"operator": {suspend: (*Manager).Suspend, cleared: true},
-		"shutdown": {suspend: (*Manager).SuspendForShutdown},
+		"operator": {suspend: operatorSuspend, cleared: true},
+		"shutdown": {suspend: sweepSuspend},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -79,9 +79,9 @@ func TestOperatorSuspendHoldsTheRow(t *testing.T) {
 		suspend func(m *Manager, id string) error
 		held    bool
 	}{
-		"operator":                    {state: StateActive, suspend: (*Manager).Suspend, held: true},
-		"operator on sweep-suspended": {state: StateSuspended, suspend: (*Manager).Suspend, held: true},
-		"shutdown":                    {state: StateActive, suspend: (*Manager).SuspendForShutdown},
+		"operator":                    {state: StateActive, suspend: operatorSuspend, held: true},
+		"operator on sweep-suspended": {state: StateSuspended, suspend: operatorSuspend, held: true},
+		"shutdown":                    {state: StateActive, suspend: sweepSuspend},
 		"chat idle":                   {state: StateActive, suspend: idleSuspend},
 		"chat idle on suspended":      {state: StateSuspended, suspend: idleSuspend},
 	} {
@@ -126,7 +126,9 @@ func TestOperatorSuspendRefusesARowClosedSinceRead(t *testing.T) {
 	}
 }
 
-func idleSuspend(m *Manager, id string) error { return m.SuspendIdle(context.Background(), id) }
+func idleSuspend(m *Manager, id string) error {
+	return m.Suspend(context.Background(), testActor(m, ActorOperator), id, true)
+}
 
 // TestChatIdleSuspendHoldsNothing: the chat idle auto-suspend clears a
 // pending wake (D7) but writes no hold, so the session resumes on its next
@@ -135,8 +137,8 @@ func TestChatIdleSuspendHoldsNothing(t *testing.T) {
 	store := beads.NewMemStore()
 	mgr := newTestManager(t, store, runtime.NewFake())
 	b := wakeRow(t, store)
-	if err := mgr.SuspendIdle(context.Background(), b.ID); err != nil {
-		t.Fatalf("SuspendIdle: %v", err)
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), b.ID, true); err != nil {
+		t.Fatalf("idle Suspend: %v", err)
 	}
 	got, _ := store.Get(b.ID)
 	if got.Metadata["state"] != string(StateSuspended) || got.Metadata["held_until"] != "" || got.Metadata["sleep_intent"] != "" || got.Metadata["wake_request"] != "" {
@@ -148,8 +150,8 @@ func TestChatIdleSuspendHoldsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	var illegal *IllegalTransitionError
-	if err := mgr.SuspendIdle(context.Background(), draining.ID); !errors.As(err, &illegal) {
-		t.Fatalf("SuspendIdle of a draining row = %v, want the operator's illegal transition", err)
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), draining.ID, true); !errors.As(err, &illegal) {
+		t.Fatalf("idle Suspend of a draining row = %v, want the operator's illegal transition", err)
 	}
 }
 
@@ -190,7 +192,7 @@ func TestOperatorSuspendHoldsBeforeTheStop(t *testing.T) {
 		if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 			t.Fatal(err)
 		}
-		err := newTestManager(t, store, sp).Suspend(b.ID)
+		err := operatorSuspend(newTestManager(t, store, sp), b.ID)
 		if sp.seen["sleep_intent"] != string(SleepReasonUserHold) || sp.seen["held_until"] == "" {
 			t.Fatalf("fail=%v: the stop found sleep_intent=%q held_until=%q, want the hold already written", fail, sp.seen["sleep_intent"], sp.seen["held_until"])
 		}
@@ -217,7 +219,7 @@ func TestFailedStopRollbackLeavesANewerWriteAlone(t *testing.T) {
 	if err := sp.Start(context.Background(), "s-wake", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := newTestManager(t, store, sp).Suspend(b.ID); err == nil {
+	if err := operatorSuspend(newTestManager(t, store, sp), b.ID); err == nil {
 		t.Fatal("Suspend with a failing stop succeeded")
 	}
 	if got, _ := store.Get(b.ID); got.Metadata["state"] != string(StateAsleep) || got.Metadata["wake_request"] != "" {

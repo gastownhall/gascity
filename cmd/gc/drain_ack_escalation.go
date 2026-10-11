@@ -516,7 +516,7 @@ func queueDrainAckForcedTermination(
 		// runtime lease, released before the poke. A busy lease means another
 		// holder is starting or stopping this runtime: escalate nothing, and let
 		// a later tick decide again.
-		ctx, release, err := controllerStopLease(store, cityPath, name, sessionID, stderr)
+		by, release, err := controllerStopLease(store, cityPath, name, sessionID, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %s deferred: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 			return
@@ -524,17 +524,17 @@ func queueDrainAckForcedTermination(
 		defer release()
 		// Decide again under the lease, on a fresh read, before any kill (the
 		// process-table kill included): see queueDrainAckAsyncStop.
-		ctx = sessionpkg.WithKillDecided(ctx, d)
+		ctx := sessionpkg.WithKillDecided(context.Background(), d)
 		if holds, _ := front.Holds(d); !holds {
 			fmt.Fprintf(stderr, "%s: %s skipped: the row moved since the escalation was decided\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return
 		}
 		// Try the ordinary provider stop once more first: it is the cheap path and
 		// it is what a merely-slow pane needs.
-		if err := controllerKillRowCtx(ctx, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
+		if err := controllerKillRowCtx(ctx, by, cityPath, store, sp, cfg, sessionID); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "%s: stopping %s: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		}
-		if confirmDrainAckRuntimeDead(ctx, cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
+		if confirmDrainAckRuntimeDead(ctx, by, cityPath, store, sp, cfg, sessionID, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
 			release()
 			recordDrainAckEscalation(cfg, info, name, reason, "stopped_without_force", attempt, rec)
 			// The caller suppresses its ordinary stop on a true return, so this

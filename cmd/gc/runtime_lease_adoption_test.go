@@ -661,3 +661,234 @@ func TestLaunchDriftRelaunchFallsBackOnANonBusyLeaseError(t *testing.T) {
 		t.Fatalf("relaunch on a closed row = (%v, %v), relaunches %d, stderr %q; want the full-restart fallback", ok, batch, env.sp.CountCalls("Relaunch", "worker"), env.stderr.String())
 	}
 }
+
+// TestStartInFlightOnlyWhileItsHolderLives: a row PreWake left creating with
+// a fresh last_woke_at reads start_in_flight only while a live holder has
+// its runtime lease, on this host or on another (an unexpired record). A
+// record that expired with no live flock is reclaimable: the pass relaunches
+// the start under its own lease (mc-5a1ma, CONTRACT §12.5).
+func TestStartInFlightOnlyWhileItsHolderLives(t *testing.T) {
+	now := time.Now().UTC()
+	remote := func(expires time.Time) map[string]string {
+		return map[string]string{
+			sessionpkg.RuntimeLeaseHolderKey: "host-b/7/n", sessionpkg.RuntimeLeaseEpochKey: "3", sessionpkg.RuntimeLeaseTTLKey: "120",
+			sessionpkg.RuntimeLeaseExpiresKey: expires.Format(time.RFC3339), sessionpkg.RuntimeLeaseFlockKey: "another-boot/1/2/0123",
+		}
+	}
+	for _, c := range []struct {
+		name      string
+		record    map[string]string
+		holdHere  bool
+		wantStart bool
+	}{
+		{"a live holder on this host", nil, true, false},
+		{"another host's unexpired record", remote(now.Add(time.Minute)), false, false},
+		{"another host's expired record", remote(now.Add(-time.Second)), false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.clk.Time = now
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			env.addDesired("worker", "worker", false)
+			row := env.createSessionBead("worker", "worker")
+			woke := now.Add(-10 * time.Second).Format(time.RFC3339)
+			env.setSessionMetadata(&row, map[string]string{
+				"state": "creating", "session_origin": "manual", "last_woke_at": woke, "pending_create_started_at": woke,
+				"generation": "2", "instance_token": "tok-prewake",
+			})
+			if c.record != nil {
+				env.setSessionMetadata(&row, c.record)
+			}
+			if c.holdHere {
+				held, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(env.store), sessionpkg.RuntimeLeaseRequest{
+					City: env.city, Name: "worker", ID: row.ID, TTL: 2 * time.Minute,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer held.Release()
+			}
+			woken := env.reconcile([]beads.Bead{mustGetBead(t, env.store, row.ID)})
+			meta := mustGetBead(t, env.store, row.ID).Metadata
+			if c.wantStart {
+				if woken != 1 || meta["instance_token"] == "tok-prewake" || meta["generation"] != "3" {
+					t.Fatalf("woken %d, row %v; want the start relaunched under a fresh token\nstderr %q", woken, meta, env.stderr.String())
+				}
+				return
+			}
+			if woken != 0 || strings.Contains(env.stderr.String(), "op=start") || meta["instance_token"] != "tok-prewake" {
+				t.Fatalf("woken %d, row %v, stderr %q; want start_in_flight: no start attempted, not even one the lease defers", woken, meta, env.stderr.String())
+			}
+		})
+	}
+}
+
+// TestReapStaleSessionBeadsSparesALiveHoldersStart: a stuck-creating row past
+// its grace is reaped only once no live holder has its runtime lease: a live
+// holder's commit or rollback settles the row (mc-5a1ma, §12.5).
+func TestReapStaleSessionBeadsSparesALiveHoldersStart(t *testing.T) {
+	store, sp, city := beads.NewMemStore(), runtime.NewFake(), t.TempDir()
+	row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "worker", "state": "creating", "pending_create_claim": "true",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock.Fake{Time: row.CreatedAt.Add(stalePendingCreateTimeout + time.Minute)}
+	if err := store.SetMetadata(row.ID, "last_woke_at", row.CreatedAt.UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	held, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(store), sessionpkg.RuntimeLeaseRequest{City: city, Name: "worker", ID: row.ID, TTL: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	if n := reapStaleSessionBeads(city, store, sp, newDrainTracker(), nil, clk, &log); n != 0 {
+		t.Fatalf("reaped %d under a live holder's lease, want 0", n)
+	}
+	held.Release()
+	if n := reapStaleSessionBeads(city, store, sp, newDrainTracker(), nil, clk, &log); n != 1 {
+		t.Fatalf("reaped %d once the holder is gone, want the stale row reaped; log %q", n, log.String())
+	}
+}
+
+// observeLagProvider reports the named runtime absent on its first IsRunning
+// call (the forward pass's observation, taken before an in-flight start's
+// runtime came up), then the truth.
+type observeLagProvider struct {
+	*runtime.Fake
+	name string
+	mu   sync.Mutex
+	seen bool
+}
+
+func (p *observeLagProvider) IsRunning(name string) bool {
+	p.mu.Lock()
+	first := name == p.name && !p.seen
+	if name == p.name {
+		p.seen = true
+	}
+	p.mu.Unlock()
+	if first {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+// inFlightAtSnapshot is a row the pass read with its start in flight (state
+// creating, a fresh last_woke_at, token T1), and that snapshot.
+func inFlightAtSnapshot(t *testing.T, env *reconcilerTestEnv, now time.Time) (beads.Bead, beads.Bead) {
+	t.Helper()
+	env.clk.Time = now
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	row := env.createSessionBead("worker", "worker")
+	woke := now.Add(-10 * time.Second).Format(time.RFC3339)
+	env.setSessionMetadata(&row, map[string]string{
+		"state": "creating", "session_origin": "manual", "last_woke_at": woke, "pending_create_started_at": woke,
+		"generation": "2", "instance_token": "T1",
+	})
+	return row, mustGetBead(t, env.store, row.ID)
+}
+
+// TestStartSettledSinceTheSnapshotIsNotRelaunched (#7565 review must-fix):
+// the pass's snapshot shows a start in flight, and before its wake decision
+// probes the lease, that start settles and releases the lease. A start that
+// committed (the runtime up under T1) or failed (its marker cleared, a wake
+// failure recorded) since the snapshot is no abandoned start: the pass does
+// not relaunch it, so a committed row keeps its runtime's token.
+func TestStartSettledSinceTheSnapshotIsNotRelaunched(t *testing.T) {
+	now := time.Now().UTC()
+	for _, c := range []struct {
+		name    string
+		settled map[string]string
+		live    bool
+	}{
+		{"committed", map[string]string{"state": "active", "state_reason": "creation_complete", "pending_create_started_at": "", "creation_complete_at": now.Format(time.RFC3339)}, true},
+		{"failed", map[string]string{"last_woke_at": "", "wake_attempts": "1"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			row, snapshot := inFlightAtSnapshot(t, env, now)
+			if err := env.store.SetMetadataBatch(row.ID, c.settled); err != nil {
+				t.Fatal(err)
+			}
+			if c.live {
+				if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", Env: map[string]string{"GC_INSTANCE_TOKEN": "T1", "GC_SESSION_ID": row.ID}}); err != nil {
+					t.Fatal(err)
+				}
+				_ = env.sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "T1")
+				_ = env.sp.SetMeta("worker", "GC_SESSION_ID", row.ID)
+			}
+			sp := &observeLagProvider{Fake: env.sp, name: "worker"}
+			cfgNames := configuredSessionNames(env.cfg, "", env.store)
+			reconcileSessionBeadsAtPath(context.Background(), env.city, []beads.Bead{snapshot}, env.desiredState, cfgNames, env.cfg, sp,
+				env.store, nil, nil, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+				nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, env.startOptions...)
+			meta := mustGetBead(t, env.store, row.ID).Metadata
+			if meta["generation"] != "2" || meta["instance_token"] != "T1" || env.sp.CountCalls("Start", "worker") > 1 {
+				t.Fatalf("row %v after a start that %s since the snapshot, want no relaunch (generation 2, token T1)\nstderr %s", meta, c.name, env.stderr.String())
+			}
+		})
+	}
+}
+
+// unreadableLeaseRowStore fails every Get once armed: the lease probe's fresh read.
+type unreadableLeaseRowStore struct {
+	beads.Store
+	armed bool
+}
+
+func (s *unreadableLeaseRowStore) Get(id string) (beads.Bead, error) {
+	if s.armed {
+		return beads.Bead{}, errors.New("store unreachable")
+	}
+	return s.Store.Get(id)
+}
+
+// TestUnprovableLeaseReadsAsInFlight (#7565 review, mutants B1, B2, B6): a
+// probe that cannot read the row, or a city path with no lock dir, proves
+// nothing, so the marker keeps its in-flight meaning and the reaper spares the
+// row; a malformed record proves its holder gone, as an acquire would take it.
+func TestUnprovableLeaseReadsAsInFlight(t *testing.T) {
+	store := &unreadableLeaseRowStore{Store: beads.NewMemStore()}
+	row, err := store.Create(beads.Bead{Title: "w", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "worker", "state": "creating", "last_woke_at": "2026-01-01T00:00:00Z",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := sessiontest.SeedBead(t, row)
+	city := t.TempDir()
+	store.armed = true
+	if startAbandoned(store, city, info) || !startHolderLive(store, city, info) {
+		t.Fatal("a failed probe read: want no abandoned start, and the reaper sparing the row")
+	}
+	store.armed = false
+	if startAbandoned(store, "relative/city", info) || !startHolderLive(store, "relative/city", info) {
+		t.Fatal("a city path with no lock dir: want no abandoned start, and the reaper sparing the row")
+	}
+	if err := store.SetMetadataBatch(row.ID, map[string]string{sessionpkg.RuntimeLeaseHolderKey: "host-b/7/n", sessionpkg.RuntimeLeaseExpiresKey: "soon", sessionpkg.RuntimeLeaseTTLKey: "120"}); err != nil {
+		t.Fatal(err)
+	}
+	if !startAbandoned(store, city, sessiontest.SeedBead(t, mustGetBead(t, store, row.ID))) {
+		t.Fatal("a malformed record: want the start abandoned, as an acquire takes it")
+	}
+}
+
+// TestFreshClaimedMarkerIsNotRolledBackWithoutALease (#7565 review): an
+// undesired pending create whose fresh marker no live holder backs is not
+// relaunched, and its time-based lease still keeps it from rollback.
+func TestFreshClaimedMarkerIsNotRolledBackWithoutALease(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	row := env.createSessionBead("helper", "helper")
+	env.setSessionMetadata(&row, map[string]string{
+		"pending_create_claim": "true", "state": "creating", "last_woke_at": env.clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
+	})
+	env.reconcile([]beads.Bead{mustGetBead(t, env.store, row.ID)})
+	got := mustGetBead(t, env.store, row.ID)
+	if got.Status == "closed" || got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("row %s %v, want the claimed row kept open with its claim", got.Status, got.Metadata)
+	}
+}
