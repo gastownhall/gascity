@@ -161,26 +161,38 @@ func (in *Inbox) UnreadAutoHandoffs() []mail.Message {
 	return messages
 }
 
-// ArchiveInjectedAutoHandoffsFromInbox is [Provider.ArchiveInjectedAutoHandoffs]
-// over the rows inbox already read: of the injected ids, the auto-handoff mail
-// that opted into archive-after-inject is marked read and closed without being
-// read again. An id the inbox did not read is left alone — it was not injected
-// from this inbox.
-func (p *Provider) ArchiveInjectedAutoHandoffsFromInbox(inbox *Inbox, ids []string) error {
-	if inbox == nil {
+// InjectedAutoHandoffIDs returns, of ids, those the inbox read as unread
+// auto-handoff mail that opted into archive-after-inject — exactly what
+// [Provider.ArchiveInjectedAutoHandoffsFromInbox] archives — in ids' order. An
+// id the inbox did not read is not one of them.
+func (in *Inbox) InjectedAutoHandoffIDs(ids []string) []string {
+	if in == nil {
 		return nil
 	}
-	rows := make(map[string]beads.Bead, len(inbox.rows))
-	for _, b := range inbox.rows {
+	rows := make(map[string]beads.Bead, len(in.rows))
+	for _, b := range in.rows {
 		rows[b.ID] = b
 	}
-	var errs []error
+	var out []string
 	for _, id := range ids {
 		b, ok := rows[strings.TrimSpace(id)]
-		if !ok || !isInjectedAutoHandoff(b) {
+		if !ok || hasLabel(b.Labels, "read") || !isInjectedAutoHandoff(b) {
 			continue
 		}
-		if err := p.archiveInjectedAutoHandoff(b.ID); err != nil {
+		out = append(out, b.ID)
+	}
+	return out
+}
+
+// ArchiveInjectedAutoHandoffsFromInbox is [Provider.ArchiveInjectedAutoHandoffs]
+// over the rows inbox already read: of the injected ids, the auto-handoff mail
+// that opted into archive-after-inject ([Inbox.InjectedAutoHandoffIDs]) is
+// marked read and closed without being read again. An id the inbox did not
+// read is left alone — it was not injected from this inbox.
+func (p *Provider) ArchiveInjectedAutoHandoffsFromInbox(inbox *Inbox, ids []string) error {
+	var errs []error
+	for _, id := range inbox.InjectedAutoHandoffIDs(ids) {
+		if err := p.archiveInjectedAutoHandoff(id); err != nil {
 			errs = append(errs, err)
 		}
 	}

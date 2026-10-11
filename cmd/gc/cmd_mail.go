@@ -801,9 +801,7 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 			// AND archived, never injected-but-not-archived) — unless the
 			// managing gc hook run would discard this output before the
 			// archive finished.
-			if hookDeadlineAllowsArchive("gc mail check", stderr) {
-				archiveInjectedAutoHandoffMessagesFrom(mp, inbox, selectMailInjectWindow(messages), stderr)
-			}
+			archiveInjectedAutoHandoffMessagesFrom("gc mail check", mp, inbox, selectMailInjectWindow(messages), stderr)
 		}
 		return 0 // --inject always exits 0
 	}
@@ -828,21 +826,35 @@ type inboxAutoHandoffArchiver interface {
 }
 
 // archiveInjectedAutoHandoffMessagesFrom archives the injected auto-handoff
-// messages. Given the inbox they were read from, a provider that can archives
-// from its rows without reading them again.
-func archiveInjectedAutoHandoffMessagesFrom(mp mail.Provider, inbox *beadmail.Inbox, messages []mail.Message, stderr io.Writer) {
+// messages, unless the managing gc hook run would discard the hook's output
+// before the archive finished (hookDeadlineAllowsArchive). Given the inbox
+// they were read from, a provider that can archives from its rows without
+// reading them again, and only the auto-handoff mail among messages is
+// archived — or, past the deadline, reported as skipped. Without the inbox,
+// which of messages are auto-handoff mail is not known until the provider
+// reads them, so the deadline is checked for any of them.
+func archiveInjectedAutoHandoffMessagesFrom(cmdName string, mp mail.Provider, inbox *beadmail.Inbox, messages []mail.Message, stderr io.Writer) {
 	ids := make([]string, 0, len(messages))
 	for _, msg := range messages {
 		ids = append(ids, msg.ID)
 	}
-	var err error
+	var archive func() error
+	what := "any injected auto-handoff mail"
 	if archiver, ok := mp.(inboxAutoHandoffArchiver); ok && inbox != nil {
-		err = archiver.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids)
+		ids = inbox.InjectedAutoHandoffIDs(ids)
+		what = fmt.Sprintf("%d injected auto-handoff message(s)", len(ids))
+		archive = func() error { return archiver.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids) }
 	} else if archiver, ok := mp.(injectedAutoHandoffArchiver); ok {
-		err = archiver.ArchiveInjectedAutoHandoffs(ids)
+		archive = func() error { return archiver.ArchiveInjectedAutoHandoffs(ids) }
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "gc mail check: archiving injected auto handoff mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	if archive == nil || len(ids) == 0 {
+		return
+	}
+	if !hookDeadlineAllowsArchive(cmdName, what, stderr) {
+		return
+	}
+	if err := archive(); err != nil {
+		fmt.Fprintf(stderr, "%s: archiving injected auto handoff mail: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 	}
 }
 

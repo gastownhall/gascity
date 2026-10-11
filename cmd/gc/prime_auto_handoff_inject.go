@@ -274,9 +274,7 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 		afterDelivery: func() {
 			// Unless the managing gc hook run would discard the delivered
 			// output before the archive finished (hook_deadline.go).
-			if hookDeadlineAllowsArchive("gc prime", stderr) {
-				archiveInjectedAutoHandoffMessagesFrom(mp, inbox, selectMailInjectWindow(messages), stderr)
-			}
+			archiveInjectedAutoHandoffMessagesFrom("gc prime", mp, inbox, selectMailInjectWindow(messages), stderr)
 		},
 	}
 	return startMail

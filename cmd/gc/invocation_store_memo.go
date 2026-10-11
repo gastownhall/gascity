@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,6 +30,16 @@ import (
 // routes. Owning frames such as openOwnedNudgeBeadStore keep their contract —
 // they close what they were handed — and closing a borrowed handle leaves the
 // shared store open for the next caller.
+//
+// One connection pool. Every caller in a memoized invocation shares the one
+// opened store, and with it that store's connection pool — where without the
+// memo each helper's open brought a pool of its own. A backend capped at one
+// connection (the SQLite store's write connection and the DoltLite read store
+// open with MaxOpenConns=1) then serializes those callers on that connection. So no caller may hold a
+// transaction or a connection-scoped operation open while it calls code that
+// opens the same scope: under the memo that open is the same pool, and the
+// inner call would wait on the outer one's connection forever. The hook verbs
+// in invocationStoreMemoCommands make one store call at a time.
 //
 // The memo is opt-in per command. run() enables it only for the one-shot verbs
 // in invocationStoreMemoCommands; long-lived entry points (the supervisor and
@@ -107,6 +119,15 @@ func beginInvocationStoreMemo() (end func() error) {
 			closeErr = memo.close()
 		})
 		return closeErr
+	}
+}
+
+// endInvocationStoreMemoLogged ends the memo for run(). The command's outcome
+// is decided by then, so an error releasing a store does not change it, but
+// it is shown on stderr under GC_DEBUG rather than dropped.
+func endInvocationStoreMemoLogged(end func() error, stderr io.Writer) {
+	if err := end(); err != nil && gcDebugEnabled() {
+		fmt.Fprintf(stderr, "gc: releasing the invocation's stores: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 }
 

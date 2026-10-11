@@ -41,6 +41,85 @@ func TestHookRunExportsItsDeadline(t *testing.T) {
 	}
 }
 
+// TestNestedHookRunKeepsTheEarlierDeadline pins a gc hook run inside another:
+// the child gets the earlier of the inherited deadline and its own, once, so
+// an inner timeout longer than the outer one cannot extend the time the outer
+// run keeps output for, and a shorter one still applies.
+func TestNestedHookRunKeepsTheEarlierDeadline(t *testing.T) {
+	exe := buildTurnBoundEnvProbe(t)
+	originalExecutable := hookRunExecutable
+	t.Cleanup(func() { hookRunExecutable = originalExecutable })
+	hookRunExecutable = func() (string, error) { return exe, nil }
+	deadlineLine := regexp.MustCompile(`(?m)^` + hookDeadlineEnv + `=(.*)$`)
+
+	for _, tc := range []struct {
+		name          string
+		inheritedIn   time.Duration
+		timeout       time.Duration
+		wantInherited bool
+	}{
+		{name: "inherited earlier", inheritedIn: 2 * time.Second, timeout: 10 * time.Second, wantInherited: true},
+		{name: "own earlier", inheritedIn: time.Minute, timeout: 10 * time.Second, wantInherited: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inherited := hookDeadlineEnvValue(time.Now().Add(tc.inheritedIn))
+			t.Setenv(hookDeadlineEnv, inherited)
+			before := time.Now()
+			var stdout, stderr bytes.Buffer
+			if code := cmdHookRun([]string{"probe"}, hookRunOptions{Timeout: tc.timeout}, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdHookRun = %d; stderr=%s", code, stderr.String())
+			}
+			lines := deadlineLine.FindAllStringSubmatch(stdout.String(), -1)
+			if len(lines) != 1 {
+				t.Fatalf("child env carries %d %s entries, want 1:\n%s", len(lines), hookDeadlineEnv, stdout.String())
+			}
+			got := strings.TrimSpace(lines[0][1])
+			if tc.wantInherited {
+				if got != inherited {
+					t.Fatalf("%s = %s, want the inherited %s", hookDeadlineEnv, got, inherited)
+				}
+				return
+			}
+			deadline, err := time.Parse(time.RFC3339Nano, got)
+			if err != nil {
+				t.Fatalf("parsing %s=%q: %v", hookDeadlineEnv, got, err)
+			}
+			if deadline.Before(before.Add(tc.timeout)) || deadline.After(time.Now().Add(tc.timeout)) {
+				t.Fatalf("%s = %s, want its own now + %s", hookDeadlineEnv, deadline, tc.timeout)
+			}
+		})
+	}
+}
+
+// TestDeadlineSkipWarnsOnlyForASkippedHandoff pins the skipped-archive
+// warning: past the margin, a mail check that injected only ordinary mail has
+// nothing to archive and says nothing, while one that injected an auto-handoff
+// says the handoff is left for the next hook.
+func TestDeadlineSkipWarnsOnlyForASkippedHandoff(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seed     func(t *testing.T, f hookBudgetFixture)
+		wantWarn bool
+	}{
+		{name: "ordinary mail only", seed: func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "status please") }, wantWarn: false},
+		{name: "auto-handoff", seed: func(t *testing.T, f hookBudgetFixture) { f.autoHandoff(t) }, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookBudgetFixture(t)
+			tc.seed(t, f)
+			setHookProcessStart(t, time.Now().Add(-time.Minute))
+			t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(time.Second)))
+			run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return mailCheckInject(t, f, stdout, stderr) })
+			if run.code != 0 || !strings.Contains(run.stdout, "unread message") {
+				t.Fatalf("exit %d, nothing injected; stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+			}
+			if warned := strings.Contains(run.stderr, "deadline"); warned != tc.wantWarn {
+				t.Fatalf("deadline warning = %v, want %v; stderr=%q", warned, tc.wantWarn, run.stderr)
+			}
+		})
+	}
+}
+
 // setHookProcessStart pins when this process counts as started, for the
 // rest of the test.
 func setHookProcessStart(t *testing.T, start time.Time) {

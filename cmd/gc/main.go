@@ -241,7 +241,7 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	}
 	if target, _, findErr := root.Find(args); findErr == nil && invocationStoreMemoEligible(target) {
 		endStoreMemo := beginInvocationStoreMemo()
-		defer func() { _ = endStoreMemo() }()
+		defer endInvocationStoreMemoLogged(endStoreMemo, stderr)
 	}
 	executedCommand, executeErr := root.ExecuteC()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))

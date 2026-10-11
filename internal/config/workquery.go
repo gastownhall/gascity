@@ -370,6 +370,14 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 // wisp tier for open rows once, not once per tier and target; a probe run
 // with no snapshot taken scans once and keeps it for the next target. The
 // same filter applies to the same rows, so the selection is unchanged.
+//
+// The snapshot can be stale by the time this tier reads it: it was taken
+// before the assigned and routed tiers ran, so a wisp routed to the target
+// since is not offered until the next probe, and one another worker claimed
+// since is still offered. That is the trade ephemeralStatusSnapshotShell
+// already makes between identities, and both are safe: a work query is a
+// point-in-time probe the caller re-runs, and a stale candidate is settled by
+// the claim that follows it, not by this read.
 func legacyEphemeralPoolDemandFromSnapshotShell(shellVar string, limit int, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return shellVar + `=$(printf "[]"); `

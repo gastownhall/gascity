@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -211,5 +212,30 @@ func TestInvocationStoreMemoCoversTheHookVerbs(t *testing.T) {
 		if err != nil || cmd.CommandPath() != path {
 			t.Errorf("memo command %q does not name a command (found %v, err %v)", path, cmd, err)
 		}
+	}
+}
+
+// TestEndInvocationStoreMemoLogsCloseErrorsAtDebug pins what run() does with
+// an error releasing the invocation's stores: the command's outcome is already
+// decided, so it is not a failure, but it is not swallowed either — GC_DEBUG
+// shows it on stderr.
+func TestEndInvocationStoreMemoLogsCloseErrorsAtDebug(t *testing.T) {
+	failing := func() error { return errors.New("store close refused") }
+	for _, tc := range []struct {
+		debug string
+		want  bool
+	}{{debug: "", want: false}, {debug: "1", want: true}} {
+		t.Setenv("GC_DEBUG", tc.debug)
+		var stderr strings.Builder
+		endInvocationStoreMemoLogged(failing, &stderr)
+		if got := strings.Contains(stderr.String(), "store close refused"); got != tc.want {
+			t.Fatalf("GC_DEBUG=%q: logged = %v, want %v; stderr=%q", tc.debug, got, tc.want, stderr.String())
+		}
+	}
+	t.Setenv("GC_DEBUG", "1")
+	var stderr strings.Builder
+	endInvocationStoreMemoLogged(func() error { return nil }, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("a clean release logged %q", stderr.String())
 	}
 }

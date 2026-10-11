@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -51,6 +52,19 @@ func inheritedHookDeadline() (time.Time, bool, error) {
 	return deadline, true, nil
 }
 
+// childHookDeadline is the deadline gc hook run hands its child: ctx's, or the
+// one this process inherited when that is earlier. A gc hook run nested in
+// another cannot keep its child's output past the outer run's deadline, so its
+// own longer timeout must not tell the child it has more time. An inherited
+// value that does not parse is ignored; ctx's deadline still holds.
+func childHookDeadline(ctx context.Context) time.Time {
+	deadline, ok := ctx.Deadline()
+	if inherited, has, err := inheritedHookDeadline(); err == nil && has && (!ok || inherited.Before(deadline)) {
+		return inherited
+	}
+	return deadline
+}
+
 // hookArchiveMargin is the time left before deadline that an archive needs: a
 // third of the time the process was given from start, capped at
 // hookDeadlineArchiveMarginMax. A fixed margin as large as a short hook
@@ -77,16 +91,18 @@ func hookDeadlineLeavesArchiveTime(now, start time.Time) (bool, error) {
 }
 
 // hookDeadlineAllowsArchive reports whether an injecting hook has time to
-// archive what it injected. When it does not, it says so on stderr under
-// cmdName, so a skipped archive is visible rather than silent.
-func hookDeadlineAllowsArchive(cmdName string, stderr io.Writer) bool {
+// archive the injected auto-handoff mail it is about to archive, described by
+// what. When it does not, it says so on stderr under cmdName, so a skipped
+// archive is visible rather than silent. Callers ask only when there is
+// auto-handoff mail to archive, so the warning names a real skip.
+func hookDeadlineAllowsArchive(cmdName, what string, stderr io.Writer) bool {
 	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v; leaving injected auto-handoff mail unarchived\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %v; leaving %s unarchived\n", cmdName, err, what) //nolint:errcheck // best-effort stderr
 		return false
 	}
 	if !ok {
-		fmt.Fprintf(stderr, "%s: hook deadline too close to archive injected auto-handoff mail; it will be delivered again\n", cmdName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: hook deadline too close to archive %s; it stays unread and the next hook delivers it again\n", cmdName, what) //nolint:errcheck // best-effort stderr
 		return false
 	}
 	return true
