@@ -803,10 +803,6 @@ type inboxAutoHandoffArchiver interface {
 	ArchiveInjectedAutoHandoffsFromInbox(*beadmail.Inbox, []string) error
 }
 
-func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
-	archiveInjectedAutoHandoffMessagesFrom(mp, nil, messages, stderr)
-}
-
 // archiveInjectedAutoHandoffMessagesFrom archives the injected auto-handoff
 // messages. Given the inbox they were read from, a provider that can archives
 // from its rows without reading them again.
@@ -1560,13 +1556,23 @@ func resolveMailAddressForCommand(identifier string, stderr io.Writer, cmdName s
 }
 
 func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
-	seen := map[string]mail.Message{}
-	order := make([]string, 0, len(recipients))
+	sets := make([][]mail.Message, 0, len(recipients))
 	for _, recipient := range recipients {
 		messages, err := fetch(recipient)
 		if err != nil {
 			return nil, err
 		}
+		sets = append(sets, messages)
+	}
+	return mergeMailByArrival(sets...), nil
+}
+
+// mergeMailByArrival unions message sets by id — a later copy of a message
+// replaces an earlier one — ordered oldest first, ties by id.
+func mergeMailByArrival(sets ...[]mail.Message) []mail.Message {
+	seen := map[string]mail.Message{}
+	var order []string
+	for _, messages := range sets {
 		for _, message := range messages {
 			if _, ok := seen[message.ID]; !ok {
 				order = append(order, message.ID)
@@ -1584,7 +1590,7 @@ func collectMailMessages(fetch func(string) ([]mail.Message, error), recipients 
 		}
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
-	return result, nil
+	return result
 }
 
 func collectMailCounts(count func(string) (int, int, error), recipients []string) (int, int, error) {

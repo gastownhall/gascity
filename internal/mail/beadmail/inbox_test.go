@@ -282,3 +282,31 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 		}
 	}
 }
+
+// TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs pins the SessionStart
+// projection: the inbox's unread archive-after-inject handoffs are exactly
+// what CheckAutoHandoffs returns for the session's addresses, in order.
+func TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs(t *testing.T) {
+	_, p, info := newInboxFixture(t)
+	labels := []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}
+	for i, to := range []string{"sky", info.ID, "old-sky", "someone-else"} {
+		if _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: to, Subject: "handoff " + to, ThreadID: "t" + to, ExtraLabels: labels}); err != nil {
+			t.Fatalf("SendHandoff %d: %v", i, err)
+		}
+	}
+	if _, err := p.SendHandoff(mail.HandoffIntent{From: "sky", To: "sky", Subject: "not archive-after-inject", ThreadID: "plain", ExtraLabels: []string{mail.AutoHandoffLabel}}); err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	want, err := p.CheckAutoHandoffs(session.MailboxAddressesFromInfo(info))
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	inbox, err := p.InboxForRoutes(session.RecipientRoutesFromInfo(info))
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	got := inbox.UnreadAutoHandoffs()
+	if !slices.Equal(messageIDs(got), messageIDs(want)) || len(got) != 3 {
+		t.Fatalf("UnreadAutoHandoffs = %v, want CheckAutoHandoffs' %v (3 handoffs)", messageIDs(got), messageIDs(want))
+	}
+}

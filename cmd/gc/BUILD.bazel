@@ -1533,6 +1533,7 @@ go_test(
         "pool_trigger_worktree_owner_test.go",
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
+        "prime_inbox_test.go",
         "prime_prompt_budget_test.go",
         "prime_session_key_capture_test.go",
         "prime_unmanaged_hook_guard_test.go",

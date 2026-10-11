@@ -65,6 +65,21 @@ func (in *Inbox) Unread() []mail.Message {
 	return messages
 }
 
+// UnreadAutoHandoffs returns the inbox's unread auto-handoff mail that opted
+// into archive-after-inject, oldest first (ties by id) — the set and order
+// [Provider.CheckAutoHandoffs] yields for the same mailbox.
+func (in *Inbox) UnreadAutoHandoffs() []mail.Message {
+	var messages []mail.Message
+	for _, b := range in.rows {
+		if hasLabel(b.Labels, "read") || !isInjectedAutoHandoff(b) {
+			continue
+		}
+		messages = append(messages, beadToMessage(b))
+	}
+	sortMessagesByArrival(messages)
+	return messages
+}
+
 // ArchiveInjectedAutoHandoffsFromInbox is [Provider.ArchiveInjectedAutoHandoffs]
 // over the rows inbox already read: of the injected ids, the auto-handoff mail
 // that opted into archive-after-inject is marked read and closed without being

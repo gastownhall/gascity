@@ -2056,6 +2056,23 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 	return target
 }
 
+// withNudgeTargetFenceFromLiveSession is withNudgeTargetFence for a caller
+// that has already read the target's live session: when that session carries
+// the target's session name it is the open session the fence would find, so
+// the fence is taken from it without listing the city's sessions.
+func withNudgeTargetFenceFromLiveSession(store beads.Store, live *session.Info, target nudgeTarget) nudgeTarget {
+	if live == nil || live.Closed || target.sessionName == "" || live.SessionNameMetadata != target.sessionName {
+		return withNudgeTargetFence(store, target)
+	}
+	if target.sessionID == "" {
+		target.sessionID = live.ID
+	}
+	if target.continuationEpoch == "" {
+		target.continuationEpoch = live.ContinuationEpoch
+	}
+	return target
+}
+
 var startNudgePoller = ensureNudgePoller
 
 // nudgeDispatcherIsSupervisor reports whether the city is configured to use
