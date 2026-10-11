@@ -1457,3 +1457,21 @@ func TestTxCloseLandedSignal(t *testing.T) {
 		t.Fatalf("settlement %+v, row %s; want ambiguous and closed, the fault injected", s, k.status())
 	}
 }
+
+// Kills a cause attached to a landing its last step did not write (the C5b-3
+// review): a section that writes, then one that ends with a cause and no
+// write (C5c1's already-closed), settles landed with no cause; a step whose
+// own write ends the effect with a cause keeps it (healInstead).
+func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
+	ends := section{Decide: func(txView) txStep { return txStep{Done: true, Cause: "already-closed"} }}
+	k := newTxKit(t)
+	if s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}, ends}}); s.Outcome != settledLanded || s.Cause != "" {
+		t.Fatalf("settlement %+v, want landed with no cause", s)
+	}
+	writes := section{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Done: true, Cause: causeHeld}
+	}}
+	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
+		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}

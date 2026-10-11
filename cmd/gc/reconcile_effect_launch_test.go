@@ -1140,3 +1140,25 @@ func TestLaunchResolvesOnTheRowBeforeItsWake(t *testing.T) {
 		}
 	}
 }
+
+// Kills a heal written in a refusal's stead that clears the row's backoff
+// (the C5b-3 review's F06, F07): a landing with a cause backs off as the
+// refusal would, a plain landing resets the record, and an endpoint-gate
+// cause, which the gate paces, records none.
+func TestLandedWithCauseBacksOff(t *testing.T) {
+	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	k := rowKey{Leg: rowLeg, ID: "gc-1"}
+	now := gatherNow
+	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, Cause: causeSessionName, At: now})
+	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 1 || !r.live(now) {
+		t.Fatalf("landed with %q: record %+v, want a live backoff", causeSessionName, r)
+	}
+	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, At: now})
+	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 0 {
+		t.Fatalf("plain landing: record %+v, want reset", r)
+	}
+	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, Cause: causeEndpointGate, At: now})
+	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 0 {
+		t.Fatalf("landed with endpoint-gate: record %+v, want none (the gate paces)", r)
+	}
+}
