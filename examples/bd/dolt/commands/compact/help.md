@@ -47,6 +47,14 @@ Compact only rewrites history that this city grew.
     `.compact-full-history` exists. Create that marker before deleting the tag
     only if this city grew the whole history.
 
+## Busy databases
+
+Compact needs HEAD to hold still while it gathers the preflight counts. It
+retries the gather up to three times. When HEAD moves every time, compact
+refuses that database before the flatten and changes nothing. A refusal is not
+a failure: the run reports `N database(s) refused compaction` with the database
+names, and exits 0 unless another database failed. The next run retries.
+
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via `CALL DOLT_GC('--full')` on each

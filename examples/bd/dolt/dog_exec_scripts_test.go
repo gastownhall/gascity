@@ -1979,14 +1979,20 @@ func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
 	}
 }
 
-func TestCompactScriptAbortsWhenHeadKeepsMovingAcrossPreflightRetries(t *testing.T) {
+func TestCompactScriptRefusesWhenHeadKeepsMovingAcrossPreflightRetries(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "head_changes_before_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite HEAD moving across every preflight retry:\n%s", out)
+	if err != nil {
+		t.Fatalf("a preflight refusal changes nothing and should not fail the run: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "HEAD kept moving across 3 preflight attempts") {
 		t.Fatalf("compact should explain the bounded preflight abort:\n%s", out)
+	}
+	if !strings.Contains(out, "1 database(s) refused compaction") {
+		t.Fatalf("compact should report the preflight abort as a refusal:\n%s", out)
+	}
+	if strings.Contains(out, "failed compaction") {
+		t.Fatalf("a preflight refusal should not be reported as a failure:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {

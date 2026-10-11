@@ -2774,6 +2774,7 @@ compact_shared_history_database() {
 
 flatten_database() {
   db="$1"
+  flatten_refused=0
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
   verify_counts_gain_drift_tables=""
@@ -3249,6 +3250,9 @@ flatten_database() {
     printf 'compact: db=%s HEAD kept moving across %s preflight attempts last_want_HEAD=%s last_got_HEAD=%s — aborting before flatten\n' \
       "$db" "$preflight_max_attempts" "$head" "${current_head:-<empty>}" >&2
     rm -f "$preflight_tmp"
+    # Nothing was changed: this is a refusal, not a failure. main reports it
+    # apart so a busy database does not read as a failed one.
+    flatten_refused=1
     return 1
   fi
 
@@ -3914,13 +3918,24 @@ main() {
     exit 0
   fi
 
+  refused_count=0
+  refused_dbs=""
   while IFS= read -r db; do
     [ -n "$db" ] || continue
     if ! flatten_database "$db"; then
-      failed_count=$((failed_count + 1))
+      if [ "$flatten_refused" = "1" ]; then
+        refused_count=$((refused_count + 1))
+        refused_dbs="${refused_dbs:+$refused_dbs }$db"
+      else
+        failed_count=$((failed_count + 1))
+      fi
     fi
   done < "$_unique_db_tmp"
 
+  if [ "$refused_count" -gt 0 ]; then
+    printf 'compact: %s database(s) refused compaction (HEAD kept moving during preflight; nothing changed, the next run retries): %s\n' \
+      "$refused_count" "$refused_dbs"
+  fi
   if [ "$failed_count" -gt 0 ]; then
     printf 'compact: %s database(s) failed compaction\n' "$failed_count" >&2
     exit 1

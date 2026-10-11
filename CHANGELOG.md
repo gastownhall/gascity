@@ -218,6 +218,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc dolt compact` reports a busy database as refused, not failed.** When
+  HEAD keeps moving across all three preflight attempts, compact changes
+  nothing and moves on. That database used to count as failed, so the run
+  exited 1 and the `mol-dog-compactor` order's tracking bead read
+  `exec-failed`. The run now prints `N database(s) refused compaction` with the
+  database names and exits 0 unless another database failed. A real failure
+  still exits 1.
+
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**
   `gc-beads-bd init` now stamps bd's version witness on a store that already
