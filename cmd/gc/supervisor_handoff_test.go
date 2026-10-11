@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -122,42 +123,56 @@ func TestBareSupervisorStartJoinsARunningInstanceOnlyWhenAsked(t *testing.T) {
 	}
 }
 
-// fakeStoppingSupervisor serves the supervisor control socket: ping answers
-// pid until a stop has finished, stop answers ok and then done:ok.
-func fakeStoppingSupervisor(t *testing.T, pid int) {
+// stoppingSupervisorPID is the PID fakeStoppingSupervisor's socket reports.
+const stoppingSupervisorPID = 4242
+
+// fakeStoppingSupervisor serves the supervisor control socket: stop answers
+// ok and then done:ok, and ping answers stoppingSupervisorPID until linger
+// after the stop, as a supervisor keeps its socket for a moment after done:ok.
+func fakeStoppingSupervisor(t *testing.T, linger time.Duration) {
 	t.Helper()
 	gcHome := shortTempDir(t, "gc-home-")
 	t.Setenv("GC_HOME", gcHome)
 	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t, "gc-run-"))
-	var stopped atomic.Bool
+	var goneAt atomic.Int64 // UnixNano when the socket stops answering; 0 until a stop
 	startTestSupervisorSocket(t, filepath.Join(gcHome, "supervisor.sock"), func(cmd string) string {
 		switch cmd {
 		case "ping":
-			if stopped.Load() {
+			if gone := goneAt.Load(); gone != 0 && time.Now().UnixNano() >= gone {
 				return ""
 			}
-			return fmt.Sprintf("%d\n", pid)
+			return fmt.Sprintf("%d\n", stoppingSupervisorPID)
 		case "stop":
-			stopped.Store(true)
+			goneAt.Store(time.Now().Add(linger).UnixNano())
 			return "ok\ndone:ok\n"
 		}
 		return ""
 	})
 }
 
-// stubSupervisorProcess models the supervisor process behind the socket: it
-// is still alive (holding its single-instance lock) until exitAt.
-func stubSupervisorProcess(t *testing.T, wantPID int, exitAt func() time.Time) {
+// stubSupervisorProcess models the supervisor process behind
+// fakeStoppingSupervisor's socket: it is still alive (holding its
+// single-instance lock) until exitAt.
+func stubSupervisorProcess(t *testing.T, exitAt func() time.Time) {
 	t.Helper()
 	old := supervisorProcessWatch
 	supervisorProcessWatch = func(pid int) func() bool {
-		if pid != wantPID {
-			t.Errorf("watched PID %d, want the supervisor's %d", pid, wantPID)
+		if pid != stoppingSupervisorPID {
+			t.Errorf("watched PID %d, want the supervisor's %d", pid, stoppingSupervisorPID)
 			return nil
 		}
 		return func() bool { return time.Now().Before(exitAt()) }
 	}
 	t.Cleanup(func() { supervisorProcessWatch = old })
+}
+
+// setSupervisorStopProcessExitGrace sets the least time stop --wait gives a
+// supervisor process to exit once its socket is gone.
+func setSupervisorStopProcessExitGrace(t *testing.T, grace time.Duration) {
+	t.Helper()
+	old := supervisorStopProcessExitGrace
+	supervisorStopProcessExitGrace = grace
+	t.Cleanup(func() { supervisorStopProcessExitGrace = old })
 }
 
 // stop --wait returns only once the supervisor process has exited, not when
@@ -166,10 +181,10 @@ func stubSupervisorProcess(t *testing.T, wantPID int, exitAt func() time.Time) {
 // for up to 5s), and a `gc supervisor start` right after a returned stop
 // failed with "supervisor already running" (ga-96smfk.86).
 func TestStopSupervisorWithWaitWaitsForTheProcessToExit(t *testing.T) {
-	fakeStoppingSupervisor(t, 4242)
+	fakeStoppingSupervisor(t, 0)
 	start := time.Now()
 	exitAt := start.Add(500 * time.Millisecond)
-	stubSupervisorProcess(t, 4242, func() time.Time { return exitAt })
+	stubSupervisorProcess(t, func() time.Time { return exitAt })
 	var stdout, stderr bytes.Buffer
 	if code := stopSupervisorWithWait(&stdout, &stderr, true, 10*time.Second); code != 0 {
 		t.Fatalf("stop --wait = %d; stderr=%q", code, stderr.String())
@@ -179,16 +194,80 @@ func TestStopSupervisorWithWaitWaitsForTheProcessToExit(t *testing.T) {
 	}
 }
 
-// A supervisor process that outlives the wait budget fails stop --wait.
-func TestStopSupervisorWithWaitFailsWhenTheProcessOutlivesTheBudget(t *testing.T) {
-	fakeStoppingSupervisor(t, 4242)
-	stubSupervisorProcess(t, 4242, func() time.Time { return time.Now().Add(time.Hour) })
+// The supervisor's socket and process outlive its done:ok: it keeps the
+// socket for 0.5s, then drains HTTP streams for up to 5s before it exits. So
+// stop --wait gives the process that shutdown tail even when the socket wait
+// ran past the --wait-timeout deadline, rather than failing on a budget the
+// socket wait already spent.
+func TestStopSupervisorWithWaitGivesTheProcessItsShutdownTail(t *testing.T) {
+	fakeStoppingSupervisor(t, 300*time.Millisecond)
+	start := time.Now()
+	exitAt := start.Add(600 * time.Millisecond)
+	stubSupervisorProcess(t, func() time.Time { return exitAt })
 	var stdout, stderr bytes.Buffer
+	if code := stopSupervisorWithWait(&stdout, &stderr, true, 100*time.Millisecond); code != 0 {
+		t.Fatalf("stop --wait = %d; stderr=%q", code, stderr.String())
+	}
+	if waited := time.Since(start); waited < 600*time.Millisecond {
+		t.Fatalf("stop --wait returned after %s, before the supervisor process exited", waited)
+	}
+}
+
+// A supervisor process that outlives the wait budget fails stop --wait, and
+// only once the whole budget is spent: a --wait-timeout longer than the grace
+// is not cut short to the grace.
+func TestStopSupervisorWithWaitFailsWhenTheProcessOutlivesTheBudget(t *testing.T) {
+	fakeStoppingSupervisor(t, 0)
+	stubSupervisorProcess(t, func() time.Time { return time.Now().Add(time.Hour) })
+	setSupervisorStopProcessExitGrace(t, 100*time.Millisecond)
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
 	if code := stopSupervisorWithWait(&stdout, &stderr, true, 300*time.Millisecond); code == 0 {
 		t.Fatal("stop --wait = 0 while the supervisor process was still running")
 	}
-	if !strings.Contains(stderr.String(), "PID 4242 to exit") {
+	if waited := time.Since(start); waited < 300*time.Millisecond {
+		t.Fatalf("stop --wait gave up after %s, before its 300ms --wait-timeout", waited)
+	}
+	if !strings.Contains(stderr.String(), fmt.Sprintf("PID %d to exit", stoppingSupervisorPID)) {
 		t.Fatalf("stderr = %q, want the PID it waited for", stderr.String())
+	}
+}
+
+// The grace also applies when the socket closes before the deadline, with less
+// of it left than the grace: the process gets the grace, not just what is left
+// of the --wait-timeout.
+func TestStopSupervisorWithWaitGivesTheGraceBeforeTheDeadlineLapses(t *testing.T) {
+	fakeStoppingSupervisor(t, 0)
+	start := time.Now()
+	exitAt := start.Add(600 * time.Millisecond)
+	stubSupervisorProcess(t, func() time.Time { return exitAt })
+	setSupervisorStopProcessExitGrace(t, 2*time.Second)
+	var stdout, stderr bytes.Buffer
+	if code := stopSupervisorWithWait(&stdout, &stderr, true, 300*time.Millisecond); code != 0 {
+		t.Fatalf("stop --wait = %d; stderr=%q", code, stderr.String())
+	}
+	if waited := time.Since(start); waited < 600*time.Millisecond {
+		t.Fatalf("stop --wait returned after %s, before the supervisor process exited", waited)
+	}
+}
+
+// A supervisor process that outlives its grace after a late socket close
+// fails stop --wait, which reports how long it waited for the process, not
+// what was left of a deadline the socket wait had already spent.
+func TestStopSupervisorWithWaitReportsHowLongItWaitedForTheProcess(t *testing.T) {
+	fakeStoppingSupervisor(t, 300*time.Millisecond)
+	stubSupervisorProcess(t, func() time.Time { return time.Now().Add(time.Hour) })
+	setSupervisorStopProcessExitGrace(t, 200*time.Millisecond)
+	var stdout, stderr bytes.Buffer
+	if code := stopSupervisorWithWait(&stdout, &stderr, true, 100*time.Millisecond); code == 0 {
+		t.Fatal("stop --wait = 0 while the supervisor process was still running")
+	}
+	m := regexp.MustCompile(fmt.Sprintf(`timed out after (\S+) waiting for supervisor PID %d to exit`, stoppingSupervisorPID)).FindStringSubmatch(stderr.String())
+	if m == nil {
+		t.Fatalf("stderr = %q, want the PID it waited for", stderr.String())
+	}
+	if waited, err := time.ParseDuration(m[1]); err != nil || waited < 200*time.Millisecond {
+		t.Fatalf("stop --wait reported waiting %s for the process (%v), want at least its 200ms grace", m[1], err)
 	}
 }
 

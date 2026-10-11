@@ -100,16 +100,23 @@ func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
 
 By default, returns as soon as the supervisor acknowledges the stop
 request — shutdown continues asynchronously. Pass --wait to block
-until the supervisor socket is no longer answering, which is what
-most callers that need deterministic cleanup want (e.g., integration
-tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).
+until the supervisor process has exited and released its
+single-instance lock, which is what most callers that need
+deterministic cleanup want (e.g., integration tests that then expect
+to remove temp directories without racing against lingering
+supervisor / controller subprocesses, or a 'gc supervisor start'
+right after the stop). --wait waits for the control socket to stop
+answering and then for the process to exit, within --wait-timeout,
+except that the process always gets at least 10s after its socket
+closes to finish shutting down. A supervisor process this host
+cannot see (one in another PID namespace) is waited for only until
+its socket stops answering.
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
 verifies on macOS that the launchd job is really gone before
-returning, sharing the same --wait-timeout deadline as the socket
-wait, and fails when it cannot confirm that. An operator stop also
+returning, sharing the same --wait-timeout deadline, and fails when
+it cannot confirm that. An operator stop also
 disables the launchd job, so it will not come back at the next login
 until 'gc supervisor install' — or 'gc start', which routes through
 install — re-enables it.
@@ -128,8 +135,8 @@ not manage it), and stop with nothing running still exits 1.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait)")
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and for its process to exit before returning")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set, except that the supervisor process gets at least 10s to exit after its socket closes (in delegated mode, bounds the synchronous systemctl stop regardless of --wait)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
@@ -909,23 +916,7 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 				return 1
 			}
-			if err := waitForSupervisorProcessExitUntil(pid, processAlive, deadline); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
-				return 1
-			}
-			if serviceErr != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
-				return 1
-			}
-			if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
-				return 1
-			}
-			if jsonOut {
-				return writeSupervisorStopSuccess(stdout, stderr, wait)
-			}
-			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
-			return 0
+			return finishSupervisorStopWait(stdout, stderr, pid, processAlive, deadline, serviceErr, jsonOut)
 		case strings.HasPrefix(line, "done:err:"):
 			fmt.Fprintf(stderr, "gc supervisor stop: %s\n", strings.TrimPrefix(line, "done:err:")) //nolint:errcheck
 			return 1
@@ -951,7 +942,29 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if err := waitForSupervisorProcessExitUntil(pid, processAlive, deadline); err != nil {
+	return finishSupervisorStopWait(stdout, stderr, pid, processAlive, deadline, serviceErr, jsonOut)
+}
+
+// supervisorStopProcessExitGrace is the least time stop --wait gives the
+// supervisor process to exit once its control socket is gone, however little
+// of the --wait-timeout deadline is left. The process outlives its socket:
+// after done:ok it keeps the socket for 0.5s, then drains HTTP streams for up
+// to 5s and stops pprof for up to 2s before it exits and frees its
+// single-instance lock. The stop command's help text, and
+// docs/reference/cli.md generated from it, state this grace as 10s. A
+// variable so tests can shorten it.
+var supervisorStopProcessExitGrace = 10 * time.Second
+
+// finishSupervisorStopWait completes stop --wait once the supervisor's control
+// socket is gone: it waits for the supervisor process to exit, confirms the
+// platform service stopped, and reports the stop. stopSupervisorViaSocketJSON
+// calls it only when wait is set, so its JSON result always has "wait": true.
+func finishSupervisorStopWait(stdout, stderr io.Writer, pid int, processAlive func() bool, deadline time.Time, serviceErr error, jsonOut bool) int {
+	processDeadline := deadline
+	if graceEnd := time.Now().Add(supervisorStopProcessExitGrace); graceEnd.After(processDeadline) {
+		processDeadline = graceEnd
+	}
+	if err := waitForSupervisorProcessExitUntil(pid, processAlive, processDeadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -959,12 +972,15 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
 		return 1
 	}
+	// The launchd check keeps the --wait-timeout deadline, as the stop help
+	// says; once the grace has run past it, the check gets one probe
+	// (ga-zfb3bd).
 	if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if jsonOut {
-		return writeSupervisorStopSuccess(stdout, stderr, wait)
+		return writeSupervisorStopSuccess(stdout, stderr, true)
 	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 	return 0
@@ -1002,10 +1018,10 @@ func waitForSupervisorProcessExitUntil(pid int, alive func() bool, deadline time
 	if alive == nil {
 		return nil
 	}
-	budget := time.Until(deadline)
+	start := time.Now()
 	for alive() {
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("timed out after %s waiting for supervisor PID %d to exit", budget.Round(time.Millisecond), pid)
+			return fmt.Errorf("timed out after %s waiting for supervisor PID %d to exit", time.Since(start).Round(time.Millisecond), pid)
 		}
 		sleep := 50 * time.Millisecond
 		if remaining := time.Until(deadline); remaining < sleep {

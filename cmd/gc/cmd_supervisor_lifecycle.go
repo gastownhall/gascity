@@ -583,6 +583,9 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// The real probe, not supervisorAliveHook: tests stub the hook to model
+	// the supervisor this start forks, and this check must still see one
+	// that is really running.
 	if pid := supervisorAlive(); pid != 0 {
 		return alreadyRunning(pid)
 	}
