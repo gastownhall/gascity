@@ -190,6 +190,10 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5.7 A10, A2; BEHAVIORS MAINT-051, SESS-009", "on an unwanted workless pool row whose hold has expired, legacy's MAINT-051 sweep closes the row first and leaves the expired held_until and sleep_reason on it; v2's timer heal (A2) clears them in an earlier pass, then A21 closes the row. §12.2 does not list the order",
 		[]string{"held_until", "sleep_reason"},
 	},
+	"dead-corpse-close": {
+		"C5c2 (MAINT-031; CONTRACT v5 A21, C3)", "legacy closes an unwanted row that claims a live runtime once its runtime is a corpse (here MAINT-051's sweep reaches it first); A21 never closes a row that claims a live runtime, and C5c2's dead-runtime close is not built",
+		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+	},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
@@ -1118,6 +1122,7 @@ func parityFixtures() []parityFixture {
 			Explain: map[string]string{
 				"row:gc-1:*close": "§12.2#42 orphan-claim-release-unconfigured", "row:gc-1:state": "§12.2#42 orphan-claim-release-unconfigured", "work:gw-1:assignee": "§12.2#42 orphan-claim-release-unconfigured", "work:gw-1:status": "§12.2#42 orphan-claim-release-unconfigured",
 				"event:bead.dead_assignee_reopened gw-1 [bead_id dead_assignee routed_to]": "§12.2#42 orphan-claim-release-unconfigured", "row:gc-2": "§12.2#42 orphan-claim-release-unconfigured",
+				"provider:Start worker-gc-2": "§12.2#42 orphan-claim-release-unconfigured", "event:session.woke worker-1 []": "§12.2#42 orphan-claim-release-unconfigured",
 			},
 		},
 		{
@@ -1154,7 +1159,19 @@ func parityFixtures() []parityFixture {
 			Name: "a dead phantom of a configured name closes and keeps the identity's work", Behaviors: []string{"SESS-080"}, City: chat(false),
 			Rows:    []parityRow{sessionRow("gc-p", "template", "keeper", "session_name", "chat", "configured_named_session", "true", "state", "asleep", "generation", "1")},
 			Work:    []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "open", Assignee: "chat", Metadata: map[string]string{}}},
-			Explain: started("gc-1", "chat", "chat", map[string]string{"row:gc-p:*reason": "§12.2#17 orphan-close-reason", "row:gc-1:" + session.CurrentBeadIDKey: "A18 start"}),
+			Explain: started("gc-1", "chat", "chat", map[string]string{"row:gc-p:*reason": "§12.2#17 orphan-close-reason"}),
+		},
+		{
+			Name: "an idle killed pool seat closes", Behaviors: []string{"SESS-623"},
+			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "killed", "slept_at", at(-time.Hour))},
+			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
+		},
+		{
+			// MAINT-031 is C5c2's: A21 never closes a row that claims a live
+			// runtime (C3), so the corpse stays and the row with it.
+			Name: "a corpse on an unwanted row that claims a live runtime", Behaviors: []string{"MAINT-031"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}},
+			Explain: map[string]string{"row:gc-1:*close": "dead-corpse-close"},
 		},
 		{
 			Name: "a corpse on an unwanted row is removed, and the row closes", Behaviors: []string{"GUAR-022", "INC-025"},
