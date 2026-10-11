@@ -142,10 +142,52 @@ func MetaValue(v string, err error) (string, error) {
 // still return raw strings). Callers that treat a missing session as
 // benign (e.g. bulk Stop) use this helper so the semantics live in one
 // place.
+//
+// A joined error is gone only when every leaf is: a composite's Stop joins a
+// failed backend's error with another backend's "not found", and errors.Is
+// (or a substring of the joined message) would read that failed kill as gone.
+// A wrap over a join is judged by the join, not by the wrap's text. An error
+// tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
-	if err == nil {
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
+	case nil:
 		return false
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return isSessionGoneLeaf(err)
+		}
+		for _, child := range children {
+			if !IsSessionGone(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		if wrapsJoin(wrapped.Unwrap()) {
+			return IsSessionGone(wrapped.Unwrap())
+		}
 	}
+	return isSessionGoneLeaf(err)
+}
+
+// wrapsJoin reports whether err's single-wrap chain reaches a non-empty join.
+func wrapsJoin(err error) bool {
+	for err != nil {
+		switch wrapped := err.(type) { //nolint:errorlint // walks the wrap chain by hand to find a join
+		case interface{ Unwrap() []error }:
+			return len(wrapped.Unwrap()) > 0
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isSessionGoneLeaf is IsSessionGone's rule for an error tree with no join.
+func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
 	}
