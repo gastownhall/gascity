@@ -281,16 +281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **An attached interactive session is no longer idle-slept under
-  `[session_sleep]`.** The sleep-policy suppression measured the idle window
-  from the pane's last activity and overrode the attached wake, so a session
-  someone was reading in a terminal was drained "idle" once its pane had been
-  quiet for `sleep_after_idle`. This affected local tmux sessions as well as
-  runtimes that report attachment. An attached session now stays awake, its
-  idle window starts at detach, and an attach overrides an idle drain the
-  reconciler had already begun. A user hold or another explicit sleep request
-  still wins over the attachment. Both the legacy reconciler and the v2
-  allocator apply the rule (follow-up to #7533).
+- **An attached session is no longer idle-slept.** Under a `[session_sleep]`
+  policy or an agent's `sleep_after_idle`, interactive sessions on local tmux
+  and on exec runtimes that declare `report-activity`, `report-attachment` and
+  `proc.exec` were drained "idle" once their pane had been quiet for the
+  window, while someone was reading them in a terminal. On any runtime that
+  reports attachment (tmux, k8s, ssh, exec with `report-attachment`), so were
+  non-interactive sessions someone had attached to. An attached session now
+  stays awake, its idle window starts at detach, and an attach overrides an
+  idle drain the reconciler had already begun. A user hold or another explicit
+  sleep request still wins over the attachment. Both the legacy reconciler and
+  the v2 allocator apply the rule (follow-up to #7533).
 
 - **Text sent to a Claude session no longer answers its permission prompt,
   and approvals are detected and answered on current Claude Code.** On
