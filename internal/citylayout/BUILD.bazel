@@ -20,6 +20,10 @@ go_test(
         "runtime_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":citylayout"],
     deps = ["//internal/testenv"],
 )
