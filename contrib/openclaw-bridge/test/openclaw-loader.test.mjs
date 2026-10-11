@@ -5,8 +5,9 @@
 // hash-named dist chunks for createIMessageRpcClient and is the most fragile
 // seam across openclaw releases. This test loads both connector surfaces after
 // `npm ci` and asserts every function the bridges call resolves, then drives the
-// resolved RPC client against the fake imsg CLI to pin the lifecycle contract
-// bridge.mjs relies on (start, request, stop, waitForClose settles).
+// resolved RPC client to pin the close contract bridge.mjs relies on
+// (watchDaemonClose): its own stop() during shutdown is not an unexpected close,
+// and an imsg daemon that dies under it is, with the close reason.
 //
 // Run: npm test  (or: node --test test/)
 
@@ -16,7 +17,12 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadIMessageConnector, loadTelegramConnector, resolveChunkExport } from '../lib/openclaw.mjs'
+import {
+  loadIMessageConnector,
+  loadTelegramConnector,
+  resolveChunkExport,
+  watchDaemonClose,
+} from '../lib/openclaw.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 
@@ -60,10 +66,36 @@ test('loadIMessageConnector resolves every function the iMessage bridge calls', 
   ])
 })
 
-test('the resolved iMessage RPC client round-trips against fake imsg and settles waitForClose on stop', async (t) => {
+test('watchDaemonClose: either waitForClose outcome means "daemon gone", unexpected only outside shutdown', async () => {
+  const closeErr = new Error('imsg rpc closed')
+  const rejects = { waitForClose: () => Promise.reject(closeErr) } // openclaw >= 2026.8
+  const resolves = { waitForClose: () => Promise.resolve() } // older openclaw
+  for (const [client, shuttingDown, want] of [
+    [rejects, false, [closeErr]],
+    [resolves, false, [undefined]],
+    [rejects, true, []],
+    [resolves, true, []],
+  ]) {
+    const got = []
+    // Awaiting proves the watch itself never rejects: bridge.mjs does not
+    // handle its result, so a rejection there would crash the bridge.
+    await watchDaemonClose(client, {
+      isShuttingDown: () => shuttingDown,
+      onUnexpectedClose: (err) => got.push(err),
+    })
+    const outcome = client === rejects ? 'rejecting' : 'resolving'
+    assert.deepEqual(got, want, `${outcome} waitForClose with shuttingDown=${shuttingDown}`)
+  }
+})
+
+test('the resolved RPC client round-trips against fake imsg, and its stop() in shutdown is not an unexpected close', async (t) => {
   const fakeDir = await mkdtemp(path.join(os.tmpdir(), 'fake-imsg-'))
   const saved = { PATH: process.env.PATH, FAKE_IMSG_DIR: process.env.FAKE_IMSG_DIR }
+  let client
   t.after(async () => {
+    // Stop first: a failed assertion must not leave the fake daemon holding
+    // the test process open until the runner times out.
+    await client?.stop()
     process.env.PATH = saved.PATH
     if (saved.FAKE_IMSG_DIR === undefined) delete process.env.FAKE_IMSG_DIR
     else process.env.FAKE_IMSG_DIR = saved.FAKE_IMSG_DIR
@@ -75,7 +107,7 @@ test('the resolved iMessage RPC client round-trips against fake imsg and settles
   process.env.FAKE_IMSG_DIR = fakeDir
 
   const oc = await loadIMessageConnector()
-  const client = await oc.createIMessageRpcClient({
+  client = await oc.createIMessageRpcClient({
     cliPath: path.join(root, 'fake-imsg', 'imsg'),
     onNotification: () => {},
   })
@@ -83,14 +115,32 @@ test('the resolved iMessage RPC client round-trips against fake imsg and settles
   const subscribed = await client.request('watch.subscribe', { attachments: false }, { timeoutMs: 10000 })
   assert.ok(subscribed && typeof subscribed === 'object', 'watch.subscribe returns a result object')
 
-  // bridge.mjs treats waitForClose() settling (resolve OR reject — openclaw
-  // 2026.8.x rejects with the terminal close error) as "daemon gone".
-  const closed = client.waitForClose().then(
-    () => 'resolved',
-    () => 'rejected',
-  )
+  // The bridge.mjs sequence: watch from startup, flag shutdown, stop the client.
+  let shuttingDown = false
+  const unexpected = []
+  const watched = watchDaemonClose(client, {
+    isShuttingDown: () => shuttingDown,
+    onUnexpectedClose: (err) => unexpected.push(err),
+  })
+  shuttingDown = true
   await client.stop()
-  assert.match(await closed, /^(resolved|rejected)$/)
+  await watched
+  assert.deepEqual(unexpected, [])
+})
+
+test('watchDaemonClose reports an imsg rpc daemon that dies under the running bridge, with the close reason', async (t) => {
+  const oc = await loadIMessageConnector()
+  // `false` stands in for an imsg daemon that exits on its own (status 1).
+  const client = await oc.createIMessageRpcClient({ cliPath: 'false', onNotification: () => {} })
+  t.after(() => client.stop())
+  const unexpected = []
+  await watchDaemonClose(client, {
+    isShuttingDown: () => false,
+    onUnexpectedClose: (err) => unexpected.push(err),
+  })
+  assert.equal(unexpected.length, 1, 'the daemon exit is reported exactly once')
+  assert.ok(unexpected[0] instanceof Error, 'waitForClose() passes the close reason through')
+  assert.match(unexpected[0].message, /code 1/)
 })
 
 test('loadTelegramConnector resolves every function the Telegram bridge calls', async () => {

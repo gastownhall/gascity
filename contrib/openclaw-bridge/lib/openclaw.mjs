@@ -15,6 +15,9 @@
 // startup, so this keeps working across openclaw releases as long as the
 // symbol itself survives.
 // (Upstream ask: export createIMessageRpcClient from the plugin API.)
+//
+// watchDaemonClose() adapts that client's close contract, which changed in
+// 2026.8 (waitForClose() now rejects), to the one callback bridge.mjs needs.
 
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -91,4 +94,20 @@ export async function resolveChunkExport(dir, name, hint) {
     }
   }
   throw new Error(`openclaw: could not resolve export ${name} from ${dir}`)
+}
+
+// Calls onUnexpectedClose(err) when the iMessage RPC client's imsg daemon goes
+// away while isShuttingDown() is false. openclaw >= 2026.8 rejects
+// waitForClose() with the terminal close error, including after the bridge's
+// own stop(); older releases resolved it. Both outcomes therefore mean "daemon
+// gone", and neither may escape as an unhandled rejection, which would crash a
+// clean shutdown (exit 1) before it unregisters from gc. err is the close
+// reason, or undefined when waitForClose() resolved. isShuttingDown is read when
+// the daemon closes, not when the watch starts. The returned promise resolves
+// once the close is handled.
+export function watchDaemonClose(client, { isShuttingDown, onUnexpectedClose }) {
+  const closed = (err) => {
+    if (!isShuttingDown()) onUnexpectedClose(err)
+  }
+  return client.waitForClose().then(() => closed(undefined), closed)
 }
