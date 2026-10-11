@@ -404,6 +404,8 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 		t.Fatalf("List calls after priming = %d, want 1", store.listCalls)
 	}
 
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
 	// A blocking request (index=0 returns immediately since the sequence is
 	// already ahead) must bypass the time cache and rebuild.
 	blockReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/status?index=0&wait=1s"), nil)
@@ -678,6 +680,8 @@ func TestHandleBeadListAllBlockingBypassesTimeCache(t *testing.T) {
 	if store.listCalls != 1 {
 		t.Fatalf("List calls after priming = %d, want 1", store.listCalls)
 	}
+
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 
 	blockReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/beads?all=true&index=0&wait=1s"), nil)
 	rec = httptest.NewRecorder()
