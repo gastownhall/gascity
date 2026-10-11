@@ -41,6 +41,16 @@ func legacyWakeFailure(t *testing.T, row beads.Bead) map[string]string {
 	return b.Metadata
 }
 
+// hasAny reports whether patch writes any of keys.
+func hasAny(patch session.MetadataPatch, keys ...string) bool {
+	for _, k := range keys {
+		if _, ok := patch[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Kills a class that writes the wrong patch, an abandon that does not fail,
 // a wake failure that drifts from legacy's recordWakeFailure, a restore over
 // an operator's newer write, a relaunch that loses its marker (#7570), an
@@ -78,12 +88,12 @@ func TestAbandonStepClasses(t *testing.T) {
 		t.Fatalf("a relaunch: %+v, want its marker kept and the wake failure accrued", step.Write)
 	}
 	killed := poolRow("gc-1", "worker", 1, "asleep", "generation", "4", "instance_token", "tok-4", "sleep_reason", "killed")
-	if step := abandonStep(abandonView(k, killed, txRuntime{Class: rtAbsent}, other)); step.Write["wake_attempts"] != "" || step.Write["session_key"] != "" {
+	if step := abandonStep(abandonView(k, killed, txRuntime{Class: rtAbsent}, other)); hasAny(step.Write, "wake_attempts", "session_key") {
 		t.Fatalf("a row killed mid-start: %+v, want no accrual", step.Write)
 	}
 	kept := other
 	kept.keeps = true
-	if step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, kept)); step.Write["session_key"] != "" || step.Write["started_config_hash"] != "" || step.Write["wake_attempts"] != "3" {
+	if step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, kept)); hasAny(step.Write, "session_key", "started_config_hash") || step.Write["wake_attempts"] != "3" {
 		t.Fatalf("a transcript on disk: %+v, want the conversation kept and the attempt accrued", step.Write)
 	}
 
