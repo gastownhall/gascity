@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,7 +138,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 	// seconds, so two writes in one second tie, and an operator's write in
 	// that second ties with them.
 	if conflictsCached && eventType != "bead.closed" && eventType != "bead.deleted" &&
-		recentlyLocal && locallyMutated && !verifiedConflict && c.ownEmission(patch, fields, now) {
+		recentlyLocal && locallyMutated && !verifiedConflict && c.ownEmission(patch, now) {
 		return
 	}
 	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || staleRisk) && !verifiedConflict {
@@ -899,17 +900,37 @@ func cacheEventPatchMatchesBead(current, patch Bead, fields map[string]json.RawM
 // ownEmitsPerRow bounds the emissions ownEmits keeps per row.
 const ownEmitsPerRow = 8
 
-// ownEmit is a row snapshot this cache emitted through onChange, and when.
+// ownEmit is the digest of a snapshot this cache emitted through onChange,
+// and when.
 type ownEmit struct {
-	at  time.Time
-	row Bead
+	at     time.Time
+	digest [sha256.Size]byte
 }
 
-// recordOwnEmission remembers b, which this cache is about to emit, for the
-// recency window, so its echo can be told from another writer's event
-// (ownEmission). It keeps the newest ownEmitsPerRow per row and sweeps
+// eventDigest hashes an event's decoded form re-encoded, so it covers every
+// field the payload carries or omits, an emptied one included, and no byte
+// difference the event picks up in transit counts.
+func eventDigest(patch Bead) ([sha256.Size]byte, bool) {
+	canonical, err := EncodeBeadEventPayload(patch)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	return sha256.Sum256(canonical), true
+}
+
+// recordOwnEmission remembers payload, which this cache is about to emit,
+// for the recency window, so its echo can be told from another writer's
+// event (ownEmission). It keeps the newest ownEmitsPerRow per row and sweeps
 // expired rows at most once a window.
-func (c *CachingStore) recordOwnEmission(b Bead) {
+func (c *CachingStore) recordOwnEmission(payload json.RawMessage) {
+	patch, _, err := decodeCacheEvent(payload)
+	if err != nil {
+		return
+	}
+	digest, ok := eventDigest(patch)
+	if !ok {
+		return
+	}
 	now := c.clockNow()
 	c.ownEmitMu.Lock()
 	defer c.ownEmitMu.Unlock()
@@ -924,27 +945,27 @@ func (c *CachingStore) recordOwnEmission(b Bead) {
 		}
 		c.ownEmitsSweptAt = now
 	}
-	emits := c.ownEmits[b.ID]
+	emits := c.ownEmits[patch.ID]
 	for len(emits) > 0 && (len(emits) >= ownEmitsPerRow || !recentLocalMutation(emits[0].at, now)) {
 		emits = emits[1:]
 	}
-	c.ownEmits[b.ID] = append(slices.Clip(emits), ownEmit{at: now, row: cloneBead(b)})
+	c.ownEmits[patch.ID] = append(slices.Clip(emits), ownEmit{at: now, digest: digest})
 }
 
-// ownEmission reports whether an event is, field for field, a complete
+// ownEmission reports whether an event is exactly, updated_at included, a
 // snapshot this cache emitted for the row within the recency window: its own
-// echo, which carries nothing the cache did not already hold. A partial patch
-// never is. updated_at must match too, so only another writer leaving the row
-// equal to an emitted snapshot to the stamp is mistaken for one.
-func (c *CachingStore) ownEmission(patch Bead, fields map[string]json.RawMessage, now time.Time) bool {
-	if !cacheEventLooksComplete(fields) || !hasCacheEventField(fields, "updated_at") {
+// echo, which carries nothing the cache did not already hold. Only another
+// writer leaving the row identical to an emitted snapshot, stamp included, is
+// mistaken for one.
+func (c *CachingStore) ownEmission(patch Bead, now time.Time) bool {
+	digest, ok := eventDigest(patch)
+	if !ok {
 		return false
 	}
 	c.ownEmitMu.Lock()
 	defer c.ownEmitMu.Unlock()
 	for _, e := range c.ownEmits[patch.ID] {
-		if recentLocalMutation(e.at, now) && e.row.UpdatedAt.Equal(patch.UpdatedAt) &&
-			cacheEventPatchMatchesBead(e.row, patch, fields) {
+		if recentLocalMutation(e.at, now) && e.digest == digest {
 			return true
 		}
 	}
@@ -1087,7 +1108,7 @@ func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead)
 		return
 	}
 	// Recorded before onChange, so the echo cannot arrive first.
-	c.recordOwnEmission(b)
+	c.recordOwnEmission(payload)
 	// Resolve the opaque run/session correlation ids from the bead's metadata at
 	// the record site and pass ONLY those two ids to onChange — never the
 	// free-form metadata map. The run-chain (workflow_id || molecule_id ||

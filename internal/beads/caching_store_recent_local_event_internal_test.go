@@ -3,6 +3,8 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -212,6 +214,8 @@ type ownEchoFixture struct {
 	id      string
 	echoes  []json.RawMessage // in emission order
 	clock   atomic.Int64      // the cache's clock, in UnixNano
+	// unrecorded counts emissions onChange saw before they were recorded.
+	unrecorded atomic.Int64
 }
 
 func newOwnEchoFixture(t *testing.T) *ownEchoFixture {
@@ -232,6 +236,10 @@ func newOwnEchoFixture(t *testing.T) *ownEchoFixture {
 			mu.Lock()
 			defer mu.Unlock()
 			f.echoes = append(f.echoes, payload)
+		}
+		if patch, _, err := decodeCacheEvent(payload); err != nil ||
+			!f.cache.ownEmission(patch, time.Unix(0, f.clock.Load())) {
+			f.unrecorded.Add(1)
 		}
 	}, WithClock(func() time.Time { return time.Unix(0, f.clock.Load()) }))
 	if err := f.cache.Prime(context.Background()); err != nil {
@@ -254,6 +262,9 @@ func (f *ownEchoFixture) writeTwice(t *testing.T, gap time.Duration) {
 	}
 	if len(f.echoes) != 2 {
 		t.Fatalf("emitted %d snapshots of the row, want 2", len(f.echoes))
+	}
+	if n := f.unrecorded.Load(); n != 0 {
+		t.Fatalf("%d emissions reached onChange before they were recorded", n)
 	}
 }
 
@@ -296,6 +307,37 @@ func TestCachingStoreOwnEchoInsideWindowReadsNothing(t *testing.T) {
 		}
 		if _, ok := f.cache.CachedList(ListQuery{Status: "open"}); !ok {
 			t.Fatal("the census declined after the cache's own echoes")
+		}
+	})
+	// The operator's write empties a field (its key then drops out of the
+	// payload) and reverts state, leaving the row equal to the first emission
+	// but for the assignee. A match over the payload's fields alone took it
+	// for the echo. (Merging a snapshot that omits a key keeps the cached
+	// value, inside the window or past it, so only state is asserted.)
+	t.Run("operator empties a field in the same second", func(t *testing.T) {
+		t.Parallel()
+		f := newOwnEchoFixture(t)
+		worker := "w1"
+		if err := f.cache.Update(f.id, UpdateOpts{Assignee: &worker, Metadata: map[string]string{"state": "creating"}}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		if err := f.cache.SetMetadata(f.id, "state", "awake"); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+		none := ""
+		if err := f.backing.Update(f.id, UpdateOpts{Assignee: &none, Metadata: map[string]string{"state": "creating"}}); err != nil {
+			t.Fatalf("Update around the cache: %v", err)
+		}
+		external, err := f.backing.Get(f.id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		reads := f.backing.getCalls
+		f.cache.ApplyEventSnapshot("bead.updated", eventPayload(t, external))
+		got, _, _ := rowFences(f.cache, f.id)
+		if f.backing.getCalls == reads || got.Metadata["state"] != "creating" {
+			t.Fatalf("after the operator's write: %d reads, cached state %q; want checked, creating",
+				f.backing.getCalls-reads, got.Metadata["state"])
 		}
 	})
 	t.Run("operator write in the same second", func(t *testing.T) {
@@ -382,4 +424,78 @@ func TestCachingStoreOwnEchoInsideWindowReadsNothing(t *testing.T) {
 				f.backing.getCalls-reads, got.Metadata["state"])
 		}
 	})
+}
+
+// An emission matches only an event identical to it: every single-field
+// difference, an emptied field whose key drops out of the payload included, is
+// another writer's. Kills: a match over the event's own fields (it misses
+// emptied fields and the ones it never compares), and one that ignores the
+// stamp.
+func TestCachingStoreOwnEmissionMatchesOnlyTheExactSnapshot(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	priority := 1
+	base := Bead{
+		ID: "gc-1", Title: "t", Status: "open", Type: "task", Priority: &priority,
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Truncate(time.Second),
+		Assignee: "w1", From: "f", ParentID: "gc-9", Ref: "r", Description: "d",
+		Labels: []string{"L"}, Metadata: StringMap{"k": "v"},
+		Dependencies: []Dep{{IssueID: "gc-1", DependsOnID: "gc-2", Type: "blocks"}},
+	}
+	cache := NewCachingStoreForTest(NewMemStore(), nil, WithClock(func() time.Time { return now }))
+	cache.recordOwnEmission(eventPayload(t, base))
+	for _, tc := range []struct {
+		name string
+		edit func(*Bead)
+		own  bool
+	}{
+		{"identical", func(*Bead) {}, true},
+		{"status", func(b *Bead) { b.Status = "in_progress" }, false},
+		{"metadata value", func(b *Bead) { b.Metadata = StringMap{"k": "w"} }, false},
+		{"metadata emptied", func(b *Bead) { b.Metadata = nil }, false},
+		{"labels emptied", func(b *Bead) { b.Labels = nil }, false},
+		{"deps emptied", func(b *Bead) { b.Dependencies = nil }, false},
+		{"assignee emptied", func(b *Bead) { b.Assignee = "" }, false},
+		{"description emptied", func(b *Bead) { b.Description = "" }, false},
+		{"priority emptied", func(b *Bead) { b.Priority = nil }, false},
+		{"parent emptied", func(b *Bead) { b.ParentID = "" }, false},
+		{"from", func(b *Bead) { b.From = "g" }, false},
+		{"ref", func(b *Bead) { b.Ref = "s" }, false},
+		{"created_at", func(b *Bead) { b.CreatedAt = now }, false},
+		{"updated_at", func(b *Bead) { b.UpdatedAt = b.UpdatedAt.Add(time.Second) }, false},
+	} {
+		b := cloneBead(base)
+		tc.edit(&b)
+		patch, _, err := decodeCacheEvent(eventPayload(t, b))
+		if err != nil {
+			t.Fatalf("%s: decode: %v", tc.name, err)
+		}
+		if got := cache.ownEmission(patch, now); got != tc.own {
+			t.Errorf("%s: ownEmission = %v, want %v", tc.name, got, tc.own)
+		}
+	}
+}
+
+// The emission record forgets rows whose last emission left the window, at
+// most once a window, and keeps rows still inside it. Kills: no sweep (the
+// record grows with every row ever written), and a sweep that drops live rows.
+func TestCachingStoreOwnEmissionSweepKeepsOnlyTheWindow(t *testing.T) {
+	t.Parallel()
+	var clock atomic.Int64
+	start := time.Now()
+	clock.Store(start.UnixNano())
+	cache := NewCachingStoreForTest(NewMemStore(), nil, WithClock(func() time.Time { return time.Unix(0, clock.Load()) }))
+	emit := func(id string, at time.Duration) {
+		clock.Store(start.Add(at).UnixNano())
+		cache.recordOwnEmission(eventPayload(t, Bead{ID: id, Title: id, Status: "open", Type: "task", CreatedAt: start}))
+	}
+	emit("gc-a", 0)
+	emit("gc-b", 4*time.Second)
+	emit("gc-c", 6*time.Second) // the first sweep since 0: gc-a is 6s old
+	cache.ownEmitMu.Lock()
+	defer cache.ownEmitMu.Unlock()
+	got := slices.Sorted(maps.Keys(cache.ownEmits))
+	if want := []string{"gc-b", "gc-c"}; !slices.Equal(got, want) {
+		t.Fatalf("recorded rows %v, want %v", got, want)
+	}
 }

@@ -284,12 +284,14 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     that lags the event looks the same. The mark refuses the census for
 //     the whole store until a backing read of the row clears it, so a row
 //     RefreshRow installed is not thereby visible in the next census.
-//   - Within five seconds of a local write to a row, an event that is,
-//     field for field and to the updated_at stamp, a complete snapshot this
-//     cache emitted for the row in that window is taken for its own echo and
-//     dropped unchecked (mc-xlphf). Another writer that leaves the row exactly
-//     so, stamp included (on a backing that stamps whole seconds, within the
-//     same second), is dropped with it until a read or scan settles the row.
+//   - Within five seconds of a local write to a row, an event identical,
+//     updated_at included, to a snapshot this cache emitted for the row in
+//     that window is taken for its own echo and dropped unchecked
+//     (mc-xlphf). Another writer that leaves the row exactly so, stamp
+//     included (on a backing that stamps whole seconds, a revert within the
+//     same second), is dropped with it: Get, List and a live list inside the
+//     window serve the older row until the first live read, RefreshRow or
+//     reconcile after the window.
 //   - A verified bead.closed snapshot older than the backing row takes the
 //     backing row, but the order is read from updated_at. A backing whose
 //     updated_at is coarser than a close/reopen cycle can tie a delayed
