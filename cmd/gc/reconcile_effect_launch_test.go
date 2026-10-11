@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -1160,5 +1161,94 @@ func TestLandedWithCauseBacksOff(t *testing.T) {
 	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledLanded, Cause: causeEndpointGate, At: now})
 	if r := p.backoff.Record(rowBackoffKey(k)); r.Consecutive != 0 {
 		t.Fatalf("landed with endpoint-gate: record %+v, want none (the gate paces)", r)
+	}
+}
+
+// TestLaunchStartOutlivesTheShutdownCancel (staging J35 A/B, §12.2 #4,
+// START-024). Kills a start the shutdown cancels mid-launch: tmux's failed
+// start kills the runtime it launched (cleanupFailedStart), so the next boot
+// relaunched it under a new token instead of adopting it. The executor's
+// shutdown cancel never reaches the provider's Start; a lost lease still
+// ends it, with its cause.
+func TestLaunchStartOutlivesTheShutdownCancel(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		cause error
+		ends  bool
+	}{
+		{"shutdown", errEffectShutdown, false},
+		{"lease lost", session.ErrRuntimeLeaseLost, true},
+		{"provider swap", errSwapCanceled, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				k, leaf := launchKit(t, "asleep")
+				ctx, cancel := context.WithCancelCause(context.Background())
+				leaf.onStart = func(startCtx context.Context) {
+					cancel(c.cause)
+					synctest.Wait() // the cancel's relay, if any, has run
+					switch err := startCtx.Err(); {
+					case err != nil && !c.ends:
+						t.Errorf("the Start's context ended with %v at the shutdown cancel; the runtime it launched would be killed", context.Cause(startCtx))
+					case err == nil && c.ends:
+						t.Errorf("the Start's context outlived %v", c.cause)
+					case c.ends && !errors.Is(context.Cause(startCtx), c.cause):
+						t.Errorf("the Start's context ended with %v, want %v", context.Cause(startCtx), c.cause)
+					}
+				}
+				k.run(ctx, effectSpecs[intentStart])
+			})
+		})
+	}
+}
+
+// TestOutlivesShutdownKeepsValuesAndOtherCauses. Kills a detached context
+// that drops the effect's values (its lease) or a cause other than the
+// shutdown's.
+func TestOutlivesShutdownKeepsValuesAndOtherCauses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type key struct{}
+		parent, cancel := context.WithCancelCause(context.WithValue(context.Background(), key{}, "lease"))
+		detached, release := outlivesShutdown(parent)
+		defer release()
+		if detached.Value(key{}) != "lease" {
+			t.Fatal("the detached context dropped its parent's values")
+		}
+		cancel(errEffectShutdown)
+		synctest.Wait()
+		if detached.Err() != nil {
+			t.Fatalf("the shutdown cancel ended the detached context: %v", context.Cause(detached))
+		}
+		parent2, cancel2 := context.WithCancelCause(context.Background())
+		detached2, release2 := outlivesShutdown(parent2)
+		defer release2()
+		cancel2(context.DeadlineExceeded)
+		synctest.Wait()
+		if !errors.Is(context.Cause(detached2), context.DeadlineExceeded) {
+			t.Fatalf("ended with %v, want the parent's cause", context.Cause(detached2))
+		}
+	})
+}
+
+// TestExecutorStopCancelsWithTheShutdownCause. Kills a shutdown cancel the
+// launch cannot tell from a lost lease: at stop's deadline every effect's
+// context ends with errEffectShutdown.
+func TestExecutorStopCancelsWithTheShutdownCause(t *testing.T) {
+	clk := newFakePlannerClock(plannerT0)
+	x, _ := fakeClockExecutor(clk)
+	causes := make(chan error, 1)
+	started := make(chan struct{})
+	if err := x.submit(rowKey{Leg: rowLeg, ID: "gc-1"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Hour), Run: func(ctx context.Context) settlement {
+		close(started)
+		<-ctx.Done()
+		causes <- context.Cause(ctx)
+		return settlement{Outcome: settledRefused}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	go x.stop(plannerT0)
+	if cause := <-causes; !errors.Is(cause, errEffectShutdown) {
+		t.Fatalf("an effect's context ended at shutdown with %v, want errEffectShutdown", cause)
 	}
 }

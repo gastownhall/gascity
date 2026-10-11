@@ -283,9 +283,11 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	leaf, _, _ := runtime.ResolveBackend(c.start.sp, name)
 	prepared.cfg.FreshOnly = true
 	in.w.Templates.installSideEffects(in.agent, in.tp)
-	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
+	detached, release := outlivesShutdown(ctx)
+	startCtx, stop := c.start.clock.WithDeadline(detached, c.it.Deadline.Add(-startDeadlineSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), tp: in.tp, prepared: prepared}
 	stop()
+	release()
 	in.ticket.verdict = verdictInconclusive
 	switch {
 	case runtime.IsProviderCapacity(out.err):
@@ -308,6 +310,26 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	out.health = startupHealthEpisodeKey(in.row, name)
 	out.accrued = startupHealthRecord{store: c.reads.city}.accrued(out.health)
 	return out, nil
+}
+
+// outlivesShutdown is ctx, with its values (the effect's lease), ended with
+// ctx's cause by any end of ctx but the executor's shutdown cancel
+// (errEffectShutdown): a lost lease, a provider swap, the effect's own
+// deadline. A provider's failed start kills the runtime it launched (tmux's
+// cleanupFailedStart), so a start the shutdown canceled mid-launch would
+// kill its own runtime and the next boot would relaunch it under a new token
+// instead of adopting it (§12.2 #4, START-024; staging J35 A/B). Its caller
+// bounds it by the effect's deadline; the executor's closed write latch keeps
+// a start that finishes during shutdown from writing. release stops the
+// relay.
+func outlivesShutdown(ctx context.Context) (context.Context, func()) {
+	detached, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	unrelay := context.AfterFunc(ctx, func() {
+		if cause := context.Cause(ctx); !errors.Is(cause, errEffectShutdown) {
+			cancel(cause)
+		}
+	})
+	return detached, func() { unrelay(); cancel(context.Canceled) }
 }
 
 // commitStep is the commit's Decide on the read after the Start: only a

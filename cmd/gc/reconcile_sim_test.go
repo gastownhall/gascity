@@ -949,7 +949,7 @@ func (s *sim) run(steps int) {
 // executor's goroutines.
 func (s *sim) teardown() {
 	s.x.close()
-	s.x.cancel()
+	s.x.cancel(errEffectShutdown)
 	for _, e := range s.parked {
 		close(e.release)
 	}

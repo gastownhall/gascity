@@ -795,7 +795,7 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 	if err := x.submit(rowKey{Leg: rowLeg, ID: "shutdown"}, hungEffect(intentRowHeal, 2, plannerT0.Add(time.Hour), release)); err != nil {
 		t.Fatal(err)
 	}
-	x.cancel()
+	x.cancel(errEffectShutdown)
 	if s := receive(t, posted); s.Cause != causeShutdown {
 		t.Fatalf("abandoned at shutdown: settlement %+v, want cause %q", s, causeShutdown)
 	}
