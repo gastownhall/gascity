@@ -1355,6 +1355,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
@@ -3005,6 +3006,7 @@ func TestCheckChurn_NonProductiveDeath(t *testing.T) {
 		"churn_count":  "0",
 	})
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if !churn {

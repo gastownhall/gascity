@@ -516,6 +516,9 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
 	}
+	if !exitAccrualHolds(info, sessFront) {
+		return info, true
+	}
 	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 	info = clearLastWokeAt(info, sessFront)
 	return info, true
@@ -784,6 +787,9 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
+		if !exitAccrualHolds(info, sessFront) {
+			return info, true
+		}
 		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
@@ -797,6 +803,18 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 		// Rapid crashes belong to checkStability, which ran first.
 		return info, false
 	}
+}
+
+// exitAccrualHolds reports whether the row, read fresh, still carries the
+// facts a rapid-crash or churn accrual was decided on (CONTRACT §12.5: a
+// destructive decision decides on a fresh read). A tick's snapshot read before
+// an operator's `gc session kill` still names the killed wake, and the dead
+// runtime it then observes is the kill, not a crash: accruing it would count
+// the operator's kill against the session (mc-uhvqj). A moved row, or a failed
+// read, accrues nothing; the next tick decides again.
+func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store) bool {
+	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
+	return err == nil && held
 }
 
 func isDeliberateSleepReason(reason string) bool {
