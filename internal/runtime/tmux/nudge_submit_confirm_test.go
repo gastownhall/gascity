@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -354,14 +358,51 @@ func TestPaneShowsStagedDraftReadsOnlyTheLiveComposer(t *testing.T) {
 	}
 }
 
-// TestStagedDraftRecoveryIsCodexOnly: recovery runs only for a family whose
-// TUI renders a recognizable staged-draft marker and whose submit is already
-// verified. Every other provider keeps the old submit contract exactly.
-func TestStagedDraftRecoveryIsCodexOnly(t *testing.T) {
-	if _, ok := stagedDraftMarkerForFamily("codex"); !ok {
-		t.Fatal("codex has no staged-draft marker; a swallowed submit would leave its pasted prompt staged forever")
+// TestPaneShowsStagedDraftReadsClaudesLiveComposer pins Claude's marker: its
+// prompt is "❯" plus NBSP, and a submitted paste stays echoed in the transcript
+// above the composer, which must not count as staged.
+func TestPaneShowsStagedDraftReadsClaudesLiveComposer(t *testing.T) {
+	claude := stagedDraftMarkers["claude"]
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{
+			name:  "staged paste in the composer",
+			lines: []string{"● Done.", "────", "❯\u00a0[Pasted text #2 +37 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			want:  true,
+		},
+		{
+			name:  "two stacked staged pastes",
+			lines: []string{"❯\u00a0[Pasted text #1 +42 lines][Pasted text #2 +37 lines]", "────"},
+			want:  true,
+		},
+		{
+			name:  "earlier paste echoed above an empty composer",
+			lines: []string{"❯\u00a0[Pasted text #1 +44 lines]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			want:  false,
+		},
 	}
-	for _, family := range []string{"claude", "gemini", "kimi", "opencode", "grok", "", "some-unregistered-family"} {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := paneShowsStagedDraft(tt.lines, claude); got != tt.want {
+				t.Fatalf("paneShowsStagedDraft(%q) = %v, want %v", tt.lines, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStagedDraftRecoveryIsClaudeAndCodexOnly: recovery runs only for a family
+// whose TUI renders a recognizable staged-draft marker and whose submit is
+// already verified. Every other provider keeps the old submit contract exactly.
+func TestStagedDraftRecoveryIsClaudeAndCodexOnly(t *testing.T) {
+	for _, family := range []string{"claude", "codex"} {
+		if _, ok := stagedDraftMarkerForFamily(family); !ok {
+			t.Fatalf("%s has no staged-draft marker; a swallowed submit would leave its pasted prompt staged forever", family)
+		}
+	}
+	for _, family := range []string{"gemini", "kimi", "opencode", "grok", "", "some-unregistered-family"} {
 		if _, ok := stagedDraftMarkerForFamily(family); ok {
 			t.Errorf("stagedDraftMarkerForFamily(%q) = ok, want no marker (old submit contract)", family)
 		}
@@ -370,5 +411,79 @@ func TestStagedDraftRecoveryIsCodexOnly(t *testing.T) {
 		if !submitVerifyEligibleFamily(family) {
 			t.Errorf("family %q has a staged-draft marker but is not submit-verify eligible; recovery only runs on the verified path", family)
 		}
+	}
+}
+
+// claudeStagedDraftExecutor answers as a Claude pane whose composer keeps a
+// collapsed paste staged however many submits arrive: no capture shows the
+// busy indicator or a drained composer. attached is the attachment probe's
+// client count; empty makes the probe fail.
+type claudeStagedDraftExecutor struct {
+	session  string
+	attached string
+	calls    [][]string
+}
+
+func (e *claudeStagedDraftExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	switch {
+	case slices.Contains(args, "#{session_name}|#{session_attached}"):
+		if e.attached == "" {
+			return "", errors.New("server busy")
+		}
+		return e.session + "|" + e.attached, nil
+	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_PROVIDER"):
+		return "GC_PROVIDER=claude", nil
+	case slices.Contains(args, "capture-pane"):
+		return strings.Join([]string{"● Done.", "────", "❯\u00a0[Pasted text #1 +42 lines]", "────", "  ⏵⏵ bypass permissions on"}, "\n"), nil
+	}
+	return "", nil
+}
+
+func (e *claudeStagedDraftExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// TestNudgeSessionClaudeStagedDraftStaysUnconfirmed: when recovery cannot
+// resolve a staged Claude paste (its bound runs out, or it is skipped because a
+// client is attached or the probe fails), the composer still shows the
+// placeholder. That composer has not drained, so the nudge must stay
+// ErrNudgeSubmitUnconfirmed and requeue. ErrNudgeSubmitDeliveredUnobserved
+// would ack it and drop the message.
+func TestNudgeSessionClaudeStagedDraftStaysUnconfirmed(t *testing.T) {
+	tests := []struct {
+		name     string
+		session  string
+		attached string
+		enters   int
+	}{
+		{"detached pane exhausts recovery", "staged-claude-detached", "0", submitEnterMaxSends + submitDraftRecoverySends},
+		{"attached pane skips recovery", "staged-claude-attached", "1", submitEnterMaxSends},
+		{"failing attachment probe skips recovery", "staged-claude-probe-error", "", submitEnterMaxSends},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The bubble creates this session's nudge lock channel; drop it so
+			// nothing outside the bubble ever touches it.
+			t.Cleanup(func() { sessionNudgeLocks.Delete(tt.session) })
+			synctest.Test(t, func(t *testing.T) {
+				ex := &claudeStagedDraftExecutor{session: tt.session, attached: tt.attached}
+				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+
+				err := tm.NudgeSession(tt.session, "reminder: please respond to the review")
+				if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+					t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitUnconfirmed", err)
+				}
+				enters := 0
+				for _, c := range ex.calls {
+					if slices.Contains(c, "send-keys") && c[len(c)-1] == "Enter" {
+						enters++
+					}
+				}
+				if enters != tt.enters {
+					t.Fatalf("submit Enter sends = %d, want %d", enters, tt.enters)
+				}
+			})
+		})
 	}
 }

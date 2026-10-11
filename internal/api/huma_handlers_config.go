@@ -65,11 +65,13 @@ func (s *Server) humaHandleConfigGet(_ context.Context, _ *ConfigGetInput) (*Ind
 		Providers:       providers,
 	}
 
-	if !cfg.Patches.IsEmpty() {
+	// Composition clears the applied patches from cfg; count the declared ones,
+	// as the patch reads list them.
+	if patches := s.patchConfig().Patches; !patches.IsEmpty() {
 		resp.Patches = &configPatchesResponse{
-			AgentCount:    len(cfg.Patches.Agents),
-			RigCount:      len(cfg.Patches.Rigs),
-			ProviderCount: len(cfg.Patches.Providers),
+			AgentCount:    len(patches.Agents),
+			RigCount:      len(patches.Rigs),
+			ProviderCount: len(patches.Providers),
 		}
 	}
 
@@ -98,10 +100,7 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 	builtins := config.BuiltinProviders()
 
 	// Use raw config for accurate provenance when available.
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
+	rawCfg := s.rawConfig()
 
 	agents := make([]annotatedAgentResponse, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
@@ -155,13 +154,14 @@ func (s *Server) humaHandleConfigExplain(_ context.Context, _ *ConfigExplainInpu
 		}
 	}
 
+	patches := s.patchConfig().Patches
 	resp := configExplainResponse{
 		Agents:    agents,
 		Providers: provMap,
 		Patches: configExplainPatches{
-			Agents:    len(cfg.Patches.Agents),
-			Rigs:      len(cfg.Patches.Rigs),
-			Providers: len(cfg.Patches.Providers),
+			Agents:    len(patches.Agents),
+			Rigs:      len(patches.Rigs),
+			Providers: len(patches.Providers),
 		},
 	}
 

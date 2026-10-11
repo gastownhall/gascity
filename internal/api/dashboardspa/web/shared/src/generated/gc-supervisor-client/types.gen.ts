@@ -63,11 +63,11 @@ export type AgentPatch = {
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     AutoReclaimStaleClaims: boolean | null;
-    ContextAdvisory: ContextAdvisory;
+    ContextAdvisory?: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -88,11 +88,11 @@ export type AgentPatch = {
     MouseMode: string | null;
     Name: string;
     Nudge: string | null;
-    OptionDefaults: {
+    OptionDefaults?: {
         [key: string]: string;
     };
     OverlayDir: string | null;
-    Pool: PoolOverride;
+    Pool?: PoolOverride;
     PreStart: Array<string> | null;
     PreStartAppend: Array<string> | null;
     PromptTemplate: string | null;
@@ -757,7 +757,7 @@ export type ConversationTranscriptRecord = {
     ExplicitTarget: string;
     ID: string;
     Kind: TranscriptMessageKind;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     Provenance: TranscriptProvenance;
@@ -854,7 +854,7 @@ export type DeliveryContextRecord = {
     ID: string;
     LastMessageID: string;
     LastPublishedAt: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     SchemaVersion: number;
@@ -1481,12 +1481,12 @@ export type InboundEventPayload = {
 };
 
 export type InboundResult = {
-    Binding: SessionBindingRecord;
-    GroupRoute: GroupRouteDecision;
+    Binding?: SessionBindingRecord;
+    GroupRoute?: GroupRouteDecision;
     Message: ExternalInboundMessage;
     TargetAgentName: string;
     TargetSessionID: string;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type ListBodyAgentPatch = {
@@ -2232,9 +2232,9 @@ export type OutboundEventPayload = {
 };
 
 export type OutboundResult = {
-    DeliveryContext: DeliveryContextRecord;
+    DeliveryContext?: DeliveryContextRecord;
     Receipt: PublishReceipt;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type OutputTurn = {
@@ -2472,7 +2472,7 @@ export type ProviderPatch = {
     ArgsAppend: Array<string> | null;
     Base: string | null;
     Command: string | null;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -2678,7 +2678,7 @@ export type PublishReceipt = {
     Delivered: boolean;
     FailureKind: string;
     MessageID: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     RetryAfter: number;
@@ -2832,7 +2832,7 @@ export type RigPatch = {
     BeadsProxiedIdleTimeout: string | null;
     DefaultBranch: string | null;
     DefaultMergeStrategy: string | null;
-    FormulaVars: {
+    FormulaVars?: {
         [key: string]: string;
     };
     Name: string;
@@ -10799,6 +10799,10 @@ export type PostV0CityByCityNameAgentByBaseByActionErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -11183,6 +11187,10 @@ export type PostV0CityByCityNameAgentByDirByBaseByActionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
