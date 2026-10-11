@@ -278,6 +278,52 @@ func TestScopedStoreLikeSelectsRigScopeWhenDirIsARig(t *testing.T) {
 	}
 }
 
+// TestScopedBdStoreForRigInheritingRemoteCityRefusesRawSQL: a rig with no
+// beads metadata of its own under a remote city is served by the city's remote
+// backend, so the ctx-bound clone gc status builds for it must know its city
+// and refuse the raw-SQL release fallback there, as the long-lived rig store
+// does, instead of shelling out to `bd sql`.
+func TestScopedBdStoreForRigInheritingRemoteCityRefusesRawSQL(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "bd-argv")
+	// This bd predates the conditional-release flags, which is what sends
+	// ReleaseIfCurrent toward its raw-SQL fallback.
+	writeExecutable(t, filepath.Join(binDir, "bd"), "#!/bin/sh\necho \"$*\" >> "+argvLog+"\ncase \"$1\" in\n"+
+		"version) echo 'bd version 1.3.1 (test)' ;;\n"+
+		"update) echo 'Error: unknown flag: --if-assignee' >&2; exit 1 ;;\n"+
+		"*) echo '[]' ;;\nesac\n")
+	cityTOML := "[workspace]\nname = \"remote-city\"\n[workspace.env]\nPATH = \"" + binDir + string(os.PathListSeparator) + "$PATH\"\n" +
+		"[[rigs]]\nname = \"inherit\"\npath = \"rigs/inherit\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attachRemoteScope(t, cityPath)
+	rigDir := filepath.Join(cityPath, "rigs", "inherit")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "inherit", Path: "rigs/inherit"}}}
+
+	store, err := scopedBdStoreForRig(context.Background(), cityPath, cfg, rigDir)
+	if err != nil {
+		t.Fatalf("scopedBdStoreForRig: %v", err)
+	}
+	if _, err := store.ReleaseIfCurrent("gc-1", "worker"); !errors.Is(err, beads.ErrConditionalReleaseRemoteUnsupported) {
+		t.Fatalf("ReleaseIfCurrent on the scoped clone of an inheriting rig = %v, want ErrConditionalReleaseRemoteUnsupported", err)
+	}
+	argv, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("the scoped store ran no bd: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(argv)), "\n") {
+		if strings.HasPrefix(line, "sql") {
+			t.Fatalf("the scoped store ran `bd %s` against a rig its remote city serves", line)
+		}
+	}
+}
+
 // TestScopedStoreLikePreservesBeadPolicyWrapper pins behavioral equivalence,
 // not just the backing directory. Production stores are policy-wrapped outside
 // the cache; dropping that wrapper from a scoped clone changes zero-value List

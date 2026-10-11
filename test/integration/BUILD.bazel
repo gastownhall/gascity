@@ -108,11 +108,10 @@ go_test(
             "//cmd/gc:gc_drift_old",
             "//examples/bd",
             "//test/integration/filebdshim",
-            # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd
-            # and dolt for the dolt-backed integration shapes, same versions the
-            # go-test CI installs via install-bd-archive.sh /
-            # install-dolt-archive.sh.
-            "@bd_bin_v1_3_1//:bd",
+            # Hermetic bd and dolt for the dolt-backed integration shapes: bd
+            # built from the beads commit gc links (tools/bd) and the pinned
+            # dolt release the go-test CI installs via install-dolt-archive.sh.
+            "//tools/bd",
             "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],

@@ -11,7 +11,8 @@
 // proxied scope any bd read restarts the proxy (BEADS_DOLT_AUTO_START is inert
 // there, tracked separately), which would hide what this check does. Needs
 // GC_ACCEPTANCE_BD_BIN pointing at a bd that supports proxied backup (beads
-// hotfix/1.3.1+); a bd that refuses it skips.
+// hotfix/1.3.1+, or the bd built from the beads main commit gc links, which
+// still declares 1.3.0); a bd that refuses it skips.
 package acceptance_test
 
 import (
@@ -26,10 +27,13 @@ import (
 
 func TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped(t *testing.T) {
 	bdPath, doltPath := helpers.RequireTopologyTooling(t)
-	// Skip before building a city when bd predates proxied backup (beads
-	// hotfix/1.3.1; its release candidates count): the positive control needs
-	// `bd backup status` to be the thing that starts a stopped store.
-	helpers.RequireBDAtLeast(t, bdPath, "v1.3.1-0", "proxied `bd backup`")
+	// Skip before building a city when bd predates the proxied topology
+	// (1.3.0; its release candidates count). The version cannot tell whether
+	// bd has proxied backup: beads main has it and still declares 1.3.0, the
+	// 1.3.0 release does not. A bd without it skips at the positive control,
+	// which needs `bd backup status` to be the thing that starts a stopped
+	// store.
+	helpers.RequireBDAtLeast(t, bdPath, "v1.3.0-0", "the proxied topology")
 	var topo helpers.BeadsTopology
 	for _, candidate := range helpers.BeadsTopologies() {
 		if candidate.Name == "M1-proxied-local" {

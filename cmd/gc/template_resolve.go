@@ -492,12 +492,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 10: Merge environment layers. Workspace.Env sits between
 	// passthrough and provider so a per-provider/agent/patch entry can
-	// still override a workspace-wide default.
+	// still override a workspace-wide default. The city's env: beads
+	// credential sources, which gc moved out of its own environment, sit
+	// just above passthrough so a gc the agent runs resolves them, while any
+	// operator layer can still override (or blank) one; they stay out of
+	// operatorEnv.
 	var workspaceEnv map[string]string
 	if p.workspace != nil {
 		workspaceEnv = p.workspace.Env
 	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	credentialEnv := cityCredentialEnv(p.cityPath, p.city)
+	env := mergeEnv(passthroughEnv(), credentialEnv, expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 

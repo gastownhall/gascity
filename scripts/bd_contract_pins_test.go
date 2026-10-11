@@ -9,19 +9,21 @@ import (
 	"testing"
 )
 
-// The bd contract cells run under Bazel against prebuilt bd release
-// archives (MODULE.bazel http_archive), not against a bd installed by a
-// go-test job. These pins keep each cell testing the bd deps.env names:
+// The bd contract cells run under Bazel against a bd Bazel provides, not
+// against a bd installed by a go-test job. These pins keep each cell testing
+// the bd deps.env names:
 //
-//   - every bd_bin_v* archive downloads that version's linux_amd64 release
+//   - //test/acceptance:bd_cli_contract_prev_test runs BD_PREV_VERSION's bd,
+//     a bd_bin_v* archive that downloads that version's linux_amd64 release
 //     with the sha256 .github/scripts/install-bd-archive.sh pins for it;
-//   - //test/acceptance:bd_cli_contract_prev_test runs BD_PREV_VERSION's bd;
 //   - //test/acceptance:bd_cli_contract_current_test and
 //     //internal/beads:bd_conditional_release_contract_test (bd first on
-//     PATH through GC_TEST_TOOL_PATHS) run BD_CURRENT_VERSION's bd. BD_CURRENT_REF is the commit that release was
-//     cut from (its tag); moving the ref off a released tag needs a
-//     source-built bd here instead, and this test then has no archive to
-//     point at.
+//     PATH through GC_TEST_TOOL_PATHS) run //tools/bd:bd, which Bazel builds
+//     from the beads commit go.mod pins (tools/bd's own test ties its module
+//     to that pin, and TestBDVersionPins ties the pin to BD_CURRENT_REF). It carries
+//     the stamps the agent image gives the same source: the version the
+//     source declares (BD_CURRENT_SOURCE_VERSION), BD_CURRENT_REF, and the
+//     image's build and branch, so both report the same bd;
 //   - the conditional-release target selects the Makefile's
 //     BD_CONDITIONAL_RELEASE_TEST, which must exist in internal/beads under
 //     the integration tag: a -run selector that matches nothing passes.
@@ -40,7 +42,13 @@ func TestBdContractCellsRunTheDepsEnvPins(t *testing.T) {
 	installer := read(".github/scripts/install-bd-archive.sh")
 	acceptance := read("test/acceptance/BUILD.bazel")
 	beadsBuild := read("internal/beads/BUILD.bazel")
+	bdBuild := read("tools/bd/BUILD.bazel")
+	dockerfile := read("contrib/k8s/Dockerfile.agent")
 	makefile := read("Makefile")
+
+	// currentBD is the bd the current cell runs, built from BD_CURRENT_REF;
+	// currentBDData is the same target as buildifier writes it in a label list.
+	const currentBD, currentBDData = "//tools/bd:bd", "//tools/bd"
 
 	pin := func(key string) string {
 		t.Helper()
@@ -85,16 +93,42 @@ func TestBdContractCellsRunTheDepsEnvPins(t *testing.T) {
 		return r
 	}
 
-	prev, current := pin("BD_PREV_VERSION"), pin("BD_CURRENT_VERSION")
+	prev := pin("BD_PREV_VERSION")
 	checkArchive(prev)
-	checkArchive(current)
 
-	for name, version := range map[string]string{
-		"bd_cli_contract_prev_test":    prev,
-		"bd_cli_contract_current_test": current,
+	imageArg := func(name string) string {
+		t.Helper()
+		m := regexp.MustCompile(`(?m)^ARG ` + name + `=(\S+)$`).FindStringSubmatch(dockerfile)
+		if m == nil {
+			t.Fatalf("contrib/k8s/Dockerfile.agent has no ARG %s", name)
+		}
+		return m[1]
+	}
+	ref, build := pin("BD_CURRENT_REF"), imageArg("BD_BUILD")
+	if !strings.HasPrefix(ref, build) {
+		t.Errorf("contrib/k8s/Dockerfile.agent BD_BUILD %q is not a prefix of deps.env BD_CURRENT_REF %q", build, ref)
+	}
+	binary := regexp.MustCompile(`(?ms)^go_binary\(\n    name = "bd",\n.*?^\)`).FindString(bdBuild)
+	if binary == "" {
+		t.Fatal("tools/bd/BUILD.bazel has no go_binary bd")
+	}
+	for _, want := range []string{
+		`embed = ["@com_github_steveyegge_beads//cmd/bd:bd_lib"],`,
+		`"main.Version": "` + strings.TrimPrefix(pin("BD_CURRENT_SOURCE_VERSION"), "v") + `",`,
+		`"main.Commit": "` + ref + `",`,
+		`"main.Build": "` + build + `",`,
+		`"main.Branch": "` + imageArg("BD_BRANCH") + `",`,
+	} {
+		if !strings.Contains(binary, want) {
+			t.Errorf("%s lacks %s:\n%s", currentBD, want, binary)
+		}
+	}
+
+	for name, label := range map[string]string{
+		"bd_cli_contract_prev_test":    "@" + repoFor(prev) + "//:bd",
+		"bd_cli_contract_current_test": currentBD,
 	} {
 		r := rule(acceptance, name)
-		label := "@" + repoFor(version) + "//:bd"
 		for _, want := range []string{
 			// The cell's bd is the only one: named for helpers.FindBD and
 			// first on PATH, over the one :acceptance_test's env puts there.
@@ -118,8 +152,8 @@ func TestBdContractCellsRunTheDepsEnvPins(t *testing.T) {
 		`args = ["-test.run=^` + testName[1] + `$$"],`,
 		`"GC_REQUIRE_BD_CONDITIONAL_RELEASE": "1",`,
 		`gotags = ["integration"],`,
-		`"GC_TEST_TOOL_PATHS": "$(rootpath @` + repoFor(current) + `//:bd)",`,
-		`data = ["@` + repoFor(current) + `//:bd"],`,
+		`"GC_TEST_TOOL_PATHS": "$(rootpath ` + currentBD + `)",`,
+		`data = ["` + currentBDData + `"],`,
 	} {
 		if !strings.Contains(r, want) {
 			t.Errorf("bd_conditional_release_contract_test lacks %s:\n%s", want, r)

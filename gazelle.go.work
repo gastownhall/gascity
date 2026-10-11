@@ -1,11 +1,13 @@
-// Bazel-only Go workspace: go_deps (MODULE.bazel) resolves the gc module and
-// the nogo analyzers' module (tools/nogo) as one dependency graph, so the
-// analyzers link against the same golang.org/x/tools as rules_go's nogo
-// runner. Not named go.work on purpose: the go command never picks it up, and
-// `go build`/`go list -m all` in the repo root keep seeing only go.mod.
+// Bazel-only Go workspace: go_deps (MODULE.bazel) resolves the gc module, the
+// nogo analyzers' module (tools/nogo) and the source-built bd's module
+// (tools/bd) as one dependency graph, so the analyzers link against the same
+// golang.org/x/tools as rules_go's nogo runner and bd builds from the beads
+// commit gc links. Not named go.work on purpose: the go command never picks it
+// up, and `go build`/`go list -m all` in the repo root keep seeing only go.mod.
 go 1.26.9
 
 use (
 	.
+	./tools/bd
 	./tools/nogo
 )

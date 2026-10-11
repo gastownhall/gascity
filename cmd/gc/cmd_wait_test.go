@@ -675,10 +675,10 @@ func waitTestEnv(overrides map[string]string) []string {
 func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
-	// Bazel hands the test the pinned release bd (MODULE.bazel's bd_bin
-	// archive, built from the same github.com/steveyegge/beads version go.mod
-	// requires; TestBuildPinnedBDBinaryForTestsUsesGoModSource checks that
-	// against this binary's build info). Under go test, build it from source.
+	// Bazel hands the test the bd it builds from the github.com/steveyegge/beads
+	// version go.mod requires (//tools/bd:bd;
+	// TestBuildPinnedBDBinaryForTestsUsesGoModSource checks that against this
+	// binary's build info). Under go test, build it from source.
 	bazelBD := bazeltest.DataPath(t, "GC_TEST_PINNED_BD_BIN")
 	waitTestRealBDPathOnce.Do(func() {
 		if bazelBD != "" {
@@ -806,10 +806,13 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go version -m %s: %v\n%s", bdPath, err, metadata)
 	}
+	// go install builds cmd/bd as the beads main module (a `mod` line); Bazel's
+	// //tools/bd:bd builds it inside gc's module graph, where beads is a
+	// dependency (a `dep` line). Either way the line names the version linked.
 	foundPinnedModule := false
 	for _, line := range strings.Split(string(metadata), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[0] == "mod" && fields[1] == "github.com/steveyegge/beads" && fields[2] == pinned {
+		if len(fields) >= 3 && (fields[0] == "mod" || fields[0] == "dep") && fields[1] == "github.com/steveyegge/beads" && fields[2] == pinned {
 			foundPinnedModule = true
 			break
 		}
@@ -818,9 +821,9 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 		t.Fatalf("%s build metadata %q does not retain pinned Beads module version %q", bdPath, metadata, pinned)
 	}
 	// `bd version` reports the release variable declared by Beads source
-	// (currently 1.1.0), not the Go module pseudo-version used to fetch that
-	// source. The exact source guarantee is therefore checked through the
-	// compiled binary's module metadata above.
+	// (deps.env BD_CURRENT_SOURCE_VERSION), not the Go module pseudo-version
+	// used to fetch that source. The exact source guarantee is therefore
+	// checked through the compiled binary's module metadata above.
 }
 
 func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {

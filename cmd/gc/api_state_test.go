@@ -764,6 +764,76 @@ func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutatio
 	}
 }
 
+// A serving rig whose store failed to open (its remote server was down at
+// boot, say) is not one a reload may keep: the reload opens it again, so the
+// rig recovers without a city restart. A suspended rig is routinely dark, and
+// a reload keeps its store; resuming it rebuilds the stores.
+func TestControllerStateRuntimeUpdateReopensServingRigStoreThatFailedToOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+	}{
+		{name: "serving rig is reopened"},
+		{name: "suspended rig keeps its store", suspended: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(cityDir, "alpha")
+			cityToml := fmt.Sprintf(`[workspace]
+name = "city1"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "alpha"
+path = %q
+prefix = "al"
+suspended_on_start = %t
+`, rigDir, tc.suspended)
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			current := &config.City{
+				Workspace: config.Workspace{Name: "city1"},
+				Beads:     config.BeadsConfig{Provider: "file"},
+				Rigs:      []config.Rig{{Name: "alpha", Path: rigDir, Prefix: "al", SuspendedOnStart: tc.suspended}},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			cs := newControllerState(ctx, current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+			// The shape buildStores leaves for a rig whose open failed: the
+			// unavailableStore behind the controller's cache.
+			dark := wrapWithCachingStore(context.Background(), unavailableStore{err: errors.New("open rig store: remote beads server unreachable")}, nil, false)
+			cs.mu.Lock()
+			cs.beadStores["alpha"] = dark
+			cs.mu.Unlock()
+
+			if got, want := cs.runtimeUpdateCanReuseCurrentStores(current), tc.suspended; got != want {
+				t.Fatalf("runtimeUpdateCanReuseCurrentStores = %t, want %t", got, want)
+			}
+			if !cs.updateFromRuntime(current, runtime.NewFake(), "") {
+				t.Fatal("runtime update was not accepted")
+			}
+			got := cs.BeadStore("alpha")
+			if tc.suspended {
+				if got != dark {
+					t.Fatal("a reload replaced the suspended rig's store")
+				}
+				return
+			}
+			if storeFailedToOpen(got) {
+				t.Fatal("BeadStore(alpha) is still the store that failed to open after a reload")
+			}
+			if _, err := got.Get("al-absent"); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("reopened BeadStore(alpha).Get(absent) = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

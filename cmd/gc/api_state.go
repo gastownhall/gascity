@@ -1590,11 +1590,19 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 	if storeSignature != "" && storeSignature != storeMetadataSignature(cs.cityPath, next) {
 		return false
 	}
+	suspState := loadSuspensionStateBestEffort(cs.cityPath)
 	for _, rig := range next.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		if stores[rig.Name] == nil {
+		store := stores[rig.Name]
+		if store == nil {
+			return false
+		}
+		// A serving rig whose store failed to open (its server was down at
+		// boot, say) is opened again. A suspended rig is routinely dark: it
+		// keeps its store, and resuming it changes the store signature.
+		if storeFailedToOpen(store) && rigStoreBackgroundRefresh(suspState, rig) {
 			return false
 		}
 	}

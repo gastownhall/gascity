@@ -261,6 +261,30 @@ go_deps.module_override(
     path = "github.com/steveyegge/beads",
 )
 
+# beads ships its own Bazel BUILD files (rules_go via its own MODULE.bazel),
+# whose apparent repo names (@rules_go and friends) are not visible from a
+# go_deps extension repository. Discard them and let gazelle regenerate the
+# module's BUILD files, as it did for releases that shipped none; the
+# migrations patch above then applies to the generated files. go_visibility
+# opens cmd/bd's library, which gazelle otherwise keeps private to its own
+# go_binary, to //tools/bd, whose bd links it with the release build's tags
+# and version stamp.
+go_deps.gazelle_override(
+    build_file_generation = "clean",
+    directives = ["gazelle:go_visibility @@//tools/bd:__pkg__"],
+    path = "github.com/steveyegge/beads",
+)
+
+# bd's release build (and so //tools/bd:bd) compiles with gms_pure_go, which
+# swaps go-mysql-server's ICU regex engine for the standard library's. gazelle
+# treats a build_tags tag as both true and false, so the regex package lists
+# both implementations and rules_go compiles the one each binary's tags select:
+# ICU for gc, the pure-Go engine for bd.
+go_deps.gazelle_override(
+    directives = ["gazelle:build_tags gms_pure_go"],
+    path = "github.com/dolthub/go-mysql-server",
+)
+
 # protoc-gen-validate's validate package regenerates the checked-in
 # validate.pb.go with go_proto_library, both in gazelle's default proto mode
 # and in the module's own validate/BUILD, which pulls the C++ protoc and
@@ -327,6 +351,18 @@ go_deps.module(
     path = "github.com/oasdiff/yaml3",
     sum = "h1:bQx3WeLcUWy+RletIKwUIt4x3t8n2SxavmoclizMb8c=",
     version = "v0.0.0-20250309153720-d2182401db90",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/josharian/intern",
+    sum = "h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=",
+    version = "v1.0.0",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/mailru/easyjson",
+    sum = "h1:UGYAvKxe3sBsEDzO8ZeWOSlIQfWFlxbzLZe7hwFURr0=",
+    version = "v0.7.7",
 )
 go_deps.module(
     indirect = True,
@@ -408,17 +444,9 @@ use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", 
 
 # Pinned prebuilt test-only binaries for hermetic integration/acceptance tests.
 # Same artifacts the go-test CI installs via .github/scripts/install-bd-archive.sh
-# and install-dolt-archive.sh; shas are release-pinned.
+# and install-dolt-archive.sh; shas are release-pinned. The bd the other tests
+# run is built from the beads commit gc links instead (//tools/bd:bd).
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-http_archive(
-    name = "bd_bin_v1_3_1",
-    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.1/beads_1.3.1_linux_amd64.tar.gz"],
-    sha256 = "3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c",
-    build_file_content = """
-exports_files(["bd"])
-""",
-)
 
 # deps.env BD_PREV_VERSION, the minimum-supported bd: the "previous" cell of
 # the bd CLI contract (//test/acceptance:bd_cli_contract_prev_test).

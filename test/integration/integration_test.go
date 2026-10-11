@@ -241,9 +241,9 @@ func TestMain(m *testing.M) {
 	} else if ok {
 		realBDBinary = override
 	} else if bazeltest.IsBazel() {
-		// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
-		// (http_archive of the same release the go-test CI installs).
-		if bd := runfilesBinaryAt("bd_bin_v1_3_1", "bd"); bd != "" {
+		// Under bazel the pinned bd ships in runfiles as a data dep
+		// (//tools/bd:bd, built from the beads commit gc links).
+		if bd := runfilesBinary("tools/bd/bd_/bd"); bd != "" {
 			realBDBinary = bd
 		}
 	} else {
@@ -656,7 +656,7 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
 // by name out of this file and asserts it matches go.mod — see
 // TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
-const wantPinnedBeadsModuleVersion = "v1.3.1"
+const wantPinnedBeadsModuleVersion = "v1.3.1-0.20261010181156-c4e667cb14c3"
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()

@@ -126,17 +126,22 @@ func TestNativeDoltStoreApplyGraphPlanMidPlanFailureLeavesZeroRows(t *testing.T)
 
 // TestNativeDoltStoreApplyGraphPlanOverCapSucceedsAtomicallyOnEmbeddedDolt is
 // the reviewer's G3 HIGH-2 probe: a plan whose batch representation exceeds
-// issueops.MaxApplyBatchItems (41 nodes, 40 of them carrying both a
-// ParentKey and AssignAfterCreate, expanding to 41 creates + 40 parent-child
-// dep_adds + 40 deferred assignee updates = 121 items) used to hard-fail with
+// issueops.MaxApplyBatchItems (childCount+1 nodes, childCount of them
+// carrying both a ParentKey and AssignAfterCreate, expanding to
+// 3*childCount+1 items: the creates, the parent-child dep_adds and the
+// deferred assignee updates) used to hard-fail with
 // *GraphApplyTooLargeError on EVERY backend, including this real embedded
 // one that has a working beadslib.RunInTransaction and therefore never
 // needed BatchApplier's cap at all. It must now succeed, atomically, through
 // applyGraphPlanOverCapInTransaction.
+//
+// childCount is derived from the linked cap rather than fixed: beads raised
+// MaxApplyBatchItems from 100 (v1.3.1) to 1000 (#7051), and a fixed 121-item
+// plan then sat under the cap and never reached the fallback this test pins.
 func TestNativeDoltStoreApplyGraphPlanOverCapSucceedsAtomicallyOnEmbeddedDolt(t *testing.T) {
 	store := openRealNativeDoltStoreForFacade(t, "graph-apply-over-cap")
 
-	const childCount = 40
+	const childCount = issueops.MaxApplyBatchItems/3 + 1
 	nodes := make([]GraphApplyNode, 0, childCount+1)
 	nodes = append(nodes, GraphApplyNode{Key: "root", Title: "Root"})
 	for i := 0; i < childCount; i++ {
@@ -151,9 +156,6 @@ func TestNativeDoltStoreApplyGraphPlanOverCapSucceedsAtomicallyOnEmbeddedDolt(t 
 	plan := &GraphApplyPlan{CommitMessage: "gc: over-cap graph apply", Nodes: nodes}
 
 	wantItems := (childCount + 1) + childCount + childCount // creates + parent links + assigns
-	if wantItems != 121 {
-		t.Fatalf("test construction error: wantItems = %d, want 121", wantItems)
-	}
 	if wantItems <= issueops.MaxApplyBatchItems {
 		t.Fatalf("test construction error: %d items does not exceed the %d-item cap", wantItems, issueops.MaxApplyBatchItems)
 	}

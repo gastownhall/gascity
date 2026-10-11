@@ -98,11 +98,13 @@ import (
 // read-only open FROM BEADS: that is the standing ask, alongside
 // SchemaVersions().
 const (
-	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
-	SchemaCursorMain = 66
+	// SchemaCursorMain is schema.LatestVersion() for the pinned library
+	// (beads main at the S6 pin: migrations 0067-0069 add the versioned
+	// issue tables, attribution status and the datetime-precision widen).
+	SchemaCursorMain = 69
 	// SchemaCursorIgnored is schema.LatestIgnoredVersion() for the pinned
-	// library.
-	SchemaCursorIgnored = 26
+	// library (ignored/0027 adds wisps.current_revision).
+	SchemaCursorIgnored = 27
 )
 
 // PinnedSchemaCursors returns the pair a proxied database must already be at

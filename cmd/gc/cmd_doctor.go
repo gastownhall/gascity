@@ -435,6 +435,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 	}
 
+	// The boot capability gate (wire_compat) for remote beads scopes:
+	// registered only when the city has one.
+	if cfgErr == nil && cfg != nil {
+		if c := newRemoteWireCompatDoctorCheck(cityPath, cfg); c != nil {
+			register(c)
+		}
+	}
+
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))

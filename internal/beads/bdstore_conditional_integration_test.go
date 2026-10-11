@@ -180,6 +180,18 @@ func TestNewConditionalIntegrationRunnerIsolatesHOMEFromSharedServerConfig(t *te
 // mirroring the libstore env-pinning precedent.
 func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	t.Helper()
+	dir := newIntegrationGitScope(t)
+	runner := newConditionalIntegrationRunner(t, dir)
+	if out, err := runner(dir, "bd", "init", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("bd init: %v\n%s", err, out)
+	}
+	return beads.NewBdStore(dir, runner), dir
+}
+
+// newIntegrationGitScope is a fresh git repository in a guarded TempDir, the
+// root a bd scope is initialized in.
+func newIntegrationGitScope(t *testing.T) string {
+	t.Helper()
 	dir := beadstest.GuardedTempDir(t)
 	git := exec.Command("git", "init", "--quiet", dir)
 	// GIT_DIR/GIT_WORK_TREE from the invoking shell would redirect init away
@@ -197,11 +209,7 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	if out, err := git.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	runner := newConditionalIntegrationRunner(t, dir)
-	if out, err := runner(dir, "bd", "init", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
-		t.Fatalf("bd init: %v\n%s", err, out)
-	}
-	return beads.NewBdStore(dir, runner), dir
+	return dir
 }
 
 // newConditionalIntegrationRunner pins BEADS_DIR to the scope so every bd

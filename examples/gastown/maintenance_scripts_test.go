@@ -10089,6 +10089,31 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 	}
 }
 
+// A gc bd list that fails (an unreachable store, a remote scope whose
+// credential gc cannot resolve) is a failed run, not an empty city: the order
+// must exit non-zero and carry gc's own diagnostic.
+func TestWispCompactFailsLoudWhenListFails(t *testing.T) {
+	bdLog, env := wispCompactEnv(t, "[]")
+	env["FAKE_UNREACHABLE_SCOPES"] = "city"
+
+	out, err := runScriptResult(t, coreScriptPath("wisp-compact.sh"), env)
+	if err == nil {
+		t.Fatalf("wisp-compact.sh exited 0 although gc bd list failed; output:\n%s", out)
+	}
+	for _, want := range []string{"wisp-compact: gc bd list failed", "fake gc: city bead store unreachable"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+	}
+	log, readErr := os.ReadFile(bdLog)
+	if readErr != nil {
+		t.Fatalf("ReadFile(bd log): %v", readErr)
+	}
+	if len(log) != 0 {
+		t.Fatalf("a failed list must not mutate beads; bd log:\n%s", log)
+	}
+}
+
 // crossRigDepsEnv installs a `bd` stub that handles three subcommand shapes:
 //   - `bd list --status=closed --closed-after=... --json` → returns closedJSON
 //   - `bd dep list <id> --direction=up --type=blocks --json` → returns depsJSON

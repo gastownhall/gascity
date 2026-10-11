@@ -775,6 +775,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
+	// Move any env: beads credential out of the environment before this city
+	// spawns a child (see sequesterCityCredentialEnv).
+	sequesterCityCredentialEnv(cityPath, cfg)
 	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
 	// Strict mode (default) promotes strict-eligible config warnings to errors.
 	if strictMode && len(fatalWarnings) > 0 {
@@ -840,6 +843,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)
+	// The boot capability gate: a remote beads scope whose server cannot
+	// serve the native store refuses the start here, by name, before any
+	// bead store starts and rather than at the controller's first open.
+	if err := remoteBeadsBootGate(context.Background(), cityPath, cfg, stderr); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err)                                     //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" and read its wire_compat check") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr

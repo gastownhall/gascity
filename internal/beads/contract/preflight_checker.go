@@ -103,6 +103,16 @@ type PreflightChecker struct {
 	// caller that cannot supply this value still gets a correct, if partial,
 	// check on the main lane alone.
 	SchemaLatestIgnoredVersion int
+	// RemoteBackend reports whether a metadata backend name is a REMOTE
+	// backend registered with the linked beads library (one the native store
+	// opens over the wire, never through a Dolt server). Nil uses
+	// BackendIsRemote, the library registry's own answer.
+	RemoteBackend func(backend string) bool
+	// WireHandshake reads a remote scope's server handshake (normally cached
+	// per process). It is consulted only on the remote route, and only once
+	// the provider check passed. Nil makes wire_compat FAIL: a remote scope
+	// whose server was never verified is not native-eligible.
+	WireHandshake func(scope string) (PreflightWireHandshake, error)
 }
 
 // Check runs the beads backend preflight for scope and returns typed diagnostics.
@@ -112,6 +122,12 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		return PreflightResult{}, err
 	}
 	providerCheck := c.checkProvider()
+	if c.backendIsRemote(metadata.Backend) {
+		// The remote route: no bd context, no database dial, no schema
+		// cursor read. Every Dolt probe below is meaningless for a scope the
+		// native store reaches over the wire, so none of them runs.
+		return c.checkRemote(scope, metadata, providerCheck), nil
+	}
 	metadataCheck := c.checkMetadataBackend(metadata)
 
 	// `bd context` is a subprocess per scope (~0.3-0.4 s, plus the git probes
@@ -280,13 +296,15 @@ func ProviderUsesBDContract(provider string) bool {
 	return base == "gc-beads-bd"
 }
 
-// nativeStoreBackends is the set of metadata backends the native store can
-// serve. It is the single answer to "may a native open even be attempted for
-// this metadata backend?": both the preflight's metadata_backend check and the
-// store factory's probe-free pre-check (internal/beads.decideMetadataBackend)
-// read it, so the two cannot disagree. Every backend outside it is decided from
-// metadata.json alone — no bd context, no database dial — because no probe
-// answer can make it native-eligible.
+// nativeStoreBackends is the set of LOCAL metadata backends the native store
+// can serve through the preflight route. It is the single answer to "may a
+// local native open even be attempted for this metadata backend?": both the
+// preflight's metadata_backend check and the store factory's probe-free
+// pre-check (internal/beads.decideMetadataBackend) read it, so the two cannot
+// disagree. Every backend outside it is decided from metadata.json alone — no
+// bd context, no database dial — because no probe answer can make it
+// native-eligible. A registered remote backend is decided separately
+// (BackendIsRemote) and never reaches this set.
 //
 // It deliberately names what the native store SERVES, not what it refuses:
 // a backend this build has never heard of falls outside the set without
@@ -296,8 +314,9 @@ var nativeStoreBackends = map[string]bool{
 }
 
 // NativeStoreServesBackend reports whether the native store can serve a scope
-// whose .beads/metadata.json names backend. The empty backend is not served:
-// metadata that names nothing is the preflight's "missing" FAIL.
+// whose .beads/metadata.json names backend through the local (Dolt) preflight
+// route. The empty backend is not served: metadata that names nothing is the
+// preflight's "missing" FAIL.
 func NativeStoreServesBackend(backend string) bool {
 	return nativeStoreBackends[strings.TrimSpace(backend)]
 }
@@ -781,6 +800,12 @@ func preflightVerdictForChecks(checks []PreflightCheckResult) PreflightVerdict {
 			// (version_compat / checkSchemaCompat), never by semver, so this
 			// check's WARN must not degrade a verdict that is otherwise clean.
 			if check.ID == PreflightCheckBDVersionHint {
+				continue
+			}
+			// wire_compat WARNs only for an absent OPTIONAL capability, whose
+			// fallback the native store already takes (see
+			// RemoteCapabilityRequirements). A required gap is a FAIL.
+			if check.ID == PreflightCheckWireCompat {
 				continue
 			}
 			hasWarn = true

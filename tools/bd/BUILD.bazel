@@ -1,0 +1,80 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_test")
+
+# gazelle:prefix github.com/gastownhall/gascity/tools/bd
+
+# bd built from the beads commit gc links (go.mod's github.com/steveyegge/beads
+# pin, deps.env BD_CURRENT_REF), so the bd a test runs has the schema and wire
+# of the beads code gc runs in-process whether or not a release carries them:
+# the current bd contract cell, the acceptance and integration suites and
+# every other Bazel test that runs a real bd use this binary; a go test job
+# runs the bd it installs (see deps.env's TEMPORARY block). tools/bd/go.mod
+# supplies the modules cmd/bd needs that gc's go.mod does not
+# (gazelle.go.work joins it to go_deps); modules_test.go keeps the shared ones
+# at gc's versions. Built the way contrib/k8s/Dockerfile.agent and beads'
+# release build bd: the pure-Go regex engine, with the version the source
+# declares (deps.env BD_CURRENT_SOURCE_VERSION) and the pinned commit stamped
+# in; scripts/bd_contract_pins_test.go holds the stamps to deps.env.
+# keep
+go_binary(
+    name = "bd",
+    embed = ["@com_github_steveyegge_beads//cmd/bd:bd_lib"],
+    gotags = ["gms_pure_go"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "main.Version": "1.3.0",
+        "main.Build": "c4e667cb14c",
+        "main.Commit": "c4e667cb14c3c29a420005e0ec029a0882c6ebc3",
+        "main.Branch": "HEAD",
+    },
+)
+
+exports_files(["go.mod"])
+
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+go_test(
+    name = "bd_test",
+    srcs = ["modules_test.go"],
+    data = [
+        "go.mod",
+        "//:go.mod",
+    ],
+    deps = [
+        "@org_golang_x_mod//modfile",
+        "@org_golang_x_mod//semver",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -25,8 +25,14 @@ const nativeDoltStoreActor = "gascity"
 // each of its two passes, ga-3mv5d3's investigation included.
 
 var (
-	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
+	nativeDoltOpenBestAvailable = openBestAvailableWithNativeOptions
 	nativeDoltOpenEnvMu         sync.Mutex
+	// nativeDoltOpenEnvEpoch counts the projections and withholdings made
+	// under nativeDoltOpenEnvMu, and is read and bumped only under it. A
+	// reader that cannot hold the mutex for a whole read (the ambient bearer
+	// ladder, whose token command is a subprocess) compares it before and
+	// after to tell whether a projection overlapped the read.
+	nativeDoltOpenEnvEpoch      uint64
 	errNativeIssueMetadataParse = ErrMetadataParse
 )
 
@@ -92,6 +98,14 @@ func AmbientNativeDoltOpenEnv(key string) string {
 	nativeDoltOpenEnvMu.Lock()
 	defer nativeDoltOpenEnvMu.Unlock()
 	return os.Getenv(key)
+}
+
+// nativeDoltOpenEnvEpochNow reads nativeDoltOpenEnvEpoch once no projection is
+// in flight.
+func nativeDoltOpenEnvEpochNow() uint64 {
+	nativeDoltOpenEnvMu.Lock()
+	defer nativeDoltOpenEnvMu.Unlock()
+	return nativeDoltOpenEnvEpoch
 }
 
 func processEnvSnapshotExcludingNativeDoltOpen() []string {
@@ -163,6 +177,7 @@ var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey}
 // adding GIT_AUTHOR_NAME would silently strip an operator's git identity from
 // every direct native open in the process.
 func withProjectedOpenEnvLocked(openEnvKeys []string, env map[string]string, credentialCommand string) (func(), error) {
+	nativeDoltOpenEnvEpoch++
 	keys := openEnvKeys
 	if credentialCommand != "" {
 		keys = append(append([]string(nil), openEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
@@ -254,6 +269,7 @@ func withWithheldBeadsEnvLocked() (func(), error) {
 // any unset fails, so a partial withholding cannot leave the process env in a
 // state no caller asked for.
 func withWithheldPrefixesLocked(prefixes ...string) (func(), error) {
+	nativeDoltOpenEnvEpoch++
 	type withheld struct{ key, value string }
 	var previous []withheld
 	restore := func() {
@@ -1831,16 +1847,15 @@ func nativeIssuePatchFromUpdateOpts(opts UpdateOpts) (issueops.IssuePatch, error
 	return patch, nil
 }
 
-// applyUpdateInTx applies an Update against an open beadslib transaction. Its two
-// callers each need a transaction the facade's own per-operation one cannot be:
-// the multi-write Store.Tx path (nativeDoltTx.Update) coalesces several writes
-// into one commit, and updateLabelsIfMatch checks the row version in the same
-// transaction that writes the labels.
+// applyUpdateInTx applies an Update against an open beadslib transaction. Its
+// caller needs a transaction the facade's own per-operation one cannot be: the
+// multi-write Store.Tx path (nativeDoltTx.Update) coalesces several writes
+// into one commit. (A labeled UpdateIfMatch no longer comes here: it is a
+// fenced single-item batch, updateLabelsIfMatch, which every backend serves.)
 //
 // This route is not the unvalidated one. It skips the facade's patch validation
 // (metadata keys, title, priority) but enforces the close policy the facade
-// route waives — see the Update doc comment for the whole asymmetry. An
-// UpdateIfMatch that carries labels inherits it exactly as Store.Tx does.
+// route waives — see the Update doc comment for the whole asymmetry.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
 	if opts.ParentID != nil {
 		if err := s.validateUpdateParent(ctx, tx, id, *opts.ParentID); err != nil {

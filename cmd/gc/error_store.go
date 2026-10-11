@@ -42,3 +42,14 @@ func (s unavailableStore) DepRemove(string, string) error                   { re
 func (s unavailableStore) DepList(string, string) ([]beads.Dep, error)      { return nil, s.err }
 
 var _ beads.Store = unavailableStore{}
+
+// storeFailedToOpen reports whether store is one the controller could not
+// open: an unavailableStore, bare or behind the cache buildStores puts in
+// front of every rig store.
+func storeFailedToOpen(store beads.Store) bool {
+	if caching, ok := store.(*beads.CachingStore); ok {
+		store = caching.Backing()
+	}
+	_, failed := store.(unavailableStore)
+	return failed
+}

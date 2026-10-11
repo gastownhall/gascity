@@ -38,16 +38,21 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	if completeBinding {
 		return bdContextCommandRunnerForCity(cityPath)
 	}
+	creds := newBdScopeCredentialEnv(cityPath)
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
-		return env, err
+		if err != nil {
+			return env, err
+		}
+		return env, creds.apply(env, dir)
 	})
 }
 
 // bdContextCommandRunnerForCity delegates complete external bindings to the
 // workspace-pinned bd without projecting or recovering a managed backend.
 func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	creds := newBdScopeCredentialEnv(cityPath)
 	return func(dir, name string, args ...string) ([]byte, error) {
 		env := cityRuntimeEnvMapForCity(cityPath)
 		if err := pinBdGCEnvironment(env); err != nil {
@@ -78,6 +83,9 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
 		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return nil, err
+		}
+		if err := creds.apply(env, dir); err != nil {
 			return nil, err
 		}
 		runner, err := beadsCommandRunnerForHostedCity(cityPath, env)
@@ -338,7 +346,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		rigDir,
 		withBdReadMemo(cityPath, bdCommandRunnerForRig(cityPath, cfg, rigDir)),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreCityPath(cityPath))...,
 	)
 }
 
@@ -474,24 +482,32 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		rigDir,
 		withBdReadMemo(cityPath, controlBdCommandRunnerForRig(cityPath, cfg, rigDir)),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreCityPath(cityPath))...,
 	)
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	creds := newBdScopeCredentialEnv(cityPath)
 	return countControlBdCalls(bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		applyControllerBdEnv(env)
-		return env, err
+		if err != nil {
+			return env, err
+		}
+		return env, creds.apply(env, dir)
 	}))
 }
 
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
+	creds := newBdScopeCredentialEnv(cityPath)
 	return countControlBdCalls(bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 		applyControllerBdEnv(env)
-		return env, err
+		if err != nil {
+			return env, err
+		}
+		return env, creds.apply(env, rigDir)
 	}))
 }
 
@@ -535,8 +551,13 @@ func readScopeIssuePrefix(scopeRoot string) string {
 }
 
 func bdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
+	creds := newBdScopeCredentialEnv(cityPath)
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
-		return bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+		if err != nil {
+			return env, err
+		}
+		return env, creds.apply(env, rigDir)
 	})
 }
 
@@ -808,7 +829,10 @@ var hostedCredentialProbeLoads atomic.Int64
 
 type hostedCredentialProbeEntry struct {
 	selected bool
-	sources  []hostedCredentialProbeSource
+	// http is the city's per-scope remote beads credential configuration
+	// ([beads] credential, rigs.beads_credential), read from the same load.
+	http    cityHTTPCredentials
+	sources []hostedCredentialProbeSource
 }
 
 type hostedCredentialProbeSource struct {
@@ -844,29 +868,41 @@ func resetHostedCredentialProbeCache() {
 }
 
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
+	entry, err := cityCredentialProbe(cityPath)
+	if err != nil || entry == nil {
+		return false, err
+	}
+	return entry.selected, nil
+}
+
+// cityCredentialProbe loads (or reuses, see hostedCredentialProbeCache) the
+// credential-relevant slice of a city's config. A nil entry with a nil error
+// means the city has no city.toml.
+func cityCredentialProbe(cityPath string) (*hostedCredentialProbeEntry, error) {
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
 	before, ok := statHostedCredentialProbeSource(cityConfigPath)
 	if !ok {
 		if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return nil, nil
 		} else if err != nil {
-			return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
+			return nil, fmt.Errorf("read hosted Beads credential configuration: %w", err)
 		}
 	}
 	key := normalizePathForCompare(cityConfigPath)
 	if v, loaded := hostedCredentialProbeCache.Load(key); loaded {
 		if entry, isEntry := v.(*hostedCredentialProbeEntry); isEntry && entry.valid() {
-			return entry.selected, nil
+			return entry, nil
 		}
 		hostedCredentialProbeCache.Delete(key)
 	}
 	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	hostedCredentialProbeLoads.Add(1)
 	if err != nil {
-		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
+		return nil, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}
 	selected := configSelectsHostedBeadsCredentialProvider(cfg)
-	entry := &hostedCredentialProbeEntry{selected: selected}
+	entry := &hostedCredentialProbeEntry{selected: selected, http: cityHTTPCredentialsFromConfig(cityPath, cfg)}
+	beads.SequesterRemoteCredentialEnv(cityCredentialEnvNames(entry.http)...)
 	cacheable := true
 	for _, source := range prov.Sources {
 		stat, ok := statHostedCredentialProbeSource(source)
@@ -885,7 +921,7 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	if cacheable {
 		hostedCredentialProbeCache.Store(key, entry)
 	}
-	return selected, nil
+	return entry, nil
 }
 
 func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
@@ -1864,6 +1900,22 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		if explicitRig != nil {
 			env["GC_RIG"] = explicitRig.Name
 		}
+	}
+	// A rig served by a registered remote backend (the shape `bd connect` and
+	// bdhttp.Attach write, or no metadata of its own under a city that has
+	// that shape) is a store gc does not serve: bd reads the activation from
+	// BEADS_DIR and speaks to the server itself, so the rig gets the opaque
+	// projection with no Dolt environment and no managed-runtime recovery.
+	// BEADS_DIR names the activation the native store would open, so both
+	// lanes of one rig always reach the same server. This does not wait for
+	// the rig's own config.yaml to resolve authoritative: Attach can write
+	// metadata.json into a scope that has none.
+	if activationRoot, remote := beads.RemoteBackendActivationRoot(rigPath, cityPath); remote {
+		env["BEADS_DIR"] = filepath.Join(activationRoot, ".beads")
+		if _, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, activationRoot); err != nil {
+			return env, err
+		}
+		return env, nil
 	}
 	rigDoltlite := scopeBackendIsDoltlite(cityPath, rigPath)
 	cityDoltlite := scopeBackendIsDoltlite(cityPath, cityPath)

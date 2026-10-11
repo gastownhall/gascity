@@ -87,6 +87,7 @@ go_library(
         "bead_worktree_liveness.go",
         "bead_worktree_liveness_fallback.go",
         "bead_worktree_reaper.go",
+        "beads_backend_registry.go",
         "beads_blocked_repair.go",
         "beads_dir.go",
         "beads_preflight_checker.go",
@@ -95,6 +96,8 @@ go_library(
         "beads_proxied_idle_timeout.go",
         "beads_proxied_native.go",
         "beads_quiescence.go",
+        "beads_remote_boot_gate.go",
+        "beads_remote_credential.go",
         "beads_scope_ownership.go",
         "beads_scope_suspension.go",
         "beads_shared_server.go",
@@ -226,6 +229,7 @@ go_library(
         "cmd_status.go",
         "cmd_stop.go",
         "cmd_storage.go",
+        "cmd_storage_connect.go",
         "cmd_storage_repair_sequence.go",
         "cmd_supervisor.go",
         "cmd_supervisor_city.go",
@@ -354,6 +358,7 @@ go_library(
         "gascity_pack_binding_doctor_check.go",
         "gc_permissions.go",
         "gitignore.go",
+        "hook_claim_remote.go",
         "hook_cross_store.go",
         "hook_output.go",
         "hook_session_claim.go",
@@ -609,6 +614,7 @@ go_library(
         "//internal/beads",
         "//internal/beads/closeorder",
         "//internal/beads/contract",
+        "//internal/beads/credsource",
         "//internal/beads/exec",
         "//internal/beads/proxyendpoint",
         "//internal/bootstrap",
@@ -948,6 +954,9 @@ go_test(
         "beads_proxied_idle_timeout_test.go",
         "beads_proxied_native_test.go",
         "beads_quiescence_test.go",
+        "beads_remote_attach_test.go",
+        "beads_remote_boot_gate_test.go",
+        "beads_remote_credential_test.go",
         "beads_rig_inherits_external_test.go",
         "beads_scope_dolt_mode_authority_test.go",
         "beads_scope_legacy_city_rig_test.go",
@@ -1183,6 +1192,7 @@ go_test(
         "cmd_status_test.go",
         "cmd_stop_server_lifecycle_test.go",
         "cmd_stop_test.go",
+        "cmd_storage_connect_test.go",
         "cmd_storage_repair_sequence_test.go",
         "cmd_supervisor_city_test.go",
         "cmd_supervisor_fork_env_test.go",
@@ -1387,6 +1397,8 @@ go_test(
         "hook_claim_failure_honesty_test.go",
         "hook_claim_legacy_restamp_test.go",
         "hook_claim_occupant_identity_test.go",
+        "hook_claim_remote_router_test.go",
+        "hook_claim_remote_test.go",
         "hook_claim_retry_window_test.go",
         "hook_claim_self_resume_residency_test.go",
         "hook_claim_sigpipe_unwind_test.go",
@@ -1944,7 +1956,7 @@ go_test(
         "//:gotags_integration": [
             ":gc",
             "//cmd/gc-write-mint",
-            "@bd_bin_v1_3_1//:bd",
+            "//tools/bd",
             "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
@@ -1953,13 +1965,14 @@ go_test(
     # The integration build (GC_FAST_UNIT=0, .bazelrc test:integration) runs
     # the integration-tagged and process-backed tests: bd/dolt by name
     # (GC_TEST_TOOL_PATHS puts the pinned binaries first on PATH, see
-    # internal/testenv), and the gc and gc-write-mint Bazel built and the
-    # pinned release bd instead of `go build` / `go install`.
+    # internal/testenv), and the gc and gc-write-mint Bazel built and the bd
+    # built from the beads commit gc links (tools/bd) instead of `go build` /
+    # `go install`.
     env = select({
         "//:gotags_integration": {
             "GC_TEST_GC_BIN": "$(rootpath :gc)",
-            "GC_TEST_PINNED_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
-            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+            "GC_TEST_PINNED_BD_BIN": "$(rootpath //tools/bd:bd)",
+            "GC_TEST_TOOL_PATHS": "$(rootpath //tools/bd:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
             "GC_TEST_WRITE_MINT_BIN": "$(rootpath //cmd/gc-write-mint)",
         },
         "//conditions:default": {},
@@ -2103,6 +2116,8 @@ go_test(
         "@com_github_santhosh_tekuri_jsonschema_v6//:jsonschema",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
+        "@com_github_steveyegge_beads//backend",
+        "@com_github_steveyegge_beads//backend/http",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",

@@ -150,10 +150,10 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (v1.3.1, internal/storage/schema/schema.go: sentinel tables floor at 0
-// and short-circuit, then floored tables and columns clamp to the lowest
-// replayFloor of anything absent).
-const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d"
+// beads (beads main at the S6 pin, internal/storage/schema/schema.go: sentinel
+// tables floor at 0 and short-circuit, then sentinel columns clamp to the
+// lowest replayFloor of anything absent; main carries no floored tables).
+const pinnedCursorRealityFloorDigest = "65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by
 // feeding it the library shapes the old substring pin could not see, and one it
@@ -168,11 +168,6 @@ func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 	ignoredSource = migrationSource{
 		cursorTable:     "ignored_schema_migrations",
 		sentinelTables:  []string{"wisps", "wisp_dependencies"},
-		sentinelFlooredTables: []schemaSentinelTable{
-			{table: "events", replayFloor: 18},
-			{table: "bd_events_journal", replayFloor: 21},
-			{table: "bd_events_seq", replayFloor: 21},
-		},
 		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
 	}
 )
@@ -226,16 +221,22 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 			want: "thirdSource",
 		},
 		{
+			// The pinned beads (main) carries no floored tables; the v1.3.1
+			// release line's set re-appearing must fail the pin.
 			name: "an ADDED floored sentinel table",
 			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
-				`{table: "bd_events_seq", replayFloor: 21},`, `{table: "bd_events_seq", replayFloor: 21},
-			{table: "bd_events_cursor", replayFloor: 24},`, 1)},
+				`		sentinelColumns:`, `		sentinelFlooredTables: []schemaSentinelTable{{table: "events", replayFloor: 18}},
+		sentinelColumns:`, 1)},
 			want: "sentinelFlooredTables",
 		},
 		{
-			name: "a moved floored-table replay floor",
+			name: "several ADDED floored sentinel tables",
 			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
-				`{table: "events", replayFloor: 18},`, `{table: "events", replayFloor: 17},`, 1)},
+				`		sentinelColumns:`, `		sentinelFlooredTables: []schemaSentinelTable{
+			{table: "events", replayFloor: 18},
+			{table: "bd_events_journal", replayFloor: 21},
+		},
+		sentinelColumns:`, 1)},
 			want: "sentinelFlooredTables",
 		},
 		{

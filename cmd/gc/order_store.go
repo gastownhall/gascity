@@ -226,6 +226,12 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	// `gh` calls authenticate. Projected before the [order.env] loop below so an
 	// order can still scope its own GH_TOKEN; see projectGitHubTokenExecEnv.
 	projectGitHubTokenExecEnv(env)
+	// The city's env: beads credential sources, moved out of gc's own
+	// environment, so a gc the order runs resolves them; [order.env] below
+	// still overrides one.
+	for name, value := range cityCredentialEnv(cityPath, cfg) {
+		env[name] = value
+	}
 	// Order-supplied [order.env] entries take effect last so they can tune
 	// non-controller thresholds (e.g. raising GC_DOCTOR_LATENCY_WARN_S for a
 	// noisy city) without editing the order's shell scripts or the parent

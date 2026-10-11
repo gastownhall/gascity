@@ -30,6 +30,7 @@ import (
 // STATEMENTS as much as on the answer: a reader that concluded the right thing
 // from evidence it never gathered would pass an outcome-only test.
 func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
+	withReleaseLineFlooredSentinels(t)
 	const rawIgnored = 26
 
 	cases := []struct {
@@ -354,4 +355,19 @@ func TestServedProbeForTestIsNeverCalledInProduction(t *testing.T) {
 	if scanned < 100 {
 		t.Fatalf("scanned %d non-test Go files from %s; the walk is not seeing the module", scanned, root)
 	}
+}
+
+// withReleaseLineFlooredSentinels installs the beads v1.3.1 release line's
+// floored sentinel tables for one test. The pinned beads (main) carries none,
+// so the mirror is empty in production; the floored-table mechanism is still
+// exercised here so a pin back onto that line keeps a tested probe.
+func withReleaseLineFlooredSentinels(t *testing.T) {
+	t.Helper()
+	previous := ignoredSentinelFlooredTables
+	ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
+		{Table: "events", Floor: 18},
+		{Table: "bd_events_journal", Floor: 21},
+		{Table: "bd_events_seq", Floor: 21},
+	}
+	t.Cleanup(func() { ignoredSentinelFlooredTables = previous })
 }

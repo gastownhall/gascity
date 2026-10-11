@@ -142,8 +142,10 @@ func overBlockScope(t *testing.T, run *helpers.TopologyRun, rig string) []string
 		}
 	}
 	// The scope was last repaired under an older bd: the next start is the
-	// first one after a bd upgrade.
-	blockedRepairScopeBD(t, run, rig, "config", "set", blockedRepairMarkerKey, "1.3.0")
+	// first one after a bd upgrade. Any marker but the running bd's version
+	// makes the scope due, so the planted one must predate every bd this test
+	// runs: 1.0.0 is older than bd recompute-blocked, which the test requires.
+	blockedRepairScopeBD(t, run, rig, "config", "set", blockedRepairMarkerKey, "1.0.0")
 	return hidden
 }
 

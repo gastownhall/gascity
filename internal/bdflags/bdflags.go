@@ -44,7 +44,8 @@ var globalBoolFlags = map[string]bool{
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29).
+// Sourced from `bd <sub> --help` (bd built from beads c4e667cb14c3, the commit
+// go.mod pins, which reports 1.3.0; 2026-10-11).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -70,6 +71,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--session": true, "--set-labels": true, "--set-metadata": true,
 		"-s": true, "--status": true, "-t": true, "--type": true,
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
+		"-l": true, "--if-revision": true,
 		// The compare-and-set guards. Pinned as well as discovered: help
 		// discovery swallows its own errors, so a bd that is missing, renamed
 		// or slow leaves the pinned table as the only answer, and these two
@@ -78,12 +80,13 @@ var valueFlagsBySub = map[string]map[string]bool{
 	},
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
+		"--if-revision": true,
 	},
 	"reopen": {
-		"-r": true, "--reason": true,
+		"-r": true, "--reason": true, "--if-revision": true,
 	},
 	"delete": {
-		"--from-file": true,
+		"--from-file": true, "--if-revision": true,
 	},
 	"ready": {
 		"-a": true, "--assignee": true, "--exclude-label": true, "--exclude-type": true,
@@ -111,7 +114,7 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--wisp-type": true,
 	},
 	"show": {
-		"--as-of": true, "--id": true,
+		"--as-of": true, "--comments-tail": true, "--id": true,
 	},
 	"mol current": {
 		"--for": true, "--limit": true, "--range": true,
@@ -141,7 +144,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29). A flag whose
+// Sourced from `bd <sub> --help` (bd built from beads c4e667cb14c3, the commit
+// go.mod pins, which reports 1.3.0; 2026-10-11). A flag whose
 // help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
 // not in valueFlagsBySub: it never consumes the next argv token, so
 // `bd list --deps all` leaves "all" positional.
@@ -152,8 +156,8 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
-		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
-		"--force": true, "--history": true, "--no-history": true,
+		"--allow-empty-description": true, "--claim": true, "--clear-notes": true,
+		"--ephemeral": true, "--force": true, "--history": true, "--no-history": true,
 		"--persistent": true, "--stdin": true,
 	},
 	"close": {
@@ -165,13 +169,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
 	},
 	"ready": {
-		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
+		"--brief": true, "--claim": true, "--explain": true, "--flat": true, "--gated": true,
 		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
 		"--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
 		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
-		"--empty-description": true, "--flat": true,
+		"--empty-description": true, "--flat": true, "--include-comments": true,
 		"--include-ephemeral": true, "--include-gates": true, "--include-infra": true,
 		"--include-templates": true, "--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,

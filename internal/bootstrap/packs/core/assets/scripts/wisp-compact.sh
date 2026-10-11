@@ -23,8 +23,20 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CITY="${GC_CITY:-.}"
 
-# Get all ephemeral beads.
-ALL=$(gc bd list --json --all -n 0 2>/dev/null) || exit 0
+# Get all ephemeral beads. A failed list (an unreachable store, a credential
+# gc cannot resolve) fails the run with gc's own diagnostic; a successful one
+# keeps gc's stderr (config warnings) out of the summary.
+if ! LIST_ERR=$(mktemp); then
+    echo "wisp-compact: could not create the gc bd list stderr capture file" >&2
+    exit 1
+fi
+if ! ALL=$(gc bd list --json --all -n 0 2>"$LIST_ERR"); then
+    cat "$LIST_ERR" >&2 || true
+    rm -f "$LIST_ERR"
+    echo "wisp-compact: gc bd list failed" >&2
+    exit 1
+fi
+rm -f "$LIST_ERR"
 EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true)]' 2>/dev/null) || exit 0
 
 if [ -z "$EPHEMERALS" ] || [ "$EPHEMERALS" = "[]" ]; then

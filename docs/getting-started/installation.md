@@ -47,8 +47,8 @@ installs it, or download `bd` for your platform from the
 With bd v1.3.0 Gas City falls back from its native store to the bd CLI, and
 proxied `bd backup` and closed-wisp purge are skipped.
 
-Gas City 1.4.2 pairs the native store with Beads 1.3.0, and main pairs it with
-Beads 1.3.1, which keeps the same schema. When upgrading
+Gas City 1.4.2 pairs the native store with Beads 1.3.0, and Gas City 1.5 pairs
+it with Beads 1.3.1, which keeps the same schema. When upgrading
 an existing shared database from Beads 1.2.2, coordinate the upgrade of all
 clients using that database, then run `bd migrate schema` from the workspace
 (for a city, see [Migrate the Beads schema](/getting-started/upgrading#migrate-the-beads-schema)).
@@ -61,6 +61,30 @@ To install the exact release archive pinned by CI:
 ```bash
 set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"
 ```
+
+### bd for a remote Beads server
+
+Gas City main links an unreleased Beads, gastownhall/beads main at commit
+`c4e667cb14c3`, which uses schema 69. No Beads release ships the HTTP client
+that a scope on a remote `bd serve` (backend `http`, attached with
+`bd connect`) needs yet.
+
+| Your bd | Local databases | Remote scopes |
+|---|---|---|
+| v1.3.1 (schema 66) | Supported, through the bd CLI. The native store treats a schema-66 database as behind its own and falls back rather than migrate it, logging `native_store_unavailable gate=version_compat`. | Not supported: v1.3.1 has no HTTP client and no `bd connect`. |
+| Built from `c4e667cb14c3` or later (reports v1.3.0) | Supported, natively, at schema 69. This bd refuses a schema-66 database until you run `bd migrate schema`. | Supported. |
+
+To build that bd you need a C compiler, because a bd built with
+`CGO_ENABLED=0` refuses embedded-Dolt workspaces:
+
+```bash
+CGO_ENABLED=1 go install -tags gms_pure_go github.com/steveyegge/beads/cmd/bd@v1.3.1-0.20261010181156-c4e667cb14c3
+```
+
+Moving a database to schema 69 is one-way, whether `bd migrate schema` does it
+or `beads.allow_schema_behind_migrate` lets the native store do it: bd v1.3.1
+cannot open the result. On a database other clients share, move all of them
+to the new bd first.
 
 ## Homebrew (recommended)
 

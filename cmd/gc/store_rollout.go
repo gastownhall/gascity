@@ -85,12 +85,20 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 }
 
 // openControlBdStoreThroughFactory routes a control-plane bd store through
-// the beads factory so it carries the conditional-writes stamp. No
-// PreflightChecker is supplied, so the factory can never select the native
-// store for the control path (the zero checker fails preflight and the
-// factory takes the bd fallback — pinned by
-// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd); the store comes
-// back raw, matching the control path's deliberately unwrapped handles.
+// the beads factory so it carries the conditional-writes stamp. The factory
+// can never select the native store for the control path, on either route:
+//
+//   - a local scope: no PreflightChecker is supplied, the zero checker fails
+//     preflight and the factory takes the bd fallback (pinned by
+//     TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd);
+//   - a remote scope (metadata naming a registered remote backend): no
+//     NativeTransport is threaded, and an unset mode never requires native
+//     for a remote backend, so the factory takes the bd fallback before any
+//     probe or remote open (pinned by
+//     TestOpenControlBdStoreThroughFactoryRemoteScopeTakesBdStore).
+//
+// The store comes back raw, matching the control path's deliberately
+// unwrapped handles.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
 	flags, resolved := resolvedConditionalWritesFlags(cfg)
 	mode := gate.ModeUnset

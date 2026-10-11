@@ -29,10 +29,10 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 #                                  of the test process on loopback, so they
 #                                  run on remote workers without docker.
 ACCEPTANCE_ENV = {
-    "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
+    "GC_ACCEPTANCE_BD_BIN": "$(rootpath //tools/bd:bd)",
     "GC_ACCEPTANCE_TOPOLOGY_MATRIX": "1",
     "GC_REQUIRE_ACCEPTANCE_TOOLING": "1",
-    "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+    "GC_TEST_TOOL_PATHS": "$(rootpath //tools/bd:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
 }
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
@@ -205,9 +205,9 @@ go_test(
         "//examples/bd",
         "//:go.mod",
         "//examples:all_examples",
-        # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
-        # dolt, same versions the go-test CI installs.
-        "@bd_bin_v1_3_1//:bd",
+        # Hermetic bd and dolt: bd built from the beads commit gc links
+        # (tools/bd) and the pinned dolt release the go-test CI installs.
+        "//tools/bd",
         "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
     env = ACCEPTANCE_ENV,
@@ -257,9 +257,9 @@ exports_files(
 # override that does not resolve fails the test (helpers.RequireBD).
 #
 #   prev     deps.env BD_PREV_VERSION, the minimum-supported release
-#   current  deps.env BD_CURRENT_REF; that commit is the v1.3.1 tag, whose
-#            release binary is @bd_bin_v1_3_1 (scripts/bd_contract_pins_test.go
-#            pins the correspondence)
+#   current  deps.env BD_CURRENT_REF, the beads commit gc links: //tools/bd:bd
+#            builds bd from it (scripts/bd_contract_pins_test.go pins the
+#            correspondence)
 BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig)$$"
 
 go_variant_test(
@@ -279,10 +279,10 @@ go_variant_test(
     name = "bd_cli_contract_current_test",
     size = "large",
     args = [BD_CLI_CONTRACT_RUN],
-    data = ["@bd_bin_v1_3_1//:bd"],
+    data = ["//tools/bd"],
     env = {
-        "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)",
-        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd)",
+        "GC_ACCEPTANCE_BD_BIN": "$(rootpath //tools/bd:bd)",
+        "GC_TEST_TOOL_PATHS": "$(rootpath //tools/bd:bd)",
     },
     gotags = ["acceptance_bd_contract"],
     test = ":acceptance_test",

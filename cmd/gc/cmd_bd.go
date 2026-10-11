@@ -176,6 +176,13 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	// A scope with a per-scope remote credential gets it the way every BdStore
+	// bd child does: BEADS_HTTP_TOKEN=host:port=token in this child's env only,
+	// the ambient token command blanked. Without it gc bd (and the show-watch
+	// runner, which reuses this env) would fall back to the machine-wide ladder.
+	if err := newBdScopeCredentialEnv(cityPath).apply(overrides, target.ScopeRoot); err != nil {
+		return nil, err
+	}
 	applyExportSuppressionEnv(overrides)
 	// bd may invoke gc again through its provider/lifecycle hooks. Pin those
 	// recursive calls to this exact executable rather than inheriting an
@@ -796,9 +803,9 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	}
 
 	// The flag sets are the complete value-consuming and boolean (no-value)
-	// flags for this subcommand, in both long and short form, sourced from
-	// `bd <sub> --help` (bd 1.3.1, 2026-09-29). Unknown flags not in either set
-	// make the scan ambiguous.
+	// flags for this subcommand, in both long and short form: internal/bdflags'
+	// manifest, sourced from `bd <sub> --help` of the bd gc pins. Unknown flags
+	// not in either set make the scan ambiguous.
 	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
 	if ambiguous {
 		return nil, true, true

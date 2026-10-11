@@ -28,6 +28,9 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
+	if err := newBdScopeCredentialEnv(cityPath).apply(env, cityPath); err != nil {
+		return nil, err
+	}
 	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
 	if err != nil {
 		return nil, err
@@ -44,11 +47,16 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	if err != nil {
 		return nil, err
 	}
+	if err := newBdScopeCredentialEnv(cityPath).apply(env, rigDir); err != nil {
+		return nil, err
+	}
 	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(rigDir, runner), nil
+	// The city path lets the clone see a remote backend the rig inherits from
+	// its city, as bdStoreForRig's store does, and refuse the raw-SQL paths.
+	return beads.NewBdStore(rigDir, runner, beads.WithBdStoreCityPath(cityPath)), nil
 }
 
 func beadsCommandRunnerWithContextForHostedCity(ctx context.Context, cityPath string, env map[string]string) (beads.CommandRunner, error) {

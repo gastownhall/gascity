@@ -83,6 +83,10 @@ func FindModuleRoot() string {
 	}
 }
 
+// bazelBDRunfilesPath is where //tools/bd:bd, the bd built from the beads
+// commit gc links, sits in a Bazel test's runfiles.
+const bazelBDRunfilesPath = "_main/tools/bd/bd_/bd"
+
 // FindBD returns the path to the bd binary, or empty string if not found.
 //
 // GC_ACCEPTANCE_BD_BIN, when set, is the only candidate: a set override that
@@ -95,15 +99,15 @@ func FindBD() string {
 		}
 		return ""
 	}
-	// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
-	// (http_archive of the same release the go-test CI installs); prefer it
-	// over PATH so remote workers without a system bd run the bd shapes.
+	// Under bazel the pinned bd ships in runfiles as a data dep (//tools/bd:bd,
+	// built from the beads commit gc links); prefer it over PATH so remote
+	// workers without a system bd run the bd shapes.
 	if bazeltest.IsBazel() {
 		for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
 			if rf == "" {
 				continue
 			}
-			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_3_1", "bd"); statBinary(bin) {
+			if bin := filepath.Join(rf, filepath.FromSlash(bazelBDRunfilesPath)); statBinary(bin) {
 				return bin
 			}
 		}

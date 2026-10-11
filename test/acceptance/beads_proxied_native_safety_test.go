@@ -322,9 +322,17 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// opened in-process. So the control is a scratch scope whose metadata
 		// says plain dolt_mode "server" with no port (ResolveServerMode:
 		// owned), opened through the SAME production window, with the SAME
-		// endpoint map less the two gate keys, against the SAME dead port. The
-		// only differences from the row below are the two keys and the mode
-		// that makes the library server-backed without them.
+		// endpoint map less the two gate keys, against the SAME dead port.
+		//
+		// The port reaches the control through the scope's port file, not
+		// BEADS_DOLT_SERVER_PORT: the beads gc links reads an env-named port on
+		// a scope that is not proxied-server as a server an orchestrator manages
+		// (doltserver resolveServerMode check 2c: external), and an external
+		// scope never auto-starts. The port file is bd's own bookkeeping, next
+		// in the library's port precedence after the env, so the scope stays
+		// owned and the open still dials the dead port first. The differences
+		// from the row below are the two keys, the mode that makes the library
+		// server-backed without them, and that channel for the port.
 		sentinel.Reset()
 		sentinel.TrapThisProcess(t)
 
@@ -336,12 +344,16 @@ func TestProxiedNativeSafety(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(scratch, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(scratch, ".beads", "dolt-server.port"), []byte(productionEnv["BEADS_DOLT_SERVER_PORT"]+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		controlEnv := make(map[string]string, len(productionEnv))
 		for key, value := range productionEnv {
 			controlEnv[key] = value
 		}
 		delete(controlEnv, "BEADS_DOLT_SERVER_MODE")
 		delete(controlEnv, "BEADS_DOLT_AUTO_START")
+		delete(controlEnv, "BEADS_DOLT_SERVER_PORT")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

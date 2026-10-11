@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	beadsbackend "github.com/steveyegge/beads/backend"
 )
 
 func TestResolvedConditionalWritesMode(t *testing.T) {
@@ -615,6 +616,55 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	}
 	if writer == nil {
 		t.Fatal("require was not stamped onto the control-plane bd store")
+	}
+}
+
+// TestOpenControlBdStoreThroughFactoryRemoteScopeTakesBdStore pins the other
+// half of the control path's "never native" promise: a scope whose metadata
+// names a registered REMOTE backend. The control path threads no
+// native_transport value, and an unset mode must not inherit auto's native
+// requirement there, or convoy dispatch on a remote city would never get its
+// BdStore and native_transport = "off" could not reach it. The fake backend's
+// openers fail the test if anything dials it.
+func TestOpenControlBdStoreThroughFactoryRemoteScopeTakesBdStore(t *testing.T) {
+	const fakeRemote = "gcctlfakeremote"
+	open := func(context.Context, string) (beadsbackend.DoltStorage, error) {
+		t.Fatal("the control path dialed the remote backend")
+		return nil, errors.New("unreachable")
+	}
+	beadsbackend.Register(fakeRemote, beadsbackend.Backend{Open: open, OpenReadOnly: open, WorkspaceIsBeadsDir: true, Remote: true})
+	t.Cleanup(func() { beadsbackend.Deregister(fakeRemote) })
+
+	scope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(`{"backend":"`+fakeRemote+`","project_id":"p"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !beads.ScopeUsesRemoteBackend(scope) {
+		t.Fatal("fixture: the scope must classify as remote")
+	}
+	for _, native := range []string{"", "auto", "off"} {
+		t.Run("native_transport="+native, func(t *testing.T) {
+			toml := "[workspace]\nname = \"t\"\n"
+			if native != "" {
+				toml += "\n[beads]\nnative_transport = \"" + native + "\"\n"
+			}
+			cfg, err := config.Parse([]byte(toml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := beads.NewBdStore(scope, func(_, _ string, _ ...string) ([]byte, error) { return nil, nil })
+			store, err := openControlBdStoreThroughFactory(scope, scope, "bd", cfg,
+				func() (beads.Store, error) { return raw, nil })
+			if err != nil {
+				t.Fatalf("openControlBdStoreThroughFactory on a remote scope: %v (the control path must get BdStore)", err)
+			}
+			if store != beads.Store(raw) {
+				t.Fatalf("store = %T, want the raw control BdStore", store)
+			}
+		})
 	}
 }
 

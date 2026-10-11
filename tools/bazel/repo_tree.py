@@ -35,9 +35,9 @@ from __future__ import annotations
 import os
 import sys
 
-# tools/nogo is the only Bazel package tree under tools/; the rest of tools/
-# stays in root_extras.
-SOURCE_ROOTS = ("internal", "cmd", "pkg", "examples", "test", "scripts", "docs", "contrib", "tools/nogo")
+# tools/bd and tools/nogo are the only Bazel package trees under tools/; the
+# rest of tools/ stays in root_extras.
+SOURCE_ROOTS = ("internal", "cmd", "pkg", "examples", "test", "scripts", "docs", "contrib", "tools/bd", "tools/nogo")
 SKIP_TOPDIRS = {".claude", ".worktrees", ".git", "bazel-bin", "bazel-out",
                 "bazel-testlogs", "engdocs",
                 "third_party", "bin", ".gc", ".beads", "node_modules"}

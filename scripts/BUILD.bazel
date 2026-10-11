@@ -192,6 +192,7 @@ go_test(
         "//test/integration:BUILD.bazel",
         "//tools/bazel/rules:go_repository_tools.bzl",
         "//tools/bazel/rules:openapi_base_spec.bzl",
+        "//tools/bd:BUILD.bazel",
     ],
     shard_count = 6,
     deps = [

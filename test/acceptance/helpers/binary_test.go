@@ -103,6 +103,31 @@ func TestFindBDResolvesBazelRootpathOverride(t *testing.T) {
 	}
 }
 
+// Without an override, a Bazel test that declares //tools/bd:bd as data runs
+// that bd, not whichever one the worker has on PATH.
+func TestFindBDPrefersTheRunfilesBdUnderBazel(t *testing.T) {
+	srcdir := t.TempDir()
+	want := filepath.Join(srcdir, filepath.FromSlash(bazelBDRunfilesPath))
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "bd"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	t.Setenv("RUNFILES_DIR", "")
+	t.Setenv("TEST_SRCDIR", srcdir)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", "")
+
+	if got := FindBD(); got != want {
+		t.Fatalf("FindBD() = %q, want the runfiles bd %q", got, want)
+	}
+}
+
 func TestFindBDNeverFallsBackFromABrokenOverride(t *testing.T) {
 	pathDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(pathDir, "bd"), []byte("#!/bin/sh\n"), 0o755); err != nil {
