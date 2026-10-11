@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -123,6 +124,11 @@ type World struct {
 	// over: minted from the city work store, never the sessions store
 	// (NEW2-1). Effects reach them only as effectReads.
 	WorkLegs WorkLegs
+	// Phantoms are the rows that squat a configured name without being its
+	// canonical owner (SESS-080), each with the assignees its close keeps (the
+	// identity and its runtime name), which A21 reads. Resolving them writes
+	// diagnostics, which the pure decide may not (censusPhantoms).
+	Phantoms map[rowKey][]string
 	// fresh is one row's fresh runtime read, which the fresh accessors read
 	// in its pass's stead (withRuntime): set only inside an effect.
 	fresh *freshRow
@@ -168,6 +174,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
 	}
@@ -316,6 +323,7 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	}
 	if e.WorkStore != nil {
 		k1.WorkStore = e.WorkStore()
+		k1.WorkLegs = workLegsFromCensus(e.CityPath, env.Cfg, cityWorkLegOf(beads.WorkStore{Store: k1.WorkStore}), rigs)
 	}
 	return k1, nil
 }
@@ -549,6 +557,38 @@ func (m *gatherMemo) sleepPolicies(cfg *config.City, env *reconcileEnv, rows []c
 			m.sleep[k] = policy
 		}
 		out[row.Key.ID] = policy
+	}
+	return out
+}
+
+// censusPhantoms is c's SESS-080 phantoms under cfg (World.Phantoms).
+func censusPhantoms(c *sessionCensus, cfg *config.City, cityName string) map[rowKey][]string {
+	out := map[rowKey][]string{}
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return out
+	}
+	// names are the configured names' runtime names, built once: only a row
+	// under one can be a phantom, so the predicate runs on those alone.
+	names := map[string]bool{}
+	city := cmp.Or(strings.TrimSpace(cityName), config.EffectiveCityName(cfg, ""))
+	for i := range cfg.NamedSessions {
+		if identity := cfg.NamedSessions[i].QualifiedName(); identity != "" {
+			names[config.NamedSessionRuntimeName(city, cfg.Workspace, identity)] = true
+		}
+	}
+	for k, row := range c.Rows {
+		if !names[strings.TrimSpace(row.Info.SessionNameMetadata)] {
+			continue
+		}
+		identity, ok := recyclableDeadConfiguredNamePhantomInfo(row.Info, cfg, cityName)
+		if !ok {
+			continue
+		}
+		keep := []string{identity}
+		if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
+			keep = append(keep, rn)
+		}
+		out[k] = keep
 	}
 	return out
 }

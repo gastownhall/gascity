@@ -1048,9 +1048,11 @@ func idleTimeline() []timelineFixture {
 			{Name: "idle past sleep_after_idle", Advance: 6 * time.Minute},
 		}, tlPol("gc-1"), map[string]map[string]string{"seed": tlAliasSync()})
 	// retired is legacy's drain of gc-1, acknowledged and stopped, and the
-	// pool slot's close; v2 leaves the drain to A20 and the close to A21.
+	// pool slot's close that follows it; v2's stop verb (A4) is not built,
+	// so its runtime stays up and A21 has nothing to close.
 	retired := map[string]string{
-		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*close": "A21 close", "row:gc-1:*sync": "C7d-2 row-metadata",
+		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*sync": "C7d-2 row-metadata",
+		"row:gc-1:status": "A4 drain-stop", "row:gc-1:state": "A4 drain-stop", "row:gc-1:close_reason": "A4 drain-stop", "row:gc-1:closed_at": "A4 drain-stop",
 	}
 	retiring := map[string]string{
 		"provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop", "provider:Stop s-gc-1": "A4 drain-stop",
@@ -1234,7 +1236,7 @@ func operatorTimeline() []timelineFixture {
 		if blocked {
 			name = "kill a seat holding a dep-blocked claim"
 			work = append(work, parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}})
-			graced = map[string]string{"row:gc-1:*close": "A21 killed-seat", "row:gc-1:*sync": "C7d-2 row-metadata", "work:gw-1:assignee": "A21 killed-seat"}
+			graced = nil                      // legacy and v2 both close the killed seat (A21, B1)
 			seed, killed = tlAliasSync(), nil // A7 writes in the first pass, the runtime sync a pass later
 		}
 		f := tlFixture(name, tlCity, []parityRow{tlRow("gc-1", 1, time.Hour)}, work, []simRuntime{tlLive("gc-1")},
@@ -1242,7 +1244,9 @@ func operatorTimeline() []timelineFixture {
 				tlRestlessSeed,
 				{Name: "kill", Op: func(tw twin) {
 					tw.patch("gc-1", session.KillPendingPatch(tw.now))
+					tw.sp.external = true // the operator's kill, not v2's
 					_ = tw.sp.Stop("s-gc-1")
+					tw.sp.external = false
 				}},
 				{Name: "past the kill grace", Advance: session.KillPendingGrace + time.Minute},
 			}, tlPol("gc-1"), map[string]map[string]string{"seed": seed, "kill": killed, "past the kill grace": graced})
@@ -1294,7 +1298,7 @@ func operatorTimeline() []timelineFixture {
 	// wait_hold. When the wait's dependency closes, legacy wakes it through
 	// the idle latch: the wait's own intent is no explicit sleep intent
 	// (explicitSleepIntentInfo), so its claim is not stranded.
-	waitDrained := tlMerged(tlIdent(), drainedRow, map[string]string{"runtime:s-gc-1": "A4 drain-stop", "row:gc-1:state": "A4 drain-stop", "row:gc-1:*stranded": "A21 stranded", "row:gc-1:detached_at": "A4 wait-sleep"})
+	waitDrained := tlMerged(tlIdent(), drainedRow, map[string]string{"runtime:s-gc-1": "A4 drain-stop", "row:gc-1:state": "A4 drain-stop", "row:gc-1:*stranded": "A4 wait-sleep", "row:gc-1:detached_at": "A4 wait-sleep"})
 	napping := func() *config.City {
 		cfg := tlCity()
 		cfg.Agents[0].SleepAfterIdle = "5m"
@@ -1333,7 +1337,7 @@ func operatorTimeline() []timelineFixture {
 				"provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop", "provider:Stop s-gc-1": "A4 drain-stop",
 				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "A4 drain-stop",
 				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "A4 drain-stop",
-				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "A21 stranded",
+				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "A4 wait-sleep",
 			}),
 			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
 				"row:gc-1:*waitsleep": "A4 wait-sleep", "runtime:s-gc-1": "A4 wait-sleep", "provider:Start s-gc-1": "A4 wait-sleep", "provider:RemoveMeta s-gc-1": "A4 wait-sleep",

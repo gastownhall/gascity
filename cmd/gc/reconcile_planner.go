@@ -124,6 +124,7 @@ type planner struct {
 	effects     *effectExecutor          // submits what admission lets through; nil while trace-only
 	creates     *createEffects           // runs create effects on effects; nil defers creates (no-effect)
 	rec         events.Recorder          // settlements' events; nil records none
+	stranded    *strandedClaimAlerts     // the controller's session.stranded_claims alerter
 	stderr      io.Writer
 	metrics     *passMetrics
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none

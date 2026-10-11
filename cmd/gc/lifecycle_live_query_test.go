@@ -249,7 +249,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testin
 	}
 
 	unclaimWorkAssignedToRetiredSessionBead(
-		testWorkLegs("", nil, store, nil), store,
+		testWorkLegs("", servingCity("worker"), store, nil), store,
 		beads.Bead{ID: "retired-session"},
 		"worker",
 		io.Discard,

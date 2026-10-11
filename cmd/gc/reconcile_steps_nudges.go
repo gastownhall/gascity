@@ -124,9 +124,10 @@ func (l *externalReadsLane) orphanRelease(_ context.Context, env externalReadsEn
 	}
 	wake, wakeRefs := filterAssignedWorkBeadsForSessionWake(env.Cfg, env.CityPath, work, s.OpenSessions, s.AssignedWork, s.AssignedStoreRefs)
 	snapshot := DesiredStateResult{AssignedWorkBeads: s.AssignedWork, AssignedWorkStores: s.AssignedStores, AssignedWorkStoreRefs: s.AssignedStoreRefs, StoreQueryPartial: s.Partial}
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(work, beads.SessionStore{Store: env.CityStore}, env.Cfg, env.CityPath, s.OpenSessions, snapshot, env.RigStores, protectedWakeWorkKeys(wake, wakeRefs), nil)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(work, beads.SessionStore{Store: env.CityStore}, env.Cfg, env.CityPath, s.OpenSessions, snapshot, env.RigStores, protectedWakeWorkKeys(wake, wakeRefs), nil, &l.deadAssigneeKeeps)
 	for _, r := range released {
 		fmt.Fprintf(l.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck // best-effort stderr
 	}
 	emitDeadAssigneeReopenedEvents(l.events, s.AssignedWork, released, l.now())
+	detectStrandedClaims(env.WorkLegs, env.CityStore, s.OpenSessions, l.stranded, l.now())
 }

@@ -2778,6 +2778,9 @@
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionStrandedClaimsPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionStrandedPayload"
           },
           {
@@ -8283,6 +8286,43 @@
         ],
         "type": "object"
       },
+      "SessionStrandedClaimsPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "claims": {
+            "description": "The stranded claims, sorted by bead ID.",
+            "items": {
+              "$ref": "#/components/schemas/StrandedClaim"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close).",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID of the closed or retired seat holding the claims.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name from the session bead metadata, when set.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Template of the seat, when set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "kind",
+          "claims"
+        ],
+        "type": "object"
+      },
       "SessionStrandedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -12446,6 +12486,28 @@
         ],
         "type": "object"
       },
+      "StrandedClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "The claim's work bead ID.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why it was kept: unserved-route.",
+            "type": "string"
+          },
+          "route": {
+            "description": "The route the claim would be released into, when it has one: no configured agent serves it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "reason"
+        ],
+        "type": "object"
+      },
       "SubmissionCapabilities": {
         "additionalProperties": false,
         "properties": {
@@ -12919,6 +12981,7 @@
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedEventStreamEnvelopeSessionStranded",
+            "session.stranded_claims": "#/components/schemas/TypedEventStreamEnvelopeSessionStrandedClaims",
             "session.suspended": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.unknown_state": "#/components/schemas/TypedEventStreamEnvelopeSessionUnknownState",
@@ -13196,6 +13259,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStranded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionStrandedClaims"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended"
@@ -14625,6 +14691,7 @@
                 "session.drain_stop_escalated",
                 "session.stranded",
                 "session.pool_slot_retired_at_drain_deadline",
+                "session.stranded_claims",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -18267,6 +18334,63 @@
         "title": "TypedEventStreamEnvelope session.stranded",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionStrandedClaims": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStrandedClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.stranded_claims",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.stranded_claims",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionSuspended": {
         "additionalProperties": false,
         "properties": {
@@ -19439,6 +19563,7 @@
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.stranded": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStranded",
+            "session.stranded_claims": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStrandedClaims",
             "session.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.unknown_state": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUnknownState",
@@ -19716,6 +19841,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStranded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStrandedClaims"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended"
@@ -21240,6 +21368,7 @@
                 "session.drain_stop_escalated",
                 "session.stranded",
                 "session.pool_slot_retired_at_drain_deadline",
+                "session.stranded_claims",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -25129,6 +25258,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.stranded",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionStrandedClaims": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionStrandedClaimsPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.stranded_claims",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.stranded_claims",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionSuspended": {

@@ -141,12 +141,19 @@ func TestSimR14PartialListingConcludesNoAbsence(t *testing.T) {
 }
 
 // Scenario R17 (INC-006; I10): an event replayed many times, and rescans,
-// mark the planner dirty and write nothing: no write loop.
+// mark the planner dirty and write nothing: no write loop. The city first
+// settles: the heal lands, then the freed slot's close (A21).
 func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 	s := scripted(t, nil, heldRow())
 	s.inventory()
 	s.pass()
 	s.release(0)
+	for range 3 {
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+	}
 	s.audit("v2")
 	ev := s.operator("gc-1", "held_until", s.rel(time.Hour))
 	for range 5 {
@@ -185,6 +192,9 @@ func TestSimR34R35ServerGone(t *testing.T) {
 			gone := s.liveness("gc-1") == livenessGone
 			if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
 				t.Errorf("cold boot %t, confirmed dead %t: gc-1 gone %t, boot inventory complete %t", coldBoot, confirmed, gone, s.p.boot.InventoryComplete)
+			}
+			for len(s.parked) > 0 { // a confirmed-gone row's close (A21) runs out
+				s.release(0)
 			}
 			s.audit("v2")
 			s.noViolations(t)
@@ -657,4 +667,31 @@ func TestSimR43IdentityBeforeRebaseline(t *testing.T) {
 		t.Errorf("kills %v starts %v state %q, want the seat left running", s.sp.kills, s.sp.starts, m["state"])
 	}
 	s.noViolations(t)
+}
+
+// Kills a rollback that stops a foreign occupant outside C8.2(a), and an I4
+// that flags the stop C8.2(a) admits (the C5a2 review): a pending create
+// whose bead-scoped name another row's runtime holds is rolled back, the
+// occupant stopped by name, with no violation; the same occupant under a
+// configured named row's name is never stopped.
+func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
+	run := func(t *testing.T, row beads.Bead) *sim {
+		t.Helper()
+		s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+			s.sp.put(row.Metadata["session_name"], "gc-other", "1", "tok-other")
+			return []beads.Bead{row}, nil
+		}})
+		s.lag = false
+		for range 3 {
+			s.advance(simPatrol)
+			s.settle()
+		}
+		s.noViolations(t)
+		return s
+	}
+	started := plannerT0.Add(-time.Minute).Format(time.RFC3339)
+	s := run(t, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", started))
+	if b, _ := s.legs[0].backing.Get("gc-1"); b.Status != "closed" || len(s.sp.kills) != 1 {
+		t.Fatalf("bead-scoped: row %s kills %+v, want rolled back with the occupant stopped", b.Status, s.sp.kills)
+	}
 }

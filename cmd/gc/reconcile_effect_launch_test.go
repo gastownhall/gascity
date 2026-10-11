@@ -274,7 +274,7 @@ func TestLaunchDeadlines(t *testing.T) {
 	k, leaf := launchKit(t, "asleep")
 	clk := k.p.Clock.(*fakePlannerClock)
 	leaf.onStart = func(ctx context.Context) {
-		clk.Advance(70*time.Second - startDeadlineSlack)
+		clk.Advance(70*time.Second - startDeadlineSlack - startFailureSlack)
 		select {
 		case <-ctx.Done():
 			if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
@@ -917,13 +917,14 @@ func TestStaleKeyResetRotatesTheContinuation(t *testing.T) {
 	if env := leaf.cfgs[0].Env["GC_CONTINUATION_EPOCH"]; env != "6" || k.meta("continuation_epoch") != "6" || k.meta("continuation_reset_pending") != "" {
 		t.Fatalf("runtime epoch %q, row epoch %q, reset pending %q; want 6, 6 and cleared", env, k.meta("continuation_epoch"), k.meta("continuation_reset_pending"))
 	}
-	// A failed launch leaves the PreWake's write alone: rotated and cleared,
-	// with no commit to clear the mark for it.
+	// A failed launch is S3's any-other class (#7570): the PreWake's
+	// rotation is restored, and the wake failure resets the conversation
+	// again (legacy's restorePreWakeState, then recordWakeFailure).
 	failed, _ := launchKit(t, "asleep", "session_key", "stale", "continuation_epoch", "5", "started_config_hash", "h0")
 	failed.p.World.Templates = k.p.World.Templates
 	failed.sp.nextStart = errors.New("boom")
-	if s := failed.runKind(); s.Cause != causeStartError || failed.meta("continuation_epoch") != "6" || failed.meta("continuation_reset_pending") != "" {
-		t.Fatalf("a failed launch: settlement %+v, row epoch %q, reset pending %q; want start-error, 6 and cleared", s, failed.meta("continuation_epoch"), failed.meta("continuation_reset_pending"))
+	if s := failed.runKind(); s.Cause != causeStartError || failed.meta("continuation_epoch") != "5" || failed.meta("continuation_reset_pending") != "true" || failed.meta("wake_attempts") != "1" {
+		t.Fatalf("a failed launch: settlement %+v, row epoch %q, reset pending %q, attempts %q; want start-error, 5, reset again, 1", s, failed.meta("continuation_epoch"), failed.meta("continuation_reset_pending"), failed.meta("wake_attempts"))
 	}
 }
 

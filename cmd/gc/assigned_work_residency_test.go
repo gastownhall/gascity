@@ -205,14 +205,14 @@ func TestRetiredSessionSweepReleasesABindingResidentClaim(t *testing.T) {
 	binding := beads.NewMemStore()
 	seedSplitRoutes(t, cityPath, binding)
 	work := beads.NewMemStore()
-	cfg := residencyTestConfig()
+	cfg := servingRigsCity(residencyTestConfig(), "worker")
 
 	sessionBead := beads.Bead{ID: "gcs-dead-1", Metadata: map[string]string{"session_name": "worker-1"}}
 	step, err := binding.Create(beads.Bead{
 		ID:       "gcg-step-1",
 		Title:    "graph step claimed by a session that then died",
 		Type:     "task",
-		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "worker"}, Assignee: sessionBead.ID,
 	})
 	if err != nil {
 		t.Fatalf("seed the binding-resident claim: %v", err)
@@ -294,7 +294,7 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
 	released := releaseOrphanedPoolAssignments(
 		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
-		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil,
+		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — a LIVE holder's claim was taken back on a leg the release path now reads; that is claim loss, not a strand", released)

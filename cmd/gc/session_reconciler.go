@@ -2417,7 +2417,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// false verdict — cancel it rather than stopping the worker.
 						if providerAlive && !hasAssignedWork && orphanedDrainInFlightInfo(infoPostHeal, sp, dt, name) &&
 							liveClaimVetoApplies(cityPath, cfg, infoPostHeal, suspState) {
-							if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, infoPostHeal, dt, name, "orphaned", stdout, stderr); vetoed &&
+							if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, infoPostHeal, dt, name, "orphaned", stdout, stderr); vetoed &&
 								cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name) {
 								_ = dops.clearDrain(name)
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
@@ -2556,7 +2556,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// began). Config removal and suspension are not vetoed
 					// (liveClaimVetoApplies).
 					if reason == "orphaned" && liveClaimVetoApplies(cityPath, cfg, infoPostHeal, suspState) {
-						if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, infoPostHeal, dt, name, reason, stdout, stderr); vetoed {
+						if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, infoPostHeal, dt, name, reason, stdout, stderr); vetoed {
 							drainCanceled := cancelOrphanedDrainForLiveClaimInfo(infoPostHeal, sp, dt, name)
 							if trace != nil {
 								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
@@ -2726,9 +2726,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						//
 						// Restricted to "orphaned": a "suspended" seat is configured and
 						// merely scaled down, so its work stays put for its return.
-						if released := releaseConfirmedOrphanSessionWork(cfg, censusWorkLeg(cityPath, store), rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
+						if released := releaseConfirmedOrphanSessionWork(cfg, sw.Legs().workStore(), sw.Legs().rigs, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
-							closed = closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						}
+						closed = closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						// What the release kept for want of a lane does not keep the
+						// seat (O5, revised): its agent is gone, the claims stay on the
+						// closed row, and the cascade alerts. A claim a lane serves (one
+						// moved, or detached and alive) still blocks.
+						if !closed && onlyStrandedWork(sw, infoByID[id]) {
+							closed = closeBead(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr)
 						}
 					}
 					if closed {
@@ -3006,7 +3013,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// cannot see still cancels the drain.
 						if alive && !hasAssignedWork && liveClaimDrainReasonCancelable(ackReason) &&
 							liveClaimVetoApplies(cityPath, cfg, infoByID[id], suspState) {
-							hasAssignedWork, _ = liveClaimVeto(cityPath, cfg, store, rigStores, infoByID[id], dt, name, ackReason, stdout, stderr)
+							hasAssignedWork, _ = liveClaimVeto(cityPath, cfg, store, sw, infoByID[id], dt, name, ackReason, stdout, stderr)
 						}
 						if alive && hasAssignedWork &&
 							(cancelSessionDrainForAssignedWorkInfo(infoByID[id], sp, dt) || cancelRecoveredDrainForAssignedWorkInfo(infoByID[id], sp, name)) {
@@ -4662,7 +4669,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				(intent == "" || intent == "idle-stop-pending") &&
 				dt.get(target.info.ID) == nil &&
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
-				if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, rigStores, info, dt, name, reason, stdout, stderr); vetoed {
+				if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, info, dt, name, reason, stdout, stderr); vetoed {
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen, target.tp.TemplateName, name, traceRecordPayload{
 							"sleep_intent": intent,
@@ -4728,7 +4735,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		hasAssignedWork := false
 		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeableInfo(info, clk.Now()) && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info)
 		killedSeat := poolFreeable && strings.TrimSpace(info.SleepReason) == string(sessionpkg.SleepReasonKilled)
-		if killedSeat && killedSeatSnapshotHasReleasableClaim(cfg, assignedWorkBeads, info) {
+		if killedSeat && killedSeatSnapshotHasRoutedClaim(cfg, assignedWorkBeads, info) {
 			releaseUnexecutedClaimsOnKill(sw, store, clk.Now(), info, stderr)
 		}
 		if poolFreeable {
@@ -4767,7 +4774,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// unclaimWorkAssignedToRetiredSessionInfo, the Info form of the same detach primitive
 			// named-session retirement uses.
 			if !storeQueryPartial &&
-				repairStrandedPoolWorkerBead(sw, store, infoByID[target.info.ID], retiredSessionFallbackRouteInfo(infoByID[target.info.ID]), clk, stderr) {
+				repairStrandedPoolWorkerBead(sw, store, infoByID[target.info.ID], clk, stderr) {
 				tick.markClosed(target.info.ID)
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}

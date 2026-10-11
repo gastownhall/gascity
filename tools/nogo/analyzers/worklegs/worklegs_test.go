@@ -43,6 +43,14 @@ type RefuseScope struct{ ids []string }
 
 func (s ReleaseScope) scopeIDs() []string { return s.ids }
 func (s RefuseScope) scopeIDs() []string  { return s.ids }
+
+type assignment struct{}
+
+func (assignment) Release(id string) error { return releaseRaw(id) }
+
+func releaseRaw(string) error { return nil }
+
+func releaseListed(a assignment, id string) error { return a.Release(id) }
 `
 
 const callers = `package p
@@ -79,6 +87,14 @@ type wide struct{ RefuseScope } // I1
 
 func shadowed() { type RefuseScope struct{ ReleaseScope } } // I3
 
+func releaseHere(a assignment) error { return a.Release("x") } // R1
+
+func releaseByValue(a assignment) error { f := a.Release; return f("x") } // R2
+
+func releaseByExpr() error { return assignment.Release(assignment{}, "x") } // R3
+
+func releaseRawHere() error { return releaseRaw("x") } // R4
+
 type fakeLegs struct {
 	work  beads.Store
 	n     int
@@ -110,6 +126,10 @@ var cfg = worklegs.Config{
 	Mints: map[string]map[string]string{
 		"cityWorkLegOf":      {"runtime.legs": "the runtime's work store", "gone": "a stale entry"},
 		"workLegsFromCensus": {"runtime.legs": "over its cityWorkLegOf"},
+	},
+	Releases: map[string]map[string]string{
+		"assignment.Release": {"releaseListed": "the verb's body", "stale": "a stale entry"},
+		"releaseRaw":         {"assignment.Release": "the primitive's own layering"},
 	},
 	Scope:        "workScope",
 	ScopeImpls:   []string{"ReleaseScope", "RefuseScope"},
@@ -143,11 +163,16 @@ func TestWorkLegsLint(t *testing.T) {
 		"N1": "WorkLegs.inner set outside location.go",
 		"N2": "WorkLegs.inner set outside location.go",
 		"R5": "WorkLegs.work read outside location.go",
-		"":   "reviewed mint site gone (cityWorkLegOf) mints nothing",
+		"":   "reviewed mint site gone (cityWorkLegOf) names nothing",
+		"R1": "assignment.Release referenced in releaseHere, which is not a reviewed release site",
+		"R2": "assignment.Release referenced in releaseByValue, which is not a reviewed release site",
+		"R3": "assignment.Release referenced in releaseByExpr, which is not a reviewed release site",
+		"R4": "releaseRaw referenced in releaseRawHere, which is not a reviewed release site",
+		"S":  "reviewed release site stale (assignment.Release) names nothing",
 	}
 	for marker, msg := range want {
 		prefix := "callers.go:" + fmt.Sprint(markerLine(marker)) + " "
-		if marker == "" {
+		if marker == "" || marker == "S" {
 			prefix = ""
 		}
 		if !contains(got, prefix, msg) {

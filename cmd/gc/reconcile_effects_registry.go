@@ -48,13 +48,16 @@ type effectReads struct {
 
 // heldCaps are a pass's capabilities. create is what the pass hands its
 // creates, raw stores included: a create's guarded row write is v5 R1's
-// exception 1 (§13). creates runs them. The planner sets both, the first on
-// its first admitted create (planner.submit).
+// exception 1 (§13). creates runs them. release is the closes' raw work
+// legs, for their releases and cascades. The planner sets them, create on
+// its first admitted create and release on its first close (planner.submit).
 type heldCaps struct {
 	create  *createPass
 	creates *createEffects
 	start   startCaps           // the breaker and its recorder; capsFor adds the provider and clock
 	episode startupHealthRecord // over the sessions store
+	retire  retiredCleanup      // over the sessions store
+	release *closeReleases
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -69,6 +72,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	if w.SessionsStore != nil {
 		p.reads.city = readOnlyStore{blindWriteRefusingStore{inner: w.SessionsStore}}
 		p.held.episode = startupHealthRecord{store: w.SessionsStore}
+		p.held.retire = retiredCleanup{store: w.SessionsStore}
 	}
 	p.reads.rigs = make(map[string]beads.Store, len(w.RigStores))
 	for rig, store := range w.RigStores {
@@ -92,7 +96,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 // (v2purity reaches a function stored in a field only through a read of
 // that field):
 var effectSpecs = map[string]effectSpec{
-	intentStart:           {class: capStarts, tokens: 1, needs: needs{Runtime: true, Lease: true}, caps: capReadStores | capProviderStart | capEpisode, sections: startSections},
+	intentStart:           {class: capStarts, tokens: 1, needs: needs{Runtime: true, Lease: true}, caps: capReadStores | capProviderStart | capEpisode | capRetire, sections: startSections, around: retireAround},
 	intentAdopt:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capReadStores, sections: adoptSections},
 	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                 // C1, C2
 	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections}, // A3: writes the incarnation under the row's lease record
@@ -104,11 +108,11 @@ var effectSpecs = map[string]effectSpec{
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentClose:           {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                    // A7 (C7d): a row write, lease-free
-	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections}, // A7 (C7d)
-	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                     // A8 (C7c)
-	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                     // A6
-	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                              // A6
+	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround}, // A21 (C5c1)
+	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},          // A10 (C3)
+	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                                                                            // A7 (C7d): a row write, lease-free
+	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections},                                                         // A7 (C7d)
+	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                                             // A8 (C7c)
+	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                                             // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                                      // A6
 }
