@@ -128,6 +128,12 @@ type planner struct {
 	metrics     *passMetrics
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
 
+	// observations is the cache a fresh read's Noted fact is written to; nil
+	// notes none. capacity is the endpoint breaker a start admits its ticket
+	// on; nil admits without one.
+	observations func() *ObservationCache
+	capacity     func() *endpointCapacityGuard
+
 	inflight plannerInflight
 	backoff  *backoffTable
 	bucket   bucketState
@@ -339,6 +345,15 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	default:
 		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
 	}
+	if n := f.Noted; n != nil && p.observations != nil {
+		if cache := p.observations(); cache != nil {
+			// Listed, running and the agent alive, at the read's issue time,
+			// so a later inventory pass overrides it either way (v5 O4).
+			for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
+				cache.Note(n.Name, kind, ObsYes, n.At, SourceProbe, "")
+			}
+		}
+	}
 }
 
 // recordDrainTransition is legacy's drain telemetry; a test reads it.
@@ -360,7 +375,8 @@ func (p *planner) record(ev events.Event) {
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
 // resets its record; a refusal, failure or ambiguous outcome (an abandoned
-// write) backs it off with its cause, except a swap pause.
+// write) backs it off with its cause, except a swap pause and an endpoint-gate
+// refusal, deferrals the gate itself paces.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
@@ -370,7 +386,7 @@ func (p *planner) backoffSettled(s settlement) {
 	case key == "":
 	case s.Outcome == settledLanded || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause:
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

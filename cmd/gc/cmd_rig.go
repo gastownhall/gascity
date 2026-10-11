@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -1036,19 +1034,14 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	err = suspensionstate.Update(fs, cityPath, func(st *suspensionstate.State) error {
-		if !suspendRigInState(st, rigName) {
-			return errSuspensionStateNoOp
-		}
-		return nil
-	})
-	if errors.Is(err, errSuspensionStateNoOp) {
+	changed, err := updateRigSuspension(fs, cityPath, rigName, suspendRigInState)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig suspend: updating state: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !changed {
 		fmt.Fprintf(stdout, "Rig '%s' is already suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 	for _, r := range cfg.Rigs {
 		if r.Name == rigName {
@@ -1158,19 +1151,14 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	err = suspensionstate.Update(fs, cityPath, func(st *suspensionstate.State) error {
-		if !resumeRigInState(st, rigName) {
-			return errSuspensionStateNoOp
-		}
-		return nil
-	})
-	if errors.Is(err, errSuspensionStateNoOp) {
+	changed, err := updateRigSuspension(fs, cityPath, rigName, resumeRigInState)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig resume: updating state: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !changed {
 		fmt.Fprintf(stdout, "Rig '%s' is not suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 
 	fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout

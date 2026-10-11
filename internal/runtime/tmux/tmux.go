@@ -2545,11 +2545,12 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 }
 
 // Staged-draft recovery bounds. The confirm window above totals ~2.4s, and a
-// codex TUI under load can take longer than that to ingest a large pasted
-// prompt (an ~11KB startup nudge). Every submit in the window then lands inside
-// the ingest and is swallowed, and the paste stays staged in the composer as
-// "[Pasted Content N chars]" with the seat idle and its claim held. Recovery
-// re-sends at a slower pace while that draft is visible, up to this bound.
+// staged-draft TUI (codex, Claude) under load can take longer than that to
+// ingest a large pasted prompt, such as codex's ~11KB startup nudge. Every
+// submit in the window then lands inside the ingest and is swallowed, and the
+// paste stays staged in the composer as its placeholder (stagedDraftMarkers)
+// with the seat idle and its claim held. Recovery re-sends at a slower pace
+// while that draft is visible, up to this bound.
 const (
 	submitDraftRecoverySends   = 8
 	submitDraftRecoveryBackoff = time.Second
@@ -2565,12 +2566,15 @@ type stagedDraftMarker struct {
 }
 
 // stagedDraftMarkers lists the families whose staged-paste placeholder is
-// known. codex collapses a large paste into "[Pasted Content N chars]" until
-// it is submitted. A family without an entry never gets recovery submits.
-// Every entry must also be submit-verify eligible: recovery runs only on the
-// verified submit path.
+// known. codex collapses a large paste into "[Pasted Content N chars]" and
+// Claude into "[Pasted text #N +M lines]" until it is submitted. A family
+// without an entry never gets recovery submits. Every entry must also be
+// submit-verify eligible: recovery runs only on the verified submit path.
+// paneShowsDrainedComposer reads every entry too: a composer that still shows
+// a placeholder has not drained.
 var stagedDraftMarkers = map[string]stagedDraftMarker{
-	"codex": {promptPrefix: "› ", marker: "[Pasted Content "},
+	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
+	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
 }
 
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
@@ -4511,15 +4515,38 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 	return fmt.Errorf("timeout waiting for runtime prompt")
 }
 
+// PromptObservationLines is how many trailing pane lines prompt and idle
+// detection capture. Claude's welcome/idle UI can leave several blank rows
+// below the prompt, so capturing only the last handful of lines misses the
+// ready indicator. Runtimes that apply [PaneShowsIdlePrompt] to a pane they
+// capture themselves should capture this many lines.
+const PromptObservationLines = 120
+
+// ReadyPromptEnvKey is the tmux session environment variable that carries the
+// session's ready-prompt prefix. Runtimes that observe a tmux pane themselves
+// publish and read the prefix under this key, so idle detection scans for the
+// agent's own prompt.
+const ReadyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
+
+// IdlePollInterval is the pause between two pane observations in idle
+// detection.
+const IdlePollInterval = 200 * time.Millisecond
+
+// IdleRequiredObservations is how many consecutive idle pane observations idle
+// detection needs: a single observation can land in the gap between two tool
+// calls, when the prompt is visible but the agent is still working.
+const IdleRequiredObservations = 2
+
 // DefaultReadyPromptPrefix is the Claude Code prompt prefix used for idle detection.
 // Claude Code uses ❯ (U+276F) as the prompt character.
 const (
 	DefaultReadyPromptPrefix = "❯ "
-	sessionReadyPromptEnvKey = "GC_READY_PROMPT_PREFIX"
-	// promptObservationLines widens prompt detection beyond the pane footer.
-	// Claude's welcome/idle UI can leave several blank rows below the prompt,
-	// so capturing only the last handful of lines misses the ready indicator.
-	promptObservationLines = 120
+	// sessionReadyPromptEnvKey is the in-package name for ReadyPromptEnvKey,
+	// kept so existing call sites stay unchanged.
+	sessionReadyPromptEnvKey = ReadyPromptEnvKey
+	// promptObservationLines is the in-package name for
+	// PromptObservationLines, kept so existing call sites stay unchanged.
+	promptObservationLines = PromptObservationLines
 	// codexInterruptBoundaryTailBytes is the transcript tail window scanned for
 	// Codex's durable interrupt acknowledgement marker.
 	codexInterruptBoundaryTailBytes = 16 * 1024
@@ -4560,18 +4587,30 @@ func (t *Tmux) resolveIdlePromptPrefix(session string) string {
 // can distinguish a session that has gone away (ErrSessionNotFound /
 // ErrNoServer) from a transient read failure.
 func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
-	prefix := strings.TrimSpace(promptPrefix)
-
 	lines, err := t.CapturePaneLines(session, promptObservationLines)
 	if err != nil {
 		return false, err
 	}
+	return PaneShowsIdlePrompt(lines, promptPrefix), nil
+}
+
+// PaneShowsIdlePrompt is the pure scan behind tmux idle detection: it reports
+// whether captured pane lines show promptPrefix with no active-processing
+// indicator. It does not substitute a default for a blank promptPrefix;
+// callers resolve the prefix first (DefaultReadyPromptPrefix when the session
+// configures none).
+//
+// Runtimes that run the agent in a tmux session inside a remote box capture
+// the pane over their own connection (PromptObservationLines lines) and apply
+// this same scan, so their idle boundary matches local tmux exactly.
+func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
+	prefix := strings.TrimSpace(promptPrefix)
 
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
 	if paneContainsBusyIndicator(lines) {
-		return false, nil
+		return false
 	}
 
 	// Scan captured lines for the prompt prefix.
@@ -4583,10 +4622,10 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 			continue
 		}
 		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
@@ -4605,10 +4644,15 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // To avoid false positives during inter-tool-call gaps (where the prompt is
 // visible in scrollback but the agent is actively processing), this function:
 //  1. Checks for "esc to interrupt" in the pane — if present, the agent is busy.
-//  2. Requires 2 consecutive idle polls before confirming idle state.
+//  2. Requires IdleRequiredObservations consecutive idle polls before
+//     confirming idle state.
 //
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
+//
+// Its twin is the exec provider's waitForPaneIdle loop
+// (internal/runtime/exec/idle.go), which runs the same check over the exec
+// connection; change the two together.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
 	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
 	// and re-reading it per tick would add a tmux show-environment exec to
@@ -4616,7 +4660,6 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	promptPrefix := t.resolveIdlePromptPrefix(session)
 
 	consecutiveIdle := 0
-	const requiredConsecutive = 2
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -4639,7 +4682,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		}
 		if idle {
 			consecutiveIdle++
-			if consecutiveIdle >= requiredConsecutive {
+			if consecutiveIdle >= IdleRequiredObservations {
 				return nil
 			}
 		} else {
@@ -4653,7 +4696,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 }
 
 func waitForIdlePoll(ctx context.Context) error {
-	timer := time.NewTimer(200 * time.Millisecond)
+	timer := time.NewTimer(IdlePollInterval)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -4823,15 +4866,39 @@ func paneContainsBusyIndicator(lines []string) bool {
 // line of sent (compared on its first 40 runes, trimmed) is still present in
 // what remains after stripping the prompt prefix. That is the ga-bwm case --
 // the message is sitting drafted-but-unsubmitted -- and callers must keep
-// treating it as unconfirmed and retry. It returns true otherwise: the
-// composer is bare (or holds different, newer text), so the prior submit
-// drained it and only the busy-state OBSERVATION failed. When no line
-// matches the prompt prefix at all, the composer cannot be observed, so this
-// conservatively returns false rather than claiming delivery is proven.
+// treating it as unconfirmed and retry. It also returns false while the live
+// composer shows a staged-paste placeholder (stagedDraftMarkers): a TUI that
+// collapses a large paste into "[Pasted text #N +M lines]" still holds sent,
+// only not as its text. For this check the live composer is the last line
+// matching ANY family's prompt prefix, plus the lines below it, and every
+// family's placeholder counts. A placeholder echoed above that line is
+// transcript whichever prompt starts it, and a staged paste below a transcript
+// line that starts with another family's prompt is still live. A placeholder
+// cannot be matched to sent, so one left by a different paste reads as
+// undrained too; retrying is the safe side of that ambiguity. It returns true
+// otherwise: the composer is bare (or holds different, newer text), so the
+// prior submit drained it and only the busy-state OBSERVATION failed. When no
+// line matches the prompt prefix at all, the composer cannot be observed, so
+// this conservatively returns false rather than claiming delivery is proven.
 func paneShowsDrainedComposer(lines []string, sent string) bool {
 	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
 	if !observed {
 		return false
+	}
+	live := 0
+	for i, line := range lines {
+		for _, m := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, m.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	for _, line := range lines[live:] {
+		for _, m := range stagedDraftMarkers {
+			if strings.Contains(line, m.marker) {
+				return false
+			}
+		}
 	}
 	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
 	if draft != "" && strings.Contains(remainder, draft) {

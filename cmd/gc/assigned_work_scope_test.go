@@ -440,7 +440,10 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 	}
 }
 
-func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
+// A rig-bound seat's gate reads the census leg set, so its city-store claim
+// holds it (mc-3ixn3.16 ruling: one leg set for gate and cascade); its rig claim
+// does too.
+func TestSessionHasOpenAssignedWorkCountsCityStoreWorkForARigBoundSeat(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")
 	cfg := &config.City{
@@ -461,12 +464,13 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 			"session_name": "worker-session",
 		},
 	}
-	if _, err := cityStore.Create(beads.Bead{
+	cityWork, err := cityStore.Create(beads.Bead{
 		ID:       "city-work",
 		Type:     "task",
 		Status:   "open",
 		Assignee: session.ID,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create city work: %v", err)
 	}
 
@@ -474,8 +478,11 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
 	}
-	if has {
-		t.Fatal("city-store assigned work should not count for a rig-scoped session")
+	if !has {
+		t.Fatal("city-store assigned work must count for a rig-bound seat")
+	}
+	if err := cityStore.Close(cityWork.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	if _, err := rigStore.Create(beads.Bead{

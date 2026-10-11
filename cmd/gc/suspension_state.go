@@ -1,21 +1,10 @@
 package main
 
 import (
-	"errors"
-
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
-
-// errSuspensionStateNoOp signals from a [suspensionstate.Update] mutate
-// closure that the rig is already in the desired suspend/resume state.
-// cmd_rig.go's suspend/resume call sites check for it with errors.Is
-// to print the existing "already suspended" / "not suspended" message
-// and return success without writing — preserving the pre-lock
-// behavior where the no-op case skipped Save entirely (so mtime and
-// UpdatedAt are left untouched).
-var errSuspensionStateNoOp = errors.New("suspension state: already in desired state")
 
 // loadSuspensionState reads .gc/runtime/suspension-state.json. A
 // missing file returns a zero-value State, mirroring the convention
@@ -24,9 +13,17 @@ func loadSuspensionState(fs fsys.FS, cityPath string) (suspensionstate.State, er
 	return suspensionstate.Load(fs, cityPath)
 }
 
-// saveSuspensionState writes the runtime suspension state to disk.
-func saveSuspensionState(fs fsys.FS, cityPath string, st suspensionstate.State) error {
-	return suspensionstate.Save(fs, cityPath, st)
+// updateRigSuspension applies apply (suspendRigInState or
+// resumeRigInState) to the rig through [suspensionstate.Update], so the
+// read and the write hold the suspension fence together, and reports
+// whether apply changed the state. An unchanged state is not rewritten.
+func updateRigSuspension(fs fsys.FS, cityPath, rigName string, apply func(*suspensionstate.State, string) bool) (bool, error) {
+	changed := false
+	err := suspensionstate.Update(fs, cityPath, func(st *suspensionstate.State) bool {
+		changed = apply(st, rigName)
+		return changed
+	})
+	return changed, err
 }
 
 // loadSuspensionStateBestEffort returns the runtime suspension state,

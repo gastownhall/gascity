@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -13,7 +14,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // Suspension is quiescence. A suspended rig, and every scope of a suspended
@@ -177,6 +180,14 @@ var suspendedScopePair = func(scopeRoot string) (proxied, live bool) {
 	return true, !doctor.ProxiedStoreNotRunning(scopeRoot)
 }
 
+// stopSuspendedScopeStore runs the lifecycle "stop" op (`bd dolt stop`) for a
+// suspended scope's store once stillSuspended, checked while the city's
+// lifecycle slot is held, returns nil. A variable so tests can observe what
+// overlaps it.
+var stopSuspendedScopeStore = func(ctx context.Context, cityPath, scopeRoot string, stillSuspended func() error) error {
+	return runProviderOwnedScopeLifecycleOpGuarded(ctx, cityPath, scopeRoot, "stop", stillSuspended)
+}
+
 // retireSuspendedScopes stops the bd-owned pair of every suspended scope whose
 // sessions have been drained for a whole tick, so the drain's own bead
 // bookkeeping is done before the pair goes away.
@@ -223,11 +234,83 @@ func (cr *CityRuntime) retireSuspendedScopes(ctx context.Context, suspended bead
 		case !proxied && cr.retiredScopes.done(root, suspended.epoch):
 			continue
 		}
-		if err := runProviderOwnedScopeLifecycleOpContext(ctx, cr.cityPath, root, "stop"); err != nil {
-			fmt.Fprintf(cr.stderr, "suspended scope %s: stopping its bd proxy: %v\n", root, err) //nolint:errcheck // best-effort stderr
-		}
-		cr.retiredScopes.mark(root, suspended.epoch)
+		cr.stopStillSuspendedScope(ctx, root, suspended.City())
 	}
+}
+
+// errScopeNotSuspended is what stopStillSuspendedScope's re-check returns for
+// a scope a resume has reached: the stop is skipped, not failed.
+var errScopeNotSuspended = errors.New("scope is no longer suspended")
+
+// stopStillSuspendedScope stops root's store if root is still suspended. The
+// tick read the suspension state before it checked drain and liveness, and a
+// resume may have landed since — followed at once by a read that started the
+// pair this tick then found live (ga-vnycm2.14). So once the stop holds the
+// city's lifecycle slot, it takes the suspension fence, re-reads the state,
+// and stops only a scope that is still suspended, holding the fence until the
+// stop is done: a resume written meanwhile, by the API or by the CLI writing
+// the state file, waits for the stop itself rather than handing its caller a
+// pair that is being torn down, and never for the stop's wait for the slot.
+// A stop that fails before the re-read is not recorded, so the next settled
+// tick tries again. city says whether the caller retires the city's scopes
+// (enterBeadsQuiescenceIfDue) or only rigs suspended in their own right
+// (tickRetireSuspendedRigScopes).
+func (cr *CityRuntime) stopStillSuspendedScope(ctx context.Context, root string, city bool) {
+	release := func() {}
+	// A closure, so it releases the fence the re-check takes; deferred, so a
+	// panic in the stop, which safeTick recovers, releases it too.
+	defer func() { release() }()
+	checked := false
+	var epoch time.Time
+	err := stopSuspendedScopeStore(ctx, cr.cityPath, root, func() error {
+		fenced, now, err := cr.fenceStillSuspended(root, city)
+		if err != nil {
+			return err
+		}
+		release, checked, epoch = fenced, true, now.epoch
+		return nil
+	})
+	switch {
+	case errors.Is(err, errScopeNotSuspended):
+		return
+	case !checked:
+		fmt.Fprintf(cr.stderr, "suspended scope %s: %v; not stopping its bd proxy\n", root, err) //nolint:errcheck // best-effort stderr
+		return
+	case err != nil:
+		fmt.Fprintf(cr.stderr, "suspended scope %s: stopping its bd proxy: %v\n", root, err) //nolint:errcheck // best-effort stderr
+	}
+	cr.retiredScopes.mark(root, epoch)
+}
+
+// fenceStillSuspended takes the suspension fence and re-reads the state. When
+// root is still suspended, and stopping it would not stop the pair a resumed
+// city shares, it returns the fence's release and the fresh suspension.
+// Otherwise, a panic included, it releases the fence, and it returns
+// errScopeNotSuspended or the error that kept it from knowing.
+func (cr *CityRuntime) fenceStillSuspended(root string, city bool) (func(), beadsScopeSuspension, error) {
+	release, err := suspensionstate.Fence(cr.cityPath)
+	if err != nil {
+		return nil, beadsScopeSuspension{}, err
+	}
+	kept := false
+	defer func() {
+		if !kept {
+			release()
+		}
+	}()
+	st, err := loadSuspensionState(fsys.OSFS{}, cr.cityPath)
+	if err != nil {
+		return nil, beadsScopeSuspension{}, fmt.Errorf("re-reading suspension state: %w", err)
+	}
+	now := suspendedBeadsScopesWithState(cr.cityPath, cr.cfg, st)
+	if !city {
+		now = now.withoutCity()
+	}
+	if !now.Suspended(root) || (!samePath(root, cr.cityPath) && !now.City() && proxyendpoint.SharesCityRoot(cr.cityPath, root)) {
+		return nil, now, errScopeNotSuspended
+	}
+	kept = true
+	return release, now, nil
 }
 
 // beadsScopeRoots lists the city root and every configured rig root.
@@ -303,7 +386,10 @@ func withoutSuspendedRigs(cityPath string, cfg *config.City, stores map[string]b
 // one nothing runs in the city, so there is nothing to wait for. city stops
 // every provider-owned scope of the city, as gc stop's last step does;
 // otherwise each of roots is stopped, except a rig that shares the city's
-// proxy root, whose pair also serves the city.
+// proxy root, whose pair also serves the city. Unlike the controller's stop
+// (stopStillSuspendedScope), it neither takes the suspension fence nor
+// re-reads the state, so a resume that lands before the stop can still lose
+// its pair; ga-qxvv6s tracks giving it the same fence and re-check.
 func retireSuspendedScopesWithoutController(cityPath string, roots []string, city bool, stderr io.Writer) {
 	if controllerAlive(cityPath) != 0 {
 		return

@@ -263,7 +263,7 @@ type PreWakePatchInput struct {
 // caller that carries the marker only while the claim is held always carries
 // the start of the current episode. A marker that does not parse is replaced.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
-	startedAt := pendingCreateStartedAt(input.Now)
+	startedAt := input.Now.UTC().Format(time.RFC3339) // every caller passes Now (R12: no clock fallback)
 	if episode := strings.TrimSpace(input.EpisodePendingCreateStartedAt); episode != "" {
 		if t, err := time.Parse(time.RFC3339, episode); err == nil && !t.IsZero() {
 			startedAt = episode
@@ -454,7 +454,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	// prior interval on a reused session bead; a recovery re-confirmation of an
 	// already-running runtime leaves the in-flight interval's epoch untouched.
 	if input.StartsAwakeInterval {
-		patch["awake_started_at"] = awakeIntervalStartedAt(input.Now)
+		patch["awake_started_at"] = input.Now.UTC().Format(time.RFC3339Nano) // every caller passes Now (R12: no clock fallback)
 	}
 	// Priming confirmation pair (both-or-neither). Stamped atomically with
 	// started_config_hash so priming inherits its crash semantics and lifetime.

@@ -82,7 +82,7 @@ STUB_ENV = "present"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionWithConfig: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), testActorIn(t, session.ActorAgent, cityDir)); err != nil {
 		t.Fatalf("handle.Start: %v", err)
 	}
 
@@ -1302,7 +1302,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testActorIn(t, session.ActorOperator, cityDir), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1313,7 +1313,7 @@ session_id_flag = "--session-id"
 
 	sp.Calls = nil
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Attach: %v", err)
 	}
 
@@ -1370,7 +1370,7 @@ session_id_flag = "--session-id"
 	if err != nil {
 		t.Fatalf("workerHandleForSessionTargetWithConfig: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
 	// The live event recorder now wired into the CLI factory (#5859) makes
@@ -2720,7 +2720,7 @@ command = "/bin/echo"
 	if err != nil {
 		t.Fatalf("factory.SessionByID: %v", err)
 	}
-	if err := handle.Kill(context.Background()); err != nil {
+	if err := handle.Kill(context.Background(), testActorIn(t, session.ActorOperator, cityDir)); err != nil {
 		t.Fatalf("handle.Kill: %v", err)
 	}
 

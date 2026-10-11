@@ -529,14 +529,14 @@ func TestUpdate_SerializesConcurrentUpdates(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			name := fmt.Sprintf("rig-%d", i)
-			err := Update(fsys.OSFS{}, cityDir, func(st *State) error {
+			err := Update(fsys.OSFS{}, cityDir, func(st *State) bool {
 				// Widen the load->save window so an unlocked
 				// implementation would reliably interleave and lose
 				// updates instead of the race being too narrow to
 				// observe.
 				time.Sleep(10 * time.Millisecond)
 				SetRig(st, name, boolPtr(true))
-				return nil
+				return true
 			})
 			errCh <- err
 		}(i)
@@ -565,39 +565,15 @@ func TestUpdate_SerializesConcurrentUpdates(t *testing.T) {
 	}
 }
 
-// TestUpdate_PropagatesMutateErrorWithoutSaving confirms Update does
-// not persist any state when mutate returns an error, and that the
-// error is returned unchanged.
-func TestUpdate_PropagatesMutateErrorWithoutSaving(t *testing.T) {
-	cityDir := t.TempDir()
-	wantErr := errors.New("boom")
-
-	err := Update(fsys.OSFS{}, cityDir, func(st *State) error {
-		SetRig(st, "should-not-persist", boolPtr(true))
-		return wantErr
-	})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("Update error = %v, want %v", err, wantErr)
-	}
-
-	got, err := Load(fsys.OSFS{}, cityDir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if _, ok := got.Rigs["should-not-persist"]; ok {
-		t.Error("mutate error should prevent Save; rig entry should not exist")
-	}
-}
-
 // TestUpdate_LoadMutateSaveRoundTrip is the basic single-writer
 // sanity check: Update should behave like Load, mutate, Save chained
 // together for the non-concurrent case.
 func TestUpdate_LoadMutateSaveRoundTrip(t *testing.T) {
 	cityDir := t.TempDir()
 
-	if err := Update(fsys.OSFS{}, cityDir, func(st *State) error {
+	if err := Update(fsys.OSFS{}, cityDir, func(st *State) bool {
 		SetRig(st, "alpha", boolPtr(true))
-		return nil
+		return true
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}

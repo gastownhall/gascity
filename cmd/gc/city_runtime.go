@@ -1319,9 +1319,18 @@ var legacyTickPhases = []tickPhase{
 // runTickPhases runs phases in order and reports whether the pass reached its
 // end. A session phase is skipped when legacySessionEntry refuses it.
 func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
+	uninstall, indexed := func() {}, false
+	defer func() { uninstall() }()
 	for _, phase := range phases {
 		if phase.session && cr.legacySessionEntry(phase.name) {
 			continue
+		}
+		if phase.session && !indexed {
+			// The session phases share one seat work index per tick (seat_work.go),
+			// installed at the first, after the config reload, so it reads this
+			// tick's legs. A nested pass finds it installed and keeps it.
+			indexed = true
+			uninstall = installSeatWorkIndex(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, cr.rigBeadStores()) // residency:allow — handed to assignedWorkSweepPlan, which plans the legs
 		}
 		if phase.run(cr, p) {
 			return false
@@ -2240,7 +2249,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	statePtr := &nudgeState
 
 	mailTTL := nudgeMailSweepMailTTLForConfig(cfg, cr.stderr)
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, nudgeMailSweepWatchdogCloseBudget)
+	unreadMailTTL := nudgeMailSweepUnreadMailTTLForConfig(cfg, cr.stderr)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
@@ -3909,7 +3919,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(gcSweepSessionBeadsAt(cityPath, store.Store, rigStores, candidates, sweepTime))
+	return len(gcSweepSessionBeadsAt(cityPath, cfg, store.Store, rigStores, candidates, sweepTime))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {

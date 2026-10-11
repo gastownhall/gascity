@@ -2638,7 +2638,7 @@ func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) 
 	for _, b := range sessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return GCSweepSessionBeads("", store, nil, infos)
+	return GCSweepSessionBeads("", nil, store, nil, infos)
 }
 
 func TestDirectSessionBeadIDCandidates_DerivesModernPoolSessionBeadID(t *testing.T) {

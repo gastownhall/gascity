@@ -18,11 +18,13 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 	"auto": {
 		"FreshByConstruction":     {"deliberate", "a leaf's own read; readRuntime judges it on the routed leaf (cmd/gc/reconcile_effect_runtime.go freshReadable)", ""},
 		"IdentitySidecarProvider": {"deliberate", "identity is read on the routed leaf (cmd/gc/runtime_inventory_lane.go identityReadable)", ""},
+		"IdleProbeBudgetProvider": {"deliberate", "the idle-proof budget is read on the routed leaf (cmd/gc/session_sleep.go idleSleepProbeTimeoutFor)", ""},
 		"InventoryProvider":       {"deliberate", "the inventory lane reads each backend's leaf through Backends (cmd/gc/runtime_inventory_lane.go)", ""},
 	},
 	"hybrid": {
 		"FreshByConstruction":         {"deliberate", "as auto's", ""},
 		"IdentitySidecarProvider":     {"deliberate", "as auto's", ""},
+		"IdleProbeBudgetProvider":     {"deliberate", "as auto's", ""},
 		"InventoryProvider":           {"deliberate", "as auto's", ""},
 		"FreshLivenessObserver":       {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
 		"TransportCapabilityProvider": {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},
