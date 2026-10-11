@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,8 +40,10 @@ type Filter struct {
 	// acceptable, already-representable result — a rare or optional Type
 	// filter can otherwise force a full-file backward walk with the same
 	// cost as an unfiltered forward scan (#4418). It has no effect on
-	// ReadFiltered's forward scan or on List/ListTail implementations
-	// that are not byte-scanning a file (e.g. Fake, Multiplexer).
+	// ReadFiltered and its variants, whose backward walk for a Since
+	// filter must reach the window's close or byte 0, on
+	// ReadFilteredHistoryTail, or on List/ListTail implementations that
+	// are not byte-scanning a file (e.g. Fake, Multiplexer).
 	MaxScanBytes int64
 }
 
@@ -197,153 +200,26 @@ func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	return start
 }
 
-// sinceScanSkew is how far past filter.Since a backward walk keeps
-// reading before it will conclude the window is closed.
-//
-// Seq is globally monotonic; Ts is NOT. Events are appended by many
-// processes under an flock, each stamping its own wall clock, so a
-// record written later can carry an earlier timestamp than the one
-// before it. Stopping on the first event older than Since would drop
-// any event whose clock ran behind its neighbors. The walk therefore
-// stops only once it is a whole margin past the requested boundary,
-// which is a bound on inter-process clock disagreement on one host
-// rather than on event ordering — five minutes is far beyond anything
-// NTP leaves on a single machine, and costs only the events actually
-// recorded in those five minutes.
-const sinceScanSkew = 5 * time.Minute
-
 // ReadFiltered reads events from path and sibling archives, returning
 // only those matching all non-zero fields in filter. Archives whose
 // seq window is fully excluded by the filter's AfterSeq predicate are
 // skipped without gunzipping. Returns (nil, nil) if no events exist.
-// Scanner errors return the events parsed before the error alongside
-// the error.
 //
-// A filter carrying Since is answered by walking the active log
-// BACKWARD from EOF and stopping once the walk is past the window,
-// rather than by parsing the whole file forward. #4418 bounded the
-// backward walk with MaxScanBytes and said explicitly that it does not
-// touch this forward scan; this is that gap. It is not a micro
-// optimisation. The forward scan json.Unmarshals every record before
-// matchesFilter can reject it, so a bare `--since 5m` pays for the
-// entire history to answer a question about the last five minutes, and
-// the cost grows with a file that only ever grows. Measured on a 97 MB
-// / 305k-line active log: 19.5s, against 1.45s for the same query with
-// a Limit, which is the only thing that routed it to the tail path.
+// A Since filter is answered from the active log alone when its backward
+// walk closes the window (see sinceWalk), which proves that no older event,
+// in the active log or in an archive, matches. The answer is the full
+// read's unless the log breaks the invariant sinceScanSkew describes. When
+// the walk cannot close the window or does not, the full read runs.
+//
+// A read error returns the events parsed before it alongside the error:
+// from the full read, a log-order prefix of the answer; from the Since
+// walk, the newest matches it reached, in log order.
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
-	if !filter.Since.IsZero() {
-		result, bounded, err := readFilteredSince(path, filter)
-		if err != nil {
-			return result, err
-		}
-		if bounded {
-			return result, nil
-		}
-		// The walk reached byte 0 without leaving the window, so the
-		// active log does not cover all of it and older archives may
-		// still hold matches. Fall through and pay for the full read —
-		// correctness first; this is the case a rotation was supposed
-		// to make rare, not the case that pins a box.
+	if result, bounded, err := readFilteredSince(context.Background(), path, filter); bounded || err != nil {
+		return result, err
 	}
 	result, _, err := readFilteredTracked(path, filter)
 	return result, err
-}
-
-// readFilteredSince answers a Since-bounded query from the active log
-// alone, walking backward from EOF.
-//
-// The second return reports whether the answer is COMPLETE. It is true
-// only when the walk stopped early — having seen an event older than
-// Since by a full sinceScanSkew — because that is what proves the
-// active log already contains the whole window. Everything the walk did
-// not reach is earlier in the file, and by seq monotonicity earlier in
-// the log, so no archive can hold a matching event. When the walk
-// instead runs out of file, the window extends back beyond the active
-// log and the caller must consult the archives; this returns false and
-// its partial result is discarded rather than served.
-//
-// Limit is applied by the caller on the ascending result, matching
-// readFilteredTracked, which takes the FIRST Limit matches
-// chronologically rather than the last.
-func readFilteredSince(path string, filter Filter) ([]Event, bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No active log is not the same as no history: archives may
-			// exist. Report unbounded so the caller looks.
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("reading events: %w", err)
-	}
-	defer f.Close() //nolint:errcheck // read-only file
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, false, fmt.Errorf("stat events: %w", err)
-	}
-	size := info.Size()
-	if size <= 0 {
-		return nil, false, nil
-	}
-
-	horizon := filter.Since.Add(-sinceScanSkew)
-	const chunkSize int64 = 64 * 1024
-	var reversed []Event
-	var pending []byte
-	end := size
-	bounded := false
-	for end > 0 && !bounded {
-		n := chunkSize
-		if end < n {
-			n = end
-		}
-		start := end - n
-		chunk := make([]byte, n)
-		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
-			return nil, false, fmt.Errorf("reading events: %w", err)
-		}
-		data := make([]byte, 0, len(chunk)+len(pending))
-		data = append(data, chunk...)
-		data = append(data, pending...)
-		parts := bytes.Split(data, []byte{'\n'})
-		firstComplete := 0
-		if start > 0 {
-			pending = append(pending[:0], parts[0]...)
-			firstComplete = 1
-		} else {
-			pending = nil
-		}
-		for i := len(parts) - 1; i >= firstComplete; i-- {
-			line := bytes.TrimSuffix(parts[i], []byte{'\r'})
-			if len(bytes.TrimSpace(line)) == 0 {
-				continue
-			}
-			var e Event
-			if err := json.Unmarshal(line, &e); err != nil {
-				continue // skip malformed lines, as the forward scan does
-			}
-			if matchesFilter(e, filter) {
-				reversed = append(reversed, e)
-			}
-			// Checked after matching, not before: an event at the very
-			// edge of the margin is still a legitimate match.
-			if !e.Ts.IsZero() && e.Ts.Before(horizon) {
-				bounded = true
-				break
-			}
-		}
-		end = start
-	}
-	if !bounded {
-		return nil, false, nil
-	}
-	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
-		reversed[i], reversed[j] = reversed[j], reversed[i]
-	}
-	if filter.Limit > 0 && len(reversed) > filter.Limit {
-		reversed = reversed[:filter.Limit]
-	}
-	return reversed, true, nil
 }
 
 type eventSeqWindow struct {
@@ -450,21 +326,14 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 // catch-up path; a positive Filter.Limit bounds only ReadFiltered's own scan,
 // not newly discovered rotation sources merged by the recovery pass.
 func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
-	if !filter.Since.IsZero() {
-		// Same bounded walk as ReadFiltered, and safe here for the same
-		// reason plus one more. A bounded result proves the ACTIVE log
-		// spans the window; an in-flight rotating file is the previous
-		// active log on its way to becoming an archive, so it is older
-		// still and holds no match. The moment that stops being true is
-		// the moment rotation has just installed a fresh, nearly-empty
-		// active file — and then the walk reaches byte 0, reports
-		// unbounded, and this falls through to the full read that does
-		// consult the rotating sources.
-		if result, bounded, err := readFilteredSince(path, filter); err != nil {
-			return result, err
-		} else if bounded {
-			return result, nil
-		}
+	// A closed window proves the records appended before it hold no
+	// match, and an in-flight rotating file holds the previous active
+	// log, appended earlier still. Right after rotation installs a fresh
+	// active file, its first record is too recent for the walk to close
+	// the window or the walk reaches byte 0 still open, and the full read
+	// below consults the rotating sources.
+	if result, bounded, err := readFilteredSince(context.Background(), path, filter); bounded || err != nil {
+		return result, err
 	}
 	base, listedArchives, baseErr := readFilteredTracked(path, filter)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
@@ -747,82 +616,21 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
-	if size <= 0 {
-		return nil, nil
-	}
-	const chunkSize int64 = 64 * 1024
-	// A Since filter is a horizon as well as a predicate. Without this the
-	// walk keeps going after it has left the window, looking for a `limit`
-	// it can never reach — matchesFilter rejects everything older — and a
-	// selective Type filter turns that into a full backward parse of the
-	// file at the same cost as the forward scan. That is this walk's half
-	// of the same defect, and it is the half the supervisor's event API
-	// hits: ListTail is what serves `gc events`.
-	horizon := time.Time{}
-	if !filter.Since.IsZero() {
-		horizon = filter.Since.Add(-sinceScanSkew)
-	}
-	pastHorizon := false
+	// A Since filter is a horizon as well as a predicate: once the window
+	// closes, nothing earlier can match, and a walk that kept going for a
+	// limit it can no longer reach would parse the rest of the file.
+	window := newSinceWindow(filter.Since)
 	var reversed []Event
-	var pending []byte
-	end := size
-	for end > 0 && len(reversed) < limit && !pastHorizon && (filter.MaxScanBytes <= 0 || size-end < filter.MaxScanBytes) {
-		n := chunkSize
-		if end < n {
-			n = end
+	_, err := walkBackward(context.Background(), f, size, filter.MaxScanBytes, func(e Event) bool {
+		if matchesFilter(e, filter) {
+			reversed = append(reversed, e)
 		}
-		// Clamp the read to what remains of the byte budget so a
-		// MaxScanBytes that is not a chunkSize multiple stops the walk
-		// mid-chunk rather than overscanning by up to one full chunk.
-		// The loop condition guarantees remaining > 0 on entry, and the
-		// chunk is read at start = end - n, so a smaller n simply moves
-		// the walk's stopping point without misaligning pending.
-		if filter.MaxScanBytes > 0 {
-			if remaining := filter.MaxScanBytes - (size - end); remaining < n {
-				n = remaining
-			}
-		}
-		start := end - n
-		chunk := make([]byte, n)
-		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
-			return nil, fmt.Errorf("reading events tail: %w", err)
-		}
-		data := make([]byte, 0, len(chunk)+len(pending))
-		data = append(data, chunk...)
-		data = append(data, pending...)
-		parts := bytes.Split(data, []byte{'\n'})
-		firstComplete := 0
-		if start > 0 {
-			pending = append(pending[:0], parts[0]...)
-			firstComplete = 1
-		} else {
-			pending = nil
-		}
-		for i := len(parts) - 1; i >= firstComplete && len(reversed) < limit && !pastHorizon; i-- {
-			line := bytes.TrimSuffix(parts[i], []byte{'\r'})
-			if len(bytes.TrimSpace(line)) == 0 {
-				continue
-			}
-			var e Event
-			if err := json.Unmarshal(line, &e); err != nil {
-				continue
-			}
-			if matchesFilter(e, filter) {
-				reversed = append(reversed, e)
-			}
-			// Checked after matching, so an event at the very edge of the
-			// margin is still a legitimate match. See sinceScanSkew for why
-			// the stop is a margin past Since rather than at it.
-			if !horizon.IsZero() && !e.Ts.IsZero() && e.Ts.Before(horizon) {
-				pastHorizon = true
-			}
-		}
-		end = start
+		return len(reversed) >= limit || window.closedBy(e.Ts)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading events tail: %w", err)
 	}
-	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
-		reversed[i], reversed[j] = reversed[j], reversed[i]
-	}
-	return reversed, nil
+	return ascending(reversed, 0), nil
 }
 
 // ReadLatestSeq returns the highest complete event Seq visible in the
