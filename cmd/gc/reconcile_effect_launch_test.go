@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1082,5 +1083,41 @@ func TestRefusedStartStillHeals(t *testing.T) {
 				t.Fatalf("settlement %+v, want landed %v", s, healed)
 			}
 		})
+	}
+}
+
+// Kills a launch that resolves its template on the woken row (should-fix
+// 4): realize defers a pool seat's unassigned alias on a creating row, so
+// the launch resolves on the row as legacy does at the tick, bound but not
+// yet woken, and starts with that resolution; a resolution that fails is
+// logged and the pass's template launches.
+func TestLaunchResolvesOnTheRowBeforeItsWake(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		k, leaf := launchKit(t, "asleep")
+		row := k.p.World.Census.Rows[k.it.Key]
+		var seen []string
+		pass := TemplateParams{TemplateName: "worker", Env: map[string]string{"GC_TEST_RESOLVED": "pass"}}
+		k.p.World.Templates = &templateMemo{
+			entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: pass}},
+			resolveAt: func(info session.Info, _ time.Time) templateResolution {
+				seen = append(seen, info.MetadataState)
+				if fail {
+					return templateResolution{Err: errors.New("catalog unreadable")}
+				}
+				return templateResolution{TP: TemplateParams{TemplateName: "worker", Env: map[string]string{"GC_TEST_RESOLVED": "solo"}}}
+			},
+		}
+		var stderr bytes.Buffer
+		k.p.held.start.stderr = &stderr
+		want := map[bool]string{false: "solo", true: "pass"}[fail]
+		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 || leaf.cfgs[0].Env["GC_TEST_RESOLVED"] != want {
+			t.Fatalf("fail=%v: settlement %+v, %d starts; want the resolution %q", fail, s, len(leaf.cfgs), want)
+		}
+		if !slices.Equal(seen, []string{"asleep"}) {
+			t.Fatalf("fail=%v: resolved on states %v, want the row before its wake (asleep)", fail, seen)
+		}
+		if logged := strings.Contains(stderr.String(), "catalog unreadable"); logged != fail {
+			t.Fatalf("fail=%v: stderr %q", fail, stderr.String())
+		}
 	}
 }

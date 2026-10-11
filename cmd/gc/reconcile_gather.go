@@ -303,13 +303,16 @@ func censusDemandEnv(c *sessionCensus, store beads.Store, rigs map[string]beads.
 
 // templateMemoKey is what one row's template resolution reads off the row:
 // the row's ID (the session bead ID and pool-name ownership), the template
-// and identity fields its kind's path reads (rowTemplateResolver), and the
-// trigger fields resolveTemplateForSessionBeadInfo stamps.
+// and identity fields its kind's path reads (rowTemplateResolver), the
+// trigger fields resolveTemplateForSessionBeadInfo stamps, and whether a
+// pool seat's unassigned alias defers (poolRuntimeAliasIsDeferredInfo, which
+// the realize path reads off the state, the claim and an alias conflict).
 type templateMemoKey struct {
 	ID, Template, CommonName, SessionName, SessionNameExplicit, AgentName, Alias string
 	Origin, ManualMetadata, PoolSlot, NamedIdentity                              string
 	Named, PoolManaged, DependencyOnly                                           bool
 	TriggerBeadID, TriggerStoreRef, Pack                                         string
+	AliasDeferred                                                                bool
 }
 
 func templateMemoKeyOf(info session.Info) templateMemoKey {
@@ -320,6 +323,7 @@ func templateMemoKeyOf(info session.Info) templateMemoKey {
 		NamedIdentity: info.ConfiguredNamedIdentity, Named: info.ConfiguredNamedSession, PoolManaged: info.PoolManaged,
 		DependencyOnly: info.DependencyOnly,
 		TriggerBeadID:  info.TriggerBeadID, TriggerStoreRef: info.TriggerBeadStoreRef, Pack: info.Pack,
+		AliasDeferred: poolRuntimeAliasIsDeferredInfo(info),
 	}
 }
 

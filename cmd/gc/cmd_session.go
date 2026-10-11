@@ -2541,6 +2541,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		now := time.Now().UTC()
 		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
 		patch["synced_at"] = now.Format(time.RFC3339)
+		if session.HoldsInfo(info, now).In&session.HoldUser != 0 {
+			patch["held_until"] = "" // as the fence's: no heartbeat-shaped hold left behind
+		}
 		for k, v := range session.ClearWakeRequestPatch() {
 			patch[k] = v
 		}

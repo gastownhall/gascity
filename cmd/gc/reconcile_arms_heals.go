@@ -208,10 +208,14 @@ func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 	return patch, true
 }
 
-// heartbeatHeld reports a live hold no sleep intent explains: SESS-602's
-// heartbeat hold. The timer is trimmed, as operatorDormant's.
+// heartbeatHeld reports a live hold no sleep intent explains, within the
+// horizon a heartbeat can write (maximumHeartbeatDuration, with an hour's
+// slack for skew): SESS-602's heartbeat hold. An operator hold whose intent
+// a blind write cleared is not one. The timer is trimmed, as
+// operatorDormant's.
 func heartbeatHeld(info session.Info, now time.Time) bool {
-	return metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) && strings.TrimSpace(info.SleepIntent) == ""
+	until, ok := parseRFC3339Metadata(strings.TrimSpace(info.HeldUntil))
+	return ok && until.After(now) && !until.After(now.Add(maximumHeartbeatDuration+time.Hour)) && strings.TrimSpace(info.SleepIntent) == ""
 }
 
 // armAwakeHeal is legacy's heal of an asleep row whose own runtime is alive

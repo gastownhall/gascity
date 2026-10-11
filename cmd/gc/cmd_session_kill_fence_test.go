@@ -573,16 +573,19 @@ func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
 
 // TestCmdSessionKill_ClearsAUserHoldsTimer: a kill clears a user-hold
 // intent, and with it the operator's held_until, so no heartbeat-shaped hold
-// is left; a heartbeat hold (no intent) keeps its timer, and a failed kill's
-// rollback restores both.
+// is left, whether the kill takes the fence or (its runtime already gone)
+// the plain asleep sync; a heartbeat hold (no intent) keeps its timer, and a
+// failed kill's rollback restores both.
 func TestCmdSessionKill_ClearsAUserHoldsTimer(t *testing.T) {
 	heldUntil := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	for name, tc := range map[string]struct {
 		intent   string
 		stopFail bool
+		gone     bool // a suspended row, its runtime already stopped: no fence
 		want     string
 	}{
 		"user hold":             {intent: "user-hold", want: ""},
+		"user hold, no fence":   {intent: "user-hold", gone: true, want: ""},
 		"heartbeat":             {want: heldUntil},
 		"user hold, stop fails": {intent: "user-hold", stopFail: true, want: heldUntil},
 	} {
@@ -594,6 +597,12 @@ func TestCmdSessionKill_ClearsAUserHoldsTimer(t *testing.T) {
 			fake := wrapKillPokeProvider(t, &killHookProvider{}).(*runtime.Fake)
 			if tc.stopFail {
 				fake.StopErrors[sessionName] = errors.New("tmux: kill-session refused")
+			}
+			if tc.gone { // a suspended row whose runtime is gone
+				setKillFixtureMetadata(t, store, bead.ID, map[string]string{"state": "suspended"})
+				if err := fake.Stop(sessionName); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var stdout, stderr bytes.Buffer
 			_ = cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr)

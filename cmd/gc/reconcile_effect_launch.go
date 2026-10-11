@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -140,9 +141,13 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 	return f, nil
 }
 
-// launchPass is what the PreWake hands the launch Call.
+// launchPass is what the PreWake hands the launch Call: bound is the row
+// its template resolves on, bound but not yet woken, as legacy binds and
+// resolves at the tick before its PreWake (a pool seat's alias defers on a
+// creating row).
 type launchPass struct {
 	launchRow
+	bound      session.Info
 	transcript sessTranscriptState
 	ticket     *startTicket
 }
@@ -200,7 +205,8 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: launchPass{launchRow: launch, transcript: transcript, ticket: ticket}}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket}
+	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
 }
 
 // preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
@@ -251,8 +257,11 @@ type startOutcome struct {
 // its slack, the stale-key wait after a start with a key, and the commit's
 // reads.
 func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, error) {
-	if res, ok := in.w.Templates.launchTemplate(in.row, c.start.clock.Now()); ok { // the bound row, at the tick (its prompt's beacon)
+	switch res, ok := in.w.Templates.launchTemplate(in.bound, c.start.clock.Now()); { // at the tick (its prompt's beacon)
+	case ok:
 		in.tp, in.agent = res.TP, res.Agent
+	case res.Err != nil && c.start.stderr != nil:
+		fmt.Fprintf(c.start.stderr, "v2 start %s: resolving its template at launch: %v; launching the pass's\n", in.row.ID, res.Err) //nolint:errcheck // best-effort stderr
 	}
 	// session.woke once the commit has landed, as legacy records it after
 	// its commit: at the effect's end, whether or not afterCommit ran.

@@ -108,7 +108,8 @@ func TestDecideRowAdoptsAliveUncommittedIntent(t *testing.T) {
 // Kills A17 widened past the heartbeat hold or narrowed off it (SESS-602,
 // v5.9i): a dead committed seat held only by an agent heartbeat, with
 // assigned work, is respawned in the same pass carrying the dead-runtime
-// heal; an operator's hold, no work, or a quarantine leaves it to A6's heal.
+// heal; an operator's hold (a hold past a heartbeat's horizon included), no
+// work, or a quarantine leaves it to A6's heal, and a drain to its drain.
 func TestDecideRowHeartbeatRespawn(t *testing.T) {
 	soon := gatherNow.Add(time.Hour).Format(time.RFC3339)
 	for _, tc := range []struct {
@@ -118,7 +119,9 @@ func TestDecideRowHeartbeatRespawn(t *testing.T) {
 		respawn bool
 	}{
 		{"heartbeat hold with work", []string{"held_until", soon}, true, true},
+		{"a heartbeat's longest hold", []string{"held_until", gatherNow.Add(maximumHeartbeatDuration).Format(time.RFC3339)}, true, true},
 		{"an operator's hold", []string{"held_until", soon, "sleep_intent", "user-hold"}, true, false},
+		{"an operator's hold whose intent a blind write cleared", []string{"held_until", gatherNow.AddDate(100, 0, 0).Format(time.RFC3339)}, true, false},
 		{"no work", []string{"held_until", soon}, false, false},
 		{"quarantined", []string{"held_until", soon, "quarantined_until", soon}, true, false},
 	} {
@@ -139,6 +142,11 @@ func TestDecideRowHeartbeatRespawn(t *testing.T) {
 			}
 		})
 	}
+	drain := newHealCase(t, livenessGone, desireDrain, "state", "active", "held_until", soon)
+	drain.a.Snapshot.Entries[drain.k].AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+	if it := drain.decide(); it.Reason == decideHeartbeatRespawn {
+		t.Fatalf("decideRow = (%q, %q), want no respawn of a row AL1 drains", it.Kind, it.Reason)
+	}
 }
 
 // Kills a dead seat's death accrual lost, miscounted, or restarting the
@@ -147,7 +155,7 @@ func TestDecideRowHeartbeatRespawn(t *testing.T) {
 // productivity threshold accrues churn and resets the conversation; each
 // clears last_woke_at and restarts the next pass; a productive death clears
 // churn and restarts in the same pass, as does a death in a drain the row
-// asked for, which accrues nothing.
+// asked for, or a subprocess worker's exit, which accrue nothing.
 func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 	woke := func(ago time.Duration) string { return gatherNow.Add(-ago).Format(time.RFC3339) }
 	for _, tc := range []struct {
@@ -181,6 +189,12 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 				}
 			}
 		})
+	}
+	// A subprocess worker exits after its unit of work: no crash, no churn.
+	c := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "last_woke_at", woke(10*time.Second))
+	c.w.Env = &reconcileEnv{Cfg: &config.City{Session: config.SessionConfig{Provider: "subprocess"}}}
+	if it := c.decide(); it.Kind != intentStart || it.Patch["wake_attempts"] != "" {
+		t.Fatalf("subprocess exit: decideRow = (%q, %q, %v), want a same-pass start with no accrual", it.Kind, it.Reason, it.Patch)
 	}
 }
 
