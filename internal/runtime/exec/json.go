@@ -10,6 +10,7 @@ package exec
 import (
 	"encoding/json"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -39,6 +40,10 @@ type startConfig struct {
 	PackOverlayDirs    []string          `json:"pack_overlay_dirs,omitempty"`
 	OverlayDir         string            `json:"overlay_dir,omitempty"`
 	CopyFiles          []copyEntry       `json:"copy_files,omitempty"`
+	// WorkDirExclude lists work_dir-relative patterns for controller-local
+	// state a runtime that copies work_dir elsewhere must leave behind.
+	// See [citylayout.WorkDirExportExcludes] for the pattern grammar.
+	WorkDirExclude []string `json:"work_dir_exclude,omitempty"`
 }
 
 // marshalStartConfig converts a [runtime.Config] to JSON for the exec script.
@@ -63,6 +68,7 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 		PackOverlayDirs:    cfg.PackOverlayDirs,
 		OverlayDir:         cfg.OverlayDir,
 		CopyFiles:          cfs,
+		WorkDirExclude:     citylayout.WorkDirExportExcludes(cfg.WorkDir),
 	}
 	return json.Marshal(sc)
 }

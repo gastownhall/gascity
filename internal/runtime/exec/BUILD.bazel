@@ -13,6 +13,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/exec",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/execgrace",
         "//internal/runtime",
         "//internal/runtime/tmux",
@@ -37,6 +38,7 @@ go_test(
     ],
     embed = [":exec"],
     deps = [
+        "//internal/citylayout",
         "//internal/runtime",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
