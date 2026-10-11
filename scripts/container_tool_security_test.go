@@ -72,6 +72,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		thriftVersion  = "0.24.0"
+		xnetVersion    = "0.60.0"
 	)
 
 	root := repoRoot(t)
@@ -102,12 +103,15 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG THRIFT_VERSION=" + thriftVersion,
+		"ARG XNET_VERSION=" + xnetVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`go get "github.com/apache/thrift@v${THRIFT_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
+		`go get "golang.org/x/net@v${XNET_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -266,10 +270,10 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 
 	// Versions each override forces, at or above what Trivy names as fixed for the findings it clears.
 	for _, arg := range []string{
-		"ARG XCRYPTO_VERSION=0.55.0",
-		"ARG XNET_VERSION=0.58.0",
-		"ARG XTEXT_VERSION=0.41.0",
-		"ARG XMOD_VERSION=0.40.0",
+		"ARG XCRYPTO_VERSION=0.57.0",
+		"ARG XNET_VERSION=0.60.0",
+		"ARG XTEXT_VERSION=0.42.0",
+		"ARG XMOD_VERSION=0.41.0",
 		"ARG THRIFT_VERSION=0.24.0",
 	} {
 		if !strings.Contains(base, arg) {
@@ -277,10 +281,11 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		}
 	}
 
-	// gh needs x/text and x/mod; its pinned source already selects patched x/crypto and x/net.
+	// gh needs x/text, x/net and x/mod; its pinned source already selects a patched x/crypto.
 	// Dolt takes no x/mod override because no x/mod package is linked into its binary.
 	ghModules := map[string]string{
 		"golang.org/x/text": "XTEXT_VERSION",
+		"golang.org/x/net":  "XNET_VERSION",
 		"golang.org/x/mod":  "XMOD_VERSION",
 	}
 	doltModules := map[string]string{
