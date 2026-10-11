@@ -93,26 +93,29 @@ func sessionOwnsLiveClaim(
 	if claimID == "" {
 		return false, "", nil
 	}
-	// The first leg that holds the claimed bead answers for it — bead ids are
-	// unique, so the bead's own state (held, closed, released, re-owned) is
-	// final and the walk stops there either way. Only NotFound moves on to the
-	// next leg. Without this a finished worker whose stamp names a closed bead
-	// would read every remaining leg on every tick.
-	held := false
-	_, err = assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		work, err := liveBeadRead(s, claimID)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return false, nil
-			}
-			return false, err
-		}
-		held = claimedWorkStillHeldBy(work, info.ID)
-		return true, nil
-	})
+	// The claimed bead is found by id, through the storeref ByID plan: a binding
+	// answers alone for an id in its own namespace, so a graph-resident claim
+	// (the common one on a split city) never costs a read of the remote work
+	// store, even once it is closed and the stamp lingers. The first leg that
+	// holds the bead answers for it — ids are unique, so its own state is final
+	// — and only NotFound moves on.
+	serving := servingRigStores(cfg, rigStores, buildSuspendedRigPathsForCity(cfg, cityPath))
+	owner, err := byIDOwnerRowForTopology(byIDResidencyTopology(cityPath, cfg, censusWorkLeg(cityPath, store), serving, claimID), claimID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, claimID, nil
+	}
 	if err != nil {
 		return true, claimID, fmt.Errorf("reading claimed bead %s: %w", claimID, err)
 	}
+	// The resolver's read may be a cache's; the owner is re-read live.
+	work, err := liveBeadRead(owner.Store, claimID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, claimID, nil
+	}
+	if err != nil {
+		return true, claimID, fmt.Errorf("reading claimed bead %s: %w", claimID, err)
+	}
+	held := claimedWorkStillHeldBy(work, info.ID)
 	return held, claimID, nil
 }
 

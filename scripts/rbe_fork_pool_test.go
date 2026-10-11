@@ -57,7 +57,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// Started only by rbe-west's fork pool scaler (or an operator): a dispatch
-	// with the scaler's two inputs, never a PR, push or schedule.
+	// with the scaler's inputs, never a PR, push or schedule. The third input,
+	// role, only names the run (TestRBEPoolWorkflowsNameTheirRole).
 	if len(wf.On) != 1 || wf.On["workflow_dispatch"] == nil {
 		t.Errorf("on: %v, want workflow_dispatch only", rbeSortedKeys(wf.On))
 	}
@@ -69,8 +70,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			t.Errorf("workflow_dispatch input %s = %v, want a string defaulting to %q", name, in, def)
 		}
 	}
-	if len(inputs) != 2 {
-		t.Errorf("workflow_dispatch inputs %v, want idle_minutes and max_minutes (what the scaler sends)", rbeSortedKeys(inputs))
+	if len(inputs) != 3 || inputs["role"] == nil {
+		t.Errorf("workflow_dispatch inputs %v, want idle_minutes, max_minutes and role (what the scaler sends)", rbeSortedKeys(inputs))
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
@@ -113,8 +114,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		worker = true
 		// Exactly these: isolation is not the repository variable (no
 		// rollback to 0, no canary), the fork CA's worker certificate and the
-		// fork endpoint, nothing more (no CACHE_DIR: no sticky disk shared
-		// across fork workers).
+		// fork endpoint, nothing more (no sticky disk shared across fork
+		// workers: the only warm start is the read-only warm set).
 		want := map[string]string{
 			"RBE_WORKER_TLS_CERT":  "${{ secrets.RBE_FORK_WORKER_TLS_CERT }}",
 			"RBE_WORKER_TLS_KEY":   "${{ secrets.RBE_FORK_WORKER_TLS_KEY }}",
@@ -135,6 +136,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"RBE_WIRE_ZSTD": "${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}",
 			// The dedicated zread host; the worker refuses zstd without it.
 			"RBE_WIRE_ZSTD_READ_URL": "${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}",
+			// The read-only warm set (no writable cache shared with any tier):
+			// off unless the repository variable names it; one run in N.
+			"RBE_WARM_URL":   "${{ vars.RBE_FORK_WARM_URL || '' }}",
+			"RBE_WARM_EVERY": "${{ vars.RBE_FORK_WARM_EVERY || '1' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -152,9 +157,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD and
-	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above): neither can turn isolation
-	// down, and none picks the worker code (always the pin).
+	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
+	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY
+	// (pinned above): none can turn isolation down, and none picks the worker
+	// code (always the pin).
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -162,11 +168,62 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
-		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") {
-		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD and RBE_FORK_WIRE_ZSTD_READ_URL once each, nothing else", rbeForkPoolWorkflow, n)
+	if n := strings.Count(text, "vars."); n != 4 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || !strings.Contains(text, "vars.RBE_FORK_WARM_URL ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") {
+		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY once each, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
+
+// rbe-west's pool scalers count floor workers by run name (infra
+// nativelink-cas/west oss-pool-scaler.py ROLE_TITLE, README "Pool scalers:
+// floor and burst roles"): each pool workflow takes input role, a choice of
+// burst (the default: CI pre-warm and hand dispatches) or floor, and puts it
+// and idle_minutes in run-name. The worker never reads role; idle_minutes is
+// what changes its behavior.
+func TestRBEPoolWorkflowsNameTheirRole(t *testing.T) {
+	for _, tc := range []struct{ path, name string }{
+		{rbeWorkerWorkflow, "rbe-worker-pool"},
+		{rbeForkPoolWorkflow, "rbe-fork-pool"},
+	} {
+		text := readFile(t, repoRoot(t), tc.path)
+		var wf struct {
+			Name    string         `yaml:"name"`
+			RunName string         `yaml:"run-name"`
+			On      map[string]any `yaml:"on"`
+		}
+		if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
+			t.Fatalf("parse %s: %v", tc.path, err)
+		}
+		if want := "${{ format('" + tc.name + " ({0}, idle {1}m)', inputs.role || 'burst', inputs.idle_minutes) }}"; wf.Name != tc.name || wf.RunName != want {
+			t.Errorf("%s: name %q run-name %q, want %q and %q", tc.path, wf.Name, wf.RunName, tc.name, want)
+		}
+		dispatch, _ := wf.On["workflow_dispatch"].(map[string]any)
+		inputs, _ := dispatch["inputs"].(map[string]any)
+		role, _ := inputs["role"].(map[string]any)
+		opts, _ := role["options"].([]any)
+		if role == nil || role["type"] != "choice" || role["default"] != "burst" || len(opts) != 2 || opts[0] != "burst" || opts[1] != "floor" {
+			t.Errorf("%s: workflow_dispatch input role = %v, want a choice of burst (default) or floor", tc.path, role)
+		}
+		// run-name alone reads role: no other reference (inputs.role,
+		// inputs['role'], github.event.inputs.role) and no whole-inputs
+		// exposure (toJSON(inputs), toJSON(github.event), toJSON(github),
+		// github.event.inputs) a step could read. Expressions ignore case
+		// (Inputs.Role, toJson), so the patterns do too.
+		refs := rbeRoleInputRef.FindAllStringIndex(text, -1)
+		if len(refs) != 1 || !strings.HasPrefix(text[strings.LastIndex(text[:refs[0][0]], "\n")+1:], "run-name: ") {
+			t.Errorf("%s: input role referenced %d times, want once, in run-name (the worker never reads it)", tc.path, len(refs))
+		}
+		if m := rbeWholeInputs.FindString(text); m != "" {
+			t.Errorf("%s: %q exposes every input, role included, beyond run-name", tc.path, m)
+		}
+	}
+}
+
+var (
+	rbeRoleInputRef = regexp.MustCompile(`(?i)inputs\s*(\.\s*role\b|\[\s*['"]role['"]\s*\])`)
+	rbeWholeInputs  = regexp.MustCompile(`(?i)toJSON\(\s*(github(\s*\.\s*event(\s*\.\s*inputs)?)?|inputs)\s*\)|github\s*\.\s*event\s*\.\s*inputs`)
+)
 
 func rbeSortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))

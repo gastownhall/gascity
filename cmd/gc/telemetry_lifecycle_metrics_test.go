@@ -302,6 +302,7 @@ func TestCommitStartFailure_DoesNotDuplicateFailedStartMetricAcrossBranches(t *t
 // exit left behind, the same condition the steady-state reconciler's zombie
 // detector already classifies as a crash.
 func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *testing.T) {
+	city := t.TempDir()
 	reader := installManualMetricReader(t)
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
@@ -328,12 +329,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *te
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 	if len(results) != 1 || results[0].err != nil {
 		t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
@@ -351,6 +355,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *te
 // detector's exclusion), and a recycle whose Stop fails (the start retries,
 // so recording before the Stop would count the same zombie once per retry).
 func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *testing.T) {
+	city := t.TempDir()
 	newZombie := func(t *testing.T) (*runtime.Fake, preparedStart) {
 		t.Helper()
 		sp := runtime.NewFake()
@@ -384,7 +389,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *test
 		sp, item := newZombie(t)
 		sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
 
-		results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+		results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
 		if len(results) != 1 || results[0].err != nil {
 			t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
 		}
@@ -398,7 +403,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *test
 		sp, item := newZombie(t)
 		sp.StopErrors["test-agent"] = errors.New("stop failed")
 
-		results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+		results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
 		if len(results) != 1 || results[0].err == nil {
 			t.Fatalf("expected 1 failed result when the zombie recycle Stop fails, got %+v", results)
 		}
@@ -523,9 +528,9 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFail
 
 	var stdout, stderr bytes.Buffer
 	cfgNames := configuredSessionNames(cfg, "", store)
-	woken := reconcileSessionBeads(
-		context.Background(), []beads.Bead{bead}, desired, cfgNames,
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), t.TempDir(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
 	if woken != 0 {
@@ -549,7 +554,7 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFail
 // staying true by inspection alone.
 func TestCommitStartResult_SuccessDoesNotDuplicateStartMetric(t *testing.T) {
 	reader := installManualMetricReader(t)
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
@@ -651,7 +656,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 	finalize := func(t *testing.T, rec events.Recorder) *sdkmetric.ManualReader {
 		t.Helper()
 		reader := installManualMetricReader(t)
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
 		// createSessionBead ties agent_name to the session name; override it so
@@ -666,7 +671,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		session.Metadata = patch.Apply(session.Metadata)
 
 		result := finalizeDrainAckStoppedSession(
-			"", env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
+			env.city, env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
 			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr,
 		)
 
@@ -705,6 +710,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 // with the qualified agent identity resolved from the session bead, not the
 // sanitized runtime session name.
 func TestDoHandoffRemote_RecordsAgentStopMetric(t *testing.T) {
+	city := t.TempDir()
 	const sessionName = "gascity--gc__worker" // sanitized runtime session name
 	const identity = "gascity/gc.worker"      // qualified agent identity
 	reader := installManualMetricReader(t)
@@ -728,8 +734,8 @@ func TestDoHandoffRemote_RecordsAgentStopMetric(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, sessionName, sessionName, "sender",
-		[]string{"Context refresh", "body"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(city, store, store, rec, sp, sessionName, sessionName, "sender",
+		[]string{"Context refresh", "body"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1077,7 +1083,7 @@ func TestReconcileSessionBeads_RecordsReconcileCycleMetric(t *testing.T) {
 
 	t.Run("completed tick records the cycle", func(t *testing.T) {
 		reader := installManualMetricReader(t)
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 
 		env.reconcile(nil)
 
@@ -1086,14 +1092,15 @@ func TestReconcileSessionBeads_RecordsReconcileCycleMetric(t *testing.T) {
 
 	t.Run("canceled context still records the cycle", func(t *testing.T) {
 		reader := installManualMetricReader(t)
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		reconcileSessionBeads(
-			ctx, nil, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
-			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{},
+		reconcileSessionBeadsAtPath(
+			ctx, env.city, nil, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+			env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{},
 			false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+			withAsyncDrainAckStopTracker(env.stops),
 		)
 
 		assertCycleRecorded(t, reader)
@@ -1237,7 +1244,7 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 	const sessionName = "gascity--gc__worker"
 	const identity = "gascity/gc.worker"
 	reader := installManualMetricReader(t)
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
 	session := env.createSessionBead(sessionName, identity)
@@ -1256,7 +1263,7 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 	}
 
 	result := finalizeDrainAckStoppedSession(
-		"", env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
+		env.city, env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
 		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr,
 	)
 

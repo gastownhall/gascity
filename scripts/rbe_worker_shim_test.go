@@ -866,6 +866,14 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["RBE_WIRE_ZSTD_READ_URL"], "${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}"; got != want {
 				t.Errorf("worker step RBE_WIRE_ZSTD_READ_URL = %q, want %q", got, want)
 			}
+			// The read-only warm set: off unless the repository variable names
+			// it (rollback: unset it); one run in RBE_WARM_EVERY warms.
+			if got, want := step.Env["RBE_WARM_URL"], "${{ vars.RBE_WARM_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_WARM_URL = %q, want %q", got, want)
+			}
+			if got, want := step.Env["RBE_WARM_EVERY"], "${{ vars.RBE_WARM_EVERY || '1' }}"; got != want {
+				t.Errorf("worker step RBE_WARM_EVERY = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {

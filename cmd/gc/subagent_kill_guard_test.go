@@ -15,6 +15,7 @@ import (
 )
 
 func TestHandoffRemoteRefusesLiveSubagentsUnlessForced(t *testing.T) {
+	city := t.TempDir()
 	old := liveSubagentsForKill
 	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
 		return []worker.InFlightSubagent{{AgentID: "agent-42", Description: "Investigate make check slowness", StartedAt: time.Now().Add(-time.Minute)}}, nil
@@ -25,7 +26,7 @@ func TestHandoffRemoteRefusesLiveSubagentsUnlessForced(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := doHandoffRemote(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, &stdout, &stderr); code != 1 {
+	if code := doHandoffRemoteWithForce(city, store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, false, &stdout, &stderr); code != 1 {
 		t.Fatalf("code = %d, want refusal", code)
 	}
 	if !sp.IsRunning("target") || !bytes.Contains(stderr.Bytes(), []byte("--force")) || !bytes.Contains(stderr.Bytes(), []byte("Investigate make check slowness")) || !bytes.Contains(stderr.Bytes(), []byte("agent-42")) || !bytes.Contains(stderr.Bytes(), []byte("running")) {
@@ -33,7 +34,7 @@ func TestHandoffRemoteRefusesLiveSubagentsUnlessForced(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := doHandoffRemoteWithForce("", store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 || sp.IsRunning("target") {
+	if code := doHandoffRemoteWithForce(city, store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 || sp.IsRunning("target") {
 		t.Fatalf("force code=%d running=%v stderr=%s", code, sp.IsRunning("target"), stderr.String())
 	}
 }
@@ -89,6 +90,7 @@ func TestRefuseKillForLiveSubagentsFailsOpen(t *testing.T) {
 // A refusal must not leave handoff mail behind. If the mail is created before
 // the guard runs, the operator's --force retry delivers a second copy.
 func TestHandoffRemoteRefusalSendsNoMailAndForceSendsExactlyOne(t *testing.T) {
+	city := t.TempDir()
 	old := liveSubagentsForKill
 	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
 		return []worker.InFlightSubagent{{AgentID: "agent-42", Description: "Long audit", StartedAt: time.Now().Add(-time.Minute)}}, nil
@@ -110,7 +112,7 @@ func TestHandoffRemoteRefusalSendsNoMailAndForceSendsExactlyOne(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doHandoffRemote(store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, &stdout, &stderr); code != 1 {
+	if code := doHandoffRemoteWithForce(city, store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, false, &stdout, &stderr); code != 1 {
 		t.Fatalf("code = %d, want refusal", code)
 	}
 	if got := countMail(); got != 0 {
@@ -119,7 +121,7 @@ func TestHandoffRemoteRefusalSendsNoMailAndForceSendsExactlyOne(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := doHandoffRemoteWithForce("", store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 {
+	if code := doHandoffRemoteWithForce(city, store, store, rec, sp, "target", "target", "sender", []string{"handoff"}, true, &stdout, &stderr); code != 0 {
 		t.Fatalf("force code=%d stderr=%s", code, stderr.String())
 	}
 	if got := countMail(); got != 1 {
