@@ -1239,7 +1239,7 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 // hold when by is an operator (CONTRACT v5.9 D8). If the tmux session died
 // (active bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionStartLock(ctx, id, func() error {

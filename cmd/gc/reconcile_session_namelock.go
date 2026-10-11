@@ -84,7 +84,7 @@ func startAbandoned(store beads.Store, cityPath string, info session.Info) bool 
 func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (session.Actor, func(), error) {
 	by := sessionActor(session.ActorController, cityPath)
 	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
-	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) && !errors.Is(err, session.ErrRuntimeLeaseNoCity) {
 		fmt.Fprintf(stderr, "session reconciler: stopping %s under the name's flock alone: %v\n", name, err) //nolint:errcheck
 		lease, release, err = tryRuntimeLease(nil, cityPath, name, "", 0)
 	}

@@ -1061,7 +1061,7 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 }
 
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
 	}
 	var outcome SubmitOutcome
@@ -1102,7 +1102,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // other callers that need bounded startup without attaching a terminal. A
 // dormant row it may not resume as its actor returns ErrResumeHeld.
 func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionStartLock(ctx, id, func() error {
@@ -1119,10 +1119,7 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary. It runs under by.Lease, the caller's.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
-		return err
-	}
-	if err := by.CheckStarts(); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionMutationLock(id, func() error {
@@ -1166,7 +1163,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // an operational error. A held row the actor may not resume returns
 // ErrResumeHeld, queueing nothing, so the caller queues it and says why.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return false, err
 	}
 	var delivered bool

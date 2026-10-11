@@ -111,6 +111,7 @@ func TestActorOnAnotherCityIsRefused(t *testing.T) {
 // TestRuntimeLeaseRequestNeedsAnAbsoluteCity: a lease request names an
 // absolute city, whoever builds it.
 func TestRuntimeLeaseRequestNeedsAnAbsoluteCity(t *testing.T) {
+	ExpectNoCityRefusalsForTest(t)
 	for _, city := range []string{"", "city", "./city"} {
 		if l, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s"}); !errors.Is(err, ErrRuntimeLeaseNoCity) {
 			l.Release()
