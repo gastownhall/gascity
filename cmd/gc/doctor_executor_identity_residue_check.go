@@ -193,10 +193,12 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 		// does hold session records still contributes them. Interface identity
 		// is the right test -- production stores are pointer-backed
 		// CachingStores -- and it keeps the default single-store city from
-		// scanning the same rows twice. The union is built into the scope's own
+		// scanning the same rows twice. The session store may be the city
+		// store wrapped for emission (withMainStoreEmission), so the wrapper
+		// is looked through. The union is built into the scope's own
 		// index rather than into the shared one, so one scope's session beads
 		// can never leak into the next scope's verdict.
-		if sc.store != sessionStore {
+		if sc.store != withoutEmission(sessionStore) {
 			scopeIdentities, idxErr := buildExecutorRouteIdentityIndex(sc.store)
 			if idxErr != nil {
 				skipped = append(skipped, fmt.Sprintf("%s skipped: listing session beads: %v", sc.label, idxErr))

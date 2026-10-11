@@ -123,6 +123,43 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 	return r
 }
 
+// withMainStoreEmission is withCLIEmission for the session class of a city
+// that relocates nothing: the one-shot CLI's session writes land in the city's
+// own store, and they must be announced just as a split city's are (mc-03yxh).
+// Nothing else tells the controller's cache about them — gc no longer installs
+// the bd event hooks — so a cache-served session census (the legacy patrol
+// tick, v2's census) missed a `gc session new` until a poke's live read ran.
+//
+// It wraps only the engines the wrapper is pinned against
+// (TestEmittingClassStoreKeepsEveryEngineCapability): they run no bd hooks, so
+// nothing else emits for them, and the wrapper forwards every capability they
+// declare. Any other store is returned untouched — a bd subprocess store may
+// run hooks that already emit, and carries capabilities the wrapper does not
+// forward — as is a CachingStore, whose own notifyChange already emits, and a
+// relocated class store the funnel already wrapped. The only caller is
+// cliSessionStore.
+func withMainStoreEmission(store beads.Store, cityPath string) beads.Store {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return store
+	}
+	switch store.(type) {
+	case *beads.SQLiteStore, *beads.NativeDoltStore:
+		return &emittingClassStore{Store: store, cityPath: cityPath}
+	default:
+		return store
+	}
+}
+
+// withoutEmission returns the store an emitting wrapper adds emission to, and
+// any other store as is, for a caller that compares store identity.
+func withoutEmission(store beads.Store) beads.Store {
+	if emitting, ok := store.(*emittingClassStore); ok {
+		return emitting.Store
+	}
+	return store
+}
+
 // emittingClassStore is a relocated class store that appends a bead.* event
 // after each successful mutation. The embedded Store carries the required
 // surface; every optional capability either bead engine declares is forwarded

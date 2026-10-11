@@ -1551,3 +1551,123 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		}
 	})
 }
+
+// mc-03yxh. On a single-store city `gc session new` writes the session bead
+// from its own process into the city's engine, and nothing told the
+// controller's cache: no bd hooks, and the one-shot emission covered only
+// relocated classes. The cache-served session census (the legacy patrol tick,
+// and v2's census, which is cache-only by contract) then missed the session
+// until a poke's live read happened to run. The CLI's session store now
+// announces the create the way a split city's already does, and the
+// controller's event watcher puts the row in the cache, so the patrol's cached
+// snapshot lists it with no poke and no store read.
+func TestOneShotSessionCreateOnASingleStoreCityReachesTheControllerCache(t *testing.T) {
+	cityPath := t.TempDir()
+	writeOneShotCityTOML(t, cityPath, "")
+	captureCLIStorageStderr(t)
+	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the city engine: %v", err)
+	}
+	backing := &listCountingStore{Store: engine}
+	cr := newPokeSnapshotRuntime(t, backing)
+	cache := cr.standaloneCityStore.(*beads.CachingStore)
+	cs := &controllerState{cityBeadStore: cache}
+
+	// gc session new, in its own process: the CLI opened the engine itself.
+	created, err := cliSessionStore(engine, nil, cityPath).Create(beads.Bead{
+		Title:    "adhoc",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"template": "worker", "session_name": "worker-adhoc", "state": "creating"},
+	})
+	if err != nil {
+		t.Fatalf("creating the session bead through the CLI session store: %v", err)
+	}
+
+	// The controller's bead event watcher.
+	announced := 0
+	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+		if evt.Subject == created.ID && evt.Type == events.BeadCreated {
+			announced++
+		}
+		cs.applyBeadEventToStores(evt)
+	}
+	if announced != 1 {
+		t.Fatalf("the CLI session create appended %d bead.created row(s) for %s, want exactly 1", announced, created.ID)
+	}
+	backing.takeLists()
+	if !snapshotHasSession(cr.loadTickSessionBeadSnapshot("patrol"), created.ID) {
+		t.Fatalf("the patrol tick's cached session snapshot is missing %s, which the CLI created and announced", created.ID)
+	}
+	if n := backing.takeLists(); n != 0 {
+		t.Fatalf("the patrol snapshot issued %d store lists, want 0: the cache must know the session from the event alone", n)
+	}
+}
+
+// withMainStoreEmission wraps only the engines the wrapper is pinned against.
+// A bd subprocess store may run hooks that already emit and carries
+// capabilities the wrapper does not forward, a CachingStore emits through its
+// own notifyChange, a relocated class store the funnel wrapped already emits,
+// and a city path that names no city has no journal.
+func TestMainStoreEmissionWrapsOnlyPinnedEngines(t *testing.T) {
+	cityPath := t.TempDir()
+	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the engine: %v", err)
+	}
+	wrapped, ok := withMainStoreEmission(engine, cityPath).(*emittingClassStore)
+	if !ok || wrapped.Store != engine || wrapped.cityPath != cityPath {
+		t.Fatalf("withMainStoreEmission(sqlite engine) = %T, want the emitting wrapper over that engine and city", withMainStoreEmission(engine, cityPath))
+	}
+	if got := withoutEmission(wrapped); got != engine {
+		t.Fatalf("withoutEmission(wrapper) = %v, want the engine it wraps", got)
+	}
+	if got := withMainStoreEmission(engine, " "); got != engine {
+		t.Fatalf("withMainStoreEmission with no city path = %T, want the engine untouched", got)
+	}
+	mem := beads.NewMemStore()
+	for name, store := range map[string]beads.Store{
+		"bd subprocess store": beads.NewBdStore(t.TempDir(), nil),
+		"mem store":           mem,
+		"caching store":       beads.NewCachingStoreForTest(engine, nil),
+		"already emitting":    wrapped,
+	} {
+		if got := withMainStoreEmission(store, cityPath); got != store {
+			t.Errorf("withMainStoreEmission(%s) = %T, want the store untouched", name, got)
+		}
+	}
+}
+
+// The main-store injection has one caller, the CLI session-class resolver, for
+// the same reason withCLIEmission has one: a second injector reachable from a
+// controller path is a double row in the city's log.
+func TestMainStoreEmissionHasExactlyOneInjectionSite(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading cmd/gc: %v", err)
+	}
+	fset := token.NewFileSet()
+	sites := map[string]int{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "withMainStoreEmission" {
+					sites[name]++
+				}
+			}
+			return true
+		})
+	}
+	if len(sites) != 1 || sites["cli_session_store.go"] != 1 {
+		t.Fatalf("withMainStoreEmission is called from %v, want exactly one call in cli_session_store.go", sites)
+	}
+}
