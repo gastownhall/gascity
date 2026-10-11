@@ -199,7 +199,8 @@ func (b bypassWrite) admits(class MetadataPatch) bool {
 // deciders are pure and cannot mint, so their cells reach it folded until
 // R7c2b carries them typed and deletes the list.
 var dispositionBypass = map[string]bypassWrite{
-	"cmd/gc.fencedWriter.casRow": {"v2 row patches (the launch's PreWake, the expired-timer TimerTick, the dead runtime's Sleep and quarantine, the stability clear): their cells, folded by the pure deciders; R7c2b carries them typed to the write and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty | shapeTime}},
+	"cmd/gc.fencedWriter.closeRow": {"v2's A10 rollback close: the Retire cell, folded by its pure decider; R7c2b carries it typed and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty}},
+	"cmd/gc.fencedWriter.casRow":   {"v2 row patches (the launch's PreWake, the expired-timer TimerTick, the dead runtime's Sleep and quarantine, the stability clear): their cells, folded by the pure deciders; R7c2b carries them typed to the write and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty | shapeTime}},
 }
 
 // dispositionPlumbing are the store wrappers between a writer and the backend,

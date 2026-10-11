@@ -143,7 +143,7 @@ func abandonStep(v txView) txStep {
 	case f.terminal != "" && !f.pending:
 		return abandon(providerTerminalErrorPatch(f.terminal, v.Now), facts)
 	case f.rateLimit:
-		return abandon(session.RateLimitQuarantinePatch(v.Now.Add(defaultRateLimitQuarantineDuration)), facts)
+		return abandon(rateLimitQuarantine(v.Row, v.Now), facts)
 	case f.cause == causePrepare, f.pending && f.terminal == "" && f.configured && !f.died:
 		return abandon(session.MetadataPatch{"last_woke_at": ""}, facts)
 	case f.pending:
@@ -184,6 +184,7 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
 	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Class(row, now).Fold())
 	return patch, accrual.Quarantined
 }
 
@@ -197,6 +198,8 @@ func restorePatch(u preWakeUndo, meta map[string]string) session.MetadataPatch {
 			patch[key] = value
 		}
 	}
+	// The PreWake cell's undo, folded (the v2 deciders cannot mint).
+	maps.Copy(patch, session.UndoDisposition(u.before, u.class, meta).Fold())
 	return patch
 }
 
@@ -287,6 +290,15 @@ func rollbackable(row session.Info) bool {
 	return session.LeaseFromInfo(row).CanRollback(session.LeaseFromInfo(row))
 }
 
+// rateLimitQuarantine is legacy's recordRateLimitQuarantine for row at now: its
+// lifecycle and the Quarantine cell's quarantined_until, folded (the v2
+// deciders cannot mint; the write admits it).
+func rateLimitQuarantine(row session.Info, now time.Time) session.MetadataPatch {
+	patch := session.RateLimitQuarantinePatch()
+	maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now).Fold())
+	return patch
+}
+
 // rollbackPatch is legacy's rollbackPendingCreateClears as one atomic close:
 // last_woke_at cleared, more, then failedCreateClosePatch over them, and an
 // explicit session name cleared in the same write (legacy clears it in a
@@ -294,7 +306,8 @@ func rollbackable(row session.Info) bool {
 func rollbackPatch(row session.Info, now time.Time, more session.MetadataPatch) session.MetadataPatch {
 	patch := session.MetadataPatch{"last_woke_at": ""}
 	maps.Copy(patch, more)
-	maps.Copy(patch, failedCreateClosePatch(now))
+	maps.Copy(patch, failedCreateCloseLife(now))
+	maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
 	if strings.TrimSpace(row.SessionNameExplicit) == "true" {
 		patch["session_name"] = ""
 	}
@@ -328,7 +341,7 @@ func paneScreen(ctx context.Context, _ effectReads, v txView) (session.MetadataP
 		facts.Screen = session.ScreenRateLimit
 	}
 	if session.DecideSessionExit(facts) == session.ExitRateLimitQuarantine {
-		return session.RateLimitQuarantinePatch(v.Now.Add(defaultRateLimitQuarantineDuration)), nil
+		return rateLimitQuarantine(v.Row, v.Now), nil
 	}
 	return nil, nil
 }

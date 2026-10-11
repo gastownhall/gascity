@@ -2869,11 +2869,17 @@ func closeFailedCreateBeadInTx(tx beads.Tx, info session.Info, now time.Time) er
 // create-start clears, and the Retire cell's hold clears.
 // closeFailedCreateBead and closeFailedCreateBeadInTx both write it.
 func failedCreateClosePatch(info session.Info, now time.Time) session.MetadataPatch {
+	// The row ends: its holds are the disposition's Retire cell.
+	return session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, failedCreateCloseLife(now))
+}
+
+// failedCreateCloseLife is failedCreateClosePatch's lifecycle: ClosePatch for
+// the failed-create state plus the create-claim and create-start clears.
+func failedCreateCloseLife(now time.Time) session.MetadataPatch {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
-	// The row ends: its holds are the disposition's Retire cell.
-	return session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, patch)
+	return patch
 }
 
 // closeFailedCreateBead closes the session expected describes as failed-create.
