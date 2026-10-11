@@ -438,13 +438,17 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
 // by item, a deferred arm, INC-003, unknown-never-destroys, a harness gap
 // (by what the export cannot carry: a pool template's start, which rests on
-// demand), or unexplained.
+// demand; or what legacy's trace cannot: its identity sync, which records no
+// decision), or unexplained.
 // arms are the legacy records' owning arms. The two evidence families need
 // as many rows of the template showing the cause, as v2 traced it, as legacy
 // acted beyond v2: INC-003 a row v2 held for undesired-wake-grace.
 // C8.9's fresh attach and pending reads run in the effect, which a trace-only
 // pass never runs, so the replay cannot see that family.
 func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info) (family, item string) {
+	if d.Class == intentRowMetadata && d.Legacy == 0 { // legacy's sync writes the same keys, tracing no decision
+		return "harness gap", "legacy's identity sync records nothing"
+	}
 	if d.V2 > d.Legacy {
 		return "unexplained", ""
 	}
@@ -595,6 +599,7 @@ func TestReplayFamilies(t *testing.T) {
 		family, item                     string
 	}{
 		{"v2 only", "A20", "heal", "", "", 1, "unexplained", ""},
+		{"an identity sync", "", intentRowMetadata, "", "", 1, "harness gap", "legacy's identity sync records nothing"},
 		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, "v5 §12.2", "1"},
 		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A17"},
 		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, "harness gap", "no exported demand"},

@@ -100,7 +100,7 @@ func (w fencedWriter) updateMetadataFenced(id string, attempts int, decide func(
 
 // updateRowFenced is LL4's session.Store.UpdateRowFenced: metadata, title
 // and labels in one UpdateIfMatch.
-func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(session.Info) (session.RowPatch, bool)) (bool, error) {
+func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(session.Info, session.PersistedResponse) (session.RowPatch, bool)) (bool, error) {
 	front, err := w.front()
 	if err != nil {
 		return false, err
@@ -112,11 +112,13 @@ func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(sessi
 // row from the backing through the leg's cache (CachingStore.RefreshRow), so
 // decide never sees a cached copy. A newer write racing the read returns
 // beads.ErrRowRefreshFenced, wrapped.
-func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.MetadataPatch) (bool, error) {
+func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.RowPatch) (bool, error) {
 	if _, err := w.front(); err != nil {
 		return false, err
 	}
-	return sessionFrontDoor(w.freshStore()).UpdateMetadataFenced(id, 1, decide)
+	return sessionFrontDoor(w.freshStore()).UpdateRowFenced(id, 1, func(row session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
+		return decide(row, resp), true
+	})
 }
 
 // closeRow is runTx's one close attempt: CloseWithMetadataIfMatch at the

@@ -827,7 +827,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentStart}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -843,6 +843,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 // runner, the adopt the read-only stores its prepare reads.
 var effectCapGrants = map[string]caps{
 	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode,
+	intentRowMetadata: capReadStores | capProviderStart, // the alias probe's store, the runtime alias sync
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -1474,5 +1475,29 @@ func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
 	}}
 	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
 		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}
+
+// Kills a step's title or label deltas dropped, or written apart from its
+// metadata (v5 M1; C7d): a step's Title, AddLabels and RemoveLabels land
+// with its Write, in its one CAS.
+func TestTxWritesTitleAndLabelsWithTheMetadata(t *testing.T) {
+	k := newTxKit(t)
+	if err := k.backing.Update(k.it.Key.ID, beads.UpdateOpts{Labels: []string{"agent:old"}}); err != nil {
+		t.Fatal(err)
+	}
+	title := "worker-1"
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Title: &title, AddLabels: []string{"agent:new"}, RemoveLabels: []string{"agent:old"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata[txKeyA] != "1" || b.Title != title || !slices.Contains(b.Labels, "agent:new") || slices.Contains(b.Labels, "agent:old") {
+		t.Fatalf("row title %q labels %v meta %v, want the title and label deltas with the write", b.Title, b.Labels, b.Metadata)
 	}
 }

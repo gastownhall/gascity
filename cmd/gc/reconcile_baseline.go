@@ -32,6 +32,10 @@ const (
 	// (MAINT-025): the core baseline, not the live pair, as legacy's
 	// softReloadAcceptedHashMetadata.
 	baselineSoftReload baselineReason = "soft-reload"
+	// baselineAliasRerender rebaselines a started row whose alias A7
+	// changes (SESS-717), all six keys, as legacy's
+	// queueAliasChangeDriftRebaseline: the alias rerenders GC_ALIAS.
+	baselineAliasRerender baselineReason = "alias-rerender"
 )
 
 // baselinePatch is cfg's baseline for reason.

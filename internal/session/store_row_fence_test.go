@@ -130,7 +130,7 @@ func TestUpdateRowFencedOneCAS(t *testing.T) {
 			rec := &rowWriteRecorder{Store: store}
 			front := NewStore(beads.SessionStore{Store: rec})
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 				return singletonRowPatch(), true
 			})
 			if err != nil || !written {
@@ -168,7 +168,7 @@ func TestUpdateRowFencedRedecidesOnLostCAS(t *testing.T) {
 			front := NewStore(beads.SessionStore{Store: store})
 			var seen []string
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(current Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(current Info, _ PersistedResponse) (RowPatch, bool) {
 				seen = append(seen, current.Alias)
 				if len(seen) == 1 {
 					if err := backing.SetMetadataBatch(created.ID, map[string]string{"alias": "operator-pick"}); err != nil {
@@ -228,7 +228,7 @@ func TestUpdateRowFencedRefusesWithoutWriter(t *testing.T) {
 			created := seedRowFenceSession(t, store, "s-blind")
 			front := NewStore(beads.SessionStore{Store: store})
 			for call := 0; call < 2; call++ {
-				written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+				written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 					t.Fatal("decide ran without a conditional writer")
 					return RowPatch{}, false
 				})
@@ -255,7 +255,7 @@ func TestUpdateRowFencedLabelsRefusedWritesNothing(t *testing.T) {
 			created := seedRowFenceSession(t, store, "s-labels")
 			front := NewStore(beads.SessionStore{Store: store})
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 				return singletonRowPatch(), true
 			})
 			var unsupported *beads.ConditionalUpdateFieldUnsupportedError
@@ -282,7 +282,7 @@ func TestUpdateRowFencedDecideRefusalWritesNothing(t *testing.T) {
 			rec := &rowWriteRecorder{Store: store}
 			front := NewStore(beads.SessionStore{Store: rec})
 
-			written, err := front.UpdateRowFenced(created.ID, 3, func(Info) (RowPatch, bool) {
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
 				return decided.patch, decided.ok
 			})
 			if written || err != nil || len(rec.writes) != 0 {

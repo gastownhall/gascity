@@ -1,0 +1,128 @@
+package main
+
+import (
+	"errors"
+	"maps"
+	"slices"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+// identityCity has a pool of three ("worker"), a singleton pool ("solo")
+// and a named session on worker ("boss").
+func identityCity() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(3)},
+			{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+		},
+		NamedSessions: []config.NamedSession{{Name: "boss", Template: "worker", Mode: "always"}},
+	}
+}
+
+// Kills an identity refresh that drifts from legacy's (SESS-713, 717..719,
+// POOL-046) or never converges (I20): each row's decision, applied, decides
+// nothing more.
+func TestDesiredRowIdentity(t *testing.T) {
+	cfg := identityCity()
+	for _, tc := range []struct {
+		name      string
+		tp        TemplateParams
+		info      session.Info
+		meta      session.MetadataPatch
+		aliasWork bool
+		alias     string
+		title     bool
+		labels    bool
+	}{
+		{
+			name: "a transient pool seat's unmanaged alias clears",
+			tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2},
+			info: session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", Alias: "alias-gc-1"},
+			meta: session.MetadataPatch{}, aliasWork: true, alias: "",
+		},
+		{
+			name: "a stale pool slot follows the allocation's (SESS-719)",
+			tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2},
+			info: session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "5", AgentName: "worker-2"},
+			meta: session.MetadataPatch{"pool_slot": "2"},
+		},
+		{
+			name: "a singleton's phantom slot collapses (POOL-046)",
+			tp:   TemplateParams{TemplateName: "solo", InstanceName: "solo", Alias: "solo"},
+			info: session.Info{Template: "solo", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1", AgentName: "solo-1", Alias: "solo", Title: "solo-1", Labels: []string{"agent:solo-1"}},
+			meta: session.MetadataPatch{"agent_name": "solo", "pool_slot": ""}, title: true, labels: true,
+		},
+		{
+			name: "a named row drops its pool keys and takes its named keys",
+			tp:   TemplateParams{TemplateName: "worker", InstanceName: "boss", ConfiguredNamedIdentity: "boss", ConfiguredNamedMode: "always", Alias: "boss"},
+			info: session.Info{Template: "worker", SessionOrigin: "named", PoolManaged: true, PoolSlot: "1", AgentName: "boss", Alias: "boss"},
+			meta: session.MetadataPatch{poolManagedMetadataKey: "", "pool_slot": "", namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "boss", namedSessionModeMetadata: "always"},
+		},
+		{
+			name: "a pool row drops stale named keys",
+			tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2},
+			info: session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2", ConfiguredNamedSession: true, ConfiguredNamedIdentity: "old"},
+			meta: session.MetadataPatch{namedSessionMetadataKey: "", namedSessionIdentityMetadata: ""},
+		},
+		{
+			name: "a converged pool seat",
+			tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2},
+			info: session.Info{Template: "worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "2", AgentName: "worker-2"},
+			meta: session.MetadataPatch{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := desiredRowIdentity(cfg, tc.tp, tc.info)
+			if !maps.Equal(id.Meta, tc.meta) || id.AliasWork != tc.aliasWork || tc.aliasWork && id.Alias != tc.alias || (id.Title != nil) != tc.title || (len(id.Add)+len(id.Remove) > 0) != tc.labels {
+				t.Fatalf("identity %+v, want meta %v alias work %v (%q) title %v labels %v", id, tc.meta, tc.aliasWork, tc.alias, tc.title, tc.labels)
+			}
+			// I20: the write, applied, leaves nothing to decide.
+			next := tc.info.ApplyPatch(identityPatch(id, tc.info, false, nil, func() session.MetadataPatch { return nil }, "T"))
+			if id.Title != nil {
+				next.Title = *id.Title
+			}
+			next.Labels = slices.DeleteFunc(append(slices.Clone(next.Labels), id.Add...), func(l string) bool { return slices.Contains(id.Remove, l) })
+			again := desiredRowIdentity(cfg, tc.tp, next)
+			if len(identityPatch(again, next, false, nil, func() session.MetadataPatch { return nil }, "T")) != 0 || again.AliasWork || again.Title != nil || len(again.Add)+len(again.Remove) > 0 {
+				t.Fatalf("not converged after its write: %+v", again)
+			}
+		})
+	}
+}
+
+// Kills an alias write without its history, conflict clear, rebaseline or
+// guarded keys, a conflict recorded every pass, and a guarded key written
+// past a conflict (SESS-717/718): a free alias writes all of them; a
+// conflict records its markers on the transition only, clears a managed
+// pool row's wrong alias and withholds the guarded keys; a blocked alias
+// writes the plain keys alone.
+func TestIdentityPatch(t *testing.T) {
+	id := rowIdentity{Meta: session.MetadataPatch{"session_origin": "ephemeral"}, Guarded: session.MetadataPatch{"agent_name": "worker-2"}, AliasWork: true, Alias: "worker-2", ManagedPool: true}
+	info := session.Info{Alias: "wrong", StartedConfigHash: "v6:x", PoolAliasConflict: "older", PoolAliasConflictCount: "2"}
+	rebaseline := func() session.MetadataPatch { return session.MetadataPatch{"started_config_hash": "v6:new"} }
+	free := identityPatch(id, info, false, nil, rebaseline, "T")
+	for k, v := range map[string]string{"alias": "worker-2", "alias_history": "wrong", "agent_name": "worker-2", "started_config_hash": "v6:new", poolAliasConflictMetadataKey: "", "synced_at": "T"} {
+		if free[k] != v {
+			t.Fatalf("free alias: patch %v, want %s=%q", free, k, v)
+		}
+	}
+	taken := identityPatch(id, info, false, errors.New("held"), rebaseline, "T")
+	if taken[poolAliasConflictMetadataKey] != "worker-2" || taken[poolAliasConflictCountMetadataKey] != "3" || taken["alias"] != "" || taken["agent_name"] != "" {
+		t.Fatalf("conflict: patch %v, want the conflict recorded, the wrong alias cleared and no guarded key", taken)
+	}
+	if _, ok := taken["agent_name"]; ok {
+		t.Fatalf("conflict: patch %v writes a guarded key", taken)
+	}
+	recorded := info
+	recorded.PoolAliasConflict, recorded.Alias = "worker-2", ""
+	if again := identityPatch(id, recorded, false, errors.New("held"), rebaseline, "T"); again[poolAliasConflictCountMetadataKey] != "" {
+		t.Fatalf("a recorded conflict: patch %v, want no new markers", again)
+	}
+	if blocked := identityPatch(id, recorded, true, nil, rebaseline, "T"); !maps.Equal(blocked, session.MetadataPatch{"session_origin": "ephemeral", "synced_at": "T"}) {
+		t.Fatalf("blocked: patch %v, want the plain keys alone", blocked)
+	}
+}

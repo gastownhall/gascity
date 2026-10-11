@@ -163,6 +163,7 @@ var parityFindings = map[string]parityEntry{
 		"BEHAVIORS SESS-601/585 (A20 idle begin, AL1 stage 6b); C6a2 replay finding (owner to rule)", "legacy idle-sleeps a live row its probe reads idle past sleep_after_idle (its drain, latch, signal and stop in one tick); v2's AL1 suppresses a live row only on a known I3 activity fact (configSleepSuppressed), and no observer sets LastActivityKnown, so v2 never decides the idle sleep of a live non-interactive or always-named session (AL1's idle stage covers on-demand and pool rows from detached_at), and A20's idle begin and latch do not fire there (C6a2b)",
 		[]string{"detached_at", "drain_at", "last_woke_at", "sleep_reason", "slept_at", "state"},
 	},
+	"a7-lag":            {"C7d (ruling wanted: §12.2 or match)", "legacy refreshes a row's identity every tick, beside its heals and under a live kill fence; v2's A7 writes it when it decides the row, a pass later when an earlier arm (an A6 heal) takes the row's first pass, or once A2's kill fence lets the row through, so its write, the synced_at it stamps and its runtime alias sync land later", []string{"synced_at", "alias", "alias_history", "labels", "pool_slot", "agent_name"}},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
@@ -179,7 +180,6 @@ var parityUnported = map[string]parityEntry{
 	"rollback A10":  {"C5a2 (the rollback effect; A10's arm, C5b)", "legacy closes an undesired pending create past its never-started deadline; v2's A10 proposes the rollback once C5a2 registers its effect", []string{"status", "state", "close_reason", "closed_at"}},
 	"A21 close":     {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A21 stranded":  {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
-	"A7 identity":   {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
 	"A4 idle-sleep": {"C6b1, C6b2 (A4 + D4)", "legacy signals an idle drain in the tick it begins it and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2's begin (A20) writes the stop request and the fingerprint, and registers no signal or finalize yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
 	"A4 managed-suspend": {
 		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2's A20 writes the stop request and registers no signal or stop verb yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
@@ -192,7 +192,7 @@ var parityUnported = map[string]parityEntry{
 		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch (a wait's own intent is no explicit sleep intent) and delivers the wait's nudge with the start; v2's begin (A20) writes the stop request and registers no signal or stop verb yet, so the waiter's runtime stays up and its waits step queues the nudge to it live",
 		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
-	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
+	"C7d-2 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
 // parityPinned are KEPT rows a registered arm implements whose owner cell
@@ -223,6 +223,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// PreWake rows; S1's adopt owns no row yet.
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
 	intentAdopt: regexp.MustCompile(`\bS1 adopt\b`),
+	// A7's row-metadata verb (C7d) owns the M1 verb's rows.
+	intentRowMetadata: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`),
 	// A8's baseline (C7c) owns the M2 builder's rows.
 	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
 }
@@ -936,13 +938,13 @@ func parityFixtures() []parityFixture {
 		return chatRow("gc-c", "1", append([]string{"state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c"}, meta...)...)
 	}
 	chatLive := simRuntime{id: "gc-c", epoch: "1", token: "tok-gc-c"}
-	chatStanding := map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata"}
+	chatStanding := map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "C7d-2 row-metadata"}
 	// stopsInTick is legacy's same-tick signal, stop and sleep of the named
 	// session after its begin, which v2 leaves to A4 (C6b1, C6b2); v2's begin
 	// writes the stop request.
 	stopsInTick := func(entry string) map[string]string {
 		return map[string]string{
-			"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata", "row:gc-c:*stop": entry,
+			"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "C7d-2 row-metadata", "row:gc-c:*stop": entry,
 			"row:gc-c:state": entry, "row:gc-c:last_woke_at": entry, "row:gc-c:detached_at": entry,
 			"provider:SetMeta chat": entry, "provider:RemoveMeta chat": entry, "provider:Stop chat": entry,
 			"event:session.stopped chat [reason session_id template]": entry,
@@ -987,7 +989,9 @@ func parityFixtures() []parityFixture {
 		return out
 	}
 	// created is a row v2's create wrote, which legacy's sync then stamps.
-	created := func(id string) map[string]string { return map[string]string{"row:" + id + ":*sync": "A7 row-metadata"} }
+	created := func(id string) map[string]string {
+		return map[string]string{"row:" + id + ":*sync": "C7d-2 row-metadata"}
+	}
 	return []parityFixture{
 		{
 			// INC-024: a heal never reverts a durable suspend; the row write
@@ -1014,7 +1018,7 @@ func parityFixtures() []parityFixture {
 			Name: "a workless suspended pool row is swept before its hold heals", Behaviors: []string{"MAINT-051"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
 			Explain: map[string]string{
-				"row:gc-1:*close": "A21 close", "row:gc-1:*sync": "A7 row-metadata", "row:gc-1:held_until": "A21 close", "row:gc-1:sleep_reason": "A21 close",
+				"row:gc-1:*close": "A21 close", "row:gc-1:*sync": "C7d-2 row-metadata", "row:gc-1:held_until": "A21 close", "row:gc-1:sleep_reason": "A21 close",
 			},
 		},
 		{
@@ -1133,7 +1137,7 @@ func parityFixtures() []parityFixture {
 			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
 			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}}, Idle: []string{"gc-c"},
 			Explain: map[string]string{
-				"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata", "row:gc-c:*idle": "idle-activity-unread",
+				"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "C7d-2 row-metadata", "row:gc-c:*idle": "idle-activity-unread",
 				"provider:SetMeta chat": "idle-activity-unread", "provider:RemoveMeta chat": "idle-activity-unread", "provider:Stop chat": "idle-activity-unread",
 				"event:session.stopped chat [reason session_id template]": "idle-activity-unread",
 			},
@@ -1229,7 +1233,7 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			Name: "a mislabelled row is left alone", Rows: []parityRow{sessionRow("gc-1", "state", "asleep")},
-			Explain: map[string]string{"row:gc-1:*close": "mislabelled-close", "row:gc-1:*sync": "A7 row-metadata"},
+			Explain: map[string]string{"row:gc-1:*close": "mislabelled-close", "row:gc-1:*sync": "C7d-2 row-metadata"},
 		},
 		{Name: "a kill fence holds its row while demand creates another", Rows: []parityRow{func() parityRow {
 			b := poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1")
@@ -1275,7 +1279,7 @@ func parityFixtures() []parityFixture {
 				eps, _ := m.List(beads.ListQuery{Type: session.StartupHealthEpisodeType})
 				return append([]parityRow{row}, eps...)
 			}(), Work: assigned,
-			Explain: explain(map[string]string{"row:gc-1:*sync": "A7 row-metadata", "row:gc-1:*bind": "§12.2#40 held-start-bind", "row:gc-1:*mirror": "episode-mirror"}),
+			Explain: explain(map[string]string{"row:gc-1:*sync": "C7d-2 row-metadata", "row:gc-1:*bind": "§12.2#40 held-start-bind", "row:gc-1:*mirror": "episode-mirror"}),
 		},
 		{
 			Name: "a heartbeat-held seat whose runtime died respawns for its work", Behaviors: []string{"SESS-602"},
@@ -1315,7 +1319,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "an undesired pending create past its deadline rolls back", Behaviors: []string{"SESS-050", "SESS-051", "SESS-052", "SESS-092", "SESS-093", "SESS-501", "SESS-502", "GUAR-026", "GUAR-028", "INC-021", "MAINT-034"},
 			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", at(-11*time.Minute))},
-			Explain: map[string]string{"row:gc-1:*rollback": "rollback A10", "row:gc-1:*sync": "A7 row-metadata"},
+			Explain: map[string]string{"row:gc-1:*rollback": "rollback A10", "row:gc-1:*sync": "C7d-2 row-metadata"},
 		},
 	}
 }
@@ -1751,7 +1755,7 @@ func TestIdleProbesPaceAPatrolApart(t *testing.T) {
 	}
 	f := parityFixture{
 		City:     cfg,
-		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour), "alias", "chat", "agent_name", "chat", "session_origin", "named")}, // its identity converged: A7 has nothing to write
 		Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 	}
 	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)

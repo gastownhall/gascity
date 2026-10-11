@@ -196,6 +196,7 @@ var rowArms = []rowArm{
 	{"A6", armDetachedAt},
 	{"A6", armStrandedClear},
 	{"A6", armCurrentBead},
+	{"A7", armRowMetadata},
 	{"A8", armBaseline},
 	{"A9", armLivenessUnknown},
 	{"A10", armAdopt},

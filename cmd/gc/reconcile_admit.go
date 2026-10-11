@@ -111,6 +111,9 @@ type intent struct {
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
 	Event *events.Event
+	// AliasLock is the city alias lock A7's row-metadata verb takes around
+	// its effect (v5 M1), when its alias work needs one.
+	AliasLock string
 	// Heal is the A6 heal a start carries into its PreWake (startHealed),
 	// written alone when the start is not admitted or refuses before it.
 	Heal *intent

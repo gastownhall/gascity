@@ -406,15 +406,20 @@ type txFence struct {
 // otherwise a no-op with Cause. Without Done, the section's Call and the
 // next section run. Pass is what the section's Call takes.
 type txStep struct {
-	Write    session.MetadataPatch
-	Terminal session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
-	Refuse   string
-	Fail     string
-	Err      error
-	Done     bool
-	Cause    string
-	Facts    effectFacts
-	Pass     any
+	Write session.MetadataPatch
+	// Title and the label deltas ride Write's CAS (LL4's UpdateRowFenced):
+	// the row-metadata verb's (M1). A step that sets them writes metadata
+	// too (its synced_at).
+	Title                   *string
+	AddLabels, RemoveLabels []string
+	Terminal                session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
+	Refuse                  string
+	Fail                    string
+	Err                     error
+	Done                    bool
+	Cause                   string
+	Facts                   effectFacts
+	Pass                    any
 }
 
 // effectFacts are what an effect learned or did besides its outcome, merged
@@ -634,12 +639,12 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		var step txStep
 		var ended *settlement
 		var wroteFacts session.Facts
-		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
-			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil {
-				return nil
+		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.RowPatch {
+			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 {
+				return session.RowPatch{}
 			}
 			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
-			return step.Write
+			return session.RowPatch{Metadata: step.Write, Title: step.Title, AddLabels: step.AddLabels, RemoveLabels: step.RemoveLabels}
 		})
 		switch {
 		case ended != nil:

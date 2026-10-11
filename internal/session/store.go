@@ -301,7 +301,7 @@ func (p RowPatch) empty() bool {
 // way nothing is written. A success means the deltas applied, not that the
 // label set equals the read set plus the deltas (a legacy label-only write on
 // native Dolt does not move the revision). It reports whether it wrote.
-func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowPatch, bool)) (bool, error) {
+func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info, PersistedResponse) (RowPatch, bool)) (bool, error) {
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", id, err)
@@ -314,7 +314,7 @@ func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowP
 		if err != nil {
 			return false, err
 		}
-		patch, ok := decide(infoFromPersistedBead(bead))
+		patch, ok := decide(infoFromPersistedBead(bead), PersistedResponseFromBead(bead))
 		if !ok || patch.empty() {
 			return false, nil
 		}
