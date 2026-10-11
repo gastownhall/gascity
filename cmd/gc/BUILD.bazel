@@ -1247,6 +1247,7 @@ go_test(
         "dispatch_runtime_quiet_retry_test.go",
         "dispatch_runtime_wake_test.go",
         "dispatch_session_provider_lazy_test.go",
+        "disposition_v2_parity_test.go",
         "doctor_backlog_depth_ready_error_test.go",
         "doctor_backlog_depth_test.go",
         "doctor_bd_read_memo_test.go",

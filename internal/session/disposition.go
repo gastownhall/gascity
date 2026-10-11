@@ -40,6 +40,10 @@ const (
 	UnknownQuarantine
 )
 
+// dispositionKeys are the class's five keys, in the order Disposition.raw
+// keeps their text.
+var dispositionKeys = [...]string{"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at"}
+
 // Disposition is a row's holds as one value.
 type Disposition struct {
 	Operator OperatorHold
@@ -48,9 +52,12 @@ type Disposition struct {
 	Until time.Time
 	// Since is suspended_at.
 	Since time.Time
-	// Wait is an agent's wait (wait_hold, encoded with
-	// sleep_intent=wait-hold under no operator suspend).
+	// Wait is an agent's wait (wait_hold).
 	Wait bool
+	// WaitIntent is sleep_intent=wait-hold: a wait's own intent, which only
+	// a wait begins and a sleep keeps (D-J 3). Legacy's drain completion
+	// clears it and leaves a bare wait_hold, which holds the same.
+	WaitIntent bool
 	// Heartbeat is held_until when no operator suspend explains it.
 	Heartbeat time.Time
 	// Quarantine is quarantined_until.
@@ -61,16 +68,21 @@ type Disposition struct {
 	// Reason is the row's sleep_reason when it is an operator's (killed,
 	// user-hold, city-stop). Decoded only: the lifecycle writes it.
 	Reason SleepReason
-	// Unknown are timers present but unparseable; rawUntil and rawQuarantine
-	// keep their text, so an encode never rewrites a timer it cannot read.
-	Unknown       DispositionBit
-	rawUntil      string
-	rawQuarantine string
+	// Unknown are timers present but unparseable.
+	Unknown DispositionBit
+	// raw is the decoded row's text for each class key (dispositionKeys), so
+	// Encode rewrites a key only when its meaning moves: an unknown intent,
+	// a bare wait_hold, a timer's exact text and an unreadable stamp survive
+	// every move that does not change them.
+	raw [len(dispositionKeys)]string
 }
 
 // DecodeDisposition is meta's disposition, the one parser of its keys.
 func DecodeDisposition(meta map[string]string) Disposition {
 	var d Disposition
+	for i, k := range dispositionKeys {
+		d.raw[i] = meta[k]
+	}
 	intent := SleepReason(strings.TrimSpace(meta["sleep_intent"]))
 	switch {
 	case intent == SleepReasonUserHold:
@@ -79,12 +91,12 @@ func DecodeDisposition(meta map[string]string) Disposition {
 		d.Operator = OperatorSuspendedSoft
 	}
 	d.IdleStop = intent == sleepIntentIdleStopPending
+	d.WaitIntent = intent == SleepReasonWaitHold
 	d.Wait = strings.TrimSpace(meta["wait_hold"]) != ""
 	d.Since = parseDispositionTime(meta["suspended_at"])
 	if raw := strings.TrimSpace(meta["held_until"]); raw != "" {
 		if t, err := time.Parse(time.RFC3339, raw); err != nil {
 			d.Unknown |= UnknownHeldUntil
-			d.rawUntil = raw
 		} else if d.Operator == OperatorSuspended {
 			d.Until = t
 		} else {
@@ -94,7 +106,6 @@ func DecodeDisposition(meta map[string]string) Disposition {
 	if raw := strings.TrimSpace(meta["quarantined_until"]); raw != "" {
 		if t, err := time.Parse(time.RFC3339, raw); err != nil {
 			d.Unknown |= UnknownQuarantine
-			d.rawQuarantine = raw
 		} else {
 			d.Quarantine = t
 		}
@@ -127,38 +138,84 @@ func formatDispositionTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// Encode is d as its five keys, always all of them. It keeps today's
-// values, so a rollback build reads the rows it writes: an operator suspend
-// is sleep_intent=user-hold with held_until its Until; a wait under none is
-// wait_hold=true with sleep_intent=wait-hold; a timer d cannot read keeps
-// its text. The lifecycle keys (state, sleep_reason) are the caller's.
-func (d Disposition) Encode() MetadataPatch {
-	patch := MetadataPatch{
-		"held_until":        formatDispositionTime(d.Heartbeat),
-		"sleep_intent":      "",
-		"wait_hold":         "",
-		"quarantined_until": formatDispositionTime(d.Quarantine),
-		"suspended_at":      formatDispositionTime(d.Since),
+// unreadableTimer is canon's value for a timer d cannot read: it equals
+// itself, so a move that leaves the timer keeps its text.
+const unreadableTimer = "\x00unreadable"
+
+// canon is d's meaning for each class key, in today's values: an operator
+// suspend is sleep_intent=user-hold with held_until its Until; a wait is
+// wait_hold=true; its intent sleep_intent=wait-hold.
+func (d Disposition) canon() [len(dispositionKeys)]string {
+	var c [len(dispositionKeys)]string
+	switch {
+	case d.Unknown&UnknownHeldUntil != 0:
+		c[0] = unreadableTimer
+	case d.Operator == OperatorSuspended:
+		c[0] = formatDispositionTime(d.Until)
+	default:
+		c[0] = formatDispositionTime(d.Heartbeat)
 	}
 	switch {
 	case d.Operator == OperatorSuspended:
-		patch["sleep_intent"] = string(SleepReasonUserHold)
-		patch["held_until"] = formatDispositionTime(d.Until)
+		c[1] = string(SleepReasonUserHold)
 	case d.IdleStop:
-		patch["sleep_intent"] = string(sleepIntentIdleStopPending)
-	case d.Wait:
-		patch["sleep_intent"] = string(SleepReasonWaitHold)
+		c[1] = string(sleepIntentIdleStopPending)
+	case d.WaitIntent:
+		c[1] = string(SleepReasonWaitHold)
 	}
 	if d.Wait {
-		patch["wait_hold"] = "true"
-	}
-	if d.Unknown&UnknownHeldUntil != 0 {
-		patch["held_until"] = d.rawUntil
+		c[2] = "true"
 	}
 	if d.Unknown&UnknownQuarantine != 0 {
-		patch["quarantined_until"] = d.rawQuarantine
+		c[3] = unreadableTimer
+	} else {
+		c[3] = formatDispositionTime(d.Quarantine)
+	}
+	c[4] = formatDispositionTime(d.Since)
+	return c
+}
+
+// Encode is d as its five keys, always all of them. A key whose meaning d
+// has not moved from the row it was decoded from keeps that row's text, so
+// Encode(Decode(row)) is the row and a rollback build reads what it writes;
+// a key that moved takes today's value (canon). The lifecycle keys (state,
+// sleep_reason) are the caller's.
+func (d Disposition) Encode() MetadataPatch {
+	var base Disposition
+	if d.raw != base.raw {
+		base = DecodeDisposition(d.rawMeta())
+	}
+	was, now := base.canon(), d.canon()
+	patch := make(MetadataPatch, len(dispositionKeys))
+	for i, k := range dispositionKeys {
+		if now[i] == was[i] {
+			patch[k] = d.raw[i]
+		} else {
+			patch[k] = now[i]
+		}
 	}
 	return patch
+}
+
+// Changed is the part of Encode that differs from the row d was decoded
+// from: what a write of d must change, and all a write over a store without
+// conditional writes may touch.
+func (d Disposition) Changed() MetadataPatch {
+	patch := d.Encode()
+	for i, k := range dispositionKeys {
+		if patch[k] == d.raw[i] {
+			delete(patch, k)
+		}
+	}
+	return patch
+}
+
+func (d Disposition) rawMeta() map[string]string {
+	meta := make(map[string]string, len(dispositionKeys))
+	for i, k := range dispositionKeys {
+		meta[k] = d.raw[i]
+	}
+	return meta
 }
 
 // SuppressesWake reports a hold that keeps the row out of the wake and
@@ -176,20 +233,30 @@ func (d Disposition) BlocksConsume(now time.Time) bool {
 	return d.SuppressesWake(now) || d.Unknown != 0
 }
 
+// RefusesPreWake reports a hold that refuses the controller's PreWake (C5a1,
+// S1): an operator suspend, soft or not, or a live timer. A wait does not:
+// wait-ready launches it (POOL-077/080). Nor does an unreadable timer, which
+// would never heal. It is C5a1's HoldSet mask (preWakeHolds: HoldTimer,
+// HoldQuarantine, HoldUser, HoldSuspended) over the same row. CONTRACT v5.9i
+// adds A17's agent-heartbeat exemption on top; that is A17's, not this.
+func (d Disposition) RefusesPreWake(now time.Time) bool {
+	return d.Operator != OperatorNone || d.Until.After(now) || d.Heartbeat.After(now) || d.Quarantine.After(now)
+}
+
 // OperatorDormant reports a row its disposition holds dormant: an operator's
 // suspend, kill or city stop, a wait, or a live timer. A6's awake heal skips
 // it and D3 stops its runtime; the kill fence (IsKillPendingInfo) is the
-// lifecycle's half.
+// lifecycle's half. It is v2's operatorDormant without that half.
 func (d Disposition) OperatorDormant(now time.Time) bool {
 	return d.Reason != "" || d.Operator == OperatorSuspended || d.Wait || d.Heartbeat.After(now) ||
 		d.Until.After(now) || d.Quarantine.After(now)
 }
 
 // HeartbeatHeld reports an agent heartbeat keeping a live row up (A17,
-// SESS-602): a live held_until that neither an operator suspend, a wait nor
-// an idle stop explains.
+// SESS-602): a live held_until under no sleep intent at all, as legacy and
+// v2's heartbeatHeld read it. A bare wait_hold beside it does not stop it.
 func (d Disposition) HeartbeatHeld(now time.Time) bool {
-	return d.Heartbeat.After(now) && d.Operator != OperatorSuspended && !d.Wait && !d.IdleStop
+	return d.Heartbeat.After(now) && strings.TrimSpace(d.Encode()["sleep_intent"]) == ""
 }
 
 // KeepsSlot reports a row whose slot no free or close may take: an
@@ -254,6 +321,9 @@ func (k DispEventKind) String() string {
 type DispEvent struct {
 	Kind  DispEventKind
 	Until time.Time
+	// Running is whether the row's runtime runs, for a resume: an agent's
+	// or a background caller's resume queues by it (HoldVerdict).
+	Running bool
 }
 
 // ErrDispositionRefused is a cell that refuses its move. The caller keeps
@@ -282,14 +352,15 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 			return refuse("only an operator's suspend holds")
 		}
 		if d.Operator == OperatorSuspended && d.Until.After(now) {
-			return d, nil // idempotent while the suspend in force lasts
+			d.Since = now // a suspend in force is stamped again: a resume that read the old stamp refuses
+			return d, nil
 		}
 		until := ev.Until
 		if until.IsZero() {
 			until = now.Add(IndefiniteHoldDuration)
 		}
-		d.Operator, d.Until, d.Since, d.Heartbeat, d.IdleStop = OperatorSuspended, until, now, time.Time{}, false
-		d = d.forget(UnknownHeldUntil)
+		d.Operator, d.Until, d.Since, d.Heartbeat, d.IdleStop, d.WaitIntent = OperatorSuspended, until, now, time.Time{}, false, false
+		d.Unknown &^= UnknownHeldUntil
 	case EvSuspendSoft:
 		if d.Operator == OperatorNone {
 			d.Operator, d.Since, d.IdleStop = OperatorSuspendedSoft, now, false
@@ -299,28 +370,28 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 			return refuse("only an operator kills")
 		}
 		if d.Operator == OperatorSuspended {
-			d = d.forget(UnknownHeldUntil)
+			d.Unknown &^= UnknownHeldUntil
 		}
-		d.Operator, d.Until, d.Since, d.IdleStop = OperatorNone, time.Time{}, time.Time{}, false
+		d.Operator, d.Until, d.Since, d.IdleStop, d.WaitIntent = OperatorNone, time.Time{}, time.Time{}, false, false
 	case EvResume:
 		switch {
 		case by == ActorOperator && d.Operator == OperatorSuspended && life == StateDraining:
 			return refuse("the drain's stop owns the runtime")
 		case by == ActorOperator:
 			d = d.clearOperator()
-		case d.Operator != OperatorNone:
-			return refuse("only an operator's resume consumes a suspend")
+		case d.queues(by, ev.Running, life, now):
+			return refuse("the caller queues on a held row (HoldVerdict)")
 		}
 	case EvRestart:
 	case EvHeartbeat:
-		if d.Operator != OperatorSuspended && ev.Until.After(d.Heartbeat) {
-			d.Heartbeat = ev.Until
-			d = d.forget(UnknownHeldUntil)
+		if d.Operator != OperatorSuspended {
+			d.Heartbeat = ev.Until // it replaces held_until, as legacy's did: a heartbeat-shaped ∞ heals
+			d.Unknown &^= UnknownHeldUntil
 		}
 	case EvWaitBegin:
-		d.Wait, d.IdleStop = true, false
+		d.Wait, d.WaitIntent, d.IdleStop = true, d.Operator != OperatorSuspended, false
 	case EvWaitEnd:
-		d.Wait = false
+		d.Wait, d.WaitIntent = false, false
 	case EvSleep:
 		d.IdleStop = false
 		if d.Operator != OperatorSuspended {
@@ -330,9 +401,9 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 		if d.Operator == OperatorSuspended {
 			return refuse("a suspended row never starts")
 		}
-		d.Operator, d.Since, d.IdleStop = OperatorNone, time.Time{}, false
+		d.Operator, d.Since, d.IdleStop, d.WaitIntent = OperatorNone, time.Time{}, false, false
 	case EvIdleStopBegin:
-		if d.Operator != OperatorNone || d.Wait {
+		if d.Operator != OperatorNone || d.WaitIntent {
 			return refuse("an idle stop never runs over a hold")
 		}
 		d.IdleStop = true
@@ -343,7 +414,7 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 		d.IdleStop = false
 	case EvQuarantine:
 		d.Quarantine = ev.Until
-		d = d.forget(UnknownQuarantine)
+		d.Unknown &^= UnknownQuarantine
 	case EvTimerTick:
 		if !d.Heartbeat.After(now) {
 			d.Heartbeat = time.Time{}
@@ -356,38 +427,38 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 		}
 	case EvWake:
 		if by != ActorOperator {
-			if d.BlocksConsume(now) {
+			if d.SuppressesWake(now) {
 				return refuse("only an operator's wake clears a hold")
 			}
 			return d, nil
 		}
-		d = Disposition{Reason: d.Reason}
+		d = Disposition{Reason: d.Reason, raw: d.raw}
 	case EvRetire:
-		d = Disposition{}
+		d = Disposition{raw: d.raw}
 	default:
 		return refuse("no such event")
 	}
 	return d, nil
 }
 
-// clearOperator is d with no operator suspend: its Until, Since and the
-// held_until it owned go.
-func (d Disposition) clearOperator() Disposition {
-	if d.Operator == OperatorSuspended {
-		d = d.forget(UnknownHeldUntil)
+// queues reports whether a resume by by, not an operator, queues instead of
+// starting the row: an agent's or the controller's on a held row whose
+// runtime is not running or that is suspended, a background caller's also
+// on any row whose runtime is not running (HoldVerdict, queueFor).
+func (d Disposition) queues(by ActorKind, running bool, life State, now time.Time) bool {
+	held := d.BlocksConsume(now) && (life == StateSuspended || d.Operator == OperatorSuspendedSoft || !running)
+	if by == ActorBackground {
+		return !running || held
 	}
-	d.Operator, d.Until, d.Since = OperatorNone, time.Time{}, time.Time{}
-	return d
+	return held
 }
 
-// forget is d with the unreadable timer bit replaced: a move that writes the
-// timer drops the text it could not read.
-func (d Disposition) forget(bit DispositionBit) Disposition {
-	d.Unknown &^= bit
-	if bit == UnknownHeldUntil {
-		d.rawUntil = ""
-	} else {
-		d.rawQuarantine = ""
+// clearOperator is d with no operator suspend: its Until and Since go, and
+// the held_until it owned.
+func (d Disposition) clearOperator() Disposition {
+	if d.Operator == OperatorSuspended {
+		d.Unknown &^= UnknownHeldUntil
 	}
+	d.Operator, d.Until, d.Since = OperatorNone, time.Time{}, time.Time{}
 	return d
 }

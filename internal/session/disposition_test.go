@@ -18,33 +18,47 @@ var updateDispositionGolden = flag.Bool("update-golden", false, "rewrite the dis
 
 var dispT0 = time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 
-// dispSeeds are the dispositions the table golden starts from: each operator
-// value, each sub-state on its own, the combinations a cell treats apart,
-// and an unreadable timer.
+// dispSeeds are the dispositions the table golden starts from, each decoded
+// from a row: each operator value, each sub-state on its own, the
+// combinations a cell treats apart, legacy's shapes (a bare wait_hold, a
+// wait with an idle stop) and unreadable timers.
 func dispSeeds() []struct {
 	name string
 	d    Disposition
 } {
-	hour := dispT0.Add(time.Hour)
-	return []struct {
+	at := func(d time.Duration) string { return dispT0.Add(d).Format(time.RFC3339) }
+	rows := []struct {
+		name string
+		meta map[string]string
+	}{
+		{"none", map[string]string{}},
+		{"none+wait", map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold"}},
+		{"none+bare-wait", map[string]string{"wait_hold": "true"}},
+		{"none+bare-wait+heartbeat", map[string]string{"wait_hold": "true", "held_until": at(time.Hour)}},
+		{"none+heartbeat", map[string]string{"held_until": at(time.Hour)}},
+		{"none+heartbeat-expired", map[string]string{"held_until": at(-time.Minute)}},
+		{"none+heartbeat-now", map[string]string{"held_until": at(0)}},
+		{"none+idle-stop", map[string]string{"sleep_intent": "idle-stop-pending"}},
+		{"none+wait+idle-stop(legacy)", map[string]string{"wait_hold": "true", "sleep_intent": "idle-stop-pending"}},
+		{"none+quarantine", map[string]string{"quarantined_until": at(time.Hour)}},
+		{"none+quarantine-expired", map[string]string{"quarantined_until": at(-time.Minute)}},
+		{"none+unknown-timer", map[string]string{"held_until": "soon"}},
+		{"none+unknown-quarantine", map[string]string{"quarantined_until": "later"}},
+		{"suspended", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "suspended_at": at(0)}},
+		{"suspended+wait", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "wait_hold": "true"}},
+		{"suspended-finite-expired", map[string]string{"sleep_intent": "user-hold", "held_until": at(-time.Minute), "suspended_at": at(-time.Hour)}},
+		{"suspended-no-until", map[string]string{"sleep_intent": "user-hold"}},
+		{"suspended-unknown-until", map[string]string{"sleep_intent": "user-hold", "held_until": "soon"}},
+		{"suspended-soft", map[string]string{"state": "suspended", "suspended_at": at(0)}},
+	}
+	out := make([]struct {
 		name string
 		d    Disposition
-	}{
-		{"none", Disposition{}},
-		{"none+wait", Disposition{Wait: true}},
-		{"none+heartbeat", Disposition{Heartbeat: hour}},
-		{"none+heartbeat-expired", Disposition{Heartbeat: dispT0.Add(-time.Minute)}},
-		{"none+idle-stop", Disposition{IdleStop: true}},
-		{"none+wait+idle-stop(legacy)", Disposition{Wait: true, IdleStop: true}},
-		{"none+quarantine", Disposition{Quarantine: hour}},
-		{"none+quarantine-expired", Disposition{Quarantine: dispT0.Add(-time.Minute)}},
-		{"none+unknown-timer", Disposition{Unknown: UnknownHeldUntil, rawUntil: "soon"}},
-		{"none+unknown-quarantine", Disposition{Unknown: UnknownQuarantine, rawQuarantine: "later"}},
-		{"suspended", Disposition{Operator: OperatorSuspended, Until: dispT0.Add(IndefiniteHoldDuration), Since: dispT0}},
-		{"suspended+wait", Disposition{Operator: OperatorSuspended, Until: dispT0.Add(IndefiniteHoldDuration), Wait: true}},
-		{"suspended-finite-expired", Disposition{Operator: OperatorSuspended, Until: dispT0.Add(-time.Minute), Since: dispT0.Add(-time.Hour)}},
-		{"suspended-soft", Disposition{Operator: OperatorSuspendedSoft, Since: dispT0}},
+	}, len(rows))
+	for i, r := range rows {
+		out[i].name, out[i].d = r.name, DecodeDisposition(r.meta)
 	}
+	return out
 }
 
 // dispEvents are the table's events, each by the actors whose cells differ.
@@ -70,6 +84,7 @@ func dispEvents() []struct {
 	add(DispEvent{Kind: EvSuspendSoft}, ActorController, ActorSweep)
 	add(DispEvent{Kind: EvKill}, ActorOperator, ActorController)
 	add(DispEvent{Kind: EvResume}, ActorOperator, ActorAgent, ActorBackground, ActorController)
+	add(DispEvent{Kind: EvResume, Running: true}, ActorAgent, ActorBackground)
 	add(DispEvent{Kind: EvRestart}, ActorAgent)
 	add(DispEvent{Kind: EvHeartbeat, Until: later}, ActorAgent)
 	add(DispEvent{Kind: EvHeartbeat, Until: dispT0.Add(30 * time.Minute)}, ActorAgent)
@@ -132,6 +147,9 @@ func TestDispositionTableGolden(t *testing.T) {
 		if !e.ev.Until.IsZero() {
 			fmt.Fprintf(&b, " until t0%+v", e.ev.Until.Sub(dispT0))
 		}
+		if e.ev.Running {
+			b.WriteString(" (runtime running)")
+		}
 		b.WriteString("\n")
 		lives := []State{StateAsleep}
 		if e.ev.Kind == EvResume && e.by == ActorOperator {
@@ -148,7 +166,7 @@ func TestDispositionTableGolden(t *testing.T) {
 				case err != nil:
 					t.Fatalf("%s by %d from %s: %v", e.ev.Kind, e.by, s.name, err)
 				}
-				fmt.Fprintf(&b, "  %-28s life=%-8s -> %s\n", s.name, life, result)
+				fmt.Fprintf(&b, "  %-29s life=%-8s -> %s\n", s.name, life, result)
 			}
 		}
 	}
@@ -227,12 +245,20 @@ func TestDispositionRoundTrip(t *testing.T) {
 				if next, err := d.Apply(e.by, e.ev, StateAsleep, now); err == nil {
 					d = next
 				}
-				if got := DecodeDisposition(encodedRow(d)); !reflect.DeepEqual(got, d) {
+				if got := DecodeDisposition(encodedRow(d)); !got.sameAs(d) {
 					t.Fatalf("seed %s, walk %d: Decode(Encode(%+v)) = %+v", s.name, walk, d, got)
 				}
 			}
 		}
 	}
+}
+
+// sameAs reports whether d and o mean the same disposition, whatever text
+// each was decoded from.
+func (d Disposition) sameAs(o Disposition) bool {
+	d.raw, o.raw = [len(dispositionKeys)]string{}, [len(dispositionKeys)]string{}
+	return d.canon() == o.canon() && d.Operator == o.Operator && d.Reason == o.Reason && d.Unknown == o.Unknown &&
+		d.Wait == o.Wait && d.WaitIntent == o.WaitIntent && d.IdleStop == o.IdleStop
 }
 
 // TestDispositionEncodeWritesTheWholeClass: every encoding names all five
@@ -251,32 +277,32 @@ func TestDispositionEncodeWritesTheWholeClass(t *testing.T) {
 	}
 }
 
-// TestDispositionProjectionsMatchHolds: over every combination of the keys'
-// values, SuppressesWake and BlocksConsume answer as HoldSet does, and
-// KeepsSlot is HoldUser: a HoldSet reader switches to the disposition with
-// no change in what it decides.
-func TestDispositionProjectionsMatchHolds(t *testing.T) {
-	future, past := dispT0.Add(time.Hour).Format(time.RFC3339), dispT0.Add(-time.Hour).Format(time.RFC3339)
+// dispositionGrid walks every combination of the class keys' values with
+// the state and sleep_reason they are read beside (the max review's 15,000
+// rows, plus a legacy wait_hold reason): live, expired, exactly-now and unreadable timers, every intent and
+// an unknown one, a bare wait_hold, and an unreadable suspended_at.
+func dispositionGrid(fn func(meta map[string]string)) int {
+	future, past, now := dispT0.Add(time.Hour).Format(time.RFC3339), dispT0.Add(-time.Hour).Format(time.RFC3339), dispT0.Format(time.RFC3339)
 	values := map[string][]string{
 		"state":             {"", string(StateAsleep), string(StateSuspended), string(StateActive), string(StateDraining)},
 		"sleep_intent":      {"", string(SleepReasonUserHold), string(SleepReasonWaitHold), string(sleepIntentIdleStopPending), "other"},
-		"wait_hold":         {"", "true"},
-		"held_until":        {"", future, past, "soon"},
+		"wait_hold":         {"", "true", "w"},
+		"held_until":        {"", future, past, "soon", now},
 		"quarantined_until": {"", future, past, "soon"},
-		"sleep_reason":      {"", string(SleepReasonKilled), string(SleepReasonIdle)},
+		"sleep_reason":      {"", string(SleepReasonKilled), string(SleepReasonIdle), string(SleepReasonUserHold), string(SleepReasonCityStop)},
+		"suspended_at":      {"", past, "garbage"},
 	}
-	keys := []string{"state", "sleep_intent", "wait_hold", "held_until", "quarantined_until", "sleep_reason"}
-	var walk func(i int, meta map[string]string)
+	keys := []string{"state", "sleep_intent", "wait_hold", "held_until", "quarantined_until", "sleep_reason", "suspended_at"}
 	n := 0
+	var walk func(i int, meta map[string]string)
 	walk = func(i int, meta map[string]string) {
 		if i == len(keys) {
 			n++
-			h, d := Holds(meta, dispT0), DecodeDisposition(meta)
-			if h.SuppressesWake() != d.SuppressesWake(dispT0) || h.BlocksConsume() != d.BlocksConsume(dispT0) ||
-				(h.In&HoldUser != 0) != d.KeepsSlot() {
-				t.Errorf("%v: HoldSet %+v (suppress %v, block %v), disposition %+v (suppress %v, block %v, keeps %v)",
-					meta, h, h.SuppressesWake(), h.BlocksConsume(), d, d.SuppressesWake(dispT0), d.BlocksConsume(dispT0), d.KeepsSlot())
+			row := make(map[string]string, len(meta))
+			for k, v := range meta {
+				row[k] = v
 			}
+			fn(row)
 			return
 		}
 		for _, v := range values[keys[i]] {
@@ -285,8 +311,82 @@ func TestDispositionProjectionsMatchHolds(t *testing.T) {
 		}
 	}
 	walk(0, map[string]string{})
-	if n != 5*5*2*4*4*3 {
+	return n
+}
+
+// TestDispositionProjectionsMatchHolds: over the grid, SuppressesWake and
+// BlocksConsume answer as HoldSet does, KeepsSlot is HoldUser, and
+// RefusesPreWake is C5a1's PreWake mask (HoldTimer|HoldQuarantine|HoldUser|
+// HoldSuspended): a HoldSet reader switches to the projection that answers its
+// own question with no change in what it decides.
+func TestDispositionProjectionsMatchHolds(t *testing.T) {
+	const preWakeHolds = HoldTimer | HoldQuarantine | HoldUser | HoldSuspended
+	n := dispositionGrid(func(meta map[string]string) {
+		h, d := Holds(meta, dispT0), DecodeDisposition(meta)
+		if h.SuppressesWake() != d.SuppressesWake(dispT0) || h.BlocksConsume() != d.BlocksConsume(dispT0) ||
+			(h.In&HoldUser != 0) != d.KeepsSlot() || (h.In&preWakeHolds != 0) != d.RefusesPreWake(dispT0) {
+			t.Errorf("%v: HoldSet %+v, disposition suppress %v block %v keeps %v prewake %v",
+				meta, h, d.SuppressesWake(dispT0), d.BlocksConsume(dispT0), d.KeepsSlot(), d.RefusesPreWake(dispT0))
+		}
+	})
+	if n != 5*5*3*5*4*5*3 {
 		t.Fatalf("walked %d rows", n)
+	}
+}
+
+// TestDispositionHeartbeatHeldMatchesSESS602: over the grid, HeartbeatHeld is
+// legacy SESS-602's and v2's heartbeatHeld: a live held_until under an empty
+// sleep_intent.
+func TestDispositionHeartbeatHeldMatchesSESS602(t *testing.T) {
+	dispositionGrid(func(meta map[string]string) {
+		at, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["held_until"]))
+		legacy := err == nil && at.After(dispT0) && strings.TrimSpace(meta["sleep_intent"]) == ""
+		if got := DecodeDisposition(meta).HeartbeatHeld(dispT0); got != legacy {
+			t.Errorf("%v: HeartbeatHeld = %v, SESS-602 %v", meta, got, legacy)
+		}
+	})
+}
+
+// TestDispositionEncodeIsLossless: over the grid and legacy's other shapes,
+// Encode(Decode(row)) is the row on every class key, character for
+// character: a write of an unmoved disposition changes nothing.
+func TestDispositionEncodeIsLossless(t *testing.T) {
+	check := func(meta map[string]string) {
+		d := DecodeDisposition(meta)
+		enc := d.Encode()
+		for _, k := range dispositionKeys {
+			if enc[k] != meta[k] {
+				t.Errorf("%v: Encode rewrites %s %q -> %q", meta, k, meta[k], enc[k])
+			}
+		}
+		if changed := d.Changed(); len(changed) != 0 {
+			t.Errorf("%v: an unmoved disposition changes %v", meta, changed)
+		}
+	}
+	dispositionGrid(check)
+	for _, meta := range []map[string]string{
+		{"held_until": "2026-10-10T13:00:00.123456789Z"},
+		{"held_until": "2026-10-10T14:00:00+01:00"},
+		{"held_until": " 2026-10-10T13:00:00Z "},
+		{"quarantined_until": "2026-10-10T13:00:00.5Z"},
+		{"suspended_at": "2026-10-10T11:00:00.5Z"},
+		{"wait_hold": "w"},
+		{"held_until": "0001-01-01T00:00:00Z"},
+	} {
+		check(meta)
+	}
+}
+
+// TestDispositionChangedIsTheMove: a move writes the keys whose meaning it
+// moved and no other: a heartbeat on a bare wait writes held_until alone.
+func TestDispositionChangedIsTheMove(t *testing.T) {
+	d := DecodeDisposition(map[string]string{"wait_hold": "w", "suspended_at": "garbage", "sleep_intent": "other"})
+	moved, err := d.Apply(ActorAgent, DispEvent{Kind: EvHeartbeat, Until: dispT0.Add(time.Hour)}, StateActive, dispT0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := moved.Changed(); len(got) != 1 || got["held_until"] != dispT0.Add(time.Hour).Format(time.RFC3339) {
+		t.Fatalf("a heartbeat on a bare wait changes %v, want held_until alone", got)
 	}
 }
 
@@ -337,8 +437,8 @@ func TestDispositionOperatorDormant(t *testing.T) {
 	}
 }
 
-// TestDispositionHeartbeatHeld: only a live held_until no suspend, wait or
-// idle stop explains is a heartbeat's.
+// TestDispositionHeartbeatHeld: only a live held_until under no sleep intent
+// is a heartbeat's; a bare wait_hold beside it does not stop it.
 func TestDispositionHeartbeatHeld(t *testing.T) {
 	future := dispT0.Add(time.Hour).Format(time.RFC3339)
 	for _, c := range []struct {
@@ -348,7 +448,8 @@ func TestDispositionHeartbeatHeld(t *testing.T) {
 		{map[string]string{"held_until": future}, true},
 		{map[string]string{"held_until": dispT0.Add(-time.Hour).Format(time.RFC3339)}, false},
 		{map[string]string{"held_until": future, "sleep_intent": string(SleepReasonUserHold)}, false},
-		{map[string]string{"held_until": future, "wait_hold": "true"}, false},
+		{map[string]string{"held_until": future, "wait_hold": "true"}, true}, // a bare wait: SESS-602 keeps it up
+		{map[string]string{"held_until": future, "sleep_intent": string(SleepReasonWaitHold)}, false},
 		{map[string]string{"held_until": future, "sleep_intent": string(sleepIntentIdleStopPending)}, false},
 		{map[string]string{"held_until": future, "state": string(StateSuspended)}, true},
 	} {
