@@ -112,12 +112,15 @@ if (typeof client.start === 'function') await client.start() // idempotent
 
 // The connector's RPC client fails permanently when the imsg daemon dies;
 // exit loudly instead of staying registered with gc as a zombie adapter.
-client.waitForClose?.().then(() => {
+// waitForClose() rejects with the terminal close error (openclaw >= 2026.8),
+// including on our own stop(), so both outcomes mean "daemon gone".
+const onDaemonClosed = (err) => {
   if (!shuttingDown) {
-    console.error('[bridge] imsg rpc daemon exited unexpectedly')
+    console.error('[bridge] imsg rpc daemon exited unexpectedly' + (err ? `: ${err.message ?? err}` : ''))
     process.exit(1)
   }
-})
+}
+client.waitForClose().then(() => onDaemonClosed(), onDaemonClosed)
 
 async function onInbound(params) {
   const m = params?.message

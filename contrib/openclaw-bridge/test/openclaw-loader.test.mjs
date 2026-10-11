@@ -1,11 +1,12 @@
 // Smoke coverage for the openclaw connector loader (lib/openclaw.mjs). The other
 // suites import only lib/inbound.mjs + lib/gc-client.mjs, so nothing exercised
-// the part of the bridge that actually reaches into the installed `openclaw`
-// package — including resolveChunkExport, which scans openclaw's hash-named dist
-// chunks for createIMessageRpcClient and is the most fragile seam across openclaw
-// releases. This test loads both connector surfaces after `npm ci` and asserts
-// every function the bridges call resolves, WITHOUT starting any network daemon
-// (loadIMessage/TelegramConnector only import modules and resolve references).
+// the part of the bridge that actually reaches into the installed openclaw
+// packages — including resolveChunkExport, which scans @openclaw/imessage's
+// hash-named dist chunks for createIMessageRpcClient and is the most fragile
+// seam across openclaw releases. This test loads both connector surfaces after
+// `npm ci` and asserts every function the bridges call resolves, then drives the
+// resolved RPC client against the fake imsg CLI to pin the lifecycle contract
+// bridge.mjs relies on (start, request, stop, waitForClose settles).
 //
 // Run: npm test  (or: node --test test/)
 
@@ -57,6 +58,39 @@ test('loadIMessageConnector resolves every function the iMessage bridge calls', 
     'normalizeIMessageHandle',
     'formatIMessageChatTarget',
   ])
+})
+
+test('the resolved iMessage RPC client round-trips against fake imsg and settles waitForClose on stop', async (t) => {
+  const fakeDir = await mkdtemp(path.join(os.tmpdir(), 'fake-imsg-'))
+  const saved = { PATH: process.env.PATH, FAKE_IMSG_DIR: process.env.FAKE_IMSG_DIR }
+  t.after(async () => {
+    process.env.PATH = saved.PATH
+    if (saved.FAKE_IMSG_DIR === undefined) delete process.env.FAKE_IMSG_DIR
+    else process.env.FAKE_IMSG_DIR = saved.FAKE_IMSG_DIR
+    await rm(fakeDir, { recursive: true, force: true })
+  })
+  // fake-imsg is a `#!/usr/bin/env node` script; Bazel's test PATH need not
+  // contain node, so put the running interpreter first.
+  process.env.PATH = `${path.dirname(process.execPath)}${path.delimiter}${saved.PATH ?? ''}`
+  process.env.FAKE_IMSG_DIR = fakeDir
+
+  const oc = await loadIMessageConnector()
+  const client = await oc.createIMessageRpcClient({
+    cliPath: path.join(root, 'fake-imsg', 'imsg'),
+    onNotification: () => {},
+  })
+  if (typeof client.start === 'function') await client.start()
+  const subscribed = await client.request('watch.subscribe', { attachments: false }, { timeoutMs: 10000 })
+  assert.ok(subscribed && typeof subscribed === 'object', 'watch.subscribe returns a result object')
+
+  // bridge.mjs treats waitForClose() settling (resolve OR reject — openclaw
+  // 2026.8.x rejects with the terminal close error) as "daemon gone".
+  const closed = client.waitForClose().then(
+    () => 'resolved',
+    () => 'rejected',
+  )
+  await client.stop()
+  assert.match(await closed, /^(resolved|rejected)$/)
 })
 
 test('loadTelegramConnector resolves every function the Telegram bridge calls', async () => {
