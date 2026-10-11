@@ -204,7 +204,7 @@ func supersededBundledPinDetails(cityPath string, imports map[string]config.Impo
 
 func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
 	lockTargets := supersededBundledLockTargets(fs, cityPath)
-	bump := func(imports map[string]config.Import) bool {
+	return rewriteDeclaredImportsFS(fs, cityPath, func(imports map[string]config.Import) bool {
 		changed := false
 		for name, imp := range imports {
 			if current, _ := supersededBundledTarget(imp, lockTargets); current != "" {
@@ -214,8 +214,16 @@ func rewriteSupersededBundledPinsFS(fs fsys.FS, cityPath string) error {
 			}
 		}
 		return changed
-	}
+	})
+}
 
+// rewriteDeclaredImportsFS applies bump to every import table a city declares
+// (pack.toml [imports] and [defaults.rig.imports]; city.toml root [imports]
+// overrides, each rig's imports, and [defaults.rig.imports]) and writes back
+// the files whose tables bump changed. bump edits a table in place and
+// reports whether it changed anything. Every change is computed before
+// anything is written, and a failed write restores both files.
+func rewriteDeclaredImportsFS(fs fsys.FS, cityPath string, bump func(map[string]config.Import) bool) error {
 	packTomlPath := filepath.Join(cityPath, "pack.toml")
 	cityTomlPath := filepath.Join(cityPath, "city.toml")
 	packSnap, err := snapshotResolvedFile(fs, packTomlPath)

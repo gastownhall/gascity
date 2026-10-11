@@ -104,27 +104,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		// as out of scope rather than an error.
 		resolved, _ := config.ResolveProvider(&a, &c.cfg.Workspace, c.cfg.Providers, c.lookPath)
 
-		ctx := buildAgentPromptContext(c.cityPath, cityName, &a, c.cfg.Rigs, topo, io.Discard)
-		// Render with the workdir launch would use. The unvalidated resolver
-		// is a pure path computation, so doctor creates no directory.
-		if wd, err := resolveConfiguredWorkDirPathUnvalidated(c.cityPath, cityName, a.QualifiedName(), &a, c.cfg.Rigs); err == nil {
-			ctx.WorkDir = wd
-			ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, c.cfg.Rigs, ctx.WorkDir)
-		}
-		ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &c.cfg.Workspace, c.cfg.Providers)
-		ctx.InstructionsFile = instructionsFileForAgent(&a, &c.cfg.Workspace, c.cfg.Providers)
-
-		fragments := effectivePromptFragments(
-			c.cfg.Workspace.GlobalFragments,
-			a.InjectFragments,
-			a.AppendFragments,
-			a.InheritedAppendFragments,
-			c.cfg.AgentDefaults.AppendFragments,
-		)
-		packDirs := c.cfg.PackDirsForRig(ctx.RigName)
-
-		var renderErrs bytes.Buffer
-		prompt := renderPrompt(fsys.OSFS{}, c.cityPath, cityName, a.PromptTemplate, ctx, c.cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments, nil)
+		prompt, renderFailed := renderDoctorAgentPrompt(c.cityPath, cityName, c.cfg, topo, &a)
 		// Measure the startup prompt launch would send: the beacon is
 		// prepended exactly as resolveTemplate does. Its timestamp is
 		// fixed-width, so the zero time yields the same byte count. The
@@ -156,7 +136,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 			note(doctor.StatusError, fmt.Sprintf("%s: hard-fail: prompt exceeds the delivery budget for runtime %q and has no supported fallback (configured_mode=%s effective_mode=%s): %v", a.QualifiedName(), effProvider, configuredMode, delivery.EffectiveMode, dErr))
 		case delivery.OversizedFallback:
 			note(doctor.StatusWarning, fmt.Sprintf("%s: nudge-fallback: prompt exceeds the delivery budget for runtime %q; falls back to a post-start nudge (configured_mode=%s effective_mode=%s raw_bytes=%d raw_limit=%d argv_bytes=%d argv_limit=%d)", a.QualifiedName(), effProvider, configuredMode, delivery.EffectiveMode, delivery.RawBytes, maxPromptSuffixRawBytes, delivery.ArgvBytes, maxPromptSuffixQuotedBytes))
-		case renderErrs.Len() > 0:
+		case renderFailed:
 			note(doctor.StatusWarning, fmt.Sprintf("%s: render warning: prompt template %q failed to render and fell back to raw text", a.QualifiedName(), a.PromptTemplate))
 		}
 	}
@@ -175,4 +155,33 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 	default:
 		return okCheck("prompt-delivery-budget", "all agent prompts clear their delivery budget")
 	}
+}
+
+// renderDoctorAgentPrompt renders a's prompt template the way launch does:
+// the agent's prompt context with the workdir launch would use, its
+// effective fragments, and the pack dirs of its rig. renderFailed reports
+// that the template failed to render and the result fell back to raw text.
+// It creates no directory: the unvalidated workdir resolver is a pure path
+// computation.
+func renderDoctorAgentPrompt(cityPath, cityName string, cfg *config.City, topo config.QueryTopology, a *config.Agent) (prompt string, renderFailed bool) {
+	ctx := buildAgentPromptContext(cityPath, cityName, a, cfg.Rigs, topo, io.Discard)
+	if wd, err := resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, a.QualifiedName(), a, cfg.Rigs); err == nil {
+		ctx.WorkDir = wd
+		ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, cfg.Rigs, ctx.WorkDir)
+	}
+	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &cfg.Workspace, cfg.Providers)
+	ctx.InstructionsFile = instructionsFileForAgent(a, &cfg.Workspace, cfg.Providers)
+
+	fragments := effectivePromptFragments(
+		cfg.Workspace.GlobalFragments,
+		a.InjectFragments,
+		a.AppendFragments,
+		a.InheritedAppendFragments,
+		cfg.AgentDefaults.AppendFragments,
+	)
+	packDirs := cfg.PackDirsForRig(ctx.RigName)
+
+	var renderErrs bytes.Buffer
+	prompt = renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, &renderErrs, packDirs, fragments, nil)
+	return prompt, renderErrs.Len() > 0
 }

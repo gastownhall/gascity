@@ -1421,6 +1421,19 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+Pack and prompt drift is reported by three advisory checks that warn and
+never fail the run: prompt-gc-commands (an agent prompt writes a gc command,
+subcommand or flag this gc does not have), import-version-pins (a remote
+import with no version floats) and nested-pack-commits (a subpack locked at
+a different commit than the pack that contains it). Their limits:
+prompt-gc-commands reads only code (fenced blocks and inline spans), skips
+commands a prompt names to forbid, and cannot tell a placeholder from a real
+argument; import-version-pins ignores local path imports; nested-pack-commits
+compares a pack only with the pack whose directory contains it, never with
+siblings. None of them says whether a pinned pack is behind upstream or
+whether its capabilities changed since you accepted it. See "Pack and Prompt
+Drift Warnings" in docs/getting-started/troubleshooting.md.
+
 --check runs only the checks you name, so a caller after one verdict does
 not pay for the whole sweep. It is repeatable and also accepts a comma
 list, results keep their normal run order rather than the order you asked

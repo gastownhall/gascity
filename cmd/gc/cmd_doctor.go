@@ -47,6 +47,19 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+Pack and prompt drift is reported by three advisory checks that warn and
+never fail the run: prompt-gc-commands (an agent prompt writes a gc command,
+subcommand or flag this gc does not have), import-version-pins (a remote
+import with no version floats) and nested-pack-commits (a subpack locked at
+a different commit than the pack that contains it). Their limits:
+prompt-gc-commands reads only code (fenced blocks and inline spans), skips
+commands a prompt names to forbid, and cannot tell a placeholder from a real
+argument; import-version-pins ignores local path imports; nested-pack-commits
+compares a pack only with the pack whose directory contains it, never with
+siblings. None of them says whether a pinned pack is behind upstream or
+whether its capabilities changed since you accepted it. See "Pack and Prompt
+Drift Warnings" in docs/getting-started/troubleshooting.md.
+
 --check runs only the checks you name, so a caller after one verdict does
 not pay for the whole sweep. It is repeatable and also accepts a comma
 list, results keep their normal run order rather than the order you asked
@@ -64,7 +77,8 @@ listed.`,
   gc doctor --check controller --check events-log
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(c *cobra.Command, _ []string) error {
+			opts.CommandRoot = c.Root()
 			if doDoctor(opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -92,6 +106,9 @@ type doctorOpts struct {
 	// Checks holds the raw --check values, still unsplit. Empty runs every
 	// registered check, which is what a plain `gc doctor` does.
 	Checks []string
+	// CommandRoot is the running gc's command tree, which prompt-gc-commands
+	// resolves prompt invocations against. Nil leaves that check unregistered.
+	CommandRoot *cobra.Command
 }
 
 // splitDoctorCheckNames expands the raw --check values into one name each.
@@ -196,6 +213,12 @@ type buildDoctorChecksOpts struct {
 	// is set when resolving it failed (an out-of-enum config value).
 	RolloutFlags      rollout.Flags
 	RolloutResolveErr error
+	// CommandRoot is the running gc's command tree (see doctorOpts). Nil
+	// leaves prompt-gc-commands unregistered.
+	CommandRoot *cobra.Command
+	// CheckTimeout is doctor's per-check timeout, which a Fix that writes
+	// after slow network resolution (import-version-pins) stays within.
+	CheckTimeout time.Duration
 }
 
 // doctorOrderFiringCurrentLastRunFunc answers "when did this order last run"
@@ -323,12 +346,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
 		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
+		if opts.CommandRoot != nil {
+			register(newPromptGCCommandsDoctorCheck(cityPath, cfg, opts.CommandRoot))
+		}
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))
+		register(newImportVersionPinsDoctorCheck(cityPath, opts.CheckTimeout))
 		register(newImportStateDoctorCheck(cityPath))
+		register(newNestedPackCommitsDoctorCheck(cityPath))
 		register(newGascityPackBindingDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
@@ -683,6 +711,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		SkipRigDoltChecks:       skipRigDoltChecks,
 		RolloutFlags:            rolloutFlags,
 		RolloutResolveErr:       rolloutResolveErr,
+		CommandRoot:             opts.CommandRoot,
+		CheckTimeout:            opts.CheckTimeout,
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {

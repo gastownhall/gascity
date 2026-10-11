@@ -135,6 +135,65 @@ The fix changes nothing and explains why when:
   The message names the file and key. Update the value to `gc.` and rerun, or
   rename the import by hand if the value is unrelated. Comments are ignored.
 
+## Pack and Prompt Drift Warnings
+
+Three advisory checks catch a city whose packs and prompts no longer match
+each other or the installed `gc`. Each reports a warning and never fails the
+run.
+
+| Check | Warns when | `--fix` |
+|---|---|---|
+| `prompt-gc-commands` | An agent prompt writes a `gc` command, subcommand, or flag that neither this `gc` nor the city's pack commands provide | No |
+| `import-version-pins` | A remote import declares no `version`, so the next install may lock it to a different commit | Yes |
+| `nested-pack-commits` | A pack nested inside another pack's directory in the same repository is locked at a different commit than its parent | No |
+
+`prompt-gc-commands` renders every agent's prompt and reads only commands
+written as code: fenced blocks and inline code spans. A warning names the
+command and the agents whose prompts use it:
+
+```
+unknown-subcommand | gc agent claim | "gc agent" has no subcommand "claim" | agents: work.run-operator
+```
+
+Usually the prompt comes from a pack version written for a different `gc`.
+Pin the pack to a version whose prompts match your `gc`, or update the prompt.
+Run `gc <command> --help` to confirm what exists. An inline code span that
+follows "do not", "don't", "never", "must not", "should not", "avoid",
+"instead of", or "rather than" in the same sentence is skipped, since the
+prompt names that command to forbid it. "Do not", "don't", and "never" count
+only as an instruction at the start of a sentence or clause, so "if you don't
+know" skips nothing. A list item, heading, or table row starts a new sentence.
+Fenced code blocks are always checked.
+A prohibition worded outside that list still produces a warning; ignore it.
+
+`import-version-pins --fix` writes the same constraint `gc import add` writes
+for that source. For an import already in `packs.lock`, that constraint
+matches the locked entry, so the locked commit does not move. A bundled
+builtin pack source gets the canonical pin of the running `gc`, the same pin
+`gc init` writes. A source with an embedded `#ref` needs a manual edit: move
+the ref into `version`. `--fix` still pins the other imports, and the check
+keeps warning about the `#ref` import until you edit it. If resolving versions
+outlasts `--check-timeout`, `--fix` writes nothing.
+
+For `nested-pack-commits`, declare the same version on both imports and run
+`gc import install`.
+
+### What these checks do not tell you
+
+- `prompt-gc-commands` reads code only. A command described in prose is not
+  checked, and a prohibition worded outside its cue list still warns.
+- It checks that a command, subcommand and flag exist. It cannot check that
+  an argument is valid, and it cannot tell a placeholder such as `<id>` from
+  a real value.
+- It checks against the `gc` running the doctor. A city driven by a
+  different `gc` binary can disagree.
+- `import-version-pins` ignores local path imports, and a version range such
+  as `^0.4` passes even though `0.x` allows breaking changes in any release.
+- `nested-pack-commits` compares a pack only with the pack whose directory
+  contains it. Sibling packs from one repository are never compared.
+- None of them reports whether a pinned pack is behind upstream, or whether a
+  pack's capabilities changed since you accepted it.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
