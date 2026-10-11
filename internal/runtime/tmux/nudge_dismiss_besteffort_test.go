@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 )
 
 // sessionLimitChooserPane is the provider session-limit chooser as it renders
@@ -150,7 +151,7 @@ func (d *dialogThenSilentExecutor) executeCtx(_ context.Context, args []string) 
 // ordering at the executor boundary (PR #3427 caller-level finding).
 func TestNudgeSessionDismissesDialogBeforeLiteralPaste(t *testing.T) {
 	ex := &dialogThenSilentExecutor{pane: resumeDialogPane}
-	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, sleep: func(time.Duration) {}}
 
 	if err := tm.NudgeSession("agent-pane", "hello world"); err != nil {
 		t.Fatalf("NudgeSession: %v", err)

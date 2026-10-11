@@ -270,7 +270,7 @@ func (e *attachProbeFailsExecutor) executeCtx(_ context.Context, args []string) 
 // operator's draft.
 func TestNudgeSessionAttachProbeErrorKeepsInput(t *testing.T) {
 	ex := &attachProbeFailsExecutor{}
-	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex, sleep: func(time.Duration) {}}
 
 	err := tm.NudgeSession("worker-1", "hello world")
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {

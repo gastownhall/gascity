@@ -1975,7 +1975,7 @@ func (t *Tmux) WakePane(target string) {
 	// Resize pane down by 1 row, then up by 1 row
 	// This triggers SIGWINCH without changing the final pane size
 	_, _ = t.run("resize-pane", "-t", target, "-y", "-1")
-	time.Sleep(50 * time.Millisecond)
+	t.sleeper()(50 * time.Millisecond)
 	_, _ = t.run("resize-pane", "-t", target, "-y", "+1")
 }
 
@@ -2795,7 +2795,7 @@ const nudgeSubmitKeySettle = 100 * time.Millisecond
 func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 	for i, key := range keys {
 		if i > 0 {
-			time.Sleep(nudgeSubmitKeySettle)
+			t.sleeper()(nudgeSubmitKeySettle)
 		}
 		if _, err := t.run("send-keys", "-t", paneTarget(target), key); err != nil {
 			return err
@@ -2896,7 +2896,7 @@ func (t *Tmux) nudgeSession(
 	if t.dismissMidSessionDialogBeforeNudge(target) {
 		// Give the TUI a beat to retire the dialog before pasting, so the
 		// message lands at the prompt rather than in a closing overlay.
-		time.Sleep(midSessionDialogSettleDelay)
+		t.sleeper()(midSessionDialogSettleDelay)
 	}
 
 	// 1. Clear any pending input already sitting on the line before pasting,
@@ -2914,7 +2914,7 @@ func (t *Tmux) nudgeSession(
 		if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 			return err
 		}
-		time.Sleep(50 * time.Millisecond)
+		t.sleeper()(50 * time.Millisecond)
 	}
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
@@ -2933,7 +2933,7 @@ func (t *Tmux) nudgeSession(
 
 	// 3. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
-	time.Sleep(t.nudgeSubmitDebounce(target))
+	t.sleeper()(t.nudgeSubmitDebounce(target))
 
 	// 4. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -2942,7 +2942,7 @@ func (t *Tmux) nudgeSession(
 	if shouldSendEscape(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", paneTarget(target), "Escape")
-		time.Sleep(100 * time.Millisecond)
+		t.sleeper()(100 * time.Millisecond)
 	}
 
 	// 5. Wake detached panes before Enter. Some TUIs accept pasted input while
@@ -2975,7 +2975,7 @@ func (t *Tmux) nudgeSession(
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, t.sleeper())
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
@@ -2991,7 +2991,7 @@ func (t *Tmux) nudgeSession(
 			if marker, ok := t.stagedDraftMarkerFor(target); ok {
 				if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
 					observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
-					switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+					switch recoverStagedDraft(sendSubmit, wake, observe, t.sleeper()) {
 					case stagedDraftSubmittedBusy:
 						return nil
 					case stagedDraftCleared:
@@ -3036,7 +3036,7 @@ func (t *Tmux) nudgeSession(
 	var lastErr error
 	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
 		if attempt > 0 {
-			time.Sleep(submitReEnterBackoff)
+			t.sleeper()(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
 			lastErr = err
