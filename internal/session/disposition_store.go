@@ -119,3 +119,16 @@ func MoveDisposition(meta map[string]string, fresh Info, by ActorKind, ev DispEv
 	}
 	return patch, to, nil
 }
+
+// LifecycleOnly is patch without the disposition class's keys: the part of a
+// lifecycle builder's patch a disposition move may write beside its own.
+func LifecycleOnly(patch MetadataPatch) MetadataPatch {
+	out := make(MetadataPatch, len(patch))
+	for k, v := range patch {
+		out[k] = v
+	}
+	for _, k := range dispositionKeys {
+		delete(out, k)
+	}
+	return out
+}

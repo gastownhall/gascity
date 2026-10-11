@@ -18,7 +18,8 @@ import (
 type sessionKillFence struct {
 	sessionID string
 	sleptAt   string
-	restore   map[string]string
+	wrote     map[string]string // what the fence wrote
+	restore   map[string]string // the row's values for those keys before it
 }
 
 // sessionKillFenceAttempts bounds the re-read/re-decide loop around a
@@ -48,19 +49,16 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		}
 		// The kill is the disposition's Kill cell: an operator suspend goes
 		// whole, its held_until with it, so no heartbeat-shaped hold is left
-		// behind; a wait or a heartbeat stays. Its encoding is merged whole
-		// (lossless: a key the kill leaves keeps its text), over
-		// KillPendingPatch's own class keys.
+		// behind; a wait or a heartbeat stays. The fence writes
+		// KillPendingPatch's lifecycle and only the class keys the kill
+		// changed, so a store without conditional writes reverts no
+		// concurrent write to the others.
 		killed, err := session.DecodeDisposition(b.Metadata).Apply(session.ActorOperator, session.DispEvent{Kind: session.EvKill}, session.State(b.Metadata["state"]), now)
 		if err != nil {
 			return nil, false
 		}
-		class := killed.Encode()
-		write := make(map[string]string, len(patch)+len(class))
-		for key, value := range patch {
-			write[key] = value
-		}
-		for key, value := range class {
+		write := map[string]string(session.LifecycleOnly(patch))
+		for key, value := range killed.Changed() {
 			write[key] = value
 		}
 		// Capture the pre-image from the same observation the fenced write is
@@ -69,7 +67,7 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		for key := range write {
 			restore[key] = b.Metadata[key]
 		}
-		fence.restore = restore
+		fence.wrote, fence.restore = write, restore
 		return write, true
 	})
 	if err != nil {
@@ -107,7 +105,15 @@ func (f *sessionKillFence) rollback(store beads.Store) error {
 		if !f.owns(b) {
 			return nil, false
 		}
-		return f.restore, true
+		// Only the keys the fence changed that still read as it wrote them:
+		// a write since (a wait, a quarantine) stands.
+		undo := make(map[string]string, len(f.wrote))
+		for k, v := range f.wrote {
+			if b.Metadata[k] == v && f.restore[k] != v {
+				undo[k] = f.restore[k]
+			}
+		}
+		return undo, true
 	})
 }
 
