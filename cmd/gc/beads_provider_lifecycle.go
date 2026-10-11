@@ -1692,7 +1692,22 @@ func ensureBeadsProvider(cityPath string) error {
 // idempotent on bd v1.3.0-rc.2, so a repeated gc stop is a clean no-op. It
 // must remain the LAST teardown step: bd restarts a proxied scope's proxy and
 // Dolt child on any read, so a reader that outlives this call undoes it.
+//
+// For that reason it first stops the city's nudge pollers, the long-lived
+// readers the city itself spawns (#6857), and then stops the store even if a
+// poller could not be stopped.
 func shutdownBeadsProvider(cityPath string) error {
+	pollersErr := stopCityNudgePollers(cityPath)
+	storeErr := stopBeadsProviderBackend(cityPath)
+	if pollersErr == nil {
+		return storeErr
+	}
+	return errors.Join(fmt.Errorf("stopping nudge pollers: %w", pollersErr), storeErr)
+}
+
+// stopBeadsProviderBackend stops the bead store's backing service. See
+// shutdownBeadsProvider, its only caller.
+func stopBeadsProviderBackend(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {

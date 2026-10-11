@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -136,6 +137,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	// This route defers agent creates to the reconciler (below), which never
+	// starts a demand-only singleton's session on request (#6858).
+	if msg := demandOnlySingletonCreateRefusal(s.state.Config(), createCtx.Agent); msg != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
 		return
 	}
 	alias = createCtx.Alias
