@@ -296,7 +296,17 @@ func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *conf
 		template = info.Template
 	}
 	if template != "" && poolDesired[template] > 0 {
-		return false
+		// Pool demand keeps a non-interactive session awake over its idle
+		// latch (wakeDemandOverridesSleepSuppression), and a session whose
+		// sleep policy is off has no idle window, so the attachment of either
+		// cannot change the decision. An interactive session that can idle-sleep
+		// honors its idle window against pool demand, and only an attachment
+		// holds it then: probe it.
+		policy := config.ResolveSessionSleepPolicy(cfg, findAgentByTemplate(cfg, template))
+		_, off, err := config.ParseSleepAfterIdle(policy.Value)
+		if policy.Class == config.SessionSleepNonInteractive || (err == nil && off) {
+			return false
+		}
 	}
 	return true
 }

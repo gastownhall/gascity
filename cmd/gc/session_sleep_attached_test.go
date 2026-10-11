@@ -15,6 +15,21 @@ import (
 // remote exec runtime pack: an attached interactive session with
 // sleep_after_idle 2m was drained "idle" three minutes into the attach.
 func TestReconcileSessionBeads_AttachedInteractiveSessionDoesNotIdleSleep(t *testing.T) {
+	// No pool demand for the template, as for a manual `gc session new`
+	// session.
+	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{})
+}
+
+// The same holds for a template with pool demand. Pool demand does not keep an
+// interactive session awake past its idle window (it honors the window, so a
+// pool sibling can take the work), so only the attachment can hold it, and the
+// attach probe must run for it.
+func TestReconcileSessionBeads_AttachedInteractivePoolSessionDoesNotIdleSleep(t *testing.T) {
+	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{"worker": 1})
+}
+
+func assertAttachedInteractiveSessionStaysAwake(t *testing.T, poolDesired map[string]int) {
+	t.Helper()
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{
@@ -31,10 +46,6 @@ func TestReconcileSessionBeads_AttachedInteractiveSessionDoesNotIdleSleep(t *tes
 	env.sp.SetActivity("worker", env.clk.Time.Add(-2*time.Minute))
 	env.sp.WaitForIdleErrors["worker"] = nil
 
-	// No pool demand for the template: the attach probe runs (a template with
-	// pool demand skips it, shouldProbeAttachmentForAwakeInput), as for a
-	// manual `gc session new` session.
-	poolDesired := map[string]int{}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	for i := 0; i < 3; i++ {
 		fresh, err := env.store.Get(session.ID)
