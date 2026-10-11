@@ -30,14 +30,15 @@ ARG BD_BUILD=53637a74ad7
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0
+ARG XNET_VERSION=0.60.0
 
 # Rebuild the exact released source with its production CGO/pure-Go-regex
-# configuration and release identity. GRPC_VERSION and THRIFT_VERSION override
-# the source's own requirements with the current security floor. Keep each
-# `go get` and its trailing `go version -m` check: together they fail the
-# build if a future beads release regresses below these versions instead of
-# silently shipping it. Raise them with the upstream requirement -- never
-# leave either behind, or the `go get` downgrades the release while the check
+# configuration and release identity. GRPC_VERSION, THRIFT_VERSION and
+# XNET_VERSION override the source's own requirements with the current
+# security floor. Keep each `go get` and its trailing `go version -m` check:
+# together they fail the build if a future beads release regresses below these
+# versions instead of silently shipping it. Raise them with the upstream
+# requirement -- never leave one behind, or the `go get` downgrades the release while the check
 # still passes.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
@@ -52,6 +53,7 @@ RUN bd_version="${BD_VERSION#v}" \
     && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
     && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
+    && go get "golang.org/x/net@v${XNET_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -60,7 +62,8 @@ RUN bd_version="${BD_VERSION#v}" \
        ./cmd/bd \
     && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "
 
 FROM ${BASE_IMAGE}
 
