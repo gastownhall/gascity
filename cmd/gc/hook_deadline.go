@@ -23,37 +23,64 @@ import (
 // gc hook run must have exited for its output to be kept.
 const hookDeadlineEnv = "GC_HOOK_DEADLINE"
 
-// hookDeadlineArchiveMargin is the time an injecting hook must have left to
-// archive what it injected and exit: a mark-read update, a close, and the
+// hookDeadlineArchiveMarginMax caps the time an injecting hook must have left
+// to archive what it injected and exit: a close-with-metadata write and the
 // process exit, against a slow remote ledger.
-const hookDeadlineArchiveMargin = 3 * time.Second
+const hookDeadlineArchiveMarginMax = 3 * time.Second
+
+// hookProcessStart is when this process started, the start of the time gc
+// hook run gave it.
+var hookProcessStart = time.Now()
 
 // hookDeadlineEnvValue renders deadline for hookDeadlineEnv.
 func hookDeadlineEnvValue(deadline time.Time) string {
 	return deadline.UTC().Format(time.RFC3339Nano)
 }
 
-// hookDeadlineLeaves reports whether at least margin remains before the
-// deadline gc hook run handed this process. Without a deadline there is no
-// limit. A deadline that does not parse is reported as an error, with no time
-// assumed left: the caller cannot know whether its output will be kept.
-func hookDeadlineLeaves(margin time.Duration, now time.Time) (bool, error) {
+// inheritedHookDeadline returns the deadline gc hook run handed this process,
+// and false without one. A value that does not parse is an error.
+func inheritedHookDeadline() (time.Time, bool, error) {
 	raw := strings.TrimSpace(os.Getenv(hookDeadlineEnv))
 	if raw == "" {
-		return true, nil
+		return time.Time{}, false, nil
 	}
 	deadline, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil {
-		return false, fmt.Errorf("parsing %s=%q: %w", hookDeadlineEnv, raw, err)
+		return time.Time{}, false, fmt.Errorf("parsing %s=%q: %w", hookDeadlineEnv, raw, err)
 	}
-	return deadline.Sub(now) >= margin, nil
+	return deadline, true, nil
+}
+
+// hookArchiveMargin is the time left before deadline that an archive needs: a
+// third of the time the process was given from start, capped at
+// hookDeadlineArchiveMarginMax. A fixed margin as large as a short hook
+// timeout would never let that hook archive, and the handoff it injects would
+// be injected again by every hook after it.
+func hookArchiveMargin(deadline, start time.Time) time.Duration {
+	return min(hookDeadlineArchiveMarginMax, deadline.Sub(start)/3)
+}
+
+// hookDeadlineLeavesArchiveTime reports whether, at now, the archive margin
+// remains before the deadline gc hook run handed this process, which started
+// at start. Without a deadline there is no limit. A deadline that does not
+// parse is reported as an error, with no time assumed left: the caller cannot
+// know whether its output will be kept.
+func hookDeadlineLeavesArchiveTime(now, start time.Time) (bool, error) {
+	deadline, ok, err := inheritedHookDeadline()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return deadline.Sub(now) >= hookArchiveMargin(deadline, start), nil
 }
 
 // hookDeadlineAllowsArchive reports whether an injecting hook has time to
 // archive what it injected. When it does not, it says so on stderr under
 // cmdName, so a skipped archive is visible rather than silent.
 func hookDeadlineAllowsArchive(cmdName string, stderr io.Writer) bool {
-	ok, err := hookDeadlineLeaves(hookDeadlineArchiveMargin, time.Now())
+	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v; leaving injected auto-handoff mail unarchived\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return false

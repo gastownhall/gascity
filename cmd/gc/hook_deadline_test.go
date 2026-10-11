@@ -41,26 +41,85 @@ func TestHookRunExportsItsDeadline(t *testing.T) {
 	}
 }
 
-func TestHookDeadlineLeaves(t *testing.T) {
+// setHookProcessStart pins when this process counts as started, for the
+// rest of the test.
+func setHookProcessStart(t *testing.T, start time.Time) {
+	t.Helper()
+	prev := hookProcessStart
+	hookProcessStart = start
+	t.Cleanup(func() { hookProcessStart = prev })
+}
+
+// TestHookDeadlineLeavesArchiveTime pins the archive margin: a third of the
+// time the process was given, capped at hookDeadlineArchiveMarginMax — so a
+// hook under the default timeout keeps the full margin, and one under a short
+// timeout still archives when it is fast.
+func TestHookDeadlineLeavesArchiveTime(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	long := now.Add(-time.Minute)
 	for _, tc := range []struct {
 		name    string
+		start   time.Time
 		value   string
 		want    bool
 		wantErr bool
 	}{
-		{name: "no deadline", value: "", want: true},
-		{name: "ample", value: hookDeadlineEnvValue(now.Add(time.Minute)), want: true},
-		{name: "exactly the margin", value: hookDeadlineEnvValue(now.Add(hookDeadlineArchiveMargin)), want: true},
-		{name: "inside the margin", value: hookDeadlineEnvValue(now.Add(hookDeadlineArchiveMargin - time.Millisecond)), want: false},
-		{name: "passed", value: hookDeadlineEnvValue(now.Add(-time.Second)), want: false},
-		{name: "malformed", value: "soon", want: false, wantErr: true},
+		{name: "no deadline", start: long, value: "", want: true},
+		{name: "ample", start: long, value: hookDeadlineEnvValue(now.Add(time.Minute)), want: true},
+		{name: "exactly the full margin", start: long, value: hookDeadlineEnvValue(now.Add(hookDeadlineArchiveMarginMax)), want: true},
+		{name: "inside the full margin", start: long, value: hookDeadlineEnvValue(now.Add(hookDeadlineArchiveMarginMax - time.Millisecond)), want: false},
+		{name: "default timeout, just started", start: now, value: hookDeadlineEnvValue(now.Add(defaultHookRunTimeout)), want: true},
+		{name: "short timeout, fast hook", start: now.Add(-100 * time.Millisecond), value: hookDeadlineEnvValue(now.Add(800 * time.Millisecond)), want: true},
+		{name: "short timeout, exactly a third left", start: now.Add(-600 * time.Millisecond), value: hookDeadlineEnvValue(now.Add(300 * time.Millisecond)), want: true},
+		{name: "short timeout, under a third left", start: now.Add(-700 * time.Millisecond), value: hookDeadlineEnvValue(now.Add(200 * time.Millisecond)), want: false},
+		{name: "passed", start: long, value: hookDeadlineEnvValue(now.Add(-time.Second)), want: false},
+		{name: "malformed", start: long, value: "soon", want: false, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(hookDeadlineEnv, tc.value)
-			got, err := hookDeadlineLeaves(hookDeadlineArchiveMargin, now)
+			got, err := hookDeadlineLeavesArchiveTime(now, tc.start)
 			if (err != nil) != tc.wantErr || got != tc.want {
-				t.Fatalf("hookDeadlineLeaves = (%v, %v), want (%v, error=%v)", got, err, tc.want, tc.wantErr)
+				t.Fatalf("hookDeadlineLeavesArchiveTime = (%v, %v), want (%v, error=%v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestShortHookTimeoutStillArchives runs an auto-handoff hook twice under a
+// timeout shorter than the full archive margin. The first run injects the
+// handoff and archives it, so the second does not inject it again: a short
+// timeout cannot re-inject the same handoff forever.
+func TestShortHookTimeoutStillArchives(t *testing.T) {
+	hooks := map[string]func(t *testing.T, f hookBudgetFixture, stdout, stderr io.Writer) int{
+		"mail check --inject": mailCheckInject,
+		"prime --hook":        primeHook,
+	}
+	const timeout = 2 * time.Second
+	if timeout >= hookDeadlineArchiveMarginMax {
+		t.Fatalf("timeout %s does not undercut the full margin %s", timeout, hookDeadlineArchiveMarginMax)
+	}
+	for hookName, hook := range hooks {
+		t.Run(hookName, func(t *testing.T) {
+			f := newHookBudgetFixture(t)
+			f.autoHandoff(t)
+			for run := 1; run <= 2; run++ {
+				start := time.Now()
+				setHookProcessStart(t, start)
+				t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(start.Add(timeout)))
+				var stdout, stderr bytes.Buffer
+				endStoreMemo := beginInvocationStoreMemo()
+				code := hook(t, f, &stdout, &stderr)
+				if err := endStoreMemo(); err != nil {
+					t.Fatalf("releasing stores: %v", err)
+				}
+				resetHookBudgetProcessState(t)
+				if code != 0 {
+					t.Fatalf("run %d: exit %d; stderr=%s", run, code, stderr.String())
+				}
+				injected := strings.Contains(stdout.String(), "context cycle")
+				if want := run == 1; injected != want {
+					t.Fatalf("run %d injected the handoff = %v, want %v; stderr=%s", run, injected, want, stderr.String())
+				}
 			}
 		})
 	}
@@ -92,6 +151,7 @@ func TestInjectedAutoHandoffIsArchivedOnlyWhenTheHookCanFinish(t *testing.T) {
 				f := newHookBudgetFixture(t)
 				f.autoHandoff(t)
 				handoffID := onlyAutoHandoffID(t, f)
+				setHookProcessStart(t, time.Now().Add(-time.Minute))
 				t.Setenv(hookDeadlineEnv, tc.deadline())
 				var stdout, stderr bytes.Buffer
 				endStoreMemo := beginInvocationStoreMemo()
