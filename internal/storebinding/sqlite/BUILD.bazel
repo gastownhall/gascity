@@ -104,6 +104,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":sqlite"],
+    shard_count = 4,
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
