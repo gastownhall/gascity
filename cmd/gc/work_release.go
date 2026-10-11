@@ -314,12 +314,21 @@ func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
 // still stays, and the close's own alert names it.
 func strand(alerts *strandedClaimAlerts, seat releaseSeat, kind string, out ReleaseOutcome, now time.Time, stderr io.Writer) {
 	claims := out.Unserved() // none ends the seat's episode
-	kept := make(map[string]seatWorkHit, len(out.Kept))
+	left := make(map[string]seatWorkHit, len(out.Kept)+len(out.Failed))
 	for _, k := range out.Kept {
-		kept[k.bead.ID] = k
+		left[k.bead.ID] = k
 	}
+	// A claim the release's budget ran out on stays too: stamped and named,
+	// never left on the closed row silent (O5, revised).
+	for _, f := range out.Failed {
+		if id := f.bead.ID; out.Why[id] == failedBudget {
+			left[id] = f
+			claims = append(claims, strandedClaim{id: id, reason: failedBudget})
+		}
+	}
+	slices.SortFunc(claims, func(a, b strandedClaim) int { return strings.Compare(a.id, b.id) })
 	for _, c := range claims {
-		k := kept[c.id]
+		k := left[c.id]
 		if err := stampStranded(k.store, c.id, seat.id, strings.TrimSpace(k.bead.Assignee)); err != nil {
 			fmt.Fprintf(stderr, "session beads: marking claim %s stranded on closed session %s: %v\n", c.id, seat.id, err) //nolint:errcheck
 		}

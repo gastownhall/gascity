@@ -127,6 +127,10 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep closes it held or not",
 		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
 	},
+	"§12.2#43 close-after-hold-heal": {
+		"CONTRACT v5 §12.2 #43 (A6, A21)", "v2 heals an unwanted workless pool row's expired hold one pass before A21 closes it; legacy's MAINT-051 sweep closes it first and leaves the expired held_until and sleep_reason on the closed row",
+		[]string{"held_until", "sleep_reason"},
+	},
 	"§12.2#41 close-removes-corpse": {"CONTRACT v5 §12.2 #41 (C3 step 1, M1; C5c1)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed", nil},
 	"§12.2#42 orphan-claim-release-unconfigured": {
 		"CONTRACT v5 §12.2 #42 (C3 step 3, SESS-082, NEW-5; C5c1)", "an unwanted row whose agent was removed and which holds a served claim: legacy's sync close (SESS-722) refuses on the work and the reconciler's release (SESS-082) never runs for it, so seat and claim wedge; v2's A21 releases the claim (bead.dead_assignee_reopened), closes the row, and the freed demand creates a fresh seat",
@@ -185,10 +189,6 @@ var parityFindings = map[string]parityEntry{
 	"rollback-leaves-lease": {
 		"v5.9b §12.5 (runtime lease); BEHAVIORS START-033", "legacy's failed start rolls its pending create back while it still holds the row's runtime lease record, which stays on the closed row; v2's effect releases its lease record with the close. §12.2 does not list it",
 		[]string{session.RuntimeLeaseExpiresKey, session.RuntimeLeaseFlockKey, session.RuntimeLeaseHolderKey, session.RuntimeLeaseTTLKey},
-	},
-	"close-after-hold-heal": {
-		"CONTRACT v5.7 A10, A2; BEHAVIORS MAINT-051, SESS-009", "on an unwanted workless pool row whose hold has expired, legacy's MAINT-051 sweep closes the row first and leaves the expired held_until and sleep_reason on it; v2's timer heal (A2) clears them in an earlier pass, then A21 closes the row. §12.2 does not list the order",
-		[]string{"held_until", "sleep_reason"},
 	},
 	"dead-corpse-close": {
 		"C5c2 (MAINT-031; CONTRACT v5 A21, C3)", "legacy closes an unwanted row that claims a live runtime once its runtime is a corpse (here MAINT-051's sweep reaches it first); A21 never closes a row that claims a live runtime, and C5c2's dead-runtime close is not built",
@@ -1054,7 +1054,7 @@ func parityFixtures() []parityFixture {
 			Name: "a workless suspended pool row is swept before its hold heals", Behaviors: []string{"MAINT-051"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
 			Explain: map[string]string{
-				"row:gc-1:*reason": "§12.2#17 orphan-close-reason", "row:gc-1:held_until": "close-after-hold-heal", "row:gc-1:sleep_reason": "close-after-hold-heal",
+				"row:gc-1:*reason": "§12.2#17 orphan-close-reason", "row:gc-1:held_until": "§12.2#43 close-after-hold-heal", "row:gc-1:sleep_reason": "§12.2#43 close-after-hold-heal",
 			},
 		},
 		{

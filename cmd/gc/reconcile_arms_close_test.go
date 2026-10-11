@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"maps"
-	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -558,18 +557,91 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("claim assignee %q, want kept: the cascade runs only on a closed row", got.Assignee)
 		}
 	})
-	t.Run("a probe left without time counts as not alive", func(t *testing.T) {
-		installFakeTmux(t, "exit 0") // alive, were it asked
-		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
-		claim := c.work(t, "in_progress", detachedClaim())
-		w := *c.w
-		w.Env = &reconcileEnv{Cfg: c.cfg}
-		ctx, cancel := context.WithTimeout(context.Background(), detachedProbeDefaultTimeout/2)
+	t.Run("a short budget never counts a live handoff stranded", func(t *testing.T) {
+		installFakeTmux(t, "exit 0") // alive
+		for _, c := range []struct {
+			name     string
+			blocked  bool // the read waits out the Probe's bound
+			searched bool
+		}{
+			{"the probes run on their own bounds, however little the read left", false, true},
+			{"a read that outlasts the Probe's bound leaves it unsearched", true, false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				k := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+				k.work(t, "in_progress", detachedClaim())
+				w := *k.w
+				w.Env = &reconcileEnv{Cfg: k.cfg}
+				ctx, cancel := context.WithTimeout(context.Background(), detachedProbeDefaultTimeout/2) // less than one probe's bound
+				defer cancel()
+				legs := testWorkLegs(w.CityPath, k.cfg, k.store, nil)
+				if c.blocked {
+					legs = testWorkLegs(w.CityPath, k.cfg, blockedListStore{Store: k.store, until: ctx.Done()}, nil)
+				}
+				v := txView{It: k.decide(), World: &w, Row: k.w.Census.Rows[k.k].Info, Fence: txFence{Work: &txWork{}}}
+				got, err := strandedProbe(ctx, effectReads{legs: legs}, v)
+				if err != nil || got.searched != c.searched || len(got.ids) != 0 || got.alive != c.searched {
+					t.Fatalf("probe = %+v, %v: want searched %v, nothing counted stranded", got, err, c.searched)
+				}
+				if step := closeWorkStep(txView{It: v.It, World: &w, Alloc: k.a, Row: v.Row, Meta: k.row(t).Metadata, Fence: v.Fence}, got, nil); step.Refuse != causeStranded {
+					t.Fatalf("step %+v, want refused stranded-unstamped", step)
+				}
+			})
+		}
+	})
+	t.Run("a cascade past its deadline stamps what it leaves", func(t *testing.T) {
+		c := orphan(t)
+		claim := c.work(t, "in_progress", map[string]string{beadmeta.RunTargetMetadataKey: "repo/other"}) // the carried lane alone serves it
+		it := c.decide()
+		if err := c.store.Close(c.k.ID); err != nil {
+			t.Fatal(err)
+		}
+		rel := newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, io.Discard)
+		rel.cfg = c.cfg
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		defer cancel()
-		v := txView{It: c.decide(), World: &w, Row: c.w.Census.Rows[c.k].Info, Fence: txFence{Work: &txWork{}}}
-		got, err := strandedProbe(ctx, effectReads{legs: c.w.WorkLegs}, v)
-		if err != nil || got.alive || !slices.Equal(got.ids, []string{claim.ID}) {
-			t.Fatalf("probe = %+v, %v: want the claim counted stranded, unprobed", got, err)
+		rel.cascade(ctx, it)
+		got, _ := c.store.Get(claim.ID)
+		if got.Assignee != c.k.ID || got.Metadata[beadmeta.StrandedSessionMetadataKey] != c.k.ID {
+			t.Fatalf("claim assignee %q stamp %v, want kept and stamped on the closed row", got.Assignee, got.Metadata)
+		}
+		if evts, _ := c.rec.List(events.Filter{Type: events.SessionStrandedClaims}); len(evts) != 1 {
+			t.Fatalf("session.stranded_claims = %d, want the left claim alerted", len(evts))
+		}
+	})
+	t.Run("the prune spares a work dir a successor shares", func(t *testing.T) {
+		dir := "/city/.gc/worktrees/repo/worker-1"
+		for _, key := range []string{"work_dir", "worker_dir", beadmeta.WorkDirMetadataKey} {
+			c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), "work_dir", dir)
+			rel := newCloseReleases(c.w, nil, io.Discard)
+			if rel.workDirInUse(c.store, c.row(t)) {
+				t.Fatalf("%s: in use with no successor", key)
+			}
+			if _, err := c.store.Create(sessionRow("succ", "template", "worker", "session_name", "s-succ", "pool_managed", "true", "pool_slot", "1", "state", "awake", key, dir)); err != nil {
+				t.Fatal(err)
+			}
+			if !rel.workDirInUse(c.store, c.row(t)) {
+				t.Fatalf("a successor recording the dir as %s reads not in use: the prune would remove its worktree", key)
+			}
+		}
+	})
+	t.Run("a killed seat's workflow root takes the seat's route (N08)", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		root := c.work(t, "open", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow})
+		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || c.row(t).Status != "closed" {
+			t.Fatalf("settlement %+v, want the root released on the seat's route and the close landed", s)
+		}
+		if got, _ := c.store.Get(root.ID); got.Assignee != "" {
+			t.Fatalf("root assignee %q, want released", got.Assignee)
+		}
+	})
+	t.Run("the cascade clears the closed row's current claim (N09)", func(t *testing.T) {
+		c := orphan(t, beadmeta.CurrentClaimBeadIDMetadataKey, "gw-x")
+		if s := c.run(t, gone().tmux()); !s.Closed {
+			t.Fatalf("settlement %+v, want closed", s)
+		}
+		if got := c.row(t).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; got != "" {
+			t.Fatalf("current claim %q, want cleared by the cascade", got)
 		}
 	})
 	t.Run("an unparseable marker with work takes no lease", func(t *testing.T) {
@@ -581,6 +653,21 @@ func TestCloseEffectEdges(t *testing.T) {
 		}
 	})
 }
+
+// blockedListStore holds every List until until closes: a remote bd whose
+// list outlasts its caller's bound.
+type blockedListStore struct {
+	beads.Store
+	until <-chan struct{}
+}
+
+func (s blockedListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	<-s.until
+	return s.Store.List(q)
+}
+
+// ConditionalWritesResolveTarget keeps the inner store's fenced writes.
+func (s blockedListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
 // detachedClaim is a routed claim with a detached runtime installFakeTmux
 // answers for.

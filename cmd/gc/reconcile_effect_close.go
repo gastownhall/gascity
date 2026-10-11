@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -145,8 +146,8 @@ func killCorpse(ctx context.Context, _ txCaps, k corpseKill) (struct{}, error) {
 // strandedWork is the stranded branch's probe: the unmarked pool slot's
 // assigned work through the read-only legs, filtered by legacy's detached
 // probes (filterDetachedStrandedDiagnosticWork, without its metadata clear:
-// the legs refuse writes, and the release clears it). Each probe runs under
-// the probe's bounded context.
+// the legs refuse writes, and the release clears it). Not searched, the
+// branch refuses: no stamp rests on a probe that did not answer.
 type strandedWork struct {
 	ids      []string
 	alive    bool // every claim read reports a detached probe alive
@@ -154,7 +155,11 @@ type strandedWork struct {
 }
 
 // strandedProbe reads the stranded branch's work, only when it applies: L5
-// found work on a pool slot that is not killed and carries no marker.
+// found work on a pool slot that is not killed and carries no marker. The
+// detached probes run concurrently after the read, each on its own bound
+// (detachedProbeDefaultTimeout) apart from the read's; a probe that times
+// out reads not alive, as legacy's does. One the Probe's own bound cut
+// short leaves the work unsearched, so this attempt refuses.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	if c.Kind != closePoolSlot || c.Killed || v.Fence.Work == nil || v.Fence.Work.Free ||
@@ -162,14 +167,24 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 		return strandedWork{}, nil
 	}
 	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
+	alive := make([]bool, len(work))
+	var wg sync.WaitGroup
+	for i, item := range work {
+		if spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				alive[i] = probeDetachedWork(context.WithoutCancel(ctx), spec).Status == detachedProbeAlive
+			}()
+		}
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return strandedWork{}, nil
+	}
 	out := strandedWork{searched: true}
-	deadline, bounded := ctx.Deadline()
-	for _, item := range work {
-		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
-		// The probes share the Probe's bound: one left without time to run
-		// counts as not alive, as a timed-out probe does, so the stamp lands
-		// within the bound however many claims there are.
-		if spec == "" || bounded && time.Until(deadline) < detachedProbeDefaultTimeout || probeDetachedWork(ctx, spec).Status != detachedProbeAlive {
+	for i, item := range work {
+		if !alive[i] {
 			out.ids = append(out.ids, item.bead.ID)
 		}
 	}
@@ -377,12 +392,19 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 		return
 	}
 	cancelStateAssignedToRetiredSessionBead(store, it.Key.ID, c.now, c.stderr)
-	deadline, _ := ctx.Deadline() // the effect's: the cascade writes nothing past it
-	if it.Closing.Kind != closeFailedCreate && ctx.Err() == nil {
+	// The effect's deadline: the cascade releases nothing past it, and what
+	// it leaves, unreached or cut short, it stamps (strand).
+	deadline, _ := ctx.Deadline()
+	if ctx.Err() != nil { // ended or canceled: release nothing more
+		deadline = time.Now()
+	}
+	if it.Closing.Kind != closeFailedCreate {
 		preserve := assigneePreserveSet(it.Closing.Preserve)
 		scope := releaseScopeOfBead(b, c.cfg).except(preserve)
-		if err := clearSessionCurrentClaim(store, b.ID); err != nil {
-			fmt.Fprintf(c.stderr, "session beads: clearing current claim on closing session %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+		if ctx.Err() == nil {
+			if err := clearSessionCurrentClaim(store, b.ID); err != nil {
+				fmt.Fprintf(c.stderr, "session beads: clearing current claim on closing session %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+			}
 		}
 		out, err := ReleaseClaims(seatWorkFor(c.legs, scope), scope, releaseSeatOfBead(b), releaseCloseCascade, ReleaseOpts{Late: true, Deadline: deadline})
 		logRelease(c.stderr, "closing", b.ID, out, err)
@@ -393,20 +415,31 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 	}
 }
 
-// workDirInUse reports an open session row on store, other than closed,
-// whose work dir is closed's: a successor in the same slot, whose worktree
-// the prune would remove (the cascade runs after the lease, not ordered
-// against the next pass). A failed read counts as in use.
+// workDirInUse reports an open session row other than closed's whose work
+// dir is the prune's target (WorkerDirFromInfo: worker_dir, else work_dir),
+// as any of the keys a row records it under: a successor seat a floor
+// started in the same slot keeps its worktree. A read error counts as in
+// use.
 func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool {
-	dir := strings.TrimSpace(closed.Metadata[beadmeta.WorkDirMetadataKey])
+	dir := session.WorkerDirFromInfo(sessionInfoFromBead(closed))
 	if dir == "" {
 		return false
 	}
-	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel, Metadata: map[string]string{beadmeta.WorkDirMetadataKey: dir}})
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
 	if err != nil {
 		return true
 	}
-	return slices.ContainsFunc(rows, func(r beads.Bead) bool { return r.ID != closed.ID && r.Status != "closed" })
+	return slices.ContainsFunc(rows, func(r beads.Bead) bool {
+		if r.ID == closed.ID || r.Status == "closed" {
+			return false
+		}
+		for _, k := range []string{beadmeta.WorkerDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
+			if strings.TrimSpace(r.Metadata[k]) == dir {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // newCloseReleases is w's close release handles, alerting through alerts.
