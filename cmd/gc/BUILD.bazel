@@ -1642,6 +1642,7 @@ go_test(
         "route_recovery_lane_test.go",
         "route_recovery_test.go",
         "routed_rows_manifest_test.go",
+        "runtime_inventory_activity_test.go",
         "runtime_inventory_differential_test.go",
         "runtime_inventory_lane_test.go",
         "runtime_inventory_ondeath_test.go",

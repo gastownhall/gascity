@@ -156,10 +156,7 @@ var parityFindings = map[string]parityEntry{
 	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so its later restart replaces the suspend stamp", []string{"state", "suspended_at", "slept_at"}},
 	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
 	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
-	"idle-activity-unread": {
-		"BEHAVIORS SESS-601/585 (A20 idle begin, AL1 stage 6b); C6a2 replay finding (owner to rule)", "legacy idle-sleeps a live row its probe reads idle past sleep_after_idle (its drain, latch, signal and stop in one tick); v2's AL1 suppresses a live row only on a known I3 activity fact (configSleepSuppressed), and no observer sets LastActivityKnown, so v2 never decides the idle sleep of a live non-interactive or always-named session (AL1's idle stage covers on-demand and pool rows from detached_at), and A20's idle begin and latch do not fire there (C6a2b)",
-		[]string{"detached_at", "drain_at", "last_woke_at", "sleep_reason", "slept_at", "state"},
-	},
+
 	"pending-create-swept": {
 		"CONTRACT v5 A10, C3; BEHAVIORS MAINT-051, SESS-050..052", "an undesired pool pending create past its never-started deadline: legacy's MAINT-051 sweep closes it first as gc_swept, its claim keys left on the closed row, so its rollback never runs; v2 does not run the sweep, and A10 rolls it back (failed-create, the claim cleared). §12.2 #17 covers only the orphan close's reason",
 		[]string{"state", "close_reason", "pending_create_claim", "pending_create_started_at"},
@@ -1144,17 +1141,14 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{live},
 		},
 		{
-			// An always named session idle past sleep_after_idle: both begin
-			// its idle drain and write the latch, the row's sleep policy
-			// fingerprint; legacy also signals and stops it in the tick (A4).
+			// An always named session idle past sleep_after_idle, its
+			// activity an hour old as the observation lane reads it (C6a2b):
+			// both begin its idle drain and write the latch, which is
+			// compared; legacy also signals and stops it in the tick (A4).
 			Name: "an idle drain begin writes the sleep policy fingerprint", Behaviors: []string{"SESS-601"}, City: chatNapping,
 			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
-			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}}, Idle: []string{"gc-c"},
-			Explain: map[string]string{
-				"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata", "row:gc-c:*idle": "idle-activity-unread",
-				"provider:SetMeta chat": "idle-activity-unread", "provider:RemoveMeta chat": "idle-activity-unread", "provider:Stop chat": "idle-activity-unread",
-				"event:session.stopped chat [reason session_id template]": "idle-activity-unread",
-			},
+			Runtimes: []simRuntime{chatLive}, Idle: []string{"gc-c"},
+			Explain: tlMerged(latchCompared(stopsInTick("A4 idle-sleep")), map[string]string{"row:gc-c:config_wake_suppressed": "sleep-policy-keys"}),
 		},
 		{
 			// A pool row awake only for ready, unclaimed assigned work, idle

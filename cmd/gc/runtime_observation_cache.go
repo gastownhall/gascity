@@ -312,6 +312,11 @@ type InventoryAttrs struct {
 	ProcessProbed           bool
 	ProcessKnown            bool
 	ProcessAlive            bool
+	// ActivityKnown says the pass read the runtime's last activity
+	// (GetLastActivity, legacy's idle reference) error-free and non-zero;
+	// LastActivity is then that time. Anything else leaves it unknown.
+	ActivityKnown bool
+	LastActivity  time.Time
 }
 
 // runtimeIdentity is one read of a runtime's identity env (v5 O2, O3):
@@ -643,6 +648,12 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	obs.Attached = unsupported
 	if a.AttachedKnown {
 		obs.Attached = poller(obsFactOf(a.Attached))
+	}
+	// Activity is this pass's read or unknown: a stale reading never
+	// carries over, so a missed read cannot make a row look idle.
+	obs.LastActivity, obs.LastActivityKnown = time.Time{}, a.ActivityKnown
+	if a.ActivityKnown {
+		obs.LastActivity = a.LastActivity
 	}
 	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
