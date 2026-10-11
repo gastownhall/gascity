@@ -2062,7 +2062,7 @@ func hookClaimHeadRepoDir(dir string) (string, hookClaimProbe) {
 // caller deadline covers it: the claim's delivery window is checked before the
 // identity patch is built, and the metadata-write timeout is created after it. It
 // does not bound the claim as a whole, only each query.
-const hookClaimGitProbeTimeout = 5 * time.Second
+var hookClaimGitProbeTimeout = 5 * time.Second
 
 // hookClaimRunGit runs one git query in dir and returns its single-line output.
 //

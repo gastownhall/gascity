@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -891,7 +892,11 @@ func hookClaimGitShim(t *testing.T, matchArg string) {
 func hookClaimGitStallShim(t *testing.T) {
 	t.Helper()
 	bin := t.TempDir()
-	script := "#!/bin/sh\nexec sleep " + strconv.Itoa(int(hookClaimGitProbeTimeout.Seconds())*4) + "\n"
+	stallSecs := int(hookClaimGitProbeTimeout.Seconds()) * 4
+	if stallSecs < 2 {
+		stallSecs = 2
+	}
+	script := "#!/bin/sh\nexec sleep " + strconv.Itoa(stallSecs) + "\n"
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing the stalling git shim: %v", err)
 	}
@@ -904,6 +909,10 @@ func hookClaimGitStallShim(t *testing.T) {
 // the one that refuses: a killed process surfaces as an ExitError, the same type a
 // git that answered "no repository here" surfaces as.
 func TestHookClaimProbeDeadlineIsNotAnAnswer(t *testing.T) {
+	prevTimeout := hookClaimGitProbeTimeout
+	hookClaimGitProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { hookClaimGitProbeTimeout = prevTimeout })
+
 	f := newHookClaimStoreFixture(t)
 	// Resolved before the shim, so the refusal below is attributable to the
 	// candidate's identity being unknown and not to the store's.
