@@ -761,20 +761,41 @@ func FindCodexSessionFile(searchPaths []string, workDir string) string {
 	}
 	var bestPath string
 	var bestTime int64
-	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		path := findCodexSessionFileIn(root, workDir)
-		if path == "" {
-			continue
+	searchRoots := func(roots []string) bool {
+		found := false
+		for _, root := range roots {
+			path := findCodexSessionFileIn(root, workDir)
+			if path == "" {
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			if mt := info.ModTime().UnixNano(); mt > bestTime {
+				bestTime = mt
+				bestPath = path
+				found = true
+			}
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
+		return found
+	}
+
+	cleanedExtras := make([]string, 0, len(searchPaths))
+	for _, p := range searchPaths {
+		if strings.HasPrefix(p, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				p = filepath.Join(home, p[2:])
+			}
 		}
-		if mt := info.ModTime().UnixNano(); mt > bestTime {
-			bestTime = mt
-			bestPath = path
+		cleanedExtras = append(cleanedExtras, filepath.Clean(p))
+	}
+	if len(cleanedExtras) > 0 {
+		if searchRoots(cleanedExtras) {
+			return bestPath
 		}
 	}
+	searchRoots(DefaultCodexSearchPaths())
 	return bestPath
 }
 
@@ -1542,10 +1563,10 @@ func mergePaths(defaults, extras []string) []string {
 			result = append(result, p)
 		}
 	}
-	for _, p := range defaults {
+	for _, p := range extras {
 		add(p)
 	}
-	for _, p := range extras {
+	for _, p := range defaults {
 		add(p)
 	}
 	return result
