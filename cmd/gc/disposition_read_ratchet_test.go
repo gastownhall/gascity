@@ -23,9 +23,9 @@ const dispositionRawReadsBaseline = "testdata/disposition_raw_reads.golden"
 // each with every package under it.
 var dispositionReadScanDirs = []string{"cmd/gc", "internal/session", "internal/api"}
 
-// dispositionCodecFiles are the codec, exempt by exact name: a new file
-// beside them is counted.
-var dispositionCodecFiles = []string{"internal/session/disposition.go", "internal/session/disposition_patch.go", "internal/session/disposition_store.go"}
+// dispositionCodecFiles are the codec, and the field registry that names
+// every key, exempt by exact name: a new file beside them is counted.
+var dispositionCodecFiles = []string{"internal/session/disposition.go", "internal/session/disposition_patch.go", "internal/session/disposition_store.go", "internal/session/fields.go"}
 
 // dispositionInfoFields and dispositionMetaKeys are the five disposition keys
 // as session.Info fields and as metadata keys.
@@ -37,9 +37,9 @@ var (
 // TestDispositionReadRatchet is R7's raw-read ratchet (ARCH-RESTRUCTURE-2
 // §5.1): per production file, the reads of the five disposition keys outside
 // the codec (dispositionCodecFiles), as an Info field (x.HeldUntil), a
-// metadata index (m["held_until"]) that is not an assignment's target, or a
-// constant or variable declared to a key's string (an alias a read could
-// index by).
+// metadata index (m["held_until"]) that is not an assignment's target, a
+// key's string passed to a call (a helper that reads it), or a constant or
+// variable declared to a key's string (an alias a read could index by).
 // A reader decodes the disposition (DecodeDisposition, DispositionOfInfo)
 // and reads a projection instead; the count may only fall. It matches by
 // name, so a same-named field of another type (a startup episode's
@@ -129,6 +129,12 @@ func dispositionRawReads(f *ast.File) int {
 		case *ast.SelectorExpr:
 			if slices.Contains(dispositionInfoFields, x.Sel.Name) && !targets[x] {
 				n++
+			}
+		case *ast.CallExpr:
+			for _, arg := range x.Args {
+				if dispositionKeyLit(arg) {
+					n++
+				}
 			}
 		case *ast.ValueSpec:
 			for _, v := range x.Values {
