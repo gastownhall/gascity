@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // makeSessionBead creates a minimal session bead for heartbeat tests.
@@ -210,5 +211,28 @@ func TestDoRuntimeHeartbeatNeverShortensAHold(t *testing.T) {
 	}
 	if got := heldUntil(); !got.After(long) {
 		t.Fatalf("a longer heartbeat left held_until at %v, want past %v", got, long)
+	}
+}
+
+// casLoser loses every conditional write to a newer revision.
+type casLoser struct{ *beads.MemStore }
+
+func (c casLoser) UpdateIfMatch(id string, rev int64, _ beads.UpdateOpts) error {
+	return &beads.PreconditionFailedError{ID: id, Expected: rev, Current: rev + 1}
+}
+
+// TestDoRuntimeHeartbeatReportsALostWrite: a heartbeat whose fenced write
+// loses every attempt says so and exits 1, never a silent success.
+func TestDoRuntimeHeartbeatReportsALostWrite(t *testing.T) {
+	m, id := stampedMem(t, gate.Require)
+	if err := m.SetMetadata(id, "session_name", "testpack__lost"); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doRuntimeHeartbeat(casLoser{m}, time.Hour, "testpack__lost", "testpack__lost", false, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "lost to concurrent writes") {
+		t.Fatalf("heartbeat under a CAS that always loses = %d, stderr %q; want 1, lost", code, stderr.String())
+	}
+	if b, _ := m.Get(id); b.Metadata["held_until"] != "" {
+		t.Fatalf("the lost heartbeat wrote held_until %q", b.Metadata["held_until"])
 	}
 }

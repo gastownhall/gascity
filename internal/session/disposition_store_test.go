@@ -152,3 +152,24 @@ func (c *firstCASRacer) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpt
 	}
 	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
 }
+
+// TestOperatorSuspendInForceWritesNothing: a suspend over one still in force
+// (here drained to asleep) leaves the row as it is: no state, no wake
+// request cleared.
+func TestOperatorSuspendInForceWritesNothing(t *testing.T) {
+	store, front, id := dispositionRow(t)
+	if _, err := front.OperatorSuspend(id, dispT0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(id, map[string]string{"state": string(StateAsleep), "wake_request": "explicit"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := store.Get(id)
+	if _, err := front.OperatorSuspend(id, dispT0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := store.Get(id)
+	if after.Revision != before.Revision || after.Metadata["state"] != string(StateAsleep) || after.Metadata["wake_request"] != "explicit" {
+		t.Fatalf("a suspend in force rewrote the row: %v (revision %d -> %d)", after.Metadata, before.Revision, after.Revision)
+	}
+}
