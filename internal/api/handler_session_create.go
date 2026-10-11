@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -138,6 +141,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// This route defers agent creates to the reconciler (below), which never
+	// starts a demand-only singleton's session on request (#6858).
+	if msg := demandOnlySingletonCreateRefusal(s.state.Config(), createCtx.Agent); msg != "" {
+		s.idem.unreserve(idemKey)
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
+	}
 	alias = createCtx.Alias
 	workDir = createCtx.WorkDir
 
@@ -161,11 +171,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// handles both: schema overrides map to CLI flags, initial_message
 	// is appended to the prompt on first start only.
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
-	if extraMeta == nil {
-		extraMeta = make(map[string]string)
-	}
-	extraMeta["agent_name"] = createCtx.Identity
-	extraMeta["session_origin"] = "ephemeral"
+	extraMeta = agentSessionCreateMetadata(extraMeta, createCtx.Identity)
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, createCtx.Identity, mcpServers)
 		if err != nil {
@@ -179,7 +185,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets real-world apps
 	// show the session in the sidebar immediately via optimistic UI.
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -225,7 +231,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Do NOT overwrite it here — the old code clobbered initial_message by
 	// writing only the options portion.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
-	s.state.Poke() // wake reconciler to start the agent
+	s.state.Enqueue(reconcilekey.Session(info.ID)) // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
@@ -366,7 +372,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -396,7 +402,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	if body.Async {
-		s.state.Poke()
+		s.state.Enqueue(reconcilekey.Session(info.ID))
 	}
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
@@ -407,7 +413,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
@@ -459,7 +465,7 @@ func (s *Server) rollbackCreatedSession(store beads.SessionStore, sessionID stri
 	if store.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	if err := s.sessionManager(store.Store).Close(sessionID); err != nil {
+	if err := s.sessionManager(store.Store).Close(context.Background(), s.actor(session.ActorOperator), sessionID); err != nil {
 		return fmt.Errorf("close created session: %w", err)
 	}
 	if err := store.Delete(sessionID); err != nil {

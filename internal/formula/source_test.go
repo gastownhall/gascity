@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestFSSourceMatchesLegacyBehavior asserts FSSource is a faithful
@@ -500,6 +502,37 @@ func TestGitRefSourceIgnoresPoisonedGitEnv(t *testing.T) {
 	}
 }
 
+// TestInitRepoCommitSpawnsNoAutoMaintenance guards the t.TempDir cleanup
+// flake ga-vb1a3n. Recent git (observed: 2.55) ends every `git commit` by
+// spawning `git maintenance run --auto --detach`, which forks a daemon that
+// outlives the commit. Its default geometric strategy repacks once objects/17
+// holds two loose objects, and TestParserHonorsSetSourceForLoadByName's root
+// tree is always 170b3831..., so whenever its commit id also started with 17
+// (one wall-clock second in 256) a repack could still be writing
+// .git/objects/pack while cleanup removed the repository. GIT_TRACE records
+// the spawn itself, so this check is deterministic whether or not a repack
+// would follow.
+func TestInitRepoCommitSpawnsNoAutoMaintenance(t *testing.T) {
+	gitOK(t)
+	root := initRepo(t)
+	commitFile(t, root, "mol.toml", "formula = \"mol\"\n")
+
+	trace := filepath.Join(t.TempDir(), "git-trace.log")
+	t.Setenv("GIT_TRACE", trace)
+	runGit(t, root, "commit", "-q", "-m", "init")
+
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatalf("reading GIT_TRACE output: %v", err)
+	}
+	if !strings.Contains(string(data), "git commit") {
+		t.Fatalf("GIT_TRACE did not record the commit, so the spawn check would pass vacuously:\n%s", data)
+	}
+	if strings.Contains(string(data), "maintenance run") {
+		t.Fatalf("git commit in an initRepo repository spawned auto-maintenance, whose detached repack races t.TempDir cleanup:\n%s", data)
+	}
+}
+
 // --- helpers ---
 
 func gitOK(t *testing.T) {
@@ -516,6 +549,10 @@ func initRepo(t *testing.T) string {
 	runGit(t, root, "config", "user.email", "test@example.com")
 	runGit(t, root, "config", "user.name", "test")
 	runGit(t, root, "config", "commit.gpgsign", "false")
+	// Stop commits from spawning detached auto-maintenance, whose background
+	// repack can still be writing into .git when t.TempDir cleanup runs.
+	// See TestInitRepoCommitSpawnsNoAutoMaintenance.
+	runGit(t, root, "config", "maintenance.auto", "false")
 	return root
 }
 
@@ -584,4 +621,36 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels
+// pins the ga-iawy13.6 canonical-path-at-ingest fix: canonicalExistingPath
+// must walk up past more than one missing path component to find a
+// resolvable symlinked ancestor, matching pathutil.NormalizePathForCompare.
+// Today it only tries the immediate parent, so a path missing at both the
+// leaf and the immediate-parent level resolves through the unresolved
+// symlink instead of its real target.
+func TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-parent", "missing-leaf")
+	got := canonicalExistingPath(missing)
+
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: on macOS the two disagree on whether the temp
+	// root is spelled /var/... or /private/var/..., and only the former is
+	// what canonicalExistingPath returns. The comparison stays exact.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-parent", "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalExistingPath(%q) = %q, want %q (resolved through symlinked grandparent, 2 missing levels)", missing, got, want)
+	}
 }

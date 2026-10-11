@@ -2,16 +2,18 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// TestPoolSessionIsLive_Matrix exercises the liveness predicate used by the
-// runningSessions counter in buildDesiredState. An asleep or drained bead
+// TestPoolSessionIsLiveInfo_Matrix exercises the liveness predicate used by the
+// runningSessions counter in buildDesiredState. An asleep or drained session
 // must not count as live; everything else is treated as live so that the
-// isCold probe is never suppressed by an unknown/future state.
-func TestPoolSessionIsLive_Matrix(t *testing.T) {
+// isCold probe is never suppressed by an unknown/future state. Fed through the
+// session.Info codec, matching the production read path.
+func TestPoolSessionIsLiveInfo_Matrix(t *testing.T) {
 	cases := []struct {
 		name string
 		meta map[string]string
@@ -31,9 +33,9 @@ func TestPoolSessionIsLive_Matrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := poolSessionIsLive(beads.Bead{Metadata: tc.meta})
+			got := poolSessionIsLiveInfo(sessionpkg.Info{MetadataState: tc.meta["state"], SleepReason: tc.meta["sleep_reason"]})
 			if got != tc.want {
-				t.Fatalf("poolSessionIsLive(%v) = %v, want %v", tc.meta, got, tc.want)
+				t.Fatalf("poolSessionIsLiveInfo(%v) = %v, want %v", tc.meta, got, tc.want)
 			}
 		})
 	}
@@ -44,6 +46,9 @@ func TestPoolSessionIsLive_Matrix(t *testing.T) {
 // it (e.g., adding `default: true`) or narrow it (e.g., removing `idle-timeout`)
 // must be caught by an explicit table rather than by accident.
 func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-time.Minute).Format(time.RFC3339)
+	stale := now.Add(-sessionpkg.KillPendingGrace - time.Minute).Format(time.RFC3339)
 	cases := []struct {
 		name string
 		meta map[string]string
@@ -57,6 +62,14 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+failed-create", map[string]string{"state": "asleep", "sleep_reason": "failed-create"}, true},
 		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing)}, true},
 		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonProviderTerminalError)}, true},
+		{"asleep+max-session-age", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonMaxSessionAge)}, true},
+		// Owner ruling B1: a killed seat frees its slot unless the kill still
+		// owns the row (an honored kill fence). A fence past KillPendingGrace,
+		// or a malformed one, is not honored.
+		{"asleep+killed", map[string]string{"state": "asleep", "sleep_reason": "killed", "slept_at": recent}, true},
+		{"asleep+killed+fence-pending", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": recent}, false},
+		{"asleep+killed+fence-stale", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": stale}, true},
+		{"asleep+killed+fence-malformed", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": "not-a-time"}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},
@@ -68,9 +81,18 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isPoolSessionSlotFreeable(beads.Bead{Metadata: tc.meta})
+			got := isPoolSessionSlotFreeable(beads.Bead{Metadata: tc.meta}, now)
 			if got != tc.want {
 				t.Fatalf("isPoolSessionSlotFreeable(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+			info := sessionpkg.Info{
+				MetadataState: tc.meta["state"],
+				StateReason:   tc.meta["state_reason"],
+				SleepReason:   tc.meta["sleep_reason"],
+				SleptAt:       tc.meta["slept_at"],
+			}
+			if gotInfo := isPoolSessionSlotFreeableInfo(info, now); gotInfo != tc.want {
+				t.Fatalf("isPoolSessionSlotFreeableInfo(%v) = %v, want %v", tc.meta, gotInfo, tc.want)
 			}
 		})
 	}

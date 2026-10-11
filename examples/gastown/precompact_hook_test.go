@@ -124,7 +124,8 @@ func hookCommands(raw any) []string {
 func containsGCHandoff(command string) bool {
 	fields := strings.Fields(command)
 	for i := 0; i < len(fields)-1; i++ {
-		if fields[i] == "gc" && fields[i+1] == "handoff" {
+		gcCommand := strings.Trim(fields[i], `"'`)
+		if (gcCommand == "gc" || gcCommand == "${GC_BIN:-gc}") && fields[i+1] == "handoff" {
 			return true
 		}
 	}

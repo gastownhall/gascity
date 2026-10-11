@@ -3,19 +3,19 @@ package session
 import (
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// bead is a small helper to build a session bead with the metadata keys the
-// lease reads.
-func leaseBead(status string, meta map[string]string) beads.Bead {
-	return beads.Bead{
-		ID:        "gcs-1",
-		Status:    status,
-		Metadata:  meta,
-		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+// leaseInfo builds a session Info carrying just the fields the pending-create
+// lease reads: closed (derived from status), raw state, identity tokens, and
+// the pending_create_claim bool. It is the typed-fixture analog of the raw
+// session bead the pre-migration lease was constructed from.
+func leaseInfo(status, state, tok, gen, claim string) Info {
+	return Info{
+		Closed:             strings.TrimSpace(status) == "closed",
+		MetadataState:      state,
+		InstanceToken:      tok,
+		Generation:         gen,
+		PendingCreateClaim: strings.TrimSpace(claim) == "true",
 	}
 }
 
@@ -67,14 +67,8 @@ func TestSameIdentity(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prepared := LeaseFromBead(leaseBead("open", map[string]string{
-				"instance_token": tt.preparedToken,
-				"generation":     tt.preparedGen,
-			}))
-			current := LeaseFromBead(leaseBead("open", map[string]string{
-				"instance_token": tt.currentToken,
-				"generation":     tt.currentGen,
-			}))
+			prepared := LeaseFromInfo(Info{InstanceToken: tt.preparedToken, Generation: tt.preparedGen})
+			current := LeaseFromInfo(Info{InstanceToken: tt.currentToken, Generation: tt.currentGen})
 			if got := prepared.SameIdentity(current); got != tt.want {
 				t.Errorf("SameIdentity = %v, want %v", got, tt.want)
 			}
@@ -83,32 +77,31 @@ func TestSameIdentity(t *testing.T) {
 }
 
 // oldStillCurrent and oldCleanupAllowed reproduce the legacy boolean helpers
-// verbatim so the parity of CommitVerdict is proven against the pre-refactor
-// semantics.
-func oldIdentityMatches(prepared, current beads.Bead) bool {
-	preparedToken := trimSpace(prepared.Metadata["instance_token"])
+// verbatim (reading the same typed Info fields the pre-refactor asyncStart*
+// helpers read) so the parity of CommitVerdict is proven against the
+// pre-refactor semantics, not against itself.
+func oldIdentityMatches(prepared, current Info) bool {
+	preparedToken := strings.TrimSpace(prepared.InstanceToken)
 	if preparedToken != "" {
-		return trimSpace(current.Metadata["instance_token"]) == preparedToken
+		return strings.TrimSpace(current.InstanceToken) == preparedToken
 	}
-	preparedGeneration := trimSpace(prepared.Metadata["generation"])
+	preparedGeneration := strings.TrimSpace(prepared.Generation)
 	if preparedGeneration == "" {
 		return true
 	}
-	return trimSpace(current.Metadata["generation"]) == preparedGeneration
+	return strings.TrimSpace(current.Generation) == preparedGeneration
 }
 
-func oldClaim(b beads.Bead) bool {
-	return trimSpace(b.Metadata["pending_create_claim"]) == "true"
-}
+func oldClaim(i Info) bool { return i.PendingCreateClaim }
 
-func oldStillCurrent(prepared, current beads.Bead) bool {
-	if trimSpace(current.Status) == "closed" {
+func oldStillCurrent(prepared, current Info) bool {
+	if current.Closed {
 		return false
 	}
 	if !oldIdentityMatches(prepared, current) {
 		return false
 	}
-	currentState := State(trimSpace(current.Metadata["state"]))
+	currentState := State(strings.TrimSpace(current.MetadataState))
 	if currentState == StateAwake || currentState == StateActive {
 		return true
 	}
@@ -118,14 +111,14 @@ func oldStillCurrent(prepared, current beads.Bead) bool {
 	return oldConfirm(string(currentState))
 }
 
-func oldCleanupAllowed(prepared, current beads.Bead) bool {
-	if trimSpace(current.Status) == "closed" {
+func oldCleanupAllowed(prepared, current Info) bool {
+	if current.Closed {
 		return true
 	}
 	if !oldIdentityMatches(prepared, current) {
 		return true
 	}
-	currentState := State(trimSpace(current.Metadata["state"]))
+	currentState := State(strings.TrimSpace(current.MetadataState))
 	if oldClaim(prepared) && !oldClaim(current) {
 		return currentState != StateAwake && currentState != StateActive
 	}
@@ -135,7 +128,7 @@ func oldCleanupAllowed(prepared, current beads.Bead) bool {
 }
 
 func oldConfirm(currentState string) bool {
-	switch State(trimSpace(currentState)) {
+	switch State(strings.TrimSpace(currentState)) {
 	case "", StateStartPending, StateCreating, StateAsleep, State("drained"):
 		return true
 	}
@@ -162,14 +155,10 @@ func TestCommitVerdict_ParityWithLegacyBooleans(t *testing.T) {
 						for _, cState := range states {
 							for _, cTok := range tokens {
 								for _, cClaim := range claims {
-									prepared := leaseBead(pStatus, map[string]string{
-										"state": pState, "instance_token": pTok, "pending_create_claim": pClaim,
-									})
-									current := leaseBead(cStatus, map[string]string{
-										"state": cState, "instance_token": cTok, "pending_create_claim": cClaim,
-									})
-									pl := LeaseFromBead(prepared)
-									cl := LeaseFromBead(current)
+									prepared := leaseInfo(pStatus, pState, pTok, "", pClaim)
+									current := leaseInfo(cStatus, cState, cTok, "", cClaim)
+									pl := LeaseFromInfo(prepared)
+									cl := LeaseFromInfo(current)
 									verdict := pl.CommitVerdict(cl)
 
 									wantCommit := oldStillCurrent(prepared, current)
@@ -199,43 +188,33 @@ func TestCommitVerdict_ParityWithLegacyBooleans(t *testing.T) {
 }
 
 func TestCommitVerdict_NamedInvariantRows(t *testing.T) {
-	withState := func(state string, extra map[string]string) beads.Bead {
-		m := map[string]string{"instance_token": "tok-a", "state": state}
-		for k, v := range extra {
-			m[k] = v
-		}
-		return leaseBead("open", m)
-	}
-
 	t.Run("#1542 commit-anyway on awake even with claim cleared", func(t *testing.T) {
-		prepared := LeaseFromBead(withState("creating", map[string]string{"pending_create_claim": "true"}))
-		current := LeaseFromBead(withState("awake", nil)) // claim cleared
+		prepared := LeaseFromInfo(Info{InstanceToken: "tok-a", MetadataState: "creating", PendingCreateClaim: true})
+		current := LeaseFromInfo(Info{InstanceToken: "tok-a", MetadataState: "awake"}) // claim cleared
 		if v := prepared.CommitVerdict(current); v != LeaseCommit {
 			t.Fatalf("want Commit, got %v", v)
 		}
 	})
 	t.Run("#1542 generation drift with matching token commits", func(t *testing.T) {
-		prepared := LeaseFromBead(leaseBead("open", map[string]string{"instance_token": "tok-a", "generation": "1", "state": "creating"}))
-		current := LeaseFromBead(leaseBead("open", map[string]string{"instance_token": "tok-a", "generation": "99", "state": "creating"}))
+		prepared := LeaseFromInfo(Info{InstanceToken: "tok-a", Generation: "1", MetadataState: "creating"})
+		current := LeaseFromInfo(Info{InstanceToken: "tok-a", Generation: "99", MetadataState: "creating"})
 		if v := prepared.CommitVerdict(current); v != LeaseCommit {
 			t.Fatalf("want Commit, got %v", v)
 		}
 	})
 	t.Run("#2073 claim-cleared-from-under-us discards + stops runtime", func(t *testing.T) {
-		prepared := LeaseFromBead(withState("creating", map[string]string{"pending_create_claim": "true"}))
-		current := LeaseFromBead(withState("creating", nil)) // claim cleared, not awake/active
+		prepared := LeaseFromInfo(Info{InstanceToken: "tok-a", MetadataState: "creating", PendingCreateClaim: true})
+		current := LeaseFromInfo(Info{InstanceToken: "tok-a", MetadataState: "creating"}) // claim cleared, not awake/active
 		if v := prepared.CommitVerdict(current); v != LeaseDiscardStopRuntime {
 			t.Fatalf("want DiscardStopRuntime, got %v", v)
 		}
 	})
 	t.Run("closed current discards", func(t *testing.T) {
-		prepared := LeaseFromBead(withState("creating", nil))
-		current := LeaseFromBead(withState("creating", nil))
+		prepared := LeaseFromInfo(Info{InstanceToken: "tok-a", MetadataState: "creating"})
+		current := LeaseFromInfo(Info{InstanceToken: "tok-a", MetadataState: "creating"})
 		current.Closed = true
 		if v := prepared.CommitVerdict(current); v != LeaseDiscardStopRuntime {
 			t.Fatalf("want DiscardStopRuntime, got %v", v)
 		}
 	})
 }
-
-func trimSpace(s string) string { return strings.TrimSpace(s) }

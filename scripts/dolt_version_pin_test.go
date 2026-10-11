@@ -8,7 +8,7 @@ import (
 )
 
 func TestDoltVersionPins(t *testing.T) {
-	const doltPin = "2.1.7"
+	const doltPin = "2.2.0"
 	const doltFloor = "2.1.0"
 	repoRoot := repoRoot(t)
 
@@ -40,7 +40,6 @@ func TestDoltVersionPins(t *testing.T) {
 	assertContains("README.md", "Managed Dolt checks require a final Dolt "+doltFloor+" or newer.")
 	assertContains("examples/bd/dolt/pack.toml", "# Minimum dolt version: "+doltFloor+".")
 	assertContains("examples/bd/dolt/doctor/check-dolt/run.sh", `required="`+doltFloor+`"`)
-	assertContains("examples/bd/dolt/assets/scripts/mol-dog-backup.sh", `MIN_DOLT_BACKUP_VERSION="`+doltFloor+`"`)
 
 	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
 		assertContains(".github/scripts/install-dolt-archive.sh", doltPin+":"+platform)
@@ -50,4 +49,8 @@ func TestDoltVersionPins(t *testing.T) {
 	// using the same shared scanner as the bd pin guard so neither analog can
 	// false-pass on partial drift or a .yaml workflow.
 	assertWorkflowPins(t, repoRoot, "DOLT_VERSION", doltPin)
+
+	// The devcontainer README restates this pin on the line above the bd one and
+	// was equally unread; guard both or the next bump half-applies here instead.
+	assertDocPinAnchor(t, repoRoot, ".devcontainer/README.md", "DOLT_VERSION", doltPin)
 }

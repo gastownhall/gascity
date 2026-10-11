@@ -164,8 +164,9 @@ Provider resolution happens later, at agent startup time, via
 
 - **`ProviderSpec`** (`internal/config/provider.go`): Defines a named
   provider's startup parameters (Command, Args, PromptMode, Env, etc.).
-  Built-in presets exist for claude, codex, gemini, cursor, copilot,
-  amp, and opencode.
+  Built-in presets exist for claude, codex, gemini, grok, kimi, kiro,
+  cursor, copilot, amp, opencode, mimocode, groq, cerebras, auggie, pi,
+  omp, and antigravity.
 
 - **`ResolvedProvider`** (`internal/config/provider.go`): The
   fully-merged, ready-to-use provider config produced by

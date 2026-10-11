@@ -3,10 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -14,77 +18,294 @@ import (
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
+type storeHealthListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s *storeHealthListErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.AllowScan && query.IncludeClosed {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
 func TestCachedStoreHealthServesMemoized(t *testing.T) {
-	var calls int
-	want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
-	s := &Server{}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		calls++
-		return want
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var calls int
+		want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+			calls++
+			return want, nil
+		}
 
-	now := time.Unix(1_000_000, 0)
-	got := s.cachedStoreHealth(context.Background(), now)
-	if got != want {
-		t.Fatalf("cachedStoreHealth = %+v, want %+v", got, want)
-	}
-	if calls != 1 {
-		t.Fatalf("computer called %d times, want 1", calls)
-	}
+		got, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("cachedStoreHealth: %v", err)
+		}
+		if got != want {
+			t.Fatalf("cachedStoreHealth = %+v, want %+v", got, want)
+		}
+		if calls != 1 {
+			t.Fatalf("computer called %d times, want 1", calls)
+		}
 
-	// Within TTL: no recomputation.
-	got2 := s.cachedStoreHealth(context.Background(), now.Add(storeHealthCacheTTL-time.Second))
-	if got2 != want {
-		t.Fatalf("second cachedStoreHealth = %+v, want %+v", got2, want)
-	}
-	if calls != 1 {
-		t.Fatalf("computer called %d times within TTL, want 1", calls)
-	}
+		// Within TTL: no recomputation.
+		<-time.After(storeHealthCacheTTL - time.Second)
+		got2, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("second cachedStoreHealth: %v", err)
+		}
+		if got2 != want {
+			t.Fatalf("second cachedStoreHealth = %+v, want %+v", got2, want)
+		}
+		if calls != 1 {
+			t.Fatalf("computer called %d times within TTL, want 1", calls)
+		}
+	})
 }
 
 func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
-	var calls int
-	s := &Server{}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		calls++
-		return &StatusStoreHealth{SizeBytes: int64(calls)}
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var calls int
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+			calls++
+			return &StatusStoreHealth{SizeBytes: int64(calls)}, nil
+		}
 
-	now := time.Unix(1_000_000, 0)
-	_ = s.cachedStoreHealth(context.Background(), now)
-	later := now.Add(storeHealthCacheTTL + time.Second)
-	got := s.cachedStoreHealth(context.Background(), later)
-	if calls != 2 {
-		t.Fatalf("computer calls = %d, want 2", calls)
-	}
-	if got.SizeBytes != 2 {
-		t.Fatalf("refreshed entry SizeBytes = %d, want 2", got.SizeBytes)
-	}
+		if _, err := s.cachedStoreHealth(context.Background(), time.Now()); err != nil {
+			t.Fatalf("initial cachedStoreHealth: %v", err)
+		}
+		<-time.After(storeHealthCacheTTL + time.Second)
+		got, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("refreshed cachedStoreHealth: %v", err)
+		}
+		if calls != 2 {
+			t.Fatalf("computer calls = %d, want 2", calls)
+		}
+		if got.SizeBytes != 2 {
+			t.Fatalf("refreshed entry SizeBytes = %d, want 2", got.SizeBytes)
+		}
+	})
+}
+
+func TestCachedStoreHealthConcurrentColdMissesCoalesce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const callers = 8
+
+		want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
+		releaseCompute := make(chan struct{})
+		results := make(chan *StatusStoreHealth, callers)
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+			calls.Add(1)
+			<-releaseCompute
+			return want, nil
+		}
+
+		for range callers {
+			go func() {
+				got, err := s.cachedStoreHealth(context.Background(), time.Now())
+				if err != nil {
+					t.Errorf("cachedStoreHealth: %v", err)
+				}
+				results <- got
+			}()
+		}
+
+		// Every caller is now either the elected computer or waiting for that
+		// same in-flight result. No wall-clock sleep is needed to prove overlap.
+		synctest.Wait()
+		computeCalls := calls.Load()
+
+		close(releaseCompute)
+		synctest.Wait()
+
+		for i := range callers {
+			if got := <-results; got != want {
+				t.Errorf("caller %d got cachedStoreHealth = %p, want shared result %p", i, got, want)
+			}
+		}
+		if computeCalls != 1 {
+			t.Errorf("computer calls while %d cold misses overlapped = %d, want 1", callers, computeCalls)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("final computer calls after %d cold misses completed = %d, want 1", callers, got)
+		}
+	})
+}
+
+func TestCachedStoreHealthConcurrentExpiredMissesCoalesce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const callers = 8
+
+		stale := &StatusStoreHealth{SizeBytes: 1}
+		fresh := &StatusStoreHealth{SizeBytes: 2}
+		releaseRefresh := make(chan struct{})
+		results := make(chan *StatusStoreHealth, callers)
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+			if calls.Add(1) == 1 {
+				return stale, nil
+			}
+			<-releaseRefresh
+			return fresh, nil
+		}
+
+		primed, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("primed cachedStoreHealth: %v", err)
+		}
+		if primed != stale {
+			t.Fatalf("primed cachedStoreHealth = %p, want stale entry %p", primed, stale)
+		}
+		<-time.After(storeHealthCacheTTL)
+
+		for range callers {
+			go func() {
+				got, err := s.cachedStoreHealth(context.Background(), time.Now())
+				if err != nil {
+					t.Errorf("cachedStoreHealth: %v", err)
+				}
+				results <- got
+			}()
+		}
+
+		synctest.Wait()
+		computeCalls := calls.Load()
+
+		close(releaseRefresh)
+		synctest.Wait()
+
+		for i := range callers {
+			if got := <-results; got != fresh {
+				t.Errorf("caller %d got cachedStoreHealth = %p, want refreshed result %p", i, got, fresh)
+			}
+		}
+		if computeCalls != 2 {
+			t.Errorf("computer calls across prime plus %d expired misses = %d, want 2", callers, computeCalls)
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("final computer calls after %d expired misses completed = %d, want 2", callers, got)
+		}
+	})
+}
+
+func TestCachedStoreHealthRefreshSurvivesLeaderCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		want := &StatusStoreHealth{SizeBytes: 123}
+		canceledResult := &StatusStoreHealth{SizeBytes: -1}
+		computeStarted := make(chan struct{})
+		releaseCompute := make(chan struct{})
+		results := make(chan *StatusStoreHealth, 2)
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(ctx context.Context) (*StatusStoreHealth, error) {
+			calls.Add(1)
+			close(computeStarted)
+			<-releaseCompute
+			if ctx.Err() != nil {
+				return canceledResult, nil
+			}
+			return want, nil
+		}
+
+		leaderCtx, cancelLeader := context.WithCancel(context.Background())
+		go func() {
+			got, err := s.cachedStoreHealth(leaderCtx, time.Now())
+			if err != nil {
+				t.Errorf("cachedStoreHealth: %v", err)
+			}
+			results <- got
+		}()
+		<-computeStarted
+		cancelLeader()
+
+		go func() {
+			got, err := s.cachedStoreHealth(context.Background(), time.Now())
+			if err != nil {
+				t.Errorf("cachedStoreHealth: %v", err)
+			}
+			results <- got
+		}()
+		synctest.Wait()
+
+		close(releaseCompute)
+		synctest.Wait()
+
+		for i := range 2 {
+			if got := <-results; got != want {
+				t.Errorf("caller %d got cachedStoreHealth = %p, want request-independent result %p", i, got, want)
+			}
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("computer calls with canceled leader and live waiter = %d, want 1", got)
+		}
+	})
+}
+
+func TestCachedStoreHealthTTLStartsAfterComputeCompletes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		want := &StatusStoreHealth{Path: "/c/.beads/dolt", SizeBytes: 123}
+		var calls atomic.Int32
+
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+			calls.Add(1)
+			// Advance virtual time past the TTL while the refresh is running.
+			<-time.After(storeHealthCacheTTL + time.Second)
+			return want, nil
+		}
+
+		first, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("first cachedStoreHealth: %v", err)
+		}
+		second, err := s.cachedStoreHealth(context.Background(), time.Now())
+		if err != nil {
+			t.Fatalf("second cachedStoreHealth: %v", err)
+		}
+
+		if first != want || second != want {
+			t.Fatalf("cached results = (%p, %p), want (%p, %p)", first, second, want, want)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("computer calls across immediate post-compute read = %d, want 1", got)
+		}
+	})
 }
 
 func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
-	s := &Server{}
-	canLockDuringCompute := make(chan bool, 1)
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		locked := make(chan struct{})
-		go func() {
-			s.storeHealthMu.Lock()
-			defer s.storeHealthMu.Unlock()
-			close(locked)
-		}()
-		select {
-		case <-locked:
-			canLockDuringCompute <- true
-		case <-time.After(100 * time.Millisecond):
-			canLockDuringCompute <- false
+	synctest.Test(t, func(t *testing.T) {
+		s := &Server{}
+		s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+			locked := make(chan struct{})
+			go func() {
+				s.storeHealthMu.Lock()
+				defer s.storeHealthMu.Unlock()
+				close(locked)
+			}()
+			synctest.Wait()
+			select {
+			case <-locked:
+			default:
+				t.Error("cachedStoreHealth held storeHealthMu while running the refresh computer")
+			}
+			return &StatusStoreHealth{SizeBytes: 1}, nil
 		}
-		return &StatusStoreHealth{SizeBytes: 1}
-	}
 
-	_ = s.cachedStoreHealth(context.Background(), time.Unix(1_000_000, 0))
-	if !<-canLockDuringCompute {
-		t.Fatal("cachedStoreHealth held storeHealthMu while running the refresh computer")
-	}
+		if _, err := s.cachedStoreHealth(context.Background(), time.Now()); err != nil {
+			t.Fatalf("cachedStoreHealth: %v", err)
+		}
+	})
 }
 
 func TestStatusStoreHealthFromDomainOmitsEmptyLastGC(t *testing.T) {
@@ -137,7 +358,10 @@ func TestComputeStoreHealthServerIntegration(t *testing.T) {
 		cityBeadStore: store,
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth(context.Background())
+	got, err := s.computeStoreHealth(context.Background())
+	if err != nil {
+		t.Fatalf("computeStoreHealth: %v", err)
+	}
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
@@ -168,7 +392,10 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 		cityBeadStore: beads.NewMemStore(),
 	}
 	s := &Server{state: state}
-	got := s.computeStoreHealth(context.Background())
+	got, err := s.computeStoreHealth(context.Background())
+	if err != nil {
+		t.Fatalf("computeStoreHealth: %v", err)
+	}
 	if got == nil {
 		t.Fatal("computeStoreHealth returned nil")
 	}
@@ -180,14 +407,35 @@ func TestComputeStoreHealthUsesDoltlitePathFromMetadata(t *testing.T) {
 func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 	state := &fakeState{cityPath: ""}
 	s := &Server{state: state}
-	if got := s.computeStoreHealth(context.Background()); got != nil {
+	got, err := s.computeStoreHealth(context.Background())
+	if err != nil {
+		t.Fatalf("computeStoreHealth: %v", err)
+	}
+	if got != nil {
 		t.Fatalf("computeStoreHealth = %+v, want nil for empty city path", got)
 	}
 }
 
-func TestCountBeadStoreRowsNil(t *testing.T) {
-	if got := countBeadStoreRows(context.Background(), newFakeState(t), nil); got != 0 {
-		t.Fatalf("countBeadStoreRows(nil) = %d, want 0", got)
+func TestCountBeadStoreRowsReturnsUnavailableForNilStore(t *testing.T) {
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), nil)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows(nil) = %d, want zero value when unavailable", got)
+	}
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("countBeadStoreRows(nil) error = %v, want unavailable error", err)
+	}
+}
+
+func TestCountBeadStoreRowsReturnsScanError(t *testing.T) {
+	wantErr := errors.New("store health row scan failed")
+	store := &storeHealthListErrorStore{Store: beads.NewMemStore(), err: wantErr}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows rows = %d, want zero value when unavailable", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("countBeadStoreRows error = %v, want %v", err, wantErr)
 	}
 }
 
@@ -204,13 +452,106 @@ func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := countBeadStoreRows(context.Background(), newFakeState(t), store); got != 2 {
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows: %v", err)
+	}
+	if got != 2 {
 		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+}
+
+type storeHealthCounterStore struct {
+	beads.Store
+	count     int
+	countErr  error
+	gotQuery  *beads.ListQuery
+	listCalls int
+}
+
+func (s *storeHealthCounterStore) Count(_ context.Context, query beads.ListQuery, _ ...string) (int, error) {
+	s.gotQuery = &query
+	return s.count, s.countErr
+}
+
+func (s *storeHealthCounterStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.Store.List(query)
+}
+
+func TestCountBeadStoreRowsPrefersCounterWithoutHydration(t *testing.T) {
+	store := &storeHealthCounterStore{Store: beads.NewMemStore(), count: 41252}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows: %v", err)
+	}
+	if got != 41252 {
+		t.Fatalf("countBeadStoreRows = %d, want Counter result 41252", got)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List called %d times, want 0 (Counter path must not hydrate)", store.listCalls)
+	}
+	if store.gotQuery == nil || !store.gotQuery.IncludeClosed || !store.gotQuery.AllowScan {
+		t.Fatalf("Count query = %+v, want AllowScan and IncludeClosed set", store.gotQuery)
+	}
+}
+
+func TestCountBeadStoreRowsFallsBackWhenCountUnsupported(t *testing.T) {
+	store := &storeHealthCounterStore{
+		Store:    beads.NewMemStore(),
+		countErr: fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported),
+	}
+	if _, err := store.Create(beads.Bead{Title: "x"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("countBeadStoreRows = %d, want 1 from List fallback", got)
+	}
+	if store.listCalls == 0 {
+		t.Fatal("List never called, want hydrating fallback on ErrCountUnsupported")
+	}
+}
+
+func TestCountBeadStoreRowsReturnsCounterError(t *testing.T) {
+	wantErr := errors.New("store health count failed")
+	store := &storeHealthCounterStore{Store: beads.NewMemStore(), countErr: wantErr}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows = %d, want zero value on Counter error", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("countBeadStoreRows error = %v, want %v", err, wantErr)
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("List called %d times after non-unsupported Counter error, want 0", store.listCalls)
+	}
+}
+
+func TestComputeStoreHealthReturnsRowCountError(t *testing.T) {
+	wantErr := errors.New("store health row scan failed")
+	state := newFakeState(t)
+	state.cityBeadStore = &storeHealthListErrorStore{Store: beads.NewMemStore(), err: wantErr}
+	s := &Server{state: state}
+
+	got, err := s.computeStoreHealth(context.Background())
+	if got != nil {
+		t.Errorf("computeStoreHealth = %+v, want nil when row count is unavailable", got)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("computeStoreHealth error = %v, want %v", err, wantErr)
 	}
 }
 
 func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
 	s := &Server{state: state}
 
 	body := s.buildStatusBody(context.Background(), false)
@@ -222,6 +563,27 @@ func TestBuildStatusBodyIncludesStoreHealth(t *testing.T) {
 	}
 	if !strings.HasSuffix(body.StoreHealth.Path, "/.beads/dolt") {
 		t.Errorf("Path = %q, want .beads/dolt suffix", body.StoreHealth.Path)
+	}
+}
+
+func TestBuildStatusBodyOmitsUnavailableStoreHealthAndReportsPartialError(t *testing.T) {
+	wantErr := errors.New("store health row scan failed")
+	state := newFakeState(t)
+	s := &Server{state: state}
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+		return nil, wantErr
+	}
+
+	body := s.buildStatusBody(context.Background(), false)
+	if body.StoreHealth != nil {
+		t.Errorf("StoreHealth = %+v, want omitted when unavailable", body.StoreHealth)
+	}
+	if !body.Partial {
+		t.Error("Partial = false, want true when store health is unavailable")
+	}
+	wantPartialError := "store health: " + wantErr.Error()
+	if len(body.PartialErrors) != 1 || body.PartialErrors[0] != wantPartialError {
+		t.Fatalf("PartialErrors = %q, want [%q]", body.PartialErrors, wantPartialError)
 	}
 }
 
@@ -250,5 +612,150 @@ func TestBuildStatusBodyIncludesBeadsDiagnostic(t *testing.T) {
 	}
 	if body.Beads.PreflightReason == "" {
 		t.Fatal("preflight_reason = empty, want fallback reason")
+	}
+}
+
+// storeHealthWitnessStore is a counting store that has already handed this
+// process a row. It is the state that turns a later zero for a whole-ledger
+// read from a small ledger into a failed measurement.
+type storeHealthWitnessStore struct {
+	*storeHealthCounterStore
+	sawRows bool
+}
+
+func (s *storeHealthWitnessStore) SawRows() bool { return s.sawRows }
+
+func newStoreHealthWitnessStore(inner *storeHealthCounterStore, sawRows bool) *storeHealthWitnessStore {
+	return &storeHealthWitnessStore{storeHealthCounterStore: inner, sawRows: sawRows}
+}
+
+// TestCountBeadStoreRowsRefusesACounterZeroTheStoreContradicts covers the
+// branch where the backend answered a bare COUNT with zero. The count
+// succeeded, so nothing upstream of here has an error to report, and the zero
+// would otherwise be certified as measured and become the denominator of the
+// maintenance ratio.
+func TestCountBeadStoreRowsRefusesACounterZeroTheStoreContradicts(t *testing.T) {
+	store := newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 0}, true)
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows = %d, want zero value when the count is unavailable", got)
+	}
+	if !errors.Is(err, errRowCountContradicted) {
+		t.Fatalf("countBeadStoreRows error = %v, want errRowCountContradicted", err)
+	}
+	if !strings.Contains(err.Error(), countBranchCounter) {
+		t.Fatalf("error = %q, want it to name the %q branch that answered", err, countBranchCounter)
+	}
+}
+
+// TestCountBeadStoreRowsRefusesAListFallbackZeroTheStoreContradicts covers the
+// branch every bd-backed city takes, since BdStore implements no Counter. An
+// empty whole-ledger list is the shape the store layer already diagnoses and
+// deliberately lets succeed; refusing it belongs here, at the one consumer for
+// which zero was never a usable answer.
+func TestCountBeadStoreRowsRefusesAListFallbackZeroTheStoreContradicts(t *testing.T) {
+	store := newStoreHealthWitnessStore(&storeHealthCounterStore{
+		Store:    beads.NewMemStore(),
+		countErr: fmt.Errorf("counting beads: %w", beads.ErrCountUnsupported),
+	}, true)
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if got != 0 {
+		t.Errorf("countBeadStoreRows = %d, want zero value when the count is unavailable", got)
+	}
+	if !errors.Is(err, errRowCountContradicted) {
+		t.Fatalf("countBeadStoreRows error = %v, want errRowCountContradicted", err)
+	}
+	if !strings.Contains(err.Error(), countBranchList) {
+		t.Fatalf("error = %q, want it to name the %q branch that answered", err, countBranchList)
+	}
+	if store.listCalls == 0 {
+		t.Fatal("List never called; the fallback branch is the one under test")
+	}
+}
+
+// TestCountBeadStoreRowsKeepsAZeroFromAnEmptyLedger is the other half of the
+// contract. A city that genuinely holds nothing must keep reporting a healthy
+// zero, so the guard fires on contradiction and never on the number alone.
+func TestCountBeadStoreRowsKeepsAZeroFromAnEmptyLedger(t *testing.T) {
+	store := newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 0}, false)
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows error = %v, want nil for a store with no evidence against its zero", err)
+	}
+	if got != 0 {
+		t.Fatalf("countBeadStoreRows = %d, want 0", got)
+	}
+}
+
+// TestCountBeadStoreRowsKeepsAZeroFromAStoreThatCannotWitnessItself pins the
+// behavior for every store implementing no witness, which is what keeps this
+// change from turning an unrelated backend's healthy zero into a partial error.
+func TestCountBeadStoreRowsKeepsAZeroFromAStoreThatCannotWitnessItself(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, ok := beads.Store(store).(beads.RowWitness); ok {
+		t.Fatal("MemStore implements RowWitness; this test no longer covers the witness-less case")
+	}
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows error = %v, want nil", err)
+	}
+	if got != 0 {
+		t.Fatalf("countBeadStoreRows = %d, want 0", got)
+	}
+}
+
+// TestCountBeadStoreRowsLeavesARealCountAlone keeps the guard off the answers
+// it has no business touching: only zero is ambiguous.
+func TestCountBeadStoreRowsLeavesARealCountAlone(t *testing.T) {
+	store := newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 41252}, true)
+
+	got, err := countBeadStoreRows(context.Background(), newFakeState(t), store)
+	if err != nil {
+		t.Fatalf("countBeadStoreRows error = %v, want nil", err)
+	}
+	if got != 41252 {
+		t.Fatalf("countBeadStoreRows = %d, want 41252", got)
+	}
+}
+
+// TestBuildStatusBodyOmitsStoreHealthWhenTheRowCountIsContradicted is the
+// regression test in the operator's own terms: a store holding rows never
+// renders a successful count of zero.
+//
+// It asserts the whole route rather than the guard alone, because the value of
+// refusing the zero is entirely in where the refusal lands — the block is
+// omitted and the reason is attached, instead of `Live rows: 0` and a ratio
+// derived from a count nobody took reading as under-threshold by luck.
+func TestBuildStatusBodyOmitsStoreHealthWhenTheRowCountIsContradicted(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = newStoreHealthWitnessStore(&storeHealthCounterStore{Store: beads.NewMemStore(), count: 0}, true)
+	s := &Server{state: state}
+
+	body := s.buildStatusBody(context.Background(), false)
+	if body.StoreHealth != nil {
+		t.Fatalf("StoreHealth = %+v, want omitted when the row count is unavailable", body.StoreHealth)
+	}
+	if !body.Partial {
+		t.Error("Partial = false, want true so the absent block is visible as a gap rather than as silence")
+	}
+	var got string
+	for _, entry := range body.PartialErrors {
+		if strings.HasPrefix(entry, "store health: ") {
+			got = entry
+			break
+		}
+	}
+	if got == "" {
+		t.Fatalf("PartialErrors = %q, want a store health entry naming why the block is absent", body.PartialErrors)
+	}
+	if !strings.Contains(got, countBranchCounter) {
+		t.Errorf("partial error = %q, want it to name the branch that answered", got)
+	}
+	if !strings.Contains(got, "after already returning rows") {
+		t.Errorf("partial error = %q, want it to say what disproved the zero", got)
 	}
 }

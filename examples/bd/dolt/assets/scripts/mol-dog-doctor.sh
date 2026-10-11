@@ -36,6 +36,17 @@ BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
 ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
+# Advisory mailbox hygiene: the subject the [MEDIUM] escalation sends under, the
+# prefix the superseded-advisory sweep matches (severity-agnostic on purpose, so
+# it also catches older sends under a different severity tag), and the recipient
+# those sends go to. The recipient is the same env-var-with-default the core
+# escalate.sh resolves (RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"); a pack
+# that overrides escalate.sh with a different recipient makes the sweep a
+# harmless no-op. The CRITICAL "server unreachable" escalation uses a different
+# subject and is never matched by the prefix, so outage mail is never swept.
+ADVISORY_SUBJECT="Dolt health advisory [MEDIUM]"
+ADVISORY_SUBJECT_PREFIX="Dolt health advisory"
+ADVISORY_RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -76,19 +87,65 @@ backup_path_matches_db() {
     return 1
 }
 
-newest_backup_mtime_for_db() {
+# Age of the newest *restorable* backup for a database, which is the mtime of
+# the remote's manifest and never the mtime of the newest file of any kind.
+# `dolt backup sync` writes chunk data first and adopts it by rewriting the
+# manifest last, so a sync killed in between leaves chunk files newer than
+# anything the manifest references. Measured on a live city: an hq remote whose
+# newest chunk landed at 21:04 carried a manifest still reading 15:04, and the
+# manifest did not reference that chunk. Reading file mtimes there reports a
+# six-hour-old backup as nine minutes old.
+#
+# A db-named directory is the remote the backup order configures
+# (file://$BACKUP_ARTIFACT_DIR/<db>), so it is dated only by its own root
+# manifest, the same file `gc dolt health` reads. With no manifest it is a
+# remote whose first sync never completed: it holds nothing restorable and
+# reports 0. Nothing else is read for it, because the prefix arms of
+# backup_path_matches_db also accept a sibling such as <db>-dev/manifest or a
+# moved-aside <db>.old/manifest, and either would date this database by a
+# backup that is not its own.
+#
+# Only layouts without that directory fall back to the prefix-matched files,
+# because BACKUP_ARTIFACT_DIR may point at something that is not a Dolt remote
+# at all. A matched manifest still wins there and, with none, the newest
+# matching file is the only age there is to read. The prefix arms can still
+# credit a sibling's files on that path.
+backup_commit_mtime_for_db() {
     db_name="$1"
+    db_remote_dir="$BACKUP_ARTIFACT_DIR/$db_name"
+    if [ -d "$db_remote_dir" ]; then
+        if [ -f "$db_remote_dir/manifest" ]; then
+            file_mtime "$db_remote_dir/manifest"
+        else
+            printf '0\n'
+        fi
+        return 0
+    fi
     newest_mtime=0
+    manifest_mtime=0
     while IFS= read -r -d '' backup_path; do
         backup_rel_path="${backup_path#$BACKUP_ARTIFACT_DIR/}"
         if backup_path_matches_db "$db_name" "$backup_rel_path"; then
             backup_mtime=$(file_mtime "$backup_path")
-            if [ "$backup_mtime" -gt "$newest_mtime" ]; then
-                newest_mtime="$backup_mtime"
-            fi
+            case "$backup_path" in
+                */manifest)
+                    if [ "$backup_mtime" -gt "$manifest_mtime" ]; then
+                        manifest_mtime="$backup_mtime"
+                    fi
+                    ;;
+                *)
+                    if [ "$backup_mtime" -gt "$newest_mtime" ]; then
+                        newest_mtime="$backup_mtime"
+                    fi
+                    ;;
+            esac
         fi
     done < <(find "$BACKUP_ARTIFACT_DIR" -type f -print0 2>/dev/null)
-    printf '%s\n' "$newest_mtime"
+    if [ "$manifest_mtime" -gt 0 ]; then
+        printf '%s\n' "$manifest_mtime"
+    else
+        printf '%s\n' "$newest_mtime"
+    fi
 }
 
 append_backup_stale() {
@@ -161,7 +218,8 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
     ORPHAN_WARN=" [WARN: $ORPHAN_COUNT orphan DBs detected — run gc dolt cleanup]"
 fi
 
-# Backup freshness: check newest backup artifact per database.
+# Backup freshness: check each database's newest restorable backup, read from
+# the backup remote's manifest. See backup_commit_mtime_for_db.
 # Every user database is in scope. DBs without a configured <db>-backup
 # remote are reported as a coverage gap rather than silently excluded —
 # the exclusion is how unconfigured production DBs went unbacked-up until
@@ -189,12 +247,12 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     else
         NOW_S=$(date +%s)
         for db in $BACKUP_ELIGIBLE_DBS; do
-            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
-            if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
+            BACKUP_COMMIT_MTIME=$(backup_commit_mtime_for_db "$db")
+            if [ "$BACKUP_COMMIT_MTIME" -le 0 ]; then
                 append_backup_stale "$db backup missing"
                 continue
             fi
-            BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
+            BACKUP_AGE=$((NOW_S - BACKUP_COMMIT_MTIME))
             if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
                 append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
             fi
@@ -220,8 +278,14 @@ if [ -n "$WARNINGS" ]; then
     if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
     if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
     if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
+        # Sweep superseded advisories before the fresh send: the new advisory
+        # carries the full current status block, so older snapshots (and any
+        # backlog minted before the dedup existed) are stale the moment it
+        # lands. If the send below then fails, the sig stays unrecorded and the
+        # next tick retries both the sweep (a no-op) and the send.
+        advisory_archive_superseded "$ADVISORY_SUBJECT_PREFIX" "$ADVISORY_RECIPIENT"
         if send_escalation \
-            "Dolt health advisory [MEDIUM]" \
+            "$ADVISORY_SUBJECT" \
             "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
@@ -230,7 +294,13 @@ Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
         fi
     fi
 else
-    # Healthy: forget the last advisory so a future condition re-alerts.
+    # Healthy: the condition cleared, so no advisory should stay open. Sweep
+    # only when a prior advisory was recorded (state file present), so steady
+    # healthy ticks cost no extra gc call; then forget the signature so a
+    # future condition re-alerts.
+    if [ -f "$ADVISORY_STATE_FILE" ]; then
+        advisory_archive_superseded "$ADVISORY_SUBJECT_PREFIX" "$ADVISORY_RECIPIENT"
+    fi
     advisory_clear "$ADVISORY_STATE_FILE"
 fi
 

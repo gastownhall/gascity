@@ -201,8 +201,9 @@ func TestRunStage1SkipsUnsupportedProvider(t *testing.T) {
 
 // TestRunStage1MixedProvidersCreateSiblingSinks verifies the spec's
 // mixed-provider scenario: a claude agent and a codex agent at the
-// same scope root produce sibling .claude/skills/ and .codex/skills/
-// sinks with the same city-pack skill.
+// same scope root produce sibling .claude/skills/ and .agents/skills/
+// sinks (the codex CLI reads .agents/skills, not .codex/skills) with the
+// same city-pack skill.
 func TestRunStage1MixedProvidersCreateSiblingSinks(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
@@ -223,7 +224,7 @@ func TestRunStage1MixedProvidersCreateSiblingSinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, vendor := range []string{".claude", ".codex"} {
+	for _, vendor := range []string{".claude", ".agents"} {
 		sink := filepath.Join(cityPath, vendor, "skills", "plan")
 		info, err := os.Lstat(sink)
 		if err != nil {
@@ -233,6 +234,57 @@ func TestRunStage1MixedProvidersCreateSiblingSinks(t *testing.T) {
 		if info.Mode()&os.ModeSymlink == 0 {
 			t.Errorf("%s sink is not a symlink", vendor)
 		}
+	}
+}
+
+// TestRunStage1PiMaterializesIntoAgentsSkills verifies that a pi agent
+// gets a real on-disk sink, not just a lookup-table entry: pi shares
+// codex's .agents/skills location, so a city-scoped pi agent must end up
+// with a symlink there resolving back to the shared catalog source.
+func TestRunStage1PiMaterializesIntoAgentsSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+	source := filepath.Join(cityPath, "skills", "plan")
+	writeSkillSource(t, source)
+
+	cfg := &config.City{
+		PackSkillsDir: filepath.Join(cityPath, "skills"),
+		Session:       config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "pi"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := filepath.Join(cityPath, ".agents", "skills", "plan")
+	info, err := os.Lstat(sink)
+	if err != nil {
+		t.Fatalf(".agents/skills sink missing for pi agent: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf(".agents/skills sink is not a symlink")
+	}
+	got, err := filepath.EvalSymlinks(sink)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", sink, err)
+	}
+	want, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", source, err)
+	}
+	if got != want {
+		t.Fatalf("pi sink resolves to %s, want %s", got, want)
+	}
+
+	// pi must not get its own .pi/skills sink — that would make pi scan
+	// the same skill twice and hit its name-collision path.
+	if _, err := os.Lstat(filepath.Join(cityPath, ".pi", "skills")); !os.IsNotExist(err) {
+		t.Fatalf(".pi/skills should not be created, Lstat err = %v", err)
 	}
 }
 
@@ -553,8 +605,8 @@ func TestRunStage1AgentLocalOnlyInItsOwnSink(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(cityPath, ".claude", "skills", "mayor-only")); err != nil {
 		t.Errorf("mayor-only missing from claude sink: %v", err)
 	}
-	// deputy's codex sink does NOT get mayor's private skill.
-	if _, err := os.Lstat(filepath.Join(cityPath, ".codex", "skills", "mayor-only")); !os.IsNotExist(err) {
+	// deputy's codex sink (.agents/skills) does NOT get mayor's private skill.
+	if _, err := os.Lstat(filepath.Join(cityPath, ".agents", "skills", "mayor-only")); !os.IsNotExist(err) {
 		t.Errorf("mayor-only leaked into codex sink; err=%v", err)
 	}
 }

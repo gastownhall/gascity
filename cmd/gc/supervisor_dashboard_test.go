@@ -1,11 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/api/dashboardbff"
 )
 
 type fakeDashResolver struct{ cities []api.CityInfo }
@@ -104,46 +105,66 @@ func TestRunCwdAllowedRootsFromEnv(t *testing.T) {
 	}
 }
 
-// TestDashboardCityResolverCitiesMapsListCities proves the production resolver's
-// Cities() enumerator — the source the dashboard plane eager-warms from at
-// startup — maps every ListCities entry onto a CityRef (name + host root path),
-// so no served city is missed by the eager warm-up.
-func TestDashboardCityResolverCitiesMapsListCities(t *testing.T) {
-	res := dashboardCityResolver{resolver: fakeDashResolver{cities: []api.CityInfo{
-		{Name: "alpha", Path: "/srv/alpha", Running: true},
-		{Name: "beta", Path: "/srv/beta"},
-	}}}
-
-	got := res.Cities()
-	want := []dashboardbff.CityRef{
-		{Name: "alpha", Path: "/srv/alpha"},
-		{Name: "beta", Path: "/srv/beta"},
+// TestAttachDashboardInstallsDashboardBase guards the sling dashboard_url
+// wiring: for loopback and explicit-host binds attachDashboard must install
+// the listener's browser-reachable link base on the mux, or per-city handlers
+// can never mint dashboard deep links even though the dashboard is served.
+// For wildcard binds it must install NO base: the loopback literal the
+// samplers dial is browser-reachable only on the supervisor host, so a remote
+// /v0 sling caller would receive a dashboard_url pointing at its own machine.
+// Wildcard responses omit dashboard_url instead (silent degradation).
+func TestAttachDashboardInstallsDashboardBase(t *testing.T) {
+	cases := map[string]struct {
+		bind string
+		want string // "" means no link base installed
+	}{
+		"loopback v4":         {"127.0.0.1", "http://127.0.0.1:8372"},
+		"empty bind default":  {"", "http://127.0.0.1:8372"},
+		"localhost":           {"localhost", "http://127.0.0.1:8372"},
+		"loopback v6":         {"::1", "http://[::1]:8372"},
+		"explicit lan":        {"192.168.1.5", "http://192.168.1.5:8372"},
+		"wildcard v4":         {"0.0.0.0", ""},
+		"wildcard v6":         {"::", ""},
+		"wildcard v6 bracket": {"[::]", ""},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("Cities() = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Cities()[%d] = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-
-	// CityPath still resolves a known city and rejects an unknown one.
-	if p, ok := res.CityPath("beta"); !ok || p != "/srv/beta" {
-		t.Errorf("CityPath(beta) = %q,%v, want /srv/beta,true", p, ok)
-	}
-	if _, ok := res.CityPath("ghost"); ok {
-		t.Error("CityPath(ghost) = true, want false for an unknown city")
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GC_SUPERVISOR_DASHBOARD", "")
+			mux := newTestSupervisorMuxForDashboard()
+			plane, err := attachDashboard(mux, fakeDashResolver{}, false, tc.bind, 8372)
+			if err != nil {
+				t.Fatalf("attachDashboard: %v", err)
+			}
+			if plane == nil {
+				t.Fatal("attachDashboard returned nil plane with dashboard enabled")
+			}
+			if got := mux.DashboardBaseURL(); got != tc.want {
+				t.Fatalf("DashboardBaseURL for bind %q = %q, want %q", tc.bind, got, tc.want)
+			}
+		})
 	}
 }
 
-// TestDashboardCityResolverCitiesEmpty proves an empty registry yields an empty
-// (non-nil) slice, so Plane.Start's eager warm-up is a clean no-op.
-func TestDashboardCityResolverCitiesEmpty(t *testing.T) {
-	res := dashboardCityResolver{resolver: fakeDashResolver{}}
-	if got := res.Cities(); len(got) != 0 {
-		t.Errorf("Cities() = %+v, want empty", got)
+// TestAttachDashboardDisabledLeavesNoDashboardBase pins the standalone shape:
+// with the dashboard disabled the mux must report no link base, so sling
+// responses omit dashboard_url instead of minting dead links.
+func TestAttachDashboardDisabledLeavesNoDashboardBase(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_DASHBOARD", "0")
+	mux := newTestSupervisorMuxForDashboard()
+	plane, err := attachDashboard(mux, fakeDashResolver{}, false, "127.0.0.1", 8372)
+	if err != nil {
+		t.Fatalf("attachDashboard: %v", err)
 	}
+	if plane != nil {
+		t.Fatal("attachDashboard returned a plane with the dashboard disabled")
+	}
+	if got := mux.DashboardBaseURL(); got != "" {
+		t.Fatalf("DashboardBaseURL = %q, want empty when the dashboard is disabled", got)
+	}
+}
+
+func newTestSupervisorMuxForDashboard() *api.SupervisorMux {
+	return api.NewSupervisorMux(fakeDashResolver{}, nil, false, "vtest", "btest", time.Now())
 }
 
 func TestDashboardEnabledToggle(t *testing.T) {
@@ -154,5 +175,19 @@ func TestDashboardEnabledToggle(t *testing.T) {
 	t.Setenv("GC_SUPERVISOR_DASHBOARD", "")
 	if !dashboardEnabled() {
 		t.Error("unset GC_SUPERVISOR_DASHBOARD should default to enabled")
+	}
+}
+
+func TestWriteSupervisorDashboardStartupOnlyAdvertisesMountedDashboard(t *testing.T) {
+	var out bytes.Buffer
+	writeSupervisorDashboardStartup(&out, false, false, "127.0.0.1", 8372)
+	if out.Len() != 0 {
+		t.Fatalf("disabled dashboard output = %q, want empty", out.String())
+	}
+
+	writeSupervisorDashboardStartup(&out, true, true, "127.0.0.1", 8372)
+	want := "Dashboard:  http://127.0.0.1:8372/  [read-only]\n"
+	if out.String() != want {
+		t.Fatalf("mounted dashboard output = %q, want %q", out.String(), want)
 	}
 }

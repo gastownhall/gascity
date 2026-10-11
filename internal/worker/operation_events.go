@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -151,7 +150,7 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 	if payload.SessionID == "" {
 		payload.SessionID = h.currentSessionID()
 	}
-	if info, bead, ok := h.currentOperationSessionInfo(); ok {
+	if info, pr, ok := h.currentOperationSessionInfo(); ok {
 		payload.SessionID = info.ID
 		fallback := h.operationEventFallbackSessionName()
 		if payload.SessionName == "" || payload.SessionName == fallback {
@@ -177,7 +176,7 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		// writer exists, so pooled sessions resolve per-session today
 		// (engdocs/design/usage-facts-v0.md).
 		if strings.TrimSpace(payload.RunID) == "" {
-			payload.RunID = beadmeta.ResolveRunID(bead.Metadata, bead.ID, info.ID)
+			payload.RunID = beadmeta.ResolveRunID(pr.Metadata, info.ID, info.ID)
 		}
 	}
 	if payload.SessionName == "" {
@@ -201,16 +200,16 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 	}
 }
 
-func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, beads.Bead, bool) {
+func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, sessionpkg.PersistedResponse, bool) {
 	id := h.currentSessionID()
 	if id == "" {
-		return sessionpkg.Info{}, beads.Bead{}, false
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, false
 	}
-	info, bead, err := h.manager.GetWithBead(id)
+	info, pr, err := sessionRecordViaManager(h.manager, id)
 	if err != nil {
-		return sessionpkg.Info{}, beads.Bead{}, false
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, false
 	}
-	return info, bead, true
+	return info, pr, true
 }
 
 // recordModelUsageFact writes one model usage fact to the handle's usage sink.

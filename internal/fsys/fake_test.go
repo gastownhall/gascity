@@ -41,6 +41,7 @@ func TestFakeStatDirModeIncludesDirBit(t *testing.T) {
 
 func TestFakeStatFile(t *testing.T) {
 	f := NewFake()
+	f.Dirs["/city"] = true
 	if err := f.WriteFile("/city/city.toml", []byte("hello"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -196,6 +197,7 @@ func TestFakeMkdirAllError(t *testing.T) {
 
 func TestFakeWriteFile(t *testing.T) {
 	f := NewFake()
+	f.Dirs["/city"] = true
 
 	data := []byte("# city.toml\n")
 	if err := f.WriteFile("/city/city.toml", data, 0o644); err != nil {
@@ -221,14 +223,14 @@ func TestFakeWriteFile(t *testing.T) {
 func TestFakeWriteFileInitializesNilMaps(t *testing.T) {
 	f := &Fake{}
 
-	if err := f.WriteFile("/city/city.toml", []byte("hello"), 0o644); err != nil {
+	if err := f.WriteFile("/city.toml", []byte("hello"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if got := string(f.Files["/city/city.toml"]); got != "hello" {
+	if got := string(f.Files["/city.toml"]); got != "hello" {
 		t.Fatalf("Files content = %q, want %q", got, "hello")
 	}
-	if f.ModTimes["/city/city.toml"].IsZero() {
+	if f.ModTimes["/city.toml"].IsZero() {
 		t.Fatal("expected WriteFile to initialize synthetic mod time")
 	}
 }
@@ -236,11 +238,11 @@ func TestFakeWriteFileInitializesNilMaps(t *testing.T) {
 func TestFakeWriteFileInitializesModes(t *testing.T) {
 	f := &Fake{Files: map[string][]byte{}}
 
-	if err := f.WriteFile("/city/run.sh", []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := f.WriteFile("/run.sh", []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if f.Modes["/city/run.sh"] != 0o755 {
-		t.Fatalf("mode = %v, want 0755", f.Modes["/city/run.sh"])
+	if f.Modes["/run.sh"] != 0o755 {
+		t.Fatalf("mode = %v, want 0755", f.Modes["/run.sh"])
 	}
 }
 
@@ -289,8 +291,94 @@ func TestFakeReadDir(t *testing.T) {
 	}
 }
 
+func TestFakeDirectSeededChildrenImplyOnlyComponentParents(t *testing.T) {
+	f := NewFake()
+	f.Files["/city/rigs/alpha/config.toml"] = []byte("alpha")
+
+	info, err := f.Stat("/city/rigs")
+	if err != nil {
+		t.Fatalf("Stat implied parent: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("implied parent mode = %v, want directory", info.Mode())
+	}
+	entries, err := f.ReadDir("/city/rigs")
+	if err != nil {
+		t.Fatalf("ReadDir implied parent: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "alpha" || !entries[0].IsDir() {
+		t.Fatalf("ReadDir implied entries = %+v, want alpha directory", entries)
+	}
+	if err := f.WriteFile("/city/rigs/new.toml", []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile under implied parent: %v", err)
+	}
+
+	prefixOnly := NewFake()
+	prefixOnly.Files["/city/rigs-old/config.toml"] = []byte("old")
+	if _, err := prefixOnly.Stat("/city/rigs"); !os.IsNotExist(err) {
+		t.Fatalf("Stat prefix-only path error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestFakeInferredParentsPersistAfterLastChildRemoval(t *testing.T) {
+	f := NewFake()
+	file := "/city/rig/file"
+	f.Files[file] = []byte("content")
+
+	if err := f.Remove(file); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	for _, path := range []string{"/city", "/city/rig"} {
+		info, err := f.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat(%q): %v", path, err)
+		}
+		if !info.IsDir() {
+			t.Errorf("Stat(%q).Mode() = %v, want directory", path, info.Mode())
+		}
+	}
+}
+
+func TestFakeInferredSourceParentPersistsAfterDirectoryRename(t *testing.T) {
+	f := NewFake()
+	f.Files["/city/source/file"] = []byte("content")
+	f.Dirs["/destination"] = true
+
+	if err := f.Rename("/city/source", "/destination/source"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	info, err := f.Stat("/city")
+	if err != nil {
+		t.Fatalf("Stat source parent: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("source parent mode = %v, want directory", info.Mode())
+	}
+	if got, err := f.ReadFile("/destination/source/file"); err != nil || string(got) != "content" {
+		t.Fatalf("renamed child = %q, %v; want %q, nil", got, err, "content")
+	}
+}
+
+func TestFakeChmodMaterializesInferredDirectory(t *testing.T) {
+	f := NewFake()
+	f.Files["/city/rig/file"] = []byte("content")
+
+	if err := f.Chmod("/city/rig", 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	delete(f.Files, "/city/rig/file")
+	info, err := f.Stat("/city/rig")
+	if err != nil {
+		t.Fatalf("Stat after removing seeded child: %v", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("materialized directory mode = %v, want directory 0700", info.Mode())
+	}
+}
+
 func TestFakeReadDirInfoReportsTrackedMode(t *testing.T) {
 	f := NewFake()
+	f.Dirs["/city/rigs"] = true
 	if err := f.WriteFile("/city/rigs/run.sh", []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -324,6 +412,7 @@ func TestFakeReadDirError(t *testing.T) {
 
 func TestFakeReadDirEmpty(t *testing.T) {
 	f := NewFake()
+	f.Dirs["/city/rigs"] = true
 
 	entries, err := f.ReadDir("/city/rigs")
 	if err != nil {
@@ -336,6 +425,7 @@ func TestFakeReadDirEmpty(t *testing.T) {
 
 func TestFakeRename(t *testing.T) {
 	f := NewFake()
+	f.Dirs["/city"] = true
 	if err := f.WriteFile("/city/beads.json.tmp", []byte(`{"seq":1}`), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -365,6 +455,7 @@ func TestFakeRenameClearsStaleDestinationMode(t *testing.T) {
 	f := NewFake()
 	f.Files["/city/generated.tmp"] = []byte("new")
 	f.Files["/city/generated"] = []byte("old")
+	f.Modes["/city/generated.tmp"] = 0o600
 	f.Modes["/city/generated"] = 0o644
 
 	if err := f.Rename("/city/generated.tmp", "/city/generated"); err != nil {
@@ -375,8 +466,22 @@ func TestFakeRenameClearsStaleDestinationMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if info.Mode().Perm() != 0o755 {
-		t.Fatalf("renamed file mode = %v, want default 0755", info.Mode().Perm())
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("renamed file mode = %v, want source mode 0600", info.Mode().Perm())
+	}
+}
+
+func TestFakeRenameWithNilModTimes(t *testing.T) {
+	f := &Fake{Files: map[string][]byte{"/source": []byte("content")}}
+
+	if err := f.Rename("/source", "/destination"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if got := string(f.Files["/destination"]); got != "content" {
+		t.Fatalf("destination content = %q, want %q", got, "content")
+	}
+	if f.ModTimes["/destination"].IsZero() {
+		t.Fatal("destination mod time was not initialized")
 	}
 }
 
@@ -444,6 +549,7 @@ func TestFakeRenameMissing(t *testing.T) {
 func TestFakeRemoveVariants(t *testing.T) {
 	t.Run("file removes modtime", func(t *testing.T) {
 		f := NewFake()
+		f.Dirs["/city"] = true
 		if err := f.WriteFile("/city/city.toml", []byte("hello"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
@@ -486,6 +592,7 @@ func TestFakeRemoveVariants(t *testing.T) {
 
 func TestFakeChmodVariants(t *testing.T) {
 	f := NewFake()
+	f.Dirs["/city"] = true
 	if err := f.WriteFile("/city/city.toml", []byte("hello"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}

@@ -81,9 +81,53 @@ func PublishedServicesDir(cityRoot string) string {
 	return RuntimePath(cityRoot, "services", ".published")
 }
 
+// SessionDiagnosticsRoot is the subdirectory, relative to a city's runtime
+// root, holding per-session diagnostic artifacts: start-stderr.log,
+// nudge-unconfirmed.log, and startup-nudge-unconfirmed.log.
+const SessionDiagnosticsRoot = "sessions"
+
+// SessionDiagnosticsDir returns the directory holding per-session diagnostic
+// artifacts for a city, given the city root.
+//
+// Both the writers (internal/runtime/tmux) and the readers (gc doctor's
+// nudge-unconfirmed check) MUST resolve this directory through this function
+// or through SessionDiagnosticsDirForRuntimeDir. They previously each joined
+// their own literal onto a different helper -- the writers onto
+// RuntimePath(city) (.gc), the doctor onto RuntimeDataDir(city) (.gc/runtime)
+// -- so every successfully written diagnostic was invisible to the check that
+// exists to surface it, and the check reported a clean city. The live
+// ds-research city had 6,959 session directories under .gc/sessions and no
+// .gc/runtime/sessions at all. TestSessionDiagnosticsDirMatchesRuntimeDirForm
+// and cmd/gc's TestTmuxConfigRuntimeDirReachesDoctorSessionDiagnostics bind
+// the two forms together so they cannot drift apart again.
+func SessionDiagnosticsDir(cityRoot string) string {
+	return RuntimePath(cityRoot, SessionDiagnosticsRoot)
+}
+
+// SessionDiagnosticsDirForRuntimeDir returns the same directory for a caller
+// that holds a runtime dir rather than a city root (the tmux provider is
+// configured with one). An empty runtimeDir means diagnostic capture is
+// disabled and yields an empty path rather than a bare "sessions" relative
+// path, which would land in the process working directory.
+func SessionDiagnosticsDirForRuntimeDir(runtimeDir string) string {
+	if runtimeDir == "" {
+		return ""
+	}
+	return filepath.Join(runtimeDir, SessionDiagnosticsRoot)
+}
+
 // SessionNameLocksDir returns the canonical root for explicit session-name locks.
 func SessionNameLocksDir(cityRoot string) string {
 	return RuntimePath(cityRoot, "session-name-locks")
+}
+
+// GateSlotsDir returns the canonical root for the pre-push gate's
+// cross-invocation concurrency slots (ga-owh20p). The bash mechanism in
+// scripts/push-gate-lock-lib.sh owns the actual flock(1) semaphore; this
+// constant exists so Go tooling can locate the same directory without
+// duplicating the ".gc/gate-slots" literal.
+func GateSlotsDir(cityRoot string) string {
+	return RuntimePath(cityRoot, "gate-slots")
 }
 
 // ServiceStateDir returns the canonical runtime directory for a named service.

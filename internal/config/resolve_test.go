@@ -1804,6 +1804,27 @@ func TestResolveProviderBuiltinOpenCodeCustomCommandKeepsACPArgsOnCustomBinary(t
 	}
 }
 
+func TestResolveProviderOpenCodeStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:opencode"
+	agent := &Agent{Name: "worker", Provider: "wrapped-opencode"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-opencode": {
+			Base: &base,
+		},
+	}
+
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("opencode"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "opencode" {
+		t.Fatalf("BuiltinAncestor = %q, want opencode", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin opencode", rp.AcceptStartupDialogs)
+	}
+}
+
 // --- Tri-state capability bool tests ---
 //
 // These verify the three-way *bool semantics for SupportsHooks,

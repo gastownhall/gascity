@@ -53,14 +53,14 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	rigs := cfg.Rigs
 	for _, r := range rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 			writeRevisionDirHash(h, prov, "pack:"+r.Name+":"+ref, fs, topoDir)
 		}
 	}
 
 	// Hash city-level pack directory contents.
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 		writeRevisionDirHash(h, prov, "city-pack:"+ref, fs, topoDir)
 	}
 
@@ -113,7 +113,34 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string) {
+// conventionRevisionInputs is the state of the city root's convention
+// discovery trees (agents/, formulas/, ...) hashed BEFORE a load reads them.
+//
+// Hashing these trees after the load would race with config edits: an edit
+// landing between the loader's read and the hash pairs the pre-edit content
+// with the post-edit revision, so a long-running caller would publish stale
+// config under a revision that already matches disk and never reload. Hashed
+// first, an edit that lands mid-load can only leave the revision older than
+// the content, which the next revision comparison turns into a reload.
+type conventionRevisionInputs struct {
+	dirs   []string
+	hashes map[string]string
+}
+
+// captureConventionRevisionInputs hashes the city root's convention trees.
+// Call it before the load reads them.
+func captureConventionRevisionInputs(fs fsys.FS, cityRoot string) *conventionRevisionInputs {
+	in := &conventionRevisionInputs{
+		dirs:   existingConventionDiscoveryDirsFS(fs, cityRoot),
+		hashes: make(map[string]string),
+	}
+	for _, dir := range in.dirs {
+		in.hashes[dir] = packContentHashRecursive(fs, dir, false)
+	}
+	return in
+}
+
+func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot string, conventions *conventionRevisionInputs) {
 	if p == nil || cfg == nil {
 		return
 	}
@@ -124,17 +151,17 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 		fileKnown:    make(map[string]bool),
 	}
 	recordDir := func(label, dir string) {
-		snap.dirHashes[label] = PackContentHashRecursive(fs, dir)
+		snap.dirHashes[label] = packContentHashRecursive(fs, dir, false)
 	}
 
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 			recordDir("pack:"+r.Name+":"+ref, topoDir)
 		}
 	}
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 		recordDir("city-pack:"+ref, topoDir)
 	}
 	if tracksPackV2Imports(cfg) {
@@ -163,9 +190,12 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 			recordDir("rig-packdir:"+rigName+":"+dir, dir)
 		}
 	}
-	snap.conventionDirs = existingConventionDiscoveryDirsFS(fs, cityRoot)
+	if conventions == nil {
+		conventions = captureConventionRevisionInputs(fs, cityRoot)
+	}
+	snap.conventionDirs = append([]string(nil), conventions.dirs...)
 	for _, dir := range snap.conventionDirs {
-		recordDir("city-discovery:"+dir, dir)
+		snap.dirHashes["city-discovery:"+dir] = conventions.hashes[dir]
 	}
 	p.revisionSnapshot = snap
 }
@@ -189,7 +219,7 @@ func (p *Provenance) recordMissingSourceContents(fs fsys.FS) {
 func writeRevisionDirHash(h hash.Hash, prov *Provenance, label string, fs fsys.FS, dir string) {
 	topoHash, ok := revisionSnapshotDirHash(prov, label)
 	if !ok {
-		topoHash = PackContentHashRecursive(fs, dir)
+		topoHash = packContentHashRecursive(fs, dir, false)
 	}
 	writeRevisionBytes(h, label, []byte(topoHash))
 }
@@ -321,7 +351,7 @@ func revisionPackDir(ref, declDir, cityRoot string) (string, bool) {
 	if strings.TrimSpace(ref) == "" {
 		return "", false
 	}
-	dir, err := resolvePackRef(ref, declDir, cityRoot)
+	dir, err := resolvePackRef(ref, declDir, cityRoot, false)
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return "", false
 	}

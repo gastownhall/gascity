@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -645,5 +646,227 @@ func TestWatchDirs_Deduplicates(t *testing.T) {
 	dirs := WatchDirs(prov, &City{}, dir)
 	if len(dirs) != 1 {
 		t.Errorf("got %d dirs, want 1 (deduplicated): %v", len(dirs), dirs)
+	}
+}
+
+// The revision snapshot is captured at load time so a later Revision() call can
+// compare against the config as it was loaded rather than as it is now. Building
+// it content-hashes every pack directory, which is pure cost for a caller that
+// never computes a Revision — and cmd/gc's city-config loaders do not even
+// return the Provenance. LoadOptions.SkipRevisionSnapshot lets those callers
+// decline it.
+//
+// Every read of the snapshot already falls back to reading from disk
+// (writeRevisionDirHash -> PackContentHashRecursive, revisionSnapshotFile ->
+// fs.ReadFile, revisionConventionDirs -> existingConventionDiscoveryDirsFS), so
+// declining it must not change a revision VALUE for anybody. The tests below pin
+// that, and pin that the option stays opt-in.
+
+// writeRevisionSnapshotOptCity builds a city whose revision covers more than
+// city.toml: a city pack directory and a convention-discovered agents tree, so
+// both the directory-hash and the convention-directory fallbacks are exercised.
+func writeRevisionSnapshotOptCity(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `[workspace]
+name = "revision-snapshot-opt"
+includes = ["packs/shared"]
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `[pack]
+name = "shared"
+schema = 1
+`)
+	writeFile(t, dir, "packs/shared/prompts/worker.md", "worker prompt body\n")
+	writeFile(t, dir, "agents/worker/prompt.template.md", "first prompt\n")
+	return dir
+}
+
+func TestSkipRevisionSnapshot_PreservesRevisionValue(t *testing.T) {
+	dir := writeRevisionSnapshotOptCity(t)
+	cityPath := filepath.Join(dir, "city.toml")
+
+	capturedCfg, capturedProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{})
+	if err != nil {
+		t.Fatalf("loading with snapshot: %v", err)
+	}
+	skippedCfg, skippedProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, LoadOptions{SkipRevisionSnapshot: true})
+	if err != nil {
+		t.Fatalf("loading without snapshot: %v", err)
+	}
+
+	// Without these the test would compare two identical states and pass
+	// vacuously.
+	if capturedProv.revisionSnapshot == nil {
+		t.Fatal("default load captured no snapshot; the two arms are not different states")
+	}
+	if skippedProv.revisionSnapshot != nil {
+		t.Fatal("SkipRevisionSnapshot captured a snapshot anyway")
+	}
+
+	captured := Revision(fsys.OSFS{}, capturedProv, capturedCfg, dir)
+	skipped := Revision(fsys.OSFS{}, skippedProv, skippedCfg, dir)
+	if captured == "" {
+		t.Fatal("revision is empty; the fixture is not exercising Revision")
+	}
+	if captured != skipped {
+		t.Fatalf("revision differs without the snapshot:\n  with    %s\n  without %s", captured, skipped)
+	}
+}
+
+// TestSkipRevisionSnapshot_StillDetectsPackContentChange pins that declining the
+// prefetch does not blind revision comparison: editing a file inside a pack must
+// still change the revision, which is the property the reconciler depends on
+// (regression guard gastownhall/gascity#779). The default arm is a control — it
+// proves the edited file participates in the revision at all, so a passing
+// skipped arm means something.
+func TestSkipRevisionSnapshot_StillDetectsPackContentChange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts LoadOptions
+	}{
+		{name: "default", opts: LoadOptions{}},
+		{name: "skip snapshot", opts: LoadOptions{SkipRevisionSnapshot: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeRevisionSnapshotOptCity(t)
+			cityPath := filepath.Join(dir, "city.toml")
+
+			cfg, prov, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, tc.opts)
+			if err != nil {
+				t.Fatalf("loading: %v", err)
+			}
+			before := Revision(fsys.OSFS{}, prov, cfg, dir)
+
+			// Revision reaches the pack tree through PackContentHashRecursive,
+			// which memoizes each tree behind a cheap per-file (size, mtime)
+			// stat fingerprint — so an edit preserving BOTH is served the stale
+			// hash by design. The fixture body and the replacement used to be
+			// the same length (19 bytes each), leaving mtime as the only
+			// discriminator; on a runner whose timestamp granularity is coarser
+			// than this subtest's runtime both writes share an mtime and the
+			// revision does not move. That is the flake in gastownhall/gascity
+			// ga-b675vk, which failed unrelated PRs #5357/#5358.
+			//
+			// Keep the replacement a different length so the fingerprint moves
+			// at any mtime resolution — the same discipline
+			// TestPackContentHashRecursiveCachesUnchangedTree already applies
+			// with "prompt a (edited, longer)". The guard below fails loudly
+			// rather than flakily if a later edit reintroduces a same-size body.
+			const editedPrompt = "edited prompt body, deliberately a different length\n"
+			promptPath := filepath.Join(dir, "packs", "shared", "prompts", "worker.md")
+			info, err := os.Stat(promptPath)
+			if err != nil {
+				t.Fatalf("stat prompt: %v", err)
+			}
+			if info.Size() == int64(len(editedPrompt)) {
+				t.Fatalf("replacement body must differ in length from the %d-byte original; "+
+					"a same-size edit can reuse the memoized pack content hash and flake", info.Size())
+			}
+			writeFile(t, dir, "packs/shared/prompts/worker.md", editedPrompt)
+
+			reloadedCfg, reloadedProv, err := LoadWithIncludesOptions(fsys.OSFS{}, cityPath, tc.opts)
+			if err != nil {
+				t.Fatalf("reloading: %v", err)
+			}
+			after := Revision(fsys.OSFS{}, reloadedProv, reloadedCfg, dir)
+
+			if before == after {
+				t.Fatal("pack content edit did not change the revision; reconciler change detection would be blind")
+			}
+		})
+	}
+}
+
+// TestLoadWithIncludes_CapturesRevisionSnapshotByDefault pins that the option is
+// opt-in, so every existing caller keeps today's load-time-faithful behavior.
+func TestLoadWithIncludes_CapturesRevisionSnapshotByDefault(t *testing.T) {
+	dir := writeRevisionSnapshotOptCity(t)
+
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if prov.revisionSnapshot == nil {
+		t.Fatal("LoadWithIncludes captured no revision snapshot; the default changed")
+	}
+}
+
+// editAfterReadFS simulates a config edit that lands while a load is in
+// flight: the file is rewritten on disk right after the editAfter-th read of
+// target (1-based) returns the original bytes.
+type editAfterReadFS struct {
+	fsys.OSFS
+	target    string
+	edited    []byte
+	editAfter int
+	reads     int
+}
+
+func (f *editAfterReadFS) ReadFile(name string) ([]byte, error) {
+	data, err := f.OSFS.ReadFile(name)
+	if err == nil && name == f.target {
+		f.reads++
+		if f.reads == f.editAfter {
+			if werr := os.WriteFile(name, f.edited, 0o644); werr != nil {
+				return nil, werr
+			}
+		}
+	}
+	return data, err
+}
+
+// Regression for ga-opn27h: a load that straddles an edit of a convention
+// agent file must never pair the pre-edit content with the post-edit
+// revision. If it does, the controller publishes (old config, new revision),
+// never sees a revision change, and loses the edit permanently. Every
+// interleaving point (the edit landing after each read the load makes of the
+// file) is exercised.
+func TestRevision_EditDuringLoadIsNotStampedWithNewRevision(t *testing.T) {
+	const original = "scope = \"city\"\n"
+	const edited = "scope = \"city\"\nsuspended = true\n"
+	// setup writes a fresh city whose helper agent is not suspended.
+	setup := func(t *testing.T) (dir, cityPath, agentPath string) {
+		dir = t.TempDir()
+		writeFile(t, dir, "city.toml", "[workspace]\nname = \"test\"\n")
+		writeFile(t, dir, "pack.toml", "[pack]\nname = \"test\"\nschema = 2\n")
+		writeFile(t, dir, "agents/helper/agent.toml", original)
+		return dir, filepath.Join(dir, "city.toml"), filepath.Join(dir, "agents", "helper", "agent.toml")
+	}
+	// Count the reads one load makes of the agent file.
+	_, cityPath, agentPath := setup(t)
+	counter := &editAfterReadFS{target: agentPath}
+	if _, _, err := LoadWithIncludes(counter, cityPath); err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if counter.reads == 0 {
+		t.Fatal("loader never read the convention agent file; test setup is wrong")
+	}
+
+	for k := 1; k <= counter.reads; k++ {
+		dir, cityPath, agentPath := setup(t)
+		racing := &editAfterReadFS{target: agentPath, edited: []byte(edited), editAfter: k}
+		cfg, prov, err := LoadWithIncludes(racing, cityPath)
+		if err != nil {
+			t.Fatalf("edit after read %d: LoadWithIncludes: %v", k, err)
+		}
+		loadedSuspended := false
+		found := false
+		for _, a := range cfg.Agents {
+			if a.Name == "helper" {
+				found, loadedSuspended = true, a.Suspended
+			}
+		}
+		if !found {
+			t.Fatalf("edit after read %d: helper agent not loaded", k)
+		}
+		loadedRev := Revision(fsys.OSFS{}, prov, cfg, dir)
+		freshCfg, freshProv, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+		if err != nil {
+			t.Fatalf("edit after read %d: reload: %v", k, err)
+		}
+		diskRev := Revision(fsys.OSFS{}, freshProv, freshCfg, dir)
+		if !loadedSuspended && loadedRev == diskRev {
+			t.Fatalf("edit after read %d of %d: load returned pre-edit agent content stamped with the post-edit revision; a reload would never be triggered", k, counter.reads)
+		}
 	}
 }

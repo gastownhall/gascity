@@ -106,6 +106,42 @@ patrol_interval = "1m"
 	}
 }
 
+// TestComposeDaemonFragmentPreservesSessionReconciler pins that a fragment
+// defining any other [daemon] key does not silently reset the switch (a
+// fragment's [daemon] replaces the whole struct), while a fragment that sets
+// the key itself wins.
+func TestComposeDaemonFragmentPreservesSessionReconciler(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fragment string
+		want     string
+	}{
+		{name: "fragment sets another daemon key", fragment: "[daemon]\npatrol_interval = \"1m\"\n", want: "v2"},
+		{name: "fragment sets the switch", fragment: "[daemon]\nsession_reconciler = \"legacy\"\n", want: "legacy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+session_reconciler = "v2"
+`)
+			fs.Files["/city/fragment.toml"] = []byte(tc.fragment)
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if got := cfg.Daemon.SessionReconciler; got != tc.want {
+				t.Fatalf("Daemon.SessionReconciler = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -552,6 +588,112 @@ name = "beta"
 	}
 	if len(prov.Sources) != 3 {
 		t.Errorf("len(Sources) = %d, want 3", len(prov.Sources))
+	}
+}
+
+func TestLoadWithIncludes_WildcardPatchDeferredForImplicitAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.llama]
+base = "builtin:claude"
+
+[[rigs]]
+name = "rig-a"
+path = "."
+
+[[rigs]]
+name = "rig-b"
+path = "."
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+provider = "llama"
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	matched := 0
+	for _, a := range cfg.Agents {
+		if a.Name != "claude" {
+			continue
+		}
+		matched++
+		if a.Provider != "llama" {
+			t.Fatalf("agent %q provider = %q, want llama", a.QualifiedName(), a.Provider)
+		}
+	}
+	if matched != 3 {
+		t.Fatalf("matched = %d, want 3 implicit agents", matched)
+	}
+}
+
+func TestLoadWithIncludes_WildcardPatchMixedExplicitAndImplicit(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.custom]
+base = "builtin:claude"
+
+[[agent]]
+name = "claude"
+provider = "custom"
+
+[[rigs]]
+name = "rig-a"
+path = "."
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	matched := 0
+	for _, a := range cfg.Agents {
+		if a.Name != "claude" {
+			continue
+		}
+		matched++
+		if !a.Suspended {
+			t.Fatalf("agent %q should be suspended", a.QualifiedName())
+		}
+	}
+	if matched != 2 {
+		t.Fatalf("matched = %d, want 2", matched)
 	}
 }
 
@@ -2472,8 +2614,8 @@ provider = "kiro"
 	if rp.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
 	}
-	if rp.SessionIDFlag != "" {
-		t.Errorf("SessionIDFlag = %q, want empty (inherited from modern claude)", rp.SessionIDFlag)
+	if rp.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
 	}
 	if !rp.SupportsHooks {
 		t.Error("SupportsHooks = false, want true (inherited from claude)")

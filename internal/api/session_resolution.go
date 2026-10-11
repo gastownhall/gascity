@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -79,18 +81,6 @@ func apiCityName(cfg *config.City, cityPath string) string {
 	return config.EffectiveCityName(cfg, filepath.Base(cityPath))
 }
 
-func apiIsNamedSessionBead(b beads.Bead) bool {
-	return session.IsNamedSessionBead(b)
-}
-
-func apiNamedSessionIdentity(b beads.Bead) string {
-	return session.NamedSessionIdentity(b)
-}
-
-func apiNamedSessionContinuityEligible(b beads.Bead) bool {
-	return session.NamedSessionContinuityEligible(b)
-}
-
 func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (apiNamedSessionSpec, bool, error) {
 	cfg := s.state.Config()
 	target = apiNormalizeSessionTarget(target)
@@ -143,58 +133,63 @@ func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessi
 	return bead, ok, nil
 }
 
-func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) ([]beads.Bead, error) {
+func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) ([]session.Info, error) {
 	if store == nil {
 		return nil, nil
 	}
-	all, err := session.ExactMetadataSessionCandidates(store, false, map[string]string{
+	// Typed candidate feed: ExactMetadataSessionCandidatesInfo projects each
+	// candidate through the codec ONCE inside the session edge, so this retire
+	// lane reads only session.Info fields — no raw bead is cracked here and no
+	// b.Metadata key is inlined (the census-honest replacement for the old raw
+	// codec projection of SessionNameMetadata per candidate).
+	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
 		session.NamedSessionIdentityMetadata: spec.Identity,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing named session candidates: %w", err)
 	}
-	retired := make([]beads.Bead, 0)
+	retired := make([]session.Info, 0)
 	now := time.Now().UTC()
-	for _, b := range all {
-		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
+	for _, info := range all {
+		if info.Closed || !session.IsNamedSessionInfo(info) || session.NamedSessionIdentityInfo(info) != spec.Identity || session.NamedSessionInfoContinuityEligible(info) {
 			continue
 		}
-		if session.LifecycleIdentityReleased(b.Status, b.Metadata) {
-			retired = append(retired, b)
+		if session.LifecycleIdentityReleasedInfo(info) {
+			retired = append(retired, info)
 			continue
 		}
-		if sessionName := strings.TrimSpace(session.InfoFromPersistedBead(b).SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
-			if handle, err := s.workerHandleForSession(store, b.ID); err == nil {
-				_ = handle.Kill(context.Background())
+		if sessionName := strings.TrimSpace(info.SessionNameMetadata); sessionName != "" && s.state.SessionProvider() != nil {
+			if handle, err := s.workerHandleForSession(store, info.ID); err == nil {
+				_ = handle.Kill(context.Background(), s.actor(session.ActorOperator))
 			}
 		}
 		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
 		patch["alias_history"] = ""
-		if err := store.SetMetadataBatch(b.ID, patch); err != nil {
-			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", b.ID, err)
+		if err := store.SetMetadataBatch(info.ID, patch); err != nil {
+			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", info.ID, err)
 		}
-		retired = append(retired, b)
+		retired = append(retired, info)
 	}
 	return retired, nil
 }
 
-func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []beads.Bead, replacementID string) error {
+func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []session.Info, replacementID string) error {
 	if store == nil || strings.TrimSpace(replacementID) == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	for _, b := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, b.ID, replacementID); err != nil {
+	for _, info := range retired {
+		if err := reassignOpenWorkAssignedToSession(store, info.ID, replacementID); err != nil {
 			return err
 		}
-		if err := session.ReassignWaits(store, b.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign waits from retired session %s to %s: %w", b.ID, replacementID, err)
+		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
+			return fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
-		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {
-			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", b.ID, replacementID, err)
+		if err := extmsg.ReassignSessionBindings(ctx, store, info.ID, replacementID, now); err != nil {
+			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
-		if err := extmsg.ReassignSessionParticipants(ctx, store, b.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", b.ID, replacementID, err)
+		if err := extmsg.ReassignSessionParticipants(ctx, store, info.ID, replacementID); err != nil {
+			return fmt.Errorf("reassign external message participants from retired session %s to %s: %w", info.ID, replacementID, err)
 		}
 	}
 	return nil
@@ -312,7 +307,6 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
-	mgr := s.sessionManager(store)
 	extraMeta := map[string]string{
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
@@ -335,8 +329,37 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 			return "", err
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
 	hints := sessionCreateHints(resolved, sessionEnv, mcpServers)
+	// Route the named-session create through the worker.Handle boundary
+	// (worker-boundary migration) rather than calling session.Manager directly.
+	// SessionSpecForResolvedRuntime maps this config 1:1 onto the same
+	// CreateAliasedNamedWithTransportAndMetadata call createStartedLocked makes
+	// (alias, name, template, title, command, workdir, provider, transport, env,
+	// resume, hints, metadata), so the created session is identical; the handle
+	// additionally emits the uniform worker create-operation event.
+	resolvedCfg := worker.ResolvedSessionConfig{
+		Alias:        spec.Identity,
+		ExplicitName: spec.SessionName,
+		Template:     qualifiedTemplate,
+		Title:        spec.Identity,
+		Transport:    transport,
+		Metadata:     extraMeta,
+		Runtime: worker.ResolvedRuntime{
+			// Backfill an empty command with the provider name, matching the
+			// sibling boundary consumer (resolvedSessionConfigForProvider) and
+			// cmd/gc/worker_handle.go. A command-less custom provider otherwise
+			// hard-fails NormalizeResolvedRuntime ("command is required") where
+			// the old direct path minted a (doomed) session — the backfill keeps
+			// the create succeeding and converges this path with the adhoc one.
+			Command:    firstNonEmptyString(launchCommand.Command, resolved.Name),
+			WorkDir:    workDir,
+			Provider:   resolved.Name,
+			SessionEnv: sessionEnv,
+			Resume:     resume,
+			Hints:      hints,
+		},
+	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
@@ -345,28 +368,28 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
 			return err
 		}
+		handle, herr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+		if herr != nil {
+			return herr
+		}
 		var createErr error
-		info, createErr = mgr.CreateSession(ctx, session.CreateOptions{
-			Alias:        spec.Identity,
-			ExplicitName: spec.SessionName,
-			Template:     qualifiedTemplate,
-			Title:        spec.Identity,
-			Command:      launchCommand.Command,
-			WorkDir:      workDir,
-			Provider:     resolved.Name,
-			Transport:    transport,
-			Env:          sessionEnv,
-			Resume:       resume,
-			Hints:        hints,
-			ExtraMeta:    extraMeta,
-		})
+		info, createErr = handle.Create(ctx, worker.CreateModeStarted)
 		return createErr
 	})
 	if err == nil {
 		if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, info.ID); err != nil {
 			return "", err
 		}
-		s.state.Poke()
+		// The retired rows just handed their work, waits and bindings to
+		// the replacement; their keys ride along so a keyed reconciler
+		// revisits them too. Legacy: one poke.
+		keys := []reconcilekey.Key{reconcilekey.Session(info.ID)}
+		for _, r := range retired {
+			if strings.TrimSpace(r.ID) != "" && r.ID != info.ID {
+				keys = append(keys, reconcilekey.Session(r.ID))
+			}
+		}
+		s.state.Enqueue(keys...)
 		return info.ID, nil
 	}
 	if bead, ok, lookupErr := s.findCanonicalNamedSession(store, spec); lookupErr == nil && ok {
@@ -400,7 +423,7 @@ func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSession
 //     would deliver against an incomplete provider, worse than not-found.
 //     Once the reconciler flips state=active, subsequent inbounds resolve.
 //
-// Configured named-session beads are skipped (apiIsNamedSessionBead) so
+// Configured named-session beads are skipped (session.IsNamedSessionInfo) so
 // session.ResolveSessionID still owns those identifiers via its
 // orphan-rejection path. This step is wired AFTER session.ResolveSessionID
 // in the resolver chain so session_name/alias matches always win when both
@@ -417,28 +440,28 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 	if identifier == "" {
 		return "", false, nil
 	}
-	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := session.NewStore(beads.SessionStore{Store: store}).ListAll(session.ListAllOptions{})
 	if err != nil {
 		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
 	}
-	var best beads.Bead
+	var best session.Info
 	found := false
-	for _, b := range all {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if apiIsNamedSessionBead(b) {
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable.
+		if session.IsNamedSessionInfo(info) {
 			continue
 		}
-		if strings.TrimSpace(b.Title) != identifier {
+		if strings.TrimSpace(info.Title) != identifier {
 			continue
 		}
 		// MetadataState is the RAW state mirror; Info.State is normalizeInfoState-
 		// folded (awake->active), which would change this predicate.
-		state := session.State(session.InfoFromPersistedBead(b).MetadataState)
+		state := session.State(info.MetadataState)
 		if state != session.StateActive && state != session.StateAwake && state != session.StateNone {
 			continue
 		}
-		if !found || b.CreatedAt.After(best.CreatedAt) {
-			best = b
+		if !found || info.CreatedAt.After(best.CreatedAt) {
+			best = info
 			found = true
 		}
 	}
@@ -556,18 +579,31 @@ func lookupFact(err error) session.TargetLookupFact {
 }
 
 // liveSessionMatchIsConfigOrphan reports whether a live-resolved bead is a
-// named-session bead whose configured identity is absent from current
-// config. Lookup failures fail open: the match stands.
+// named-session bead whose configured identity is absent from current config.
+// Lookup failures fail open: the match stands (any error → false). The read
+// routes through the session front door and the session.Info twins
+// (IsNamedSessionInfo / NamedSessionIdentityInfo), so no raw bead is cracked here
+// — the Info projections mirror the bead accessors exactly.
+//
+// Byte-identical to the old raw store.Get for every real input: absent id →
+// false; present non-session bead → false; present session bead (named or not) →
+// the same verdict via the mirrored projections. ONE design-prescribed direction
+// change, and only under double corruption: a bead carrying
+// configured_named_session="true" that has lost BOTH its session type AND its
+// gc:session label was previously classified an orphan (match rejected); it now
+// fails the front door's IsSessionBeadOrRepairable check → ErrSessionNotFound →
+// false (the match stands). A named bead that is merely type-lost stays
+// repairable and reaches the identity check unchanged.
 func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bool {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return false
 	}
-	bead, err := store.Get(id)
-	if err != nil || !apiIsNamedSessionBead(bead) {
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
+	if err != nil || !session.IsNamedSessionInfo(info) {
 		return false
 	}
-	identity := apiNamedSessionIdentity(bead)
+	identity := session.NamedSessionIdentityInfo(info)
 	return identity != "" && config.FindNamedSession(cfg, identity) == nil
 }
 
@@ -583,6 +619,29 @@ func (s *Server) resolveSessionIDAllowClosedWithConfig(store beads.Store, identi
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{allowClosed: true})
 }
 
+// sessionTargetDeliverable reports whether a message/submit target is
+// deliverable: it resolves to an existing session without materializing, or
+// names a configured named session the materializing async path can wake.
+// The async command handlers (POST /session/{id}/messages, /submit) used to
+// accept ANY identifier with 202 and only discover resolve_failed inside the
+// post-accept goroutine, surfacing it solely as an event — callers treating
+// 202 as delivery proof black-holed messages to typo'd/drifted session names
+// (2026-07-18: three drifted Slack company-room bindings dropped cross-city
+// wakes for days). This gate restores the declared-404 contract for targets
+// that can never deliver, while keeping the accept-then-work model for slow
+// paths (cold named-session wakes).
+func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store, identifier string) error {
+	if _, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{}); err == nil {
+		return nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return err
+	}
+	if _, ok, specErr := s.findNamedSessionSpecForTarget(store, identifier); specErr == nil && ok {
+		return nil
+	}
+	return apiSessionTargetNotFound(identifier)
+}
+
 func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{materialize: true})
 }
@@ -591,38 +650,128 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+// messageOutcome is a delivered or queued message and, for one the resume
+// policy queued, whether the controller will start the session for it.
+type messageOutcome struct {
+	session.SubmitOutcome
+	willStart          *bool
+	willNotStartReason string
+}
+
+// submitMessageToSession submits message to session id. resume is the
+// request's `resume: true`: only then may the message start or resume the
+// session, here in the controller's process (CONTRACT v5.9 D8, owner ruling
+// 2026-10-08). Otherwise a session that is not running gets the message
+// queued and the start is left to the controller (deferToController).
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool) (messageOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
-		return session.SubmitOutcome{}, err
+		return messageOutcome{}, err
 	}
-	result, err := handle.Message(ctx, worker.MessageRequest{
+	by := s.actor(session.ActorBackground)
+	if resume {
+		by = s.actor(session.ActorOperator)
+	}
+	result, err := handle.Message(ctx, by, worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntent(intent),
 	})
 	if err != nil {
-		return session.SubmitOutcome{}, err
+		return messageOutcome{}, err
 	}
-	return session.SubmitOutcome{Queued: result.Queued}, nil
+	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: result.Queued, Deferred: result.Deferred}}
+	if result.Deferred {
+		out.willStart, out.willNotStartReason = s.deferToController(store, id)
+	}
+	return out, nil
+}
+
+// deferToController asks the controller to start a session a message was
+// queued for (D8 rule 1): it records the wake on an asleep or drained row
+// nothing holds and pokes; a held row gets no wake and no poke. It reports
+// whether the controller will start the session, nil when it cannot tell (a
+// lost wake CAS, a row that is not dormant, a pool seat that starts only for
+// demand) and, if not, why, with the remedy.
+func (s *Server) deferToController(store beads.Store, id string) (*bool, string) {
+	no := false
+	outcome, err := session.NewStore(beads.SessionStore{Store: store}).RequestWakeUnlessHeld(id, false, time.Now().UTC())
+	d := deferralFor(outcome, err)
+	switch d {
+	case deferFailed:
+		log.Printf("gc api: recording the wake for a message queued to %s: %v", id, err)
+		return nil, ""
+	case deferHeld:
+		return &no, "an operator holds the session; resend with resume: true to resume it"
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+	if d == deferUnknown {
+		return nil, ""
+	}
+	certain := true
+	if refuser, ok := s.state.(WakeStartRefuser); ok {
+		if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+			var why string
+			if why, certain = refuser.WakeStartRefusal(info); why != "" {
+				return &no, why + "; resend with resume: true to start it now"
+			}
+		}
+	}
+	if !certain {
+		return nil, ""
+	}
+	yes := true
+	return &yes, ""
+}
+
+// deferral is what deferToController does with a wake request's answer.
+type deferral uint8
+
+const (
+	deferFailed  deferral = iota // the wake was not recorded: log, no poke, unknown
+	deferHeld                    // held: no poke, will not start
+	deferUnknown                 // poke; whether it starts is unknown
+	deferAsk                     // wake recorded: poke, and ask the refuser
+)
+
+// deferralFor maps RequestWakeUnlessHeld's answer. A lost CAS still pokes
+// (another writer may have recorded the wake); a row that is not dormant (an
+// active row whose runtime died, a create in flight) is the controller's to
+// handle, and neither claims a start.
+func deferralFor(outcome session.WakeRequestOutcome, err error) deferral {
+	switch {
+	case errors.Is(err, session.ErrWakeRequestContended):
+		return deferUnknown
+	case err != nil:
+		return deferFailed
+	case outcome == session.WakeHeld:
+		return deferHeld
+	case outcome == session.WakeRecorded:
+		return deferAsk
+	}
+	return deferUnknown
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
-// runtime supports it.
+// runtime supports it. It never starts a session in the controller's process:
+// one that is not running gets the nudge queued and the start left to the
+// controller (CONTRACT v5.9 D8 7(e)).
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	result, err := handle.Nudge(ctx, s.actor(session.ActorBackground), worker.NudgeRequest{Text: message})
+	if err == nil && result.Undelivered == worker.NudgeQueuedHeld {
+		s.deferToController(store, id)
+	}
 	return err
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
 // the semantic default submit path.
-func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
-	return err
+func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string, resume bool) (messageOutcome, error) {
+	return s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, resume)
 }
 
 func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {

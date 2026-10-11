@@ -3,6 +3,7 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,9 @@ func TestShouldSeedIsolatedSupervisorConfigTrueForNonTestBinaryWithGCIsolated(t 
 
 func setProgramName(t *testing.T, name string) {
 	t.Helper()
+	// Bazel test binaries are detected via TEST_SRCDIR rather than the
+	// program name; clear it so non-test-binary simulations hold there too.
+	t.Setenv("TEST_SRCDIR", "")
 	oldArgs := os.Args
 	os.Args = append([]string{name}, oldArgs[1:]...)
 	t.Cleanup(func() {
@@ -157,6 +161,62 @@ policy_ref = "platform-sso"
 	}
 	if cfg.Publication.TenantAuth.PolicyRef != "platform-sso" {
 		t.Errorf("Publication.TenantAuth.PolicyRef = %q, want platform-sso", cfg.Publication.TenantAuth.PolicyRef)
+	}
+}
+
+func TestLoadConfigEventExportCities(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+		wantNil  bool
+		want     []string
+	}{
+		{
+			name: "omitted preserves all-city default",
+			contents: `
+[events.export]
+endpoint = "https://example.invalid/ingest"
+`,
+			wantNil: true,
+		},
+		{
+			name: "explicit empty is retained",
+			contents: `
+[events.export]
+endpoint = "https://example.invalid/ingest"
+cities = []
+`,
+			want: []string{},
+		},
+		{
+			name: "configured names retain exact spelling and order",
+			contents: `
+[events.export]
+endpoint = "https://example.invalid/ingest"
+cities = ["north", " south "]
+`,
+			want: []string{"north", " south "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "supervisor.toml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (cfg.Events.Export.Cities == nil) != tt.wantNil {
+				t.Fatalf("Cities nil = %t, want %t", cfg.Events.Export.Cities == nil, tt.wantNil)
+			}
+			if got := cfg.Events.Export.Cities; !slices.Equal(got, tt.want) {
+				t.Fatalf("Cities = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 

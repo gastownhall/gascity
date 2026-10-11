@@ -6,11 +6,14 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -29,6 +32,10 @@ type agentBuildParams struct {
 	rigs            []config.Rig
 	sessionTemplate string
 	beaconTime      time.Time
+	// decisionTime is this build's clock for time-dependent pool decisions
+	// (kill-fence grace, alias-retry backoff); see now. Legacy sets it to the
+	// build's poolDecisionTime, because its beaconTime is fixed at gc start.
+	decisionTime    time.Time
 	packDirs        []string
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
@@ -45,6 +52,27 @@ type agentBuildParams struct {
 	// desired-state build so per-agent resolution does not rescan the store.
 	sessionBeads *sessionBeadSnapshot
 
+	// sessionSnapshotComplete is the controller's explicit verdict that the
+	// session census used by this desired-state build is complete. Fresh pool
+	// materialization is unsafe without that proof: a missing holder can make an
+	// occupied concrete slot look free. sessionSnapshotCompletenessKnown
+	// distinguishes production's explicit verdict from focused unit fixtures;
+	// legacy fixtures infer completeness from a present, error-free snapshot.
+	sessionSnapshotComplete          bool
+	sessionSnapshotCompletenessKnown bool
+	// sessionOccupancyInfos is the complete cross-store open-session census
+	// used only for fresh concrete-slot reservation. Production sets it from
+	// collectAllOpenSessionInfos; focused fixtures fall back to sessionBeads.
+	sessionOccupancyInfos []session.Info
+	// sessionCensusRigStores and sessionCensusSuspendedRigPaths retain the
+	// immutable topology inputs used to produce sessionOccupancyInfos. A fresh
+	// pool create re-runs that complete census while holding every derived
+	// session-identifier lock; the initial snapshot alone cannot exclude a
+	// foreign-store holder created after planning. Successful creates still
+	// write back only to sessionBeads, the primary mutable snapshot.
+	sessionCensusRigStores         map[string]beads.Store
+	sessionCensusSuspendedRigPaths map[string]bool
+
 	// assignedWorkBeads is the actionable assigned-work snapshot for this
 	// build. Pool new-tier materialization uses it to avoid treating sessions
 	// that already own work as available generic capacity.
@@ -53,7 +81,7 @@ type agentBuildParams struct {
 	// poolSessionCreateBudget caps ordinary fresh pool session bead
 	// materialization in a single desired-state build. Existing session beads
 	// may still be reused, and dependency-floor prerequisites are exempt.
-	poolSessionCreateBudget *poolSessionCreateBudget
+	poolSessionCreateBudget *poolplan.CreateBudget
 
 	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
 	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
@@ -71,6 +99,31 @@ type agentBuildParams struct {
 	// does not set it.
 	providerHealthSnapshot *providerHealthSnapshot
 
+	// planOnly makes the pool planner decide without effects: selection skips
+	// singleton identity normalization, trigger metadata skips worktree.Verify
+	// (the create plan carries the spec), and the dependency floor returns a
+	// create plan.
+	// The effect paths (template resolution, overlay staging, hook install,
+	// session-bead creates and trigger binds) refuse with errPlanOnlyEffect.
+	// The v2 allocator sets it; legacy builds never do.
+	planOnly bool
+
+	// readOnly makes resolveTemplate a pure read for the v2 allocator's
+	// named create (AM-N3): the work dir is resolved without mkdir, Claude
+	// settings are validated and pointed at, never projected, and skill
+	// snapshots are not written. Start and adopt resolve side-effecting.
+	readOnly bool
+
+	// realizeProbe times and counts pool realization for the realize_pools
+	// trace record. Set by buildDesiredState around its realization loop only;
+	// nil elsewhere, which disables the counters.
+	realizeProbe *poolRealizeProbe
+
+	// realizeMemo is the v2 allocator's per-pass realization index for one
+	// pool agent (allocator_index.go). Legacy never sets it: nil is legacy's
+	// path, unchanged.
+	realizeMemo *poolRealizeMemo
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
@@ -86,6 +139,9 @@ type agentBuildParams struct {
 	// skillCatalogFromCache reports whether skillCatalog came from the
 	// last-good cache rather than the current LoadCityCatalog result.
 	skillCatalogFromCache bool
+	// skillCatalogFailed reports a city catalog load that failed with no
+	// cached catalog to fall back on: skills contribute nothing this cycle.
+	skillCatalogFailed bool
 	// rigSkillCatalogs caches rig-specific shared catalogs. Each entry
 	// includes city-shared skills plus any rig-import shared catalogs.
 	rigSkillCatalogs map[string]*materialize.CityCatalog
@@ -105,33 +161,42 @@ type agentBuildParams struct {
 	sessionProvider string
 }
 
+// hasCompleteSessionSnapshot reports whether a store-backed build has a
+// complete session census. Storeless legacy builds do not allocate persistent
+// session rows and therefore do not require the bead snapshot. The inference
+// lane keeps focused unit fixtures concise; production always sets the explicit
+// verdict after both the primary snapshot load and the cross-store census.
+func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
+	if p == nil {
+		return false
+	}
+	if p.beadStore == nil {
+		return true
+	}
+	if p.sessionSnapshotCompletenessKnown {
+		return p.sessionSnapshotComplete
+	}
+	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
+}
+
+// now is the build's decision clock: decisionTime when the caller set it,
+// else beaconTime, which the v2 allocator sets to its pass time. The pool
+// decide reads no wall clock (allocator_decide_purity_test.go).
+func (p *agentBuildParams) now() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	if !p.decisionTime.IsZero() {
+		return p.decisionTime
+	}
+	return p.beaconTime
+}
+
 // newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
-	params := &agentBuildParams{
-		city:            cfg,
-		cityName:        cityName,
-		cityPath:        cityPath,
-		workspace:       &cfg.Workspace,
-		agents:          append([]config.Agent(nil), cfg.Agents...),
-		providers:       cfg.Providers,
-		lookPath:        exec.LookPath,
-		fs:              fsys.OSFS{},
-		sp:              sp,
-		rigs:            cfg.Rigs,
-		sessionTemplate: cfg.Workspace.SessionTemplate,
-		beaconTime:      beaconTime,
-		packDirs:        cfg.PackDirs,
-		packOverlayDirs: cfg.PackOverlayDirs,
-		rigOverlayDirs:  cfg.RigOverlayDirs,
-		globalFragments: cfg.Workspace.GlobalFragments,
-		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
-		beadStore:       store,
-		beadNames:       make(map[string]string),
-		stderr:          stderr,
-		sessionProvider: cfg.Session.Provider,
-	}
+	params := baseAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	if store != nil {
-		params.poolSessionCreateBudget = newPoolSessionCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
+		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
 	// Load the shared skill catalog once per build cycle. Transient load
 	// failures (filesystem race during dolt sync / heavy I/O) used to
@@ -152,8 +217,11 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 			if stderr != nil {
 				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (using cached catalog to avoid drift)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
 			}
-		} else if stderr != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+		} else {
+			params.skillCatalogFailed = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+			}
 		}
 	} else {
 		catCopy := cityCatalog.Catalog
@@ -210,6 +278,47 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 	return params
 }
 
+// baseAgentBuildParams is agentBuildParams from config alone: no skill
+// catalogs and no create budget.
+func baseAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
+	return &agentBuildParams{
+		city:            cfg,
+		cityName:        cityName,
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		agents:          append([]config.Agent(nil), cfg.Agents...),
+		providers:       cfg.Providers,
+		lookPath:        exec.LookPath,
+		fs:              fsys.OSFS{},
+		sp:              sp,
+		rigs:            cfg.Rigs,
+		sessionTemplate: cfg.Workspace.SessionTemplate,
+		beaconTime:      beaconTime,
+		packDirs:        cfg.PackDirs,
+		packOverlayDirs: cfg.PackOverlayDirs,
+		rigOverlayDirs:  cfg.RigOverlayDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadStore:       store,
+		beadNames:       make(map[string]string),
+		stderr:          stderr,
+		sessionProvider: cfg.Session.Provider,
+	}
+}
+
+// newReadOnlyAgentBuildParams is the build params of a read-only template
+// resolution (readOnly): no store, so no session-name lookup or repair, and
+// no skill catalogs, which feed fingerprints and the prompt, never create
+// metadata. lookPath nil keeps exec.LookPath.
+func newReadOnlyAgentBuildParams(cityName, cityPath string, cfg *config.City, lookPath config.LookPathFunc, beaconTime time.Time, stderr io.Writer) *agentBuildParams {
+	p := baseAgentBuildParams(cityName, cityPath, cfg, nil, beaconTime, nil, stderr)
+	p.readOnly = true
+	if lookPath != nil {
+		p.lookPath = lookPath
+	}
+	return p
+}
+
 func (p *agentBuildParams) sharedSkillCatalogForAgent(agent *config.Agent) *materialize.CityCatalog {
 	return p.sharedSkillCatalogSnapshotForAgent(agent)
 }
@@ -254,10 +363,7 @@ func effectiveOverlayDirs(cityDirs []string, rigDirs map[string][]string, rigNam
 // back to the template, so `gc internal materialize-skills` exits 1.
 // For regular agents, qualifiedName already equals the template name.
 func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
-	if cfgAgent.PoolName != "" {
-		return cfgAgent.PoolName
-	}
-	if t := cfgAgent.QualifiedName(); t != "" && t != qualifiedName {
+	if t := agentutil.RoutedToIdentity(cfgAgent); t != "" && t != qualifiedName {
 		return t
 	}
 	return qualifiedName
@@ -268,10 +374,19 @@ func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
 // template is empty. Template errors fail closed so pool reconciliation does
 // not silently spawn sessions under unintended fallback names.
 func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) (string, error) {
-	if p == nil || agent == nil {
+	if p == nil {
 		return "", nil
 	}
-	resolved, err := workdirutil.ResolveTmuxAlias(p.cityPath, p.cityName, *agent, p.rigs)
+	return resolveTmuxAliasForAgentIn(p.cityPath, p.cityName, p.rigs, agent)
+}
+
+// resolveTmuxAliasForAgentIn is resolveTmuxAliasForAgent for callers without
+// build params, such as the v2 allocator's create effect.
+func resolveTmuxAliasForAgentIn(cityPath, cityName string, rigs []config.Rig, agent *config.Agent) (string, error) {
+	if agent == nil {
+		return "", nil
+	}
+	resolved, err := workdirutil.ResolveTmuxAlias(cityPath, cityName, *agent, rigs)
 	if err != nil {
 		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
 	}

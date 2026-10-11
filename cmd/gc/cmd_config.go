@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -353,22 +354,11 @@ func singletonSessionMigrationWarnings(cfg *config.City) []string {
 	if cfg == nil {
 		return nil
 	}
-	cityName := cfg.EffectiveCityName()
-	namedByTemplate := make(map[string]bool, len(cfg.NamedSessions))
-	for i := range cfg.NamedSessions {
-		spec, ok := findNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
-		if !ok {
-			continue
-		}
-		namedByTemplate[namedSessionBackingTemplate(spec)] = true
-	}
 	var warnings []string
 	for i := range cfg.Agents {
 		agentCfg := &cfg.Agents[i]
-		if !agentCfg.UsesCanonicalSingletonPoolIdentity() {
-			continue
-		}
-		if namedByTemplate[agentCfg.QualifiedName()] {
+		// Same shape the session API and pin/wake refuse (#6858).
+		if !session.IsDemandOnlySingletonTemplate(cfg, agentCfg) {
 			continue
 		}
 		warnings = append(warnings,
@@ -626,6 +616,24 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 		if a.DrainTimeout != "" {
 			explainField(w, "drain_timeout", a.DrainTimeout, source)
 		}
+	}
+
+	// Lifecycle timeouts. These resolved keys drive idle-suspend and
+	// session-age recycling but were previously omitted from explain output,
+	// forcing operators to read their provenance from the pack agent.toml
+	// directly (#3965). Only render keys that are set, matching the
+	// conditional pattern used for the fields above.
+	if a.IdleTimeout != "" {
+		explainField(w, "idle_timeout", a.IdleTimeout, source)
+	}
+	if a.SleepAfterIdle != "" {
+		explainField(w, "sleep_after_idle", a.SleepAfterIdle, source)
+	}
+	if a.MaxSessionAge != "" {
+		explainField(w, "max_session_age", a.MaxSessionAge, source)
+	}
+	if a.MaxSessionAgeJitter != "" {
+		explainField(w, "max_session_age_jitter", a.MaxSessionAgeJitter, source)
 	}
 }
 

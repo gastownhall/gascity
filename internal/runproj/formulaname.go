@@ -15,7 +15,8 @@ import (
 // TS's `name: string | null`.
 //
 // Metadata path (runFormulaMetadataName, mode='lane'): first non-empty
-// pr_review.workflow_formula across issues, else first non-empty gc.formula.
+// pr_review.workflow_formula across issues, else first non-empty gc.formula,
+// else the root's gc.formula_name emitted by the graph.v2 compiler.
 // Title fallback (runFormulaTitleFallback, mode='lane'): only for a root that
 // carries gc.formula_contract='graph.v2' AND gc.run_target, is non-terminal,
 // and whose trimmed title starts with "mol-".
@@ -25,6 +26,11 @@ func resolveRunFormulaIdentityLane(root *runIssue, issues []runIssue) (string, b
 	}
 	if name := metadataNonEmptyAcrossIssues(issues, beadmeta.FormulaMetadataKey); name != "" {
 		return name, true
+	}
+	if root != nil {
+		if name := nonEmpty(root.metadata[beadmeta.FormulaNameMetadataKey]); name != "" {
+			return name, true
+		}
 	}
 
 	if name, ok := runFormulaTitleFallbackLane(root); ok {

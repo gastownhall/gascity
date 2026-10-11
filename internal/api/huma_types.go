@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 )
 
@@ -132,13 +133,16 @@ func (t *TailParam) Compactions() (n int, provided bool) {
 }
 
 // PaginationParam is an embeddable input mixin for paginated list endpoints.
-// Limit carries a minimum: validation tag so malformed requests (e.g.
-// limit=-1) fail Huma validation with 422 instead of silently defaulting
-// or — under older paginate() behavior — panicking with a slice-bounds
-// error.
+// Limit carries minimum/maximum validation tags so malformed requests (e.g.
+// limit=-1 or limit=5000) fail Huma validation with 422 instead of silently
+// defaulting or clamping, and a default so the spec documents the unified
+// page contract (default 100, maximum 1000 — pinned by the pagination
+// dialect guard). Huma injects the default when the param is omitted, so
+// handlers see Limit=100 for a bare request; an explicit limit=0 still
+// reaches the handler as 0 and means "server default" there.
 type PaginationParam struct {
-	Cursor string `query:"cursor" doc:"Pagination cursor from a previous response's next_cursor field." required:"false"`
-	Limit  int    `query:"limit" minimum:"0" doc:"Maximum number of results to return. 0 = server default." required:"false"`
+	Cursor string `query:"cursor" doc:"Opaque keyset pagination token from a previous response's next_cursor field. Invalid or legacy tokens are rejected with a typed 400 (invalid-cursor); re-fetch the first page." required:"false"`
+	Limit  int    `query:"limit" minimum:"0" maximum:"1000" default:"100" doc:"Maximum number of results to return. Omitted or 0 = server default (100). Values above 1000 are rejected." required:"false"`
 }
 
 // --- Shared output types ---
@@ -170,6 +174,13 @@ type ListOutput[T any] struct {
 
 // IndexOutput is a generic output type for single-resource endpoints
 // that include the X-GC-Index header. CacheAgeS mirrors ListOutput.
+//
+// One handler widens that meaning: /status may serve a stale-while-revalidate
+// body (ra-4u2eqc, handler_status.go), in which case CacheAgeS reports the
+// GREATER of the CachingStore snapshot age and the age of the cached response
+// entry itself. Reporting only the snapshot age there would let a recently
+// lagging reconciler under-report true staleness and suppress the banner
+// `gc status` renders above cacheAgeBannerThresholdSeconds.
 type IndexOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
@@ -207,6 +218,10 @@ type StatusWorkCounts struct {
 	InProgress int `json:"in_progress" doc:"Number of in-progress work items."`
 	Ready      int `json:"ready" doc:"Number of ready work items."`
 	Open       int `json:"open" doc:"Number of open work items."`
+	// SuspendedRigsExcluded counts the rigs these counts leave out: a
+	// suspended rig's store is not read, because a read restarts its retired
+	// bd proxy.
+	SuspendedRigsExcluded int `json:"suspended_rigs_excluded,omitempty" doc:"Number of suspended rigs left out of these counts: a suspended rig's store is not read."`
 }
 
 // StatusMailCounts holds mail counts for the status endpoint.
@@ -226,6 +241,7 @@ type StatusMailCounts struct {
 // sentinels in their originating package and matched here.
 func mutationError(err error) error {
 	msg := err.Error()
+	var providerCatalogErr *config.ProviderCatalogError
 	switch {
 	case errors.Is(err, configedit.ErrNotFound):
 		return huma.Error404NotFound(msg)
@@ -234,6 +250,14 @@ func mutationError(err error) error {
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
+		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrPatchTargetNotFound):
+		// A patch named a target absent from the merged config; the edit was
+		// rolled back, so this is the client's error.
+		return huma.Error400BadRequest(msg)
+	case errors.As(err, &providerCatalogErr):
+		// The edit referenced a provider the city's catalog does not define;
+		// the config was rolled back, so this is the client's error.
 		return huma.Error400BadRequest(msg)
 	default:
 		return huma.Error500InternalServerError(msg)
@@ -257,14 +281,6 @@ type AgentCreatedOutput struct {
 	Body struct {
 		Status string `json:"status" doc:"Operation result." example:"created"`
 		Agent  string `json:"agent" doc:"Created agent name."`
-	}
-}
-
-// RigCreatedOutput is the 201 response for POST /rigs.
-type RigCreatedOutput struct {
-	Body struct {
-		Status string `json:"status" doc:"Operation result." example:"created"`
-		Rig    string `json:"rig" doc:"Created rig name."`
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -29,24 +30,34 @@ type StateHandle interface {
 
 // LifecycleHandle exposes worker lifecycle control operations.
 type LifecycleHandle interface {
-	Start(context.Context) error
-	StartResolved(context.Context, string, runtime.Config) error
-	Attach(context.Context) error
+	Start(context.Context, sessionpkg.Actor) error
+	StartResolved(context.Context, sessionpkg.Actor, string, runtime.Config) error
+	Attach(context.Context, sessionpkg.Actor) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error
-	Stop(context.Context) error
-	Kill(context.Context) error
-	Close(context.Context) error
-	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)
+	Stop(context.Context, sessionpkg.Actor) error
+	// StopForShutdown is Stop with CITY-SHUTDOWN intent (an ActorSweep), for
+	// the `gc stop` / `gc restart` sweep only. It carries latitude on lifecycle
+	// states that have no live turn to suspend (notably draining), which a
+	// targeted operator Stop must keep rejecting.
+	StopForShutdown(context.Context) error
+	// StopIdle is Stop for the chat idle auto-suspend: the operator's
+	// transition rules, no operator hold.
+	StopIdle(context.Context, sessionpkg.Actor) error
+	Kill(context.Context, sessionpkg.Actor) error
+	Close(context.Context, sessionpkg.Actor) error
+	CloseDetailed(context.Context, sessionpkg.Actor) (sessionpkg.CloseResult, error)
 	Rename(context.Context, string) error
 	StateHandle
 }
 
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
-	Message(context.Context, MessageRequest) (MessageResult, error)
+	// Message and Nudge may start or resume the session as the Actor may
+	// (CONTRACT v5.9 D8).
+	Message(context.Context, sessionpkg.Actor, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
-	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
+	Nudge(context.Context, sessionpkg.Actor, NudgeRequest) (NudgeResult, error)
 }
 
 // HistoryHandle exposes normalized transcript history reads.
@@ -59,6 +70,7 @@ type TranscriptHandle interface {
 	HistoryHandle
 	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
 	TranscriptPath(context.Context) (string, error)
+	TranscriptRecords(context.Context) ([]json.RawMessage, error)
 	AgentMappings(context.Context) ([]AgentMapping, error)
 	AgentTranscript(context.Context, string) (*AgentTranscriptResult, error)
 }
@@ -143,6 +155,8 @@ type MessageRequest struct {
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
 	Queued bool `json:"queued"`
+	// Deferred: the actor queued it (session.SubmitOutcome.Deferred).
+	Deferred bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -181,7 +195,35 @@ type NudgeRequest struct {
 // NudgeResult reports whether the requested live delivery actually happened.
 type NudgeResult struct {
 	Delivered bool `json:"delivered"`
+	// Undelivered names WHY a live delivery did not happen, for the callers
+	// that downgrade to the queue and have to tell a human what they did.
+	// Empty when Delivered is true, and empty for a downgrade this type does
+	// not (yet) distinguish — a caller must treat it as a hint, never as a
+	// second copy of Delivered.
+	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
 }
+
+// NudgeUndeliveredReason is the closed set of reasons a live nudge did not
+// reach the session. It is a typed enum rather than free text because it is
+// interpolated into operator-facing output.
+type NudgeUndeliveredReason string
+
+const (
+	// NudgeUndeliveredProviderUnsupported means this provider/transport cannot
+	// take a live wait-idle delivery at all, so the nudge can only be queued. It
+	// is a property of the runtime, not of the session's current state.
+	NudgeUndeliveredProviderUnsupported NudgeUndeliveredReason = "live_delivery_unsupported"
+	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
+	// but the session never reached the idle boundary within the wait window.
+	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredHeld means the session is held, which a nudge does not
+	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
+	// must queue it (a wait-idle nudge).
+	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
+	// NudgeQueuedHeld means the session is held, or (ActorBackground) not
+	// running, and queued the nudge itself; the caller must not queue it again.
+	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
+)
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.
 type NudgeWakePolicy string
@@ -204,6 +246,8 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 type HistoryRequest struct {
 	TailCompactions int    `json:"tail_compactions,omitempty"`
 	LogicalID       string `json:"logical_conversation_id,omitempty"`
+	BeforeEntryID   string `json:"before_entry_id,omitempty"`
+	AfterEntryID    string `json:"after_entry_id,omitempty"`
 }
 
 // PendingInteraction is the worker-level view of a blocking interaction.
@@ -275,6 +319,13 @@ type SessionHandle struct {
 	// skip both the keyed-path resolve and the write once the sidecar is current.
 	sidecarMu     sync.Mutex
 	sidecarDoneID string
+	// sidecarRetrySchedule is nil in production, where the sidecar retry uses
+	// time.AfterFunc. Tests supply a channel-backed scheduler to drive retries
+	// deterministically.
+	sidecarRetrySchedule  func(time.Duration, func())
+	sidecarRetryID        string
+	sidecarRetryAttempts  int
+	sidecarRetryScheduled bool
 }
 
 var (

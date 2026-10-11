@@ -1,12 +1,114 @@
 package session
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
+
+// failCreateStore wraps a store but errors on Create, to exercise the
+// CreateSessionInfo error contract (no silent half-create).
+type failCreateStore struct {
+	beads.Store
+	err error
+}
+
+func (f failCreateStore) Create(beads.Bead) (beads.Bead, error) {
+	return beads.Bead{}, f.err
+}
+
+// TestCreateSessionInfoReturnsProjectionOfCreatedBead is the write-returns-Info
+// oracle for the pool-create front door (W-pool §4): CreateSessionInfo returns
+// the projected Info of the just-created bead, and that Info is byte-identical to
+// projecting the bead a subsequent Get returns — proving the local projection on
+// the store's Create result needs no post-create store.Get. It also pins that the
+// returned Info.ID matches the id-only CreateSession sibling for the same spec.
+func TestCreateSessionInfoReturnsProjectionOfCreatedBead(t *testing.T) {
+	meta := map[string]string{
+		"template":                  "tower/polecat",
+		"agent_name":                "tower/polecat",
+		"state":                     string(StateStartPending),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": "2026-06-01T12:00:00Z",
+		"session_origin":            "ephemeral",
+		"generation":                "1",
+		"continuation_epoch":        "1",
+		"instance_token":            "tok-info",
+		"session_name":              "polecat-pending-tok-info",
+		"alias":                     "pc-1",
+		"pool_slot":                 "3",
+		"pool_alias_conflict":       "tower/polecat",
+		"pool_alias_conflict_count": "2",
+	}
+	spec := CreateSpec{
+		ID:        "explicit-info-id",
+		Title:     "polecat",
+		AgentName: "tower/polecat",
+		Metadata:  meta,
+	}
+
+	is := NewStore(beads.SessionStore{Store: beads.NewMemStore()})
+	info, err := is.CreateSessionInfo(spec)
+	if err != nil {
+		t.Fatalf("CreateSessionInfo: %v", err)
+	}
+	if info.ID == "" {
+		t.Fatal("CreateSessionInfo returned an empty-id Info")
+	}
+
+	// The returned Info must equal a full projection of what a Get returns — the
+	// property that lets the caller drop its post-create store.Get.
+	want, err := is.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after CreateSessionInfo: %v", info.ID, err)
+	}
+	if !reflect.DeepEqual(info, want) {
+		t.Errorf("CreateSessionInfo Info diverged from Get projection\n got=%+v\nwant=%+v", info, want)
+	}
+	// The new under-reach fields must round-trip through the create projection.
+	if info.PoolAliasConflict != "tower/polecat" || info.PoolAliasConflictCount != "2" {
+		t.Errorf("pool-alias-conflict mirrors not projected: conflict=%q count=%q", info.PoolAliasConflict, info.PoolAliasConflictCount)
+	}
+
+	// Info.ID matches the id-only sibling for the same spec (fresh store so the
+	// store-assigned ids line up deterministically for memstore's explicit-id echo).
+	is2 := NewStore(beads.SessionStore{Store: beads.NewMemStore()})
+	id, err := is2.CreateSession(spec)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if id != info.ID {
+		t.Errorf("CreateSession id = %q, CreateSessionInfo Info.ID = %q; want equal", id, info.ID)
+	}
+}
+
+// TestCreateSessionInfoErrorContract pins the "no silent half-create" contract:
+// when the store's Create fails, CreateSessionInfo returns a zero Info and the
+// wrapped error, and no session bead is persisted.
+func TestCreateSessionInfoErrorContract(t *testing.T) {
+	boom := errors.New("boom")
+	mem := beads.NewMemStore()
+	is := NewStore(beads.SessionStore{Store: failCreateStore{Store: mem, err: boom}})
+
+	info, err := is.CreateSessionInfo(CreateSpec{Title: "polecat", AgentName: "tower/polecat"})
+	if !errors.Is(err, boom) {
+		t.Fatalf("CreateSessionInfo err = %v, want wrap of boom", err)
+	}
+	if !reflect.DeepEqual(info, Info{}) {
+		t.Errorf("CreateSessionInfo returned non-zero Info on create error: %+v", info)
+	}
+	// No bead was persisted (the failing store never delegated to the memstore).
+	all, err := ListAllSessionBeads(mem, beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAllSessionBeads: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("persisted %d beads after a failed create, want 0", len(all))
+	}
+}
 
 // TestCreateSessionByteIdenticalConfiguredNamed proves CreateSession emits a
 // single Create whose bead is byte-identical to the raw store.Create the

@@ -10,9 +10,11 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// parseBeadFormat extracts --format/--json flags from raw args (needed because
-// DisableFlagParsing is true). Returns the format ("text", "json", or "toon")
-// and the remaining positional args with the flag removed.
+// parseBeadFormat extracts --format/--json flags from raw args. It backs the
+// fake `bd` binary used by the testscript harness (bd_testscript_test.go); the
+// gc `beads` commands themselves parse these flags through cobra. Returns the
+// format ("text", "json", or "toon") and the remaining positional args with the
+// flag removed.
 func parseBeadFormat(args []string) (string, []string) {
 	format := "text"
 	var rest []string
@@ -39,8 +41,10 @@ type beadFilters struct {
 	all    bool
 }
 
-// parseBeadFilters extracts --label=X and --status=X from args, returning
-// the filters and the remaining args with those flags removed.
+// parseBeadFilters extracts --label, --status, and --all from args, returning
+// the filters and the remaining args with those flags removed. Like
+// parseBeadFormat it backs the testscript fake-bd harness; the gc `beads list`
+// command parses these flags through cobra.
 func parseBeadFilters(args []string) (beadFilters, []string) {
 	var f beadFilters
 	var rest []string

@@ -8,10 +8,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 )
@@ -22,6 +25,8 @@ type TriggerResult struct {
 	Due bool
 	// Reason explains why the trigger is or isn't due.
 	Reason string
+	// TimedOut is true only when a condition check was killed by its check_timeout deadline.
+	TimedOut bool
 	// LastRun is the last execution time (zero if never run).
 	LastRun time.Time
 }
@@ -36,6 +41,15 @@ type CursorFunc func(orderName string) uint64
 
 // TriggerOptions carries execution context for triggers that run subprocesses.
 type TriggerOptions struct {
+	// ConditionCtx is the parent context for the condition-check subprocess.
+	// When non-nil, canceling it — a controller shutdown, a config reload, or a
+	// canceled dispatch tick — interrupts a running check promptly instead of
+	// letting a raised check_timeout keep the process alive for the full
+	// deadline. Bare callers (the API GET /v0/orders/check evaluator and the
+	// storeless CLI check) may leave it nil; checkCondition then falls back to
+	// context.Background(), preserving the timeout-only behavior for those
+	// one-shot evaluators.
+	ConditionCtx     context.Context
 	ConditionDir     string
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
@@ -47,6 +61,52 @@ var (
 	conditionCheckPostCancelWaitDelay = 2 * time.Second
 	conditionCheckSignalGrace         = 2 * time.Second
 )
+
+// ConditionCheckTimedOutMarker is the substring embedded in a condition
+// trigger's TriggerResult.Reason when the check command is killed by its
+// check_timeout deadline. It is only the human-readable text in Reason;
+// callers that need to detect a timeout must branch on TriggerResult.TimedOut,
+// since stderr excerpts appended to Reason can contain the same words.
+const ConditionCheckTimedOutMarker = "timed out"
+
+const (
+	conditionCheckStderrTailBytes    = 4096
+	conditionCheckStderrExcerptRunes = 300
+)
+
+type boundedTailWriter struct {
+	buf     []byte
+	limit   int
+	dropped bool
+	written int
+}
+
+func newBoundedTailWriter(limit int) *boundedTailWriter {
+	return &boundedTailWriter{buf: make([]byte, 0, limit), limit: limit}
+}
+
+func (w *boundedTailWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	w.written += n
+	if len(w.buf)+n > w.limit {
+		w.dropped = true
+	}
+	if n >= w.limit {
+		w.buf = w.buf[:w.limit]
+		copy(w.buf, p[n-w.limit:])
+		return n, nil
+	}
+	if overflow := len(w.buf) + n - w.limit; overflow > 0 {
+		copy(w.buf, w.buf[overflow:])
+		w.buf = w.buf[:len(w.buf)-overflow]
+	}
+	w.buf = append(w.buf, p...)
+	return n, nil
+}
+
+func (w *boundedTailWriter) String() string {
+	return string(w.buf)
+}
 
 // CheckTrigger evaluates an order's trigger condition and returns whether it's due.
 // ep is an events Provider used by event triggers to query events; may be nil for
@@ -86,6 +146,7 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad interval: %v", err)}
 	}
+	interval = clock.Backstop(interval)
 
 	last, err := lastRunFn(a.ScopedName())
 	if err != nil {
@@ -113,6 +174,33 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 	}
 }
 
+// resolveOrderLocation returns the single explicit location in which an
+// order's cron fields are evaluated: the order's tz (authored in the order
+// file, or the city-wide [workspace] timezone stamped onto the order at scan
+// time), falling back to `now`'s location when no tz is configured. For the
+// live dispatcher `now` is time.Now(), so the fallback is the process-local
+// zone — the pre-fix live-match semantics — while callers that fabricate
+// times in an explicit location (tests, replay) stay deterministic
+// regardless of the host zone. A bad tz is a hard error — order validation
+// rejects it at load; this guard keeps an unvalidated Order from silently
+// evaluating in the wrong zone.
+func resolveOrderLocation(a Order, now time.Time) (*time.Location, error) {
+	if a.TZ == "" {
+		return now.Location(), nil
+	}
+	loc, err := time.LoadLocation(a.TZ)
+	if err != nil {
+		return nil, fmt.Errorf("order %q: invalid tz %q: %w", a.ScopedName(), a.TZ, err)
+	}
+	return loc, nil
+}
+
+// wallMinuteLayout renders a wall-clock reading to minute granularity.
+// Two instants with the same rendering occupy the same wall-clock slot —
+// including the DST fall-back hour, where two distinct instants share one
+// wall-clock reading and must count as a single cron slot.
+const wallMinuteLayout = "2006-01-02 15:04"
+
 // checkCron uses minute-granularity matching against the schedule, WITH
 // catch-up. A scheduled occurrence fires if either (a) the current minute
 // matches, or (b) a scheduled minute elapsed since the last run without the
@@ -122,30 +210,55 @@ func checkCooldown(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult 
 // "0 */4 * * *" order miss every boundary (gastown td-4kziysy) because the
 // controller's eval cadence rarely coincides with a once-per-4h minute.
 // Schedule format: "minute hour day-of-month month day-of-week" (5 fields).
+//
+// All cron-field evaluation happens in ONE explicit location (see
+// resolveOrderLocation). Callers and the last-run store may hand us times in
+// different locations — the doltlite store always returns UTC-located times
+// (parseTimeString) while `now` carries the process zone — so both are
+// normalized here before any field is read. Without this, the catch-up scan
+// evaluated cron fields against the store's UTC wall clock and fired
+// zone-anchored orders at the UTC reading, then again at the real local slot.
+//
+// DST policy (in the resolved location):
+//   - Fall-back: the repeated hour yields two instants with the same
+//     wall-clock reading; an order fires at most once per wall-clock slot
+//     (dedupe by wall-clock date+HH:MM against lastRun).
+//   - Spring-forward: schedule minutes inside the nonexistent hour cannot
+//     match a real instant; the catch-up scan detects the gap and fires the
+//     order once at the first real minute after the jump.
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
-	fields := strings.Fields(a.Schedule)
-	if len(fields) != 5 {
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: want 5 fields, got %d", len(fields))}
+	if err := ValidateCronSchedule(a.Schedule); err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: %v", err)}
 	}
+	fields := strings.Fields(a.Schedule)
 
-	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
+	loc, err := resolveOrderLocation(a, now)
+	if err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad tz: %v", err)}
+	}
+	now = now.In(loc)
 
+	// The schedule was validated above, so no parse error can reach here; a
+	// non-match is the safe reading if one ever did.
 	matchesAt := func(t time.Time) bool {
-		return cronFieldMatches(minute, t.Minute()) &&
-			cronFieldMatches(hour, t.Hour()) &&
-			cronFieldMatches(dom, t.Day()) &&
-			cronFieldMatches(month, int(t.Month())) &&
-			cronFieldMatches(dow, int(t.Weekday()))
+		matched, err := CronScheduleMatchesAt(fields, t)
+		return err == nil && matched
+	}
+	sameWallMinute := func(x, y time.Time) bool {
+		return x.Format(wallMinuteLayout) == y.Format(wallMinuteLayout)
 	}
 
 	last, err := lastRunFn(a.ScopedName())
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("error querying last run: %v", err)}
 	}
+	last = last.In(loc) // same instant, evaluator's wall clock (IsZero is instant-based, unaffected)
 
-	// (a) Current minute matches — fire unless already run this minute.
+	// (a) Current minute matches — fire unless already run this wall-clock
+	// slot (wall-minute equality also covers the DST fall-back repeat, where
+	// two instants an hour apart share one wall-clock reading).
 	if matchesAt(now) {
-		if !last.IsZero() && last.Truncate(time.Minute).Equal(now.Truncate(time.Minute)) {
+		if !last.IsZero() && sameWallMinute(last, now) {
 			return TriggerResult{Due: false, Reason: "cron: already run this minute", LastRun: last}
 		}
 		return TriggerResult{Due: true, Reason: "cron: schedule matched", LastRun: last}
@@ -155,41 +268,60 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	// may have elapsed since lastRun without an evaluation landing on it. Scan
 	// minute-by-minute from just after lastRun up to now; any match is a missed
 	// occurrence that is now due. Bounded lookback so a very old lastRun cannot
-	// spin (it is overdue regardless). Skipped when lastRun is zero (never run):
-	// such an order fires only on an exact match, never back-filling history.
-	if !last.IsZero() {
-		const maxCatchupLookback = 366 * 24 * time.Hour
-		start := last.Truncate(time.Minute).Add(time.Minute)
-		if floor := now.Add(-maxCatchupLookback).Truncate(time.Minute); start.Before(floor) {
-			start = floor
+	// spin (it is overdue regardless).
+	//
+	// A never-run order (lastRun zero) gets the same scan bounded to a much
+	// shorter lookback instead of being skipped entirely: without it, a
+	// narrow-window order (e.g. one specific minute/day) that never happens to
+	// be evaluated on its exact scheduled minute could never fire at all — no
+	// lastRun exists to catch up from, and no restart recovers it (#3947, a
+	// residual cold-start gap in the warm-order catch-up above). The short
+	// floor keeps a freshly-enabled order from firing for an occurrence that
+	// elapsed long before it existed, unlike the year-long lookback a warm
+	// order's lastRun-anchored catch-up gets.
+	const maxCatchupLookback = 366 * 24 * time.Hour
+	const neverRunCatchupLookback = 25 * time.Hour
+	lookback := maxCatchupLookback
+	start := last.Truncate(time.Minute).Add(time.Minute)
+	if last.IsZero() {
+		lookback = neverRunCatchupLookback
+		start = now.Add(-neverRunCatchupLookback).Truncate(time.Minute)
+	}
+	if floor := now.Add(-lookback).Truncate(time.Minute); start.Before(floor) {
+		start = floor
+	}
+	prev := start.Add(-time.Minute)
+	for t := start; !t.After(now); t = t.Add(time.Minute) {
+		// Spring-forward: one absolute minute stepped over a wall-clock
+		// gap (e.g. 01:59 → 03:00). Schedule minutes inside the gap can
+		// never match a real instant, so evaluate the skipped wall-clock
+		// readings and fire at this first real minute after the jump.
+		_, prevOff := prev.Zone()
+		_, tOff := t.Zone()
+		if tOff > prevOff && matchesInWallGap(matchesAt, prev, t) {
+			return TriggerResult{Due: true, Reason: "cron: caught up occurrence skipped by DST spring-forward", LastRun: last}
 		}
-		for t := start; !t.After(now); t = t.Add(time.Minute) {
-			if matchesAt(t) {
-				return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
-			}
+		if matchesAt(t) && !sameWallMinute(last, t) {
+			return TriggerResult{Due: true, Reason: "cron: caught up missed occurrence", LastRun: last}
 		}
+		prev = t
 	}
 
 	return TriggerResult{Due: false, Reason: "cron: schedule not matched", LastRun: last}
 }
 
-// cronFieldMatches checks if a single cron field matches a value.
-// Supports: "*" (any), exact integer, or comma-separated values.
-func cronFieldMatches(field string, value int) bool {
-	if field == "*" {
-		return true
+// matchesInWallGap reports whether any wall-clock minute strictly between
+// prev's and t's wall-clock readings matches the schedule. Such readings do
+// not exist as instants in the location (a DST spring-forward skipped them),
+// so they are enumerated as naive calendar readings in a fixed-offset
+// container; cron fields are pure wall-clock components, so matching them
+// against naive readings is exact.
+func matchesInWallGap(matchesAt func(time.Time) bool, prev, t time.Time) bool {
+	naive := func(x time.Time) time.Time {
+		return time.Date(x.Year(), x.Month(), x.Day(), x.Hour(), x.Minute(), 0, 0, time.UTC)
 	}
-	for _, part := range strings.Split(field, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "*/") {
-			step, err := strconv.Atoi(strings.TrimPrefix(part, "*/"))
-			if err == nil && step > 0 && value%step == 0 {
-				return true
-			}
-			continue
-		}
-		n, err := strconv.Atoi(part)
-		if err == nil && n == value {
+	for w, end := naive(prev).Add(time.Minute), naive(t); w.Before(end); w = w.Add(time.Minute) {
+		if matchesAt(w) {
 			return true
 		}
 	}
@@ -199,29 +331,49 @@ func cronFieldMatches(field string, value int) bool {
 // checkCondition runs the check command and returns due if exit code is 0.
 // Uses a timeout to prevent hanging check scripts from blocking trigger evaluation.
 func checkCondition(a Order, opts TriggerOptions) TriggerResult {
-	const triggerCheckTimeout = 10 * time.Second
 	timeout := opts.ConditionTimeout
 	if timeout <= 0 {
-		timeout = triggerCheckTimeout
+		// Derive the deadline from the order itself so every CheckTrigger
+		// caller honors check_timeout, not only the ones that populate
+		// TriggerOptions.ConditionTimeout (controller dispatch, store-aware
+		// CLI check). Bare callers — the API /v0/orders/check evaluator and
+		// the storeless CLI check — pass empty opts; CheckTimeoutOrDefault
+		// returns defaultConditionCheckTimeout for an unset/invalid value, so
+		// this preserves the prior 10s behavior when check_timeout is absent.
+		timeout = a.CheckTimeoutOrDefault()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Derive the check deadline from the caller's context when one is supplied so
+	// a canceled tick/shutdown/reload stops a running check before check_timeout
+	// elapses; nil opts (bare CLI/API evaluators) fall back to the background
+	// context, keeping the timeout as the sole bound.
+	parent := opts.ConditionCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
 	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
 	cmd.WaitDelay = conditionCheckPostCancelWaitDelay
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
+	secrets := conditionCheckSensitiveValues(cmd.Env)
+	captureBytes := conditionCheckStderrTailBytes
+	if len(secrets) > 0 {
+		captureBytes += len(secrets[0])
+	}
+	stderrTail := newBoundedTailWriter(captureBytes)
+	cmd.Stderr = stderrTail
 	if opts.ConditionDir != "" {
 		cmd.Dir = opts.ConditionDir
 	}
-	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			reason := fmt.Sprintf("check command timed out after %s", timeout)
+			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)
 			if cleanupErr := cleanupCommand(); cleanupErr != nil {
 				reason = fmt.Sprintf("%s; cleanup failed: %v", reason, cleanupErr)
 			}
-			return TriggerResult{Due: false, Reason: reason}
+			return TriggerResult{Due: false, Reason: reason, TimedOut: true}
 		}
 		if errors.Is(err, exec.ErrWaitDelay) {
 			reason := "check command cleanup exceeded post-cancel wait delay"
@@ -230,9 +382,84 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 			}
 			return TriggerResult{Due: false, Reason: reason}
 		}
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
+		excerpt := conditionCheckStderrExcerpt(
+			stderrTail.String(),
+			stderrTail.dropped,
+			stderrTail.written > conditionCheckStderrTailBytes,
+			cmd.Env,
+			secrets,
+		)
+		var exitErr *exec.ExitError
+		if excerpt == "" && ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.Exited() {
+			return TriggerResult{Due: false, Reason: fmt.Sprintf("condition: not met (exit %d)", exitErr.ExitCode())}
+		}
+		reason := fmt.Sprintf("check command failed: %v", err)
+		if excerpt != "" {
+			reason += ": stderr: " + excerpt
+		}
+		return TriggerResult{Due: false, Reason: reason}
 	}
 	return TriggerResult{Due: true, Reason: "condition: check passed (exit 0)"}
+}
+
+func conditionCheckStderrExcerpt(stderr string, captureDropped, overLimit bool, env, secrets []string) string {
+	excerpt := execenv.RedactText(stderr, env)
+	for _, secret := range secrets {
+		if len(secret) < 4 {
+			excerpt = strings.ReplaceAll(excerpt, secret, execenv.Redacted)
+		}
+	}
+	partialLine := captureDropped
+	if len(excerpt) > conditionCheckStderrTailBytes {
+		excerpt = excerpt[len(excerpt)-conditionCheckStderrTailBytes:]
+		partialLine = true
+	}
+	if partialLine {
+		if newline := strings.IndexByte(excerpt, '\n'); newline >= 0 {
+			excerpt = excerpt[newline+1:]
+		} else {
+			excerpt = ""
+		}
+	}
+	excerpt = strings.Map(func(r rune) rune {
+		if !unicode.IsPrint(r) {
+			return ' '
+		}
+		return r
+	}, excerpt)
+	excerpt = strings.TrimSpace(excerpt)
+	if excerpt == "" && !overLimit {
+		return ""
+	}
+	runes := []rune(excerpt)
+	if !overLimit && len(runes) <= conditionCheckStderrExcerptRunes {
+		return excerpt
+	}
+	if keep := conditionCheckStderrExcerptRunes - 1; len(runes) > keep {
+		runes = runes[len(runes)-keep:]
+	}
+	return "…" + string(runes)
+}
+
+func conditionCheckSensitiveValues(env []string) []string {
+	seen := map[string]struct{}{}
+	values := make([]string, 0)
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		value = strings.TrimSpace(value)
+		if !ok || value == "" || !execenv.IsSensitiveKey(key) {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	sort.Slice(values, func(i, j int) bool {
+		return len(values[i]) > len(values[j])
+	})
+	return values
 }
 
 func mergeConditionEnv(environ, extra []string) []string {

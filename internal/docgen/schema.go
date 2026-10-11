@@ -5,10 +5,12 @@ package docgen
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/invopop/jsonschema"
 )
 
@@ -31,22 +33,60 @@ func ModuleRoot() (string, error) {
 	}
 }
 
-// addGoCommentsFiltered calls r.AddGoComments for each visible (non-hidden)
-// top-level directory under root, skipping any directory whose name begins
-// with ".". CWD must already be set to root before calling.
+// gitTrackedTopLevelDirs returns the set of top-level directory names known
+// to git at HEAD, scoped to root via cmd.Dir. The bool result reports
+// whether the lookup was usable at all; it is false when root is not a git
+// repository or the lookup otherwise fails, in which case callers should
+// fall back to walking every non-hidden directory instead of filtering.
+func gitTrackedTopLevelDirs(root string) (map[string]bool, bool) {
+	if !git.New(root).IsRepo() {
+		return nil, false
+	}
+	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
+	cmd.Dir = root
+	cmd.Env = git.SanitizedEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	tracked := make(map[string]bool)
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name != "" {
+			tracked[name] = true
+		}
+	}
+	return tracked, true
+}
+
+// addGoCommentsFiltered calls r.AddGoComments for each visible (non-hidden),
+// git-tracked top-level directory under root, skipping any directory whose
+// name begins with ".". CWD must already be set to root before calling.
 //
 // This avoids the TOCTOU failure where .gc/*/pr-checkout/ dirs are deleted by
 // mpr cleanup while filepath.Walk is in progress: r.AddGoComments("module",
 // ".") walks the entire tree including .gc/; if a directory disappears
 // mid-scan the walk surfaces an I/O error that propagates up and fails schema
 // generation. By enumerating only visible top-level dirs, we never enter .gc/.
+//
+// It also bounds the walk to directories git actually tracks at root (see
+// ga-vfurlv): stray untracked directories accumulating at the module root —
+// leaked worktree-stage dirs, abandoned PR-checkout dirs, and the like — are
+// each a full nested checkout that AddGoComments would otherwise recursively
+// go/parser.ParseDir in its entirety, multiplying the walk cost by however
+// many have piled up. When root is not a git repository (or the tracked-dir
+// lookup otherwise fails), this filter is skipped and every non-hidden
+// top-level directory is walked, matching the prior behavior.
 func addGoCommentsFiltered(r *jsonschema.Reflector, module, root string) error {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", root, err)
 	}
+	tracked, filterByGit := gitTrackedTopLevelDirs(root)
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if filterByGit && !tracked[entry.Name()] {
 			continue
 		}
 		if err := r.AddGoComments(module, entry.Name()); err != nil {

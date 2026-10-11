@@ -590,3 +590,77 @@ func TestRun_ExecutableNotFound(t *testing.T) {
 		t.Fatal("Run with missing executable should error")
 	}
 }
+
+// The following RequireNudge tests express FR5 (ga-s5y62b.2): a pack can
+// declare prompt_delivery = "nudge-fallback" on a runtime, but nothing
+// verifies the claim is true. RequireNudge lets a caller that has
+// independently determined nudge support is required — e.g. cmd/gc, for a
+// runtime declaring that strategy — escalate the nudge probe from an
+// optional SKIP-on-absence check to a FAIL-on-absence one.
+
+func TestRun_RequireNudgeFailsWhenNudgeUnimplemented(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, minimalScript(state), Options{RequireNudge: true})
+
+	if !res.Failed() {
+		t.Fatal("Failed() = false, want true when RequireNudge is set and nudge is unimplemented")
+	}
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusFail {
+		t.Errorf("required: nudge = %s (%s), want FAIL", c.Status, c.Detail)
+	}
+	if hasCheck(res, "optional: nudge") {
+		t.Error("optional: nudge should not appear when RequireNudge is set")
+	}
+}
+
+func TestRun_RequireNudgeFailsWhenNudgeErrors(t *testing.T) {
+	state := t.TempDir()
+	body := strings.Replace(conformantScript(state),
+		"nudge)             cat > /dev/null ;;",
+		`nudge)             echo "boom" >&2; exit 1 ;;`, 1)
+	res := runScript(t, body, Options{RequireNudge: true})
+
+	if !res.Failed() {
+		t.Fatal("Failed() = false, want true when RequireNudge is set and nudge errors")
+	}
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusFail {
+		t.Errorf("required: nudge = %s (%s), want FAIL", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "boom") {
+		t.Errorf("nudge failure detail %q should include script stderr", c.Detail)
+	}
+}
+
+func TestRun_RequireNudgePassesWhenNudgeWorks(t *testing.T) {
+	state := t.TempDir()
+	res := runScript(t, conformantScript(state), Options{RequireNudge: true})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true for conformant script with RequireNudge: %+v", res.Checks)
+	}
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusPass {
+		t.Errorf("required: nudge = %s (%s), want PASS", c.Status, c.Detail)
+	}
+	if hasCheck(res, "optional: nudge") {
+		t.Error("optional: nudge should not appear when RequireNudge is set")
+	}
+}
+
+func TestRun_RequireNudgeStartFailureSkipsWithRequiredName(t *testing.T) {
+	state := t.TempDir()
+	body := strings.Replace(conformantScript(state),
+		`start)             cat > /dev/null; touch "$state/$name.running"`,
+		`start)             echo "boom" >&2; exit 1`, 1)
+	res := runScript(t, body, Options{RequireNudge: true})
+
+	c := findCheck(t, res, "required: nudge")
+	if c.Status != StatusSkip {
+		t.Errorf("required: nudge = %s (%s), want SKIP when start fails", c.Status, c.Detail)
+	}
+	if hasCheck(res, "optional: nudge") {
+		t.Error("optional: nudge should not appear when RequireNudge is set, even after a start failure")
+	}
+}

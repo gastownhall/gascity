@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -30,26 +31,29 @@ func isDrainedSessionInfo(i sessionpkg.Info) bool {
 	return state == "asleep" && strings.TrimSpace(i.SleepReason) == string(sessionpkg.SleepReasonDrained)
 }
 
-// poolSessionIsLive reports whether a pool session bead represents an
-// actively running session for the runningSessions counter in
-// build_desired_state. An asleep or drained bead is not live — it holds
-// no active process and must not suppress the isCold cross-store wake
-// probe.
-func poolSessionIsLive(session beads.Bead) bool {
-	if strings.TrimSpace(session.Metadata["state"]) == "asleep" {
+// poolSessionIsLiveInfo reports whether a pool session represents an actively
+// running session for the runningSessions counter in build_desired_state. An
+// asleep or drained session is not live — it holds no active process and must
+// not suppress the isCold cross-store wake probe. It reads the RAW state
+// metadata (Info.MetadataState) and delegates the drained/asleep-drained check
+// to isDrainedSessionInfo, matching the untrimmed-key reads the bead carried.
+func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
+	if strings.TrimSpace(i.MetadataState) == "asleep" {
 		return false
 	}
-	if isDrainedSessionBead(session) {
+	if isDrainedSessionInfo(i) {
 		return false
 	}
 	return true
 }
 
 // isPoolSessionSlotFreeable reports whether a session's bead is in a terminal
-// state where the pool slot it occupies can be freed — either explicitly
-// drained, or asleep from a normal idle transition. Sessions parked via
-// `gc session wait` (sleep_reason=wait-hold), held by context-churn
-// quarantine, or otherwise signaling "don't touch me" keep their slot.
+// state where the pool slot it occupies can be freed: explicitly drained, or
+// asleep with sleep_reason one of idle, idle-timeout, city-stop,
+// failed-create, runtime-missing, provider-terminal-error, max-session-age,
+// or killed (without an honored kill fence). Sessions parked via `gc session
+// wait` (sleep_reason=wait-hold), held by context-churn quarantine, or
+// otherwise signaling "don't touch me" keep their slot.
 //
 // Distinct from `isDrainedSessionBead` because drain-ack can land pool
 // workers in state=asleep+sleep_reason=idle when the pre-close ownership
@@ -62,11 +66,28 @@ func poolSessionIsLive(session beads.Bead) bool {
 // failure, so its slot must be reaped — otherwise the dead bead and its worktree
 // leak indefinitely while still excluded from pool capacity.
 //
-// An explicit sleep_reason is required: deny-by-default for unknown or
-// missing reasons so writes that land in state=asleep without a known
+// A session `gc session kill` stopped (sleep_reason=killed) is freeable once
+// no kill fence is honored at now (owner ruling B1, CONTRACT C3 "Killed pool
+// seats"): an honored fence means the kill still owns the row. What happens to
+// the killed seat's work is the close's business, not this predicate's: the
+// pool-slot close releases its unexecuted claims, keeps a seat that holds
+// started work, and never stranded-repairs it.
+//
+// An explicit sleep_reason is normally required: deny-by-default for unknown
+// or missing reasons so writes that land in state=asleep without a known
 // reason (legacy beads, regressions, write races) cannot silently free
-// their slot.
-func isPoolSessionSlotFreeable(session beads.Bead) bool {
+// their slot. The one exception is an empty reason paired with a stamped
+// slept_at (gastownhall/gascity#5739): that is what a suspended/drained bead
+// looks like once re-projected to asleep by the wake path --
+// ClearWakeBlockersPatch clears the recognized reason and stamps none -- and
+// it is a genuine ordinary sleep, not a legacy/regression/write-race record.
+//
+// A row an operator holds (HoldUser, `gc session suspend`) is never freeable,
+// whatever its reason: its slot and its work stay with it.
+func isPoolSessionSlotFreeable(session beads.Bead, now time.Time) bool {
+	if sessionpkg.Holds(session.Metadata, now).In&sessionpkg.HoldUser != 0 {
+		return false
+	}
 	if isDrainedSessionBead(session) {
 		return true
 	}
@@ -77,14 +98,29 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	switch reason {
 	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
-		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError):
+		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
+		string(sessionpkg.SleepReasonMaxSessionAge):
+		return true
+	case string(sessionpkg.SleepReasonKilled):
+		return !sessionpkg.KillPendingMetadata(session.Metadata["state"], session.Metadata["state_reason"], reason, session.Metadata["slept_at"], now)
+	}
+	// A re-projected suspended->asleep bead carries no sleep_reason:
+	// ClearWakeBlockersPatch clears the recognized reason and stamps none.
+	// An EMPTY reason with a stamped slept_at is a genuine ordinary sleep,
+	// so admit it. Do not relax this to slept_at alone -- SleepPatch stamps
+	// slept_at for deliberate parks too (user-hold, wait-hold), and those
+	// must stay denied.
+	if reason == "" && strings.TrimSpace(session.Metadata["slept_at"]) != "" {
 		return true
 	}
 	return false
 }
 
 // isPoolSessionSlotFreeableInfo is the session.Info mirror of isPoolSessionSlotFreeable.
-func isPoolSessionSlotFreeableInfo(i sessionpkg.Info) bool {
+func isPoolSessionSlotFreeableInfo(i sessionpkg.Info, now time.Time) bool {
+	if sessionpkg.HoldsInfo(i, now).In&sessionpkg.HoldUser != 0 {
+		return false
+	}
 	if isDrainedSessionInfo(i) {
 		return true
 	}
@@ -95,7 +131,19 @@ func isPoolSessionSlotFreeableInfo(i sessionpkg.Info) bool {
 	switch reason {
 	case string(sessionpkg.SleepReasonIdle), string(sessionpkg.SleepReasonIdleTimeout),
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
-		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError):
+		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
+		string(sessionpkg.SleepReasonMaxSessionAge):
+		return true
+	case string(sessionpkg.SleepReasonKilled):
+		return !sessionpkg.IsKillPendingInfo(i, now)
+	}
+	// A re-projected suspended->asleep bead carries no sleep_reason:
+	// ClearWakeBlockersPatch clears the recognized reason and stamps none.
+	// An EMPTY reason with a stamped slept_at is a genuine ordinary sleep,
+	// so admit it. Do not relax this to slept_at alone -- SleepPatch stamps
+	// slept_at for deliberate parks too (user-hold, wait-hold), and those
+	// must stay denied.
+	if reason == "" && strings.TrimSpace(i.SleptAt) != "" {
 		return true
 	}
 	return false

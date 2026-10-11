@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -9,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -67,10 +67,9 @@ func runAdoptionBarrier(
 	if sessFront == nil {
 		return result, false
 	}
-	// Session-bead list queries below go through the raw session-class store the
-	// front door wraps (sessionpkg.ListAllSessionBeads takes a raw store); creates
-	// go through the front door. Same underlying store, so behavior is unchanged.
-	store := sessFront.Store().Store
+	// Session-bead list queries below go through the typed session front door
+	// (sessFront.ListAll); creates go through the front door too. Same underlying
+	// store, so behavior is unchanged.
 
 	// Step 1: List all running sessions.
 	running, err := sp.ListRunning("")
@@ -92,32 +91,27 @@ func runAdoptionBarrier(
 	// lost their gc:session label (after a crash or partial write) still
 	// participate in adoption dedup. Without the union, those beads would
 	// be invisible here and adoption would re-create duplicates.
-	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
+	existing, err := sessFront.ListAll(sessionpkg.ListAllOptions{})
 	if err != nil {
 		fmt.Fprintf(stderr, "adoption barrier: listing beads: %v\n", err) //nolint:errcheck
 		return result, false
 	}
 	bySessionName := make(map[string]bool, len(existing))
-	for _, b := range existing {
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		if b.Status == "closed" {
+	for _, info := range existing {
+		// ListAll already filters via IsSessionBeadOrRepairable and excludes closed.
+		if info.Closed {
 			continue // closed beads don't count for dedup
 		}
-		if sn := sessionpkg.InfoFromPersistedBead(b).SessionNameMetadata; sn != "" {
+		if sn := info.SessionNameMetadata; sn != "" {
 			bySessionName[sn] = true
 		}
 	}
 
 	// Build config agent lookup: session_name -> agent config.
 	// Also build a reverse lookup by qualified name for pool instance resolution.
-	// Uses the already-loaded session beads to avoid N store queries.
+	// Uses the already-loaded session Infos to avoid N store queries.
 	st := cfg.Workspace.SessionTemplate
-	snapshot := &sessionBeadSnapshot{}
-	for _, b := range existing {
-		if b.Status != "closed" && sessionpkg.IsSessionBeadOrRepairable(b) {
-			snapshot.add(b)
-		}
-	}
+	snapshot := newSessionBeadSnapshotFromInfos(existing)
 	agentBySession := make(map[string]*config.Agent, len(cfg.Agents))
 	agentByQN := make(map[string]*config.Agent, len(cfg.Agents))
 	agentBaseSessionName := make(map[string]string, len(cfg.Agents))
@@ -227,6 +221,26 @@ func runAdoptionBarrier(
 				sessionName, slot)
 		}
 
+		// Capture the runtime's own live GC_INSTANCE_TOKEN rather than
+		// minting a new one. The adopted process was already launched with
+		// whatever token it has (or none); fabricating a different value
+		// here can never retroactively match it, which permanently fences
+		// the drain-ack token check (session_reconciler.go) from ever
+		// stopping this runtime (ga-lfr06j). An empty result is the
+		// existing "cannot verify identity" signal and fails that fence
+		// open, matching sessions adopted with no known token at all.
+		//
+		// A runtime that answers with no token gets one minted for the row
+		// and, once the row exists, stamped on the runtime (LL5, v5 O2), so
+		// the adopted runtime is never half-identified. An unreadable token
+		// mints nothing: it may be a live token this cannot see.
+		liveInstanceToken, tokenErr := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+		mintedToken := ""
+		if tokenErr == nil && strings.TrimSpace(liveInstanceToken) == "" {
+			mintedToken = sessionpkg.NewInstanceToken()
+			liveInstanceToken = mintedToken
+		}
+
 		// Build bead metadata. Config/live hashes are left empty —
 		// syncSessionBeads populates them from built agent objects.
 		meta := desiredSessionIdentity(sessionIdentityInputs{
@@ -235,7 +249,7 @@ func runAdoptionBarrier(
 			State:             "active",
 			Generation:        sessionpkg.DefaultGeneration,
 			ContinuationEpoch: sessionpkg.DefaultContinuationEpoch,
-			InstanceToken:     sessionpkg.NewInstanceToken(),
+			InstanceToken:     liveInstanceToken,
 			PoolSlot:          resolvedSlot,
 			ConfigResolved:    isConfigAgent,
 		})
@@ -247,9 +261,11 @@ func runAdoptionBarrier(
 		}
 
 		alreadyHadBead := false
+		rowID := ""
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			beadID, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+			var err error
+			rowID, err = sessFront.CreateSession(sessionpkg.CreateSpec{
 				Title:     detail.AgentName,
 				AgentName: detail.AgentName,
 				Metadata:  meta,
@@ -257,10 +273,6 @@ func runAdoptionBarrier(
 			if err != nil {
 				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
 			}
-			// S19 Stage 3 shadow: record the legacy canonical-identity stamp built
-			// by desiredSessionIdentity for this adopted bead (no-op unless the
-			// shadow harness is enabled).
-			recordLegacyCompareWrites(beadID, "adoptionBarrier.create", meta)
 			return nil
 		}
 		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {
@@ -287,6 +299,13 @@ func runAdoptionBarrier(
 		}
 		result.Adopted++
 		result.Details = append(result.Details, detail)
+		stampErr := tokenErr
+		if stampErr == nil {
+			stampErr = stampAdoptedRuntime(sp, sessionName, rowID, strconv.Itoa(sessionpkg.DefaultGeneration), mintedToken)
+		}
+		if stampErr != nil {
+			fmt.Fprintf(stderr, "adoption barrier: %s adopted as %s, identity not stamped: %v\n", sessionName, rowID, stampErr) //nolint:errcheck
+		}
 	}
 
 	// Step 4: Barrier gate — all running sessions must have beads.
@@ -294,22 +313,81 @@ func runAdoptionBarrier(
 	return result, passed
 }
 
-func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
-	existing, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
-		Metadata: map[string]string{"session_name": sessionName},
-		Live:     true,
-	})
-	if err != nil {
-		return false, fmt.Errorf("listing session beads for %q: %w", sessionName, err)
-	}
-	for _, b := range existing {
-		if b.Status == "closed" {
-			continue
+// stampAdoptedRuntime writes an adopted runtime's identity to the runtime
+// (LL5, v5 O2), outside any identifier lock. A minted token is written only
+// while a fresh read still finds none; on a tmux leaf BEADS_HOLDER_TOKEN goes
+// beside it when absent, as tmux starts keep the two aligned. A failed token
+// write stamps nothing more: a runtime with the row's ID and no token reads
+// as ours to legacy's pending-create attribution after a restart, which
+// consults the epoch only on a token mismatch. A runtime with no
+// GC_SESSION_ID then gets its GC_RUNTIME_EPOCH and sessionID, the ID only
+// once the epoch landed, so that attribution reads a stale stamped
+// incarnation as another generation, never as its own. A runtime that
+// already names a session keeps it: the row holds the runtime's token, which
+// reads Current whatever the session ID, and a runtime still naming a closed
+// row stays visible to reapRuntimesBoundToClosedBeads exactly as before. The
+// caller only reports the error: the row exists either way.
+func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, generation, mintedToken string) error {
+	var errs []error
+	if mintedToken != "" {
+		switch current, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); {
+		case err != nil:
+			return fmt.Errorf("re-reading GC_INSTANCE_TOKEN: %w", err)
+		case strings.TrimSpace(current) != "":
+			return errors.New("the runtime gained a GC_INSTANCE_TOKEN after it was read")
 		}
-		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
-		return true, nil
+		if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", mintedToken); err != nil {
+			return fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err)
+		}
+		if leaf, _, _ := runtime.ResolveBackend(sp, name); isSessionEnvLeaf(leaf) {
+			if err := stampIfAbsent(sp, name, "BEADS_HOLDER_TOKEN", mintedToken); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
-	return false, nil
+	switch current, err := sp.GetMeta(name, "GC_SESSION_ID"); {
+	case err != nil:
+		errs = append(errs, fmt.Errorf("reading GC_SESSION_ID: %w", err))
+	case strings.TrimSpace(current) == "":
+		if err := sp.SetMeta(name, "GC_RUNTIME_EPOCH", generation); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_RUNTIME_EPOCH: %w", err))
+		} else if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_SESSION_ID: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// isSessionEnvLeaf reports whether leaf keeps its metadata in a session
+// environment that new processes inherit (tmux, the one
+// EnvironmentBatchProvider), rather than in a sidecar only gc reads.
+func isSessionEnvLeaf(leaf runtime.Provider) bool {
+	_, ok := leaf.(runtime.EnvironmentBatchProvider)
+	return ok
+}
+
+// stampIfAbsent writes key on the runtime when a read finds it unset.
+func stampIfAbsent(sp runtime.Provider, name, key, value string) error {
+	current, err := sp.GetMeta(name, key)
+	switch {
+	case err != nil:
+		return fmt.Errorf("reading %s: %w", key, err)
+	case strings.TrimSpace(current) != "":
+		return nil
+	}
+	if err := sp.SetMeta(name, key, value); err != nil {
+		return fmt.Errorf("stamping %s: %w", key, err)
+	}
+	return nil
+}
+
+func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
+	// HasOpenSessionNamed is the Live-tier existence probe: a session_name-filtered,
+	// CachingStore-bypassing union scan so the adoption barrier observes just-created
+	// beads immediately. It is byte-equivalent to the prior inline Live ListAll +
+	// closed filter this wrapped. The Live bypass is pinned by
+	// TestHasOpenSessionNamed in internal/session.
+	return sessFront.HasOpenSessionNamed(sessionName)
 }
 
 // resolvePoolBase attempts to match a pool instance session name back to its

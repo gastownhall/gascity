@@ -17,6 +17,7 @@ func newExtMsgAgentBindingFixture(t *testing.T) (*fakeState, *Server, *extmsg.Se
 	t.Helper()
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
 	services := extmsg.NewServices(fs.cityBeadStore)
 	fs.extmsgSvc = &services
 	registry := extmsg.NewAdapterRegistry()
@@ -151,16 +152,10 @@ func TestHandleExtMsgInboundAgentBoundColdWakesNamedSession(t *testing.T) {
 	}
 
 	// The notify fan-out materializes the bound agent's named session —
-	// the cold-wake. It runs in a background goroutine, so poll briefly.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err == nil && id != "" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for agent-bound inbound to cold-wake myrig/worker")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// the cold-wake.
+	srv.waitForBackground()
+	if id, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker"); err != nil || id == "" {
+		t.Fatalf("agent-bound inbound did not cold-wake myrig/worker: id=%q err=%v", id, err)
 	}
 }
 

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func writeTranscript(t *testing.T, lines ...string) string {
@@ -109,6 +112,23 @@ func TestContextInjectThresholdOverrides(t *testing.T) {
 	}
 }
 
+func TestContextInjectUsesPerAgentContextAdvisory(t *testing.T) {
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
+	t.Setenv("GC_CONTEXT_URGENT_PCT", "")
+	t.Setenv("GC_CONTEXT_WINDOW_TOKENS", "")
+	p := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+	global := &config.ContextAdvisory{Tiers: []config.ContextAdvisoryTier{{Threshold: contextInjectInt(60), Message: contextInjectString("global")}}}
+	agent := &config.ContextAdvisory{WindowTokens: contextInjectInt(500_000), Tiers: []config.ContextAdvisoryTier{{Threshold: contextInjectInt(80), Message: contextInjectString("agent {{.Tokens}}/{{.Window}}")}}}
+	if got := contextInjectLineForAdvisory(hookInputFor(p), global, agent); got != "agent 700000/500000\n" {
+		t.Errorf("per-agent advisory = %q", got)
+	}
+}
+
+func contextInjectInt(value int) *int { return &value }
+
+func contextInjectString(value string) *string { return &value }
+
 func TestContextInjectDisabled(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "0")
 	p := writeTranscript(t, usageLine("claude-fable-5", 50_000, 800_000, 50_000))
@@ -155,13 +175,36 @@ func TestContextInjectLastNonEmptyModelWins(t *testing.T) {
 	}
 }
 
-// Bare claude-opus-4-8 is a 1M-context model (no [1m] suffix in the transcript).
-func TestContextInjectBareOpus48Is1M(t *testing.T) {
+// Per-model windows come from the shared modelwindow table, so the injector and
+// the session-log/API path report the same window for the same model ID, and a
+// model added to that table is picked up here for free.
+//
+// Bare claude-opus-4-8 is the original regression case: a 1M-context model whose
+// transcript entry carries no "[1m]" suffix, which the injector must still read
+// as 1M. claude-sonnet-5 is a 1M model the shared table newly recognizes. gpt-5
+// covers the second half of the change — the injector used to flatten every
+// non-1M model to a blanket 200k, and now reports the family's real window.
+func TestContextInjectResolvesWindowFromSharedModelTable(t *testing.T) {
 	t.Setenv("GC_INJECT_CONTEXT", "")
-	p := writeTranscript(t, usageLine("claude-opus-4-8", 10_000, 680_000, 10_000))
-	got := contextInjectLine(hookInputFor(p))
-	if !strings.Contains(got, "700k/1000k") {
-		t.Errorf("bare opus-4-8 must resolve to the 1M window: %q", got)
+	tests := []struct {
+		model string
+		// input/cacheRead/cacheCreate sum to a usage inside the advisory band
+		// for that model's window, so the line renders.
+		input, cacheRead, cacheCreate int
+		want                          string
+	}{
+		{"claude-opus-4-8", 10_000, 680_000, 10_000, "700k/1000k"},
+		{"claude-sonnet-5", 10_000, 680_000, 10_000, "700k/1000k"},
+		{"gpt-5-20260101", 10_000, 160_000, 10_000, "180k/258k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			p := writeTranscript(t, usageLine(tt.model, tt.input, tt.cacheRead, tt.cacheCreate))
+			got := contextInjectLine(hookInputFor(p))
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("%s: want window %q in line, got %q", tt.model, tt.want, got)
+			}
+		})
 	}
 }
 
@@ -181,4 +224,53 @@ func TestContextInjectSidecarDoesNotShrinkWindow(t *testing.T) {
 	if !strings.Contains(got, "700k/1000k") {
 		t.Errorf("a 200k-classified newest entry must not shrink the 1M session window: %q", got)
 	}
+}
+
+// TestNudgeDrainInjectEmitsAdvisoryWithoutASessionTarget is the regression for
+// the no-target inject branch dropping the context advisory. A managed hook
+// that carries an identity but no $GC_ALIAS/$GC_SESSION_ID returns before any
+// nudge target is resolved; it must still carry the context-pressure guidance
+// alongside the clock line, exactly as the resolve-failure branch does.
+func TestNudgeDrainInjectEmitsAdvisoryWithoutASessionTarget(t *testing.T) {
+	unmanagedInjectEnv(t)
+	t.Setenv("GC_AGENT", "worker") // managed identity, but no alias/session id
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	t.Setenv("GC_CONTEXT_ADVISORY_PCT", "")
+	t.Setenv("GC_CONTEXT_URGENT_PCT", "")
+	t.Setenv("GC_CONTEXT_WINDOW_TOKENS", "")
+
+	// 700k of 1M = 70% — the advisory band.
+	transcript := writeTranscript(t, usageLine("claude-fable-5", 10_000, 680_000, 10_000))
+	withHookStdin(t, hookInputFor(transcript))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "700k/1000k") || !strings.Contains(out, "~70%") {
+		t.Errorf("no-target inject dropped the context advisory: %q", out)
+	}
+}
+
+// withHookStdin replaces os.Stdin with a pipe holding data for the duration of
+// the test, which is the shape readHookStdin requires (it ignores a terminal).
+func withHookStdin(t *testing.T, data []byte) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("write hook stdin: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close hook stdin writer: %v", err)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = orig
+		_ = r.Close()
+	})
 }

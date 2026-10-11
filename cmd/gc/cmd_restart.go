@@ -153,7 +153,11 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	rec := openCityRecorder(stderr)
 	store, _ := openCityStoreAt(cityPath)
 	// Every store consumer in doRigRestart is session-class (session-name

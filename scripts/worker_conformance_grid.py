@@ -26,15 +26,18 @@ import argparse
 import datetime
 import json
 import pathlib
+import re
 import sys
 
 PROFILE_ORDER = [
     "claude/tmux-cli",
     "codex/tmux-cli",
+    "cursor/tmux-cli",
     "gemini/tmux-cli",
     "kimi/tmux-cli",
     "opencode/tmux-cli",
     "mimocode/tmux-cli",
+    "zcode/tmux-cli",
     "pi/tmux-cli",
     "antigravity/tmux-cli",
 ]
@@ -164,10 +167,59 @@ def render_grid(cells, runs, generated_on):
     return "\n".join(sections)
 
 
+PROVIDER_ROW_RE = re.compile(r"^\| `(?P<provider>[^`]+)` \|")
+
+
+def merge_provider_rows(existing_block: str, generated_block: str, providers: list[str]) -> str:
+    """Rewrite only the named providers' rows, keeping every other row verbatim.
+
+    A full regeneration writes every provider from the reports it was given, so
+    running it on a host that holds one provider's reports silently downgrades
+    everyone else's recorded cells to "not verified". Merging keeps the grid a
+    cumulative record instead of a snapshot of whoever ran it last.
+    """
+    wanted = {p.split("/", 1)[0] for p in providers}
+    # A provider has one row per table, so collect them in document order and
+    # replay them against the existing rows in the same order.
+    per_table: dict[str, list[str]] = {}
+    for line in generated_block.splitlines():
+        match = PROVIDER_ROW_RE.match(line)
+        if match and match.group("provider") in wanted:
+            per_table.setdefault(match.group("provider"), []).append(line)
+
+    counters = {name: 0 for name in per_table}
+    out, seen = [], set()
+    for line in existing_block.splitlines():
+        match = PROVIDER_ROW_RE.match(line)
+        name = match.group("provider") if match else None
+        if name in per_table:
+            rows = per_table[name]
+            index = min(counters[name], len(rows) - 1)
+            out.append(rows[index])
+            counters[name] += 1
+            seen.add(name)
+        else:
+            out.append(line)
+    missing = sorted(set(per_table) - seen)
+    if missing:
+        raise SystemExit(
+            "merge target has no existing row for: " + ", ".join(missing)
+            + " (add the row once, then --provider keeps it current)"
+        )
+    return "\n".join(out) + ("\n" if existing_block.endswith("\n") else "")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-dir", action="append", required=True, dest="report_dirs")
     parser.add_argument("--readme", help="README to update in place between grid markers")
+    parser.add_argument(
+        "--provider",
+        action="append",
+        dest="providers",
+        help="merge mode: rewrite only these providers' rows, leaving every "
+             "other provider's recorded cells untouched (repeatable)",
+    )
     parser.add_argument(
         "--generated-on",
         default=datetime.date.today().isoformat(),
@@ -192,6 +244,9 @@ def main():
     if begin == -1 or end == -1:
         print(f"{args.readme}: grid markers not found", file=sys.stderr)
         return 1
+    if args.providers:
+        existing_block = text[begin:end + len(GRID_END)]
+        grid = merge_provider_rows(existing_block, grid, args.providers)
     updated = text[:begin] + grid + text[end + len(GRID_END):]
     readme.write_text(updated)
     print(f"updated {args.readme}")

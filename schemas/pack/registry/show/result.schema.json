@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "description": "Result payload for gc pack registry show.",
-  "required": ["schema_version", "ok", "registry", "name", "description", "source", "source_kind", "latest", "releases"],
+  "required": ["schema_version", "ok", "registry", "name", "tier", "publisher", "description", "source", "source_kind", "latest", "releases"],
   "properties": {
     "schema_version": {
       "const": "1",
@@ -22,6 +22,15 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?$",
       "description": "Pack name as published in the registry catalog."
+    },
+    "tier": {
+      "enum": ["maintained", "community"],
+      "description": "Effective pack trust tier after safe attribution normalization."
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Effective publisher name, or Unknown publisher when attribution is unavailable."
     },
     "description": {
       "type": "string",

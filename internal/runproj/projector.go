@@ -22,6 +22,17 @@ type Projector struct {
 	decodeMisses int
 }
 
+// RunProjectionSnapshot is one immutable bead snapshot published by an
+// incremental run projector. Ready distinguishes a genuinely empty city from a
+// cold replay that has not completed. Beads and their nested values are
+// immutable after publication, so concurrent readers may share the slice.
+type RunProjectionSnapshot struct {
+	Ready        bool
+	Beads        []beads.Bead
+	DecodeMisses int
+	Partial      bool
+}
+
 // NewProjector returns an empty projector.
 func NewProjector() *Projector {
 	return &Projector{beads: make(map[string]beads.Bead)}

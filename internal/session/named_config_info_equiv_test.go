@@ -120,7 +120,7 @@ func TestNamedSessionInfoEquivalence(t *testing.T) {
 
 	// Per-bead classifier equivalence.
 	for _, b := range beadsIn {
-		i := InfoFromPersistedBead(b)
+		i := infoFromPersistedBead(b)
 		if got, want := IsSessionBeadOrRepairableInfo(i), IsSessionBeadOrRepairable(b); got != want {
 			t.Errorf("bead %q: IsSessionBeadOrRepairableInfo=%v want %v", b.ID, got, want)
 		}
@@ -153,7 +153,7 @@ func TestNamedSessionInfoEquivalence(t *testing.T) {
 	for si, candidates := range slices {
 		infos := make([]Info, len(candidates))
 		for k, b := range candidates {
-			infos[k] = InfoFromPersistedBead(b)
+			infos[k] = infoFromPersistedBead(b)
 		}
 
 		wantBead, wantOK := FindCanonicalNamedSessionBead(candidates, spec)

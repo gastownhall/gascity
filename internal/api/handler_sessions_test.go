@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5" //nolint:gosec // Kimi uses MD5 as its documented workdir storage key.
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,15 +13,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -36,6 +40,45 @@ func newSessionFakeState(t *testing.T) *fakeState {
 }
 
 const testEventTimeout = 5 * time.Second
+
+// streamHeaderCommitTimeout bounds how long the stopped-stream tests wait for
+// committed status headers. The server normally flushes them within a few
+// milliseconds, but client and server share one test process, and full-suite
+// load has stalled that process for 2.4 s and 4.8 s (ga-kaca7z). The bound
+// only has to catch headers that never arrive.
+const streamHeaderCommitTimeout = 15 * time.Second
+
+func sameCanonicalTestPath(got, want string) bool {
+	canonicalGot, gotErr := filepath.EvalSymlinks(got)
+	canonicalWant, wantErr := filepath.EvalSymlinks(want)
+	if gotErr != nil || wantErr != nil {
+		return filepath.Clean(got) == filepath.Clean(want)
+	}
+	return canonicalGot == canonicalWant
+}
+
+func TestSameCanonicalTestPathResolvesSymlinkAliases(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir real dir: %v", err)
+	}
+	realPath := filepath.Join(realDir, "context.jsonl")
+	if err := os.WriteFile(realPath, []byte("transcript\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	aliasDir := filepath.Join(filepath.Dir(realDir), "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Fatalf("symlink real dir: %v", err)
+	}
+	aliasPath := filepath.Join(aliasDir, filepath.Base(realPath))
+
+	if !sameCanonicalTestPath(aliasPath, realPath) {
+		t.Fatalf("symlink aliases should identify the same path: got %q, want %q", aliasPath, realPath)
+	}
+	if sameCanonicalTestPath(aliasPath, filepath.Join(realDir, "missing.jsonl")) {
+		t.Fatal("distinct paths must not compare equal")
+	}
+}
 
 func decodeAsyncAccepted(t *testing.T, body io.Reader) asyncAcceptedBody {
 	t.Helper()
@@ -197,8 +240,8 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 
 func suspendSessionForPermissionModeTest(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(id); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), id, false); err != nil {
 		t.Fatalf("suspend session: %v", err)
 	}
 }
@@ -264,7 +307,7 @@ func (s *partialPrimeSessionStore) List(query beads.ListQuery) ([]beads.Bead, er
 	return rows, nil
 }
 
-func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.T) {
+func TestSessionReadModelInfosFallsBackAfterPartialCachePrime(t *testing.T) {
 	t.Parallel()
 
 	backing := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
@@ -295,16 +338,21 @@ func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.
 		t.Fatalf("Prime: %v", err)
 	}
 
-	rows, err := listSessionBeadsForReadModel(cache)
-	var partial *beads.PartialResultError
-	if !errors.As(err, &partial) {
-		t.Fatalf("listSessionBeadsForReadModel error = %v, want *PartialResultError", err)
+	// A partial prime makes the cache peek miss, so the typed feed falls through
+	// to the direct union (the backing label leg runs) and folds the partial into
+	// the partial-error envelope while still serving the survivor.
+	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: cache}))
+	if err != nil {
+		t.Fatalf("sessionReadModelInfos error = %v, want nil (partial folded into the envelope)", err)
+	}
+	if len(partialErrors) != 1 {
+		t.Fatalf("partialErrors = %v, want exactly one folded partial error", partialErrors)
 	}
 	if backing.labelListCalls != 1 {
 		t.Fatalf("label List calls = %d, want 1 backing fallback after partial prime", backing.labelListCalls)
 	}
-	if len(rows) != 1 || rows[0].ID != survivor.ID {
-		t.Fatalf("rows = %+v, want partial survivor %s", rows, survivor.ID)
+	if len(infos) != 1 || infos[0].ID != survivor.ID {
+		t.Fatalf("infos = %+v, want partial survivor %s", infos, survivor.ID)
 	}
 }
 
@@ -716,8 +764,8 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
 
 	// Suspend one.
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
 
@@ -746,28 +794,11 @@ func TestHandleSessionListPagination(t *testing.T) {
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S2")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S3")
 
-	// Limit without cursor truncates but returns no next_cursor.
+	// A truncated cursor-less page carries the keyset continuation cursor —
+	// the old offset scheme silently cut here, leaving the remainder
+	// unfetchable (the #3208 defect class).
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?limit=2"), nil)
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("limit-only: status %d", w.Code)
-	}
-	var resp listResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	items, _ := resp.Items.([]any)
-	if len(items) != 2 {
-		t.Errorf("limit-only: got %d items, want 2", len(items))
-	}
-	if resp.NextCursor != "" {
-		t.Errorf("limit-only: got next_cursor %q, want empty (no cursor mode)", resp.NextCursor)
-	}
-
-	// Cursor mode: first page.
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", cityURL(fs, "/sessions?cursor=&limit=2"), nil)
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("page1: status %d", w.Code)
@@ -784,10 +815,10 @@ func TestHandleSessionListPagination(t *testing.T) {
 		t.Errorf("page1: total = %d, want 3", page1.Total)
 	}
 	if page1.NextCursor == "" {
-		t.Fatal("page1: expected next_cursor, got empty")
+		t.Fatal("page1: expected next_cursor on a truncated page, got empty")
 	}
 
-	// Cursor mode: second page.
+	// Follow the keyset cursor to the final page.
 	w = httptest.NewRecorder()
 	r = httptest.NewRequest("GET", cityURL(fs, "/sessions?cursor=")+page1.NextCursor+"&limit=2", nil)
 	h.ServeHTTP(w, r)
@@ -802,8 +833,52 @@ func TestHandleSessionListPagination(t *testing.T) {
 	if len(items2) != 1 {
 		t.Errorf("page2: got %d items, want 1", len(items2))
 	}
+	if page2.Total != 3 {
+		t.Errorf("page2: total = %d, want 3 (full-set meaning, constant across a walk)", page2.Total)
+	}
 	if page2.NextCursor != "" {
 		t.Errorf("page2: got next_cursor %q, want empty (last page)", page2.NextCursor)
+	}
+}
+
+func TestHandleSessionListEnrichesOnlyRequestedPage(t *testing.T) {
+	fs := newSessionFakeState(t)
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S2")
+	createTestSession(t, fs.cityBeadStore, fs.sp, "S3")
+	counting := &getCountingStore{Store: fs.cityBeadStore}
+	fs.cityBeadStore = counting
+	fs.sp.Calls = nil
+
+	h := newTestCityHandler(t, fs)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?limit=1&peek=true"), nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+		Total int               `json:"total"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Total != 3 {
+		t.Fatalf("items/total = %d/%d, want 1/3", len(resp.Items), resp.Total)
+	}
+	peekCalls := 0
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Peek" {
+			peekCalls++
+		}
+	}
+	if peekCalls != 1 {
+		t.Fatalf("Peek calls = %d, want 1 for the requested page", peekCalls)
+	}
+	if got := counting.gets.Load(); got != 0 {
+		t.Fatalf("store.Get calls = %d, want 0 for the Huma session-list read model", got)
 	}
 }
 
@@ -911,15 +986,158 @@ func TestHandleSessionListUsesCachedSessionBeadsWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
-	fs := newSessionFakeState(t)
+// newHermeticCodexSessionSearchPath keeps Codex's always-merged default root
+// inside test-owned HOME while preserving a separate configured search path.
+func newHermeticCodexSessionSearchPath(t *testing.T) string {
+	t.Helper()
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
 		t.Fatalf("MkdirAll default codex sessions: %v", err)
 	}
-	searchBase := t.TempDir()
+	return t.TempDir()
+}
+
+const codexTestContextWindow = 258_400
+
+// writeCanonicalCodexTelemetryRollout writes the three real Codex rollout
+// records needed by session telemetry: session_meta identifies the rollout,
+// turn_context carries the model, and event_msg/token_count carries the latest
+// prompt usage and provider-reported context window. Codex input_tokens already
+// includes cached_input_tokens, so cached tokens are deliberately non-zero to
+// catch callers that incorrectly add or subtract them when computing context
+// occupancy.
+func writeCanonicalCodexTelemetryRollout(t *testing.T, root string, ts time.Time, sessionKey, workDir, model string, inputTokens, cachedInputTokens int) {
+	t.Helper()
+
+	local := ts.In(time.Local)
+	dir := filepath.Join(root, local.Format("2006"), local.Format("01"), local.Format("02"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll Codex rollout dir: %v", err)
+	}
+	path := filepath.Join(dir, "rollout-"+local.Format("2006-01-02T15-04-05")+"-"+sessionKey+".jsonl")
+	outputTokens := 400
+	reasoningTokens := 100
+	lastTotalTokens := inputTokens + outputTokens
+	// Keep cumulative usage far above the current request so the assertions
+	// catch code that mistakes lifetime spend for current context occupancy.
+	cumulativeInputTokens := inputTokens + 600_000
+	cumulativeCachedInputTokens := cachedInputTokens + 300_000
+	cumulativeOutputTokens := outputTokens + 25_000
+	cumulativeTotalTokens := cumulativeInputTokens + cumulativeOutputTokens
+	lines := []string{
+		fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":%q,"timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.121.0","source":"cli","model_provider":"openai"}}`, ts.UTC().Format(time.RFC3339Nano), sessionKey, ts.UTC().Format(time.RFC3339Nano), workDir),
+		fmt.Sprintf(`{"timestamp":%q,"type":"turn_context","payload":{"turn_id":"019d9845-45f6-70d2-86e8-53d8a44a830f","cwd":%q,"current_date":%q,"timezone":"Etc/UTC","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"model":%q,"personality":"pragmatic"}}`, ts.Add(100*time.Millisecond).UTC().Format(time.RFC3339Nano), workDir, ts.Format("2006-01-02"), model),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d,"reasoning_output_tokens":%d,"total_tokens":%d},"last_token_usage":{"input_tokens":%d,"cached_input_tokens":%d,"output_tokens":%d,"reasoning_output_tokens":%d,"total_tokens":%d},"model_context_window":%d},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1776394093},"secondary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1776980893},"credits":null,"plan_type":"pro"}}}`, ts.Add(200*time.Millisecond).UTC().Format(time.RFC3339Nano), cumulativeInputTokens, cumulativeCachedInputTokens, cumulativeOutputTokens, reasoningTokens, cumulativeTotalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningTokens, lastTotalTokens, codexTestContextWindow),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile Codex rollout: %v", err)
+	}
+}
+
+func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := newHermeticCodexSessionSearchPath(t)
+	workDir := t.TempDir()
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+
+	type wantTelemetry struct {
+		info       session.Info
+		sessionKey string
+		model      string
+		pct        int
+	}
+	wants := []wantTelemetry{
+		{sessionKey: "019e9966-aaaa-7000-8000-26a2dd7e15b3", model: "gpt-5.4", pct: 10},
+		{sessionKey: "019e9966-bbbb-7000-8000-26a2dd7e15b3", model: "gpt-5.5", pct: 50},
+	}
+	inputTokens := []int{25_840, 129_200}
+	cachedInputTokens := []int{5_840, 29_200}
+	now := time.Now()
+	for i := range wants {
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+			Template: "myrig/worker",
+			Title:    fmt.Sprintf("Codex Chat %d", i+1),
+			Command:  "codex",
+			WorkDir:  workDir,
+			// The concrete configured name need not contain "codex"; the
+			// persisted provider_kind is the canonical transcript family.
+			Provider: "remote-openai",
+			Env:      nil,
+			Resume:   session.ProviderResume{},
+			Hints:    runtime.Config{},
+			ExtraMeta: map[string]string{
+				"session_origin": "manual",
+				"provider_kind":  "codex",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create Codex session %d: %v", i+1, err)
+		}
+		if err := mgr.PersistSessionKey(info.ID, wants[i].sessionKey); err != nil {
+			t.Fatalf("PersistSessionKey(%s): %v", info.ID, err)
+		}
+		wants[i].info = info
+		writeCanonicalCodexTelemetryRollout(t, searchBase, now, wants[i].sessionKey, workDir, wants[i].model, inputTokens[i], cachedInputTokens[i])
+	}
+
+	// Wrap only after all session setup so any Get call below belongs to the
+	// session-list read path under test, not fixture creation or key capture.
+	counting := &getCountingStore{Store: fs.cityBeadStore}
+	fs.cityBeadStore = counting
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/sessions?template=myrig%2Fworker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != len(wants) {
+		t.Fatalf("got %d items, want %d: %#v", len(resp.Items), len(wants), resp.Items)
+	}
+	byID := make(map[string]sessionResponse, len(resp.Items))
+	for _, item := range resp.Items {
+		byID[item.ID] = item
+	}
+	for _, want := range wants {
+		got, ok := byID[want.info.ID]
+		if !ok {
+			t.Errorf("missing session %s in list response", want.info.ID)
+			continue
+		}
+		if !got.Running {
+			t.Errorf("session %s Running = false, want true", want.info.ID)
+		}
+		if got.Model != want.model {
+			t.Errorf("session %s Model = %q, want %q", want.info.ID, got.Model, want.model)
+		}
+		if got.ContextPct == nil || *got.ContextPct != want.pct {
+			t.Errorf("session %s ContextPct = %v, want %d", want.info.ID, got.ContextPct, want.pct)
+		}
+		if got.ContextWindow == nil || *got.ContextWindow != codexTestContextWindow {
+			t.Errorf("session %s ContextWindow = %v, want %d", want.info.ID, got.ContextWindow, codexTestContextWindow)
+		}
+	}
+	if got := counting.gets.Load(); got != 0 {
+		t.Fatalf("store.Get calls = %d, want 0 for keyed Codex session-list telemetry", got)
+	}
+}
+
+func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -934,17 +1152,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 		t.Fatalf("SessionKey = %q, want empty for codex provider without SessionIDFlag", info.SessionKey)
 	}
 
-	codexDir := filepath.Join(searchBase, "2026", "04", "18")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	codexPayload := strings.Join([]string{
-		fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir),
-		`{"type":"assistant","message":{"model":"gpt-5.5","usage":{"input_tokens":1000}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), []byte(codexPayload), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	writeCanonicalCodexTelemetryRollout(t, searchBase, time.Now(), "019e9966-cccc-7000-8000-26a2dd7e15b3", workDir, "gpt-5.5", 25_840, 5_840)
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/sessions?template=myrig%2Fworker"), nil)
 	rec := httptest.NewRecorder()
@@ -962,20 +1170,14 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	if len(resp.Items) != 1 || resp.Items[0].ID != info.ID {
 		t.Fatalf("items = %#v, want session %s", resp.Items, info.ID)
 	}
-	if resp.Items[0].Model != "" || resp.Items[0].ContextPct != nil {
-		t.Fatalf("session list used workdir-only Codex transcript discovery: model=%q context=%v", resp.Items[0].Model, resp.Items[0].ContextPct)
+	if got := resp.Items[0]; got.Model != "" || got.ContextPct != nil || got.ContextWindow != nil || got.Activity != "" {
+		t.Fatalf("session list used foreign workdir-only Codex telemetry: model=%q context_pct=%v context_window=%v activity=%q", got.Model, got.ContextPct, got.ContextWindow, got.Activity)
 	}
 }
 
 func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
 	fs := newSessionFakeState(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
-	if err := os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755); err != nil {
-		t.Fatalf("MkdirAll default codex sessions: %v", err)
-	}
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -987,17 +1189,7 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 		t.Fatalf("Create: %v", err)
 	}
 
-	codexDir := filepath.Join(searchBase, "2026", "04", "18")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	codexPayload := strings.Join([]string{
-		fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`, workDir),
-		`{"type":"assistant","message":{"model":"gpt-5.5","usage":{"input_tokens":1000}}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "session.jsonl"), []byte(codexPayload), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	writeCanonicalCodexTelemetryRollout(t, searchBase, time.Now(), "019e9966-dddd-7000-8000-26a2dd7e15b3", workDir, "gpt-5.5", 25_840, 5_840)
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
 	rec := httptest.NewRecorder()
@@ -1015,6 +1207,12 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	}
 	if resp.Model != "gpt-5.5" {
 		t.Fatalf("model = %q, want gpt-5.5", resp.Model)
+	}
+	if resp.ContextPct == nil || *resp.ContextPct != 10 {
+		t.Fatalf("context_pct = %v, want 10", resp.ContextPct)
+	}
+	if resp.ContextWindow == nil || *resp.ContextWindow != codexTestContextWindow {
+		t.Fatalf("context_window = %v, want %d", resp.ContextWindow, codexTestContextWindow)
 	}
 }
 
@@ -1140,11 +1338,11 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
 
-	// Drain the session directly via the manager (the API surface for drain
-	// lives elsewhere; this test isolates the transition check).
+	// Drain the session the way the controller's drain-ack path does, the
+	// only writer of state=draining (this test isolates the transition check).
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
-		t.Fatalf("BeginDrain: %v", err)
+	if err := mgr.PersistedStore().ApplyPatch(info.ID, session.DrainAckStopPendingPatch(time.Now())); err != nil {
+		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
 
 	w := httptest.NewRecorder()
@@ -1642,34 +1840,64 @@ func TestHandleSessionWake(t *testing.T) {
 	}
 }
 
-func TestHandleSessionWakeStartsSuspendedRuntime(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
+// TestHandleSessionWakeRecordsWakeOnly is D8 rule 6 (CONTRACT v5.9): POST
+// /wake records the wake and hands the session to the controller; it never
+// starts a runtime in the controller process. A controller that will not
+// start the session says why, with the wake still recorded; it judges the
+// row after the wake. Kills the API wake's own start, a refusal that drops
+// the wake, and a refusal read from the pre-wake row.
+func TestHandleSessionWakeRecordsWakeOnly(t *testing.T) {
+	for name, refusal := range map[string]string{"starts": "", "will not start": "rig \"r\" is suspended"} {
+		t.Run(name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+			if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+				t.Fatalf("Suspend: %v", err)
+			}
+			state := &wakeRefusingState{fakeState: fs, refusal: refusal}
+			h := newTestCityHandlerWith(t, state, New(state))
+			startsBefore := fs.sp.CountCalls("Start", info.SessionName)
 
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Suspended Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-	if fs.sp.IsRunning(info.SessionName) {
-		t.Fatalf("session %q running after suspend", info.SessionName)
-	}
+			w := httptest.NewRecorder()
+			synctest.Test(t, func(*testing.T) {
+				h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil))
+				synctest.Wait()
+			})
 
-	w := httptest.NewRecorder()
-	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
-	h.ServeHTTP(w, r)
+			if refusal == "" && w.Code != http.StatusOK || refusal != "" && (w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "will not start")) {
+				t.Fatalf("status %d, body %s; want refusal %q", w.Code, w.Body.String(), refusal)
+			}
+			if n := fs.sp.CountCalls("Start", info.SessionName); n != startsBefore {
+				t.Fatalf("Start calls = %d, want the controller to start the session", n-startsBefore)
+			}
+			if got := fs.enqueuedKeys(); !slices.Contains(got, reconcilekey.Session(info.ID)) {
+				t.Fatalf("enqueued keys = %v, want the session handed to the controller", got)
+			}
+			b, err := fs.cityBeadStore.Get(info.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Metadata["wake_request"] == "" {
+				t.Fatalf("metadata = %v, want the wake recorded", b.Metadata)
+			}
+			if state.seen.WakeRequest == "" || state.seen.MetadataState == "suspended" {
+				t.Fatalf("refuser read %+v, want the row after the wake", state.seen)
+			}
+		})
+	}
+}
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	deadline := time.Now().Add(testEventTimeout)
-	for !fs.sp.IsRunning(info.SessionName) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatalf("session %q should be running after async POST /wake start", info.SessionName)
-	}
+// wakeRefusingState is a controller that names why it will not start.
+type wakeRefusingState struct {
+	*fakeState
+	refusal string
+	seen    session.Info
+}
+
+func (s *wakeRefusingState) WakeStartRefusal(info session.Info) (string, bool) {
+	s.seen = info
+	return s.refusal, true
 }
 
 func TestHandleSessionWakeClosed(t *testing.T) {
@@ -1679,8 +1907,8 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	_ = mgr.Close(info.ID)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	_ = mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID)
 
 	w := httptest.NewRecorder()
 	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
@@ -2007,6 +2235,50 @@ func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 	}
 }
 
+// TestHandleSessionRenameBlankTitle covers the whitespace-only titles that
+// pass Huma's minLength:"1": they must come back as a 400 that names the
+// problem, not reach the store (where bd answers "title is required", which
+// the API surfaced as a 500) and not blank the stored title.
+func TestHandleSessionRenameBlankTitle(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		suffix string
+		body   string
+	}{
+		{name: "rename", method: http.MethodPost, suffix: "/rename", body: `{"title":"   "}`},
+		{name: "patch", method: http.MethodPatch, suffix: "", body: `{"title":" \t "}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+
+			req := httptest.NewRequest(tc.method, cityURL(fs, "/session/")+info.ID+tc.suffix, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-GC-Request", "true")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "title cannot be empty") {
+				t.Fatalf("body = %s, want it to name the blank title", w.Body.String())
+			}
+			got, err := fs.cityBeadStore.Get(info.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Title != "Original" {
+				t.Fatalf("stored title = %q, want %q untouched", got.Title, "Original")
+			}
+		})
+	}
+}
+
 func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -2234,6 +2506,9 @@ func TestHumaHandleSessionCreateUsesACPTransportCommandForAgentTemplate(t *testi
 	}
 	if got, want := bead.Metadata["transport"], "acp"; got != want {
 		t.Fatalf("transport metadata = %q, want %q", got, want)
+	}
+	if got := bead.Metadata["session_origin"]; got != "ephemeral" {
+		t.Fatalf("session_origin = %q, want ephemeral for Huma agent create", got)
 	}
 }
 
@@ -2484,8 +2759,11 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	if success.Session.Alias != "sky" {
 		t.Fatalf("Alias = %q, want %q", success.Session.Alias, "sky")
 	}
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
+	// The async create enqueues after emitting its success event, so wait for
+	// the enqueue rather than reading the count immediately.
+	waitForEnqueuedKey(t, fs, reconcilekey.Session(success.Session.ID))
+	if got := fs.enqueueCalls(); got != 1 {
+		t.Fatalf("enqueueCalls = %d, want 1", got)
 	}
 }
 
@@ -2789,8 +3067,8 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "async session creation is only supported for configured agent templates") {
 		t.Fatalf("body = %q, want provider async guidance", w.Body.String())
 	}
-	if fs.pokeCount != 0 {
-		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
+	if got := fs.enqueueCalls(); got != 0 {
+		t.Fatalf("enqueueCalls = %d, want 0", got)
 	}
 }
 
@@ -4068,7 +4346,7 @@ func TestHandleSessionPermissionModePreservesProviderCreateOptions(t *testing.T)
 		t.Fatalf("response options.effort = %q, want high from create-time provider option", got)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.Get(success.Session.ID)
 	if err != nil {
 		t.Fatalf("Get session: %v", err)
@@ -4229,7 +4507,7 @@ func TestHandleSessionGetUsesAgentDefaultsForConfiguredNamedSession(t *testing.T
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "worker", Command: "echo test", WorkDir: "/tmp", Provider: "test-agent", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -4279,7 +4557,7 @@ func TestHandleSessionGetUsesLegacyProviderKindForNameCollision(t *testing.T) {
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "codex", Title: "codex", Command: "echo", WorkDir: "/tmp/provider", Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -4551,8 +4829,8 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -4572,7 +4850,7 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello","resume":true}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -4880,13 +5158,13 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Alias: "myrig/worker", ExplicitName: "", Template: "myrig/worker", Title: "Historic Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -5348,7 +5626,7 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5363,7 +5641,7 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -5479,6 +5757,91 @@ func TestHandleSessionTranscriptAfterCursorRaw(t *testing.T) {
 	}
 }
 
+func TestHandleSessionTranscriptCursorPaginationMetadata(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"second\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"third\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"fourth\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{
+			name:    "city-huma",
+			path:    cityURL(fs, "/session/") + info.ID + "/transcript",
+			handler: h,
+		},
+		{
+			name:    "legacy",
+			path:    "/v0/session/" + info.ID + "/transcript",
+			handler: srv.legacySessionHandler(),
+		},
+	}
+	directions := []struct {
+		name      string
+		query     string
+		wantOlder bool
+		wantNewer bool
+	}{
+		{name: "before", query: "before=3", wantNewer: true},
+		{name: "after", query: "after=2", wantOlder: true},
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, direction := range directions {
+				t.Run(surface.name+"/"+format+"/"+direction.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					path := surface.path + "?format=" + format + "&" + direction.query
+					r := httptest.NewRequest(http.MethodGet, path, nil)
+					surface.handler.ServeHTTP(w, r)
+
+					if w.Code != http.StatusOK {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+					}
+					var response struct {
+						Pagination *sessionlog.PaginationInfo `json:"pagination"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+						t.Fatalf("decode transcript response: %v", err)
+					}
+					if response.Pagination == nil {
+						t.Fatal("pagination metadata is nil")
+					}
+					if response.Pagination.TotalMessageCount != 4 || response.Pagination.ReturnedMessageCount != 2 {
+						t.Fatalf("pagination = %+v, want total=4 returned=2", response.Pagination)
+					}
+					if response.Pagination.HasOlderMessages != direction.wantOlder || response.Pagination.HasNewerMessages != direction.wantNewer {
+						t.Fatalf("pagination flags = older:%t newer:%t, want older:%t newer:%t", response.Pagination.HasOlderMessages, response.Pagination.HasNewerMessages, direction.wantOlder, direction.wantNewer)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -5512,12 +5875,11 @@ func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	}
 }
 
-func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
+func TestHandleSessionTranscriptMissingCursorReturnsConflict(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
@@ -5537,20 +5899,388 @@ func TestHandleSessionTranscriptAfterCursorNotFound(t *testing.T) {
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?after=nonexistent", nil)
-	h.ServeHTTP(w, r)
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{
+			name:    "city-huma",
+			path:    cityURL(fs, "/session/") + info.ID + "/transcript",
+			handler: h,
+		},
+		{
+			name:    "legacy",
+			path:    "/v0/session/" + info.ID + "/transcript",
+			handler: srv.legacySessionHandler(),
+		},
+	}
+	formats := []string{"conversation", "raw", "structured"}
+	directions := []string{"before", "after"}
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	for _, surface := range surfaces {
+		for _, format := range formats {
+			for _, direction := range directions {
+				t.Run(surface.name+"/"+format+"/"+direction, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					path := surface.path + "?format=" + format + "&" + direction + "=nonexistent"
+					r := httptest.NewRequest(http.MethodGet, path, nil)
+					surface.handler.ServeHTTP(w, r)
+
+					if w.Code != http.StatusConflict {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+					}
+					if got := strings.Split(w.Header().Get("Content-Type"), ";")[0]; got != "application/problem+json" {
+						t.Fatalf("Content-Type = %q, want application/problem+json", w.Header().Get("Content-Type"))
+					}
+
+					var problem struct {
+						Type   string `json:"type"`
+						Title  string `json:"title"`
+						Status int    `json:"status"`
+						Detail string `json:"detail"`
+						Code   string `json:"code"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+						t.Fatalf("decode problem details: %v", err)
+					}
+					if problem.Type != "urn:gascity:error:transcript-cursor-invalidated" {
+						t.Errorf("type = %q, want transcript cursor invalidation URN", problem.Type)
+					}
+					if problem.Code != "transcript-cursor-invalidated" {
+						t.Errorf("code = %q, want transcript-cursor-invalidated", problem.Code)
+					}
+					if problem.Title != "Transcript Cursor Invalidated" {
+						t.Errorf("title = %q, want Transcript Cursor Invalidated", problem.Title)
+					}
+					if problem.Status != http.StatusConflict {
+						t.Errorf("problem status = %d, want %d", problem.Status, http.StatusConflict)
+					}
+					if !strings.Contains(problem.Detail, "nonexistent") {
+						t.Errorf("detail = %q, want missing cursor", problem.Detail)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSessionTranscriptAndStreamDuplicateEntryIDReturnsConflict(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "copilot",
+		WorkDir:  workDir,
+		Provider: "copilot",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
 
-	var resp SessionStreamMessageEvent
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	path := filepath.Join(searchBase, "copilot-session", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir Copilot fixture: %v", err)
 	}
-	if len(resp.Turns) != 2 {
-		t.Fatalf("got %d turns, want 2 (cursor not found = full set)", len(resp.Turns))
+	body := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session.start","data":{"cwd":%q}}`, workDir),
+		`{"type":"user.message","data":{"content":"zero"},"id":"duplicate"}`,
+		`{"type":"assistant.message","data":{"content":"one"},"id":"duplicate"}`,
+		`{"type":"user.message","data":{"content":"two"},"id":"copilot-2"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write Copilot fixture: %v", err)
+	}
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/transcript", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/transcript", handler: srv.legacySessionHandler()},
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, direction := range []string{"before", "after"} {
+				t.Run(surface.name+"/"+format+"/"+direction, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					r := httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+direction+"=duplicate", nil)
+					surface.handler.ServeHTTP(w, r)
+
+					if w.Code != http.StatusConflict {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+					}
+					if got := strings.Split(w.Header().Get("Content-Type"), ";")[0]; got != "application/problem+json" {
+						t.Fatalf("Content-Type = %q, want application/problem+json", w.Header().Get("Content-Type"))
+					}
+					var problem struct {
+						Code   string `json:"code"`
+						Detail string `json:"detail"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+						t.Fatalf("decode problem details: %v", err)
+					}
+					if problem.Code != "transcript-cursor-invalidated" {
+						t.Fatalf("problem code = %q, want transcript-cursor-invalidated", problem.Code)
+					}
+					if !strings.Contains(problem.Detail, "duplicate") {
+						t.Fatalf("detail = %q, want duplicate entry ID", problem.Detail)
+					}
+				})
+			}
+		}
+	}
+
+	streamSurfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/stream", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/stream", handler: srv.legacySessionHandler()},
+	}
+	for _, surface := range streamSurfaces {
+		t.Run(surface.name+"/stream", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, surface.path+"?format=structured", nil)
+			surface.handler.ServeHTTP(w, r)
+
+			if w.Code != http.StatusConflict {
+				t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+			}
+			if got := strings.Split(w.Header().Get("Content-Type"), ";")[0]; got != "application/problem+json" {
+				t.Fatalf("Content-Type = %q, want application/problem+json", w.Header().Get("Content-Type"))
+			}
+			var problem struct {
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+				t.Fatalf("decode problem details: %v", err)
+			}
+			if problem.Code != "transcript-cursor-invalidated" {
+				t.Fatalf("problem code = %q, want transcript-cursor-invalidated", problem.Code)
+			}
+			if !strings.Contains(problem.Detail, "duplicate") {
+				t.Fatalf("detail = %q, want duplicate entry ID", problem.Detail)
+			}
+		})
+	}
+}
+
+func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesOnRewrite(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "kimi",
+		WorkDir:  workDir,
+		Provider: "kimi",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	workHash := fmt.Sprintf("%x", md5.Sum([]byte(filepath.Clean(workDir))))
+	sessionDir := info.SessionKey
+	if sessionDir == "" {
+		sessionDir = "kimi-session"
+	}
+	path := filepath.Join(searchBase, workHash, sessionDir, "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir Kimi fixture: %v", err)
+	}
+	write := func(lines ...string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatalf("write Kimi fixture: %v", err)
+		}
+	}
+	initialLines := []string{
+		`{"role":"user","content":"zero"}`,
+		`{"role":"assistant","content":"one"}`,
+		`{"role":"user","content":"two"}`,
+	}
+	write(initialLines...)
+	initial, err := sessionlog.ReadProviderFile("kimi", path, 0)
+	if err != nil {
+		t.Fatalf("read initial Kimi fixture: %v", err)
+	}
+	if len(initial.Messages) != 3 {
+		t.Fatalf("initial Kimi messages = %d, want 3", len(initial.Messages))
+	}
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
+	}
+	discoveredPath, err := handle.TranscriptPath(context.Background())
+	if err != nil {
+		t.Fatalf("TranscriptPath: %v", err)
+	}
+	if !sameCanonicalTestPath(discoveredPath, path) {
+		t.Fatalf("discovered transcript path = %q, want %q", discoveredPath, path)
+	}
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/transcript", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/transcript", handler: srv.legacySessionHandler()},
+	}
+	directions := []struct {
+		name      string
+		cursor    string
+		wantOlder bool
+		wantNewer bool
+	}{
+		{name: "before", cursor: initial.Messages[2].UUID, wantNewer: true},
+		{name: "after", cursor: initial.Messages[1].UUID, wantOlder: true},
+	}
+	replacementLines := []string{
+		`{"role":"user","content":"replacement zero"}`,
+		`{"role":"assistant","content":"replacement one"}`,
+		`{"role":"user","content":"replacement two"}`,
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, direction := range directions {
+				t.Run(surface.name+"/"+format+"/"+direction.name, func(t *testing.T) {
+					write(initialLines[1:]...)
+					w := httptest.NewRecorder()
+					r := httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+direction.name+"="+direction.cursor, nil)
+					surface.handler.ServeHTTP(w, r)
+					if w.Code != http.StatusOK {
+						t.Fatalf("truncated transcript status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+					}
+					var response struct {
+						Pagination *sessionlog.PaginationInfo `json:"pagination"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+						t.Fatalf("decode truncated transcript: %v", err)
+					}
+					if response.Pagination == nil || response.Pagination.TotalMessageCount != 2 || response.Pagination.ReturnedMessageCount != 1 {
+						t.Fatalf("truncated pagination = %+v, want total=2 returned=1", response.Pagination)
+					}
+					if response.Pagination.HasOlderMessages != direction.wantOlder || response.Pagination.HasNewerMessages != direction.wantNewer {
+						t.Fatalf("truncated pagination flags = older:%t newer:%t, want older:%t newer:%t", response.Pagination.HasOlderMessages, response.Pagination.HasNewerMessages, direction.wantOlder, direction.wantNewer)
+					}
+
+					write(replacementLines...)
+					w = httptest.NewRecorder()
+					r = httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+direction.name+"="+direction.cursor, nil)
+					surface.handler.ServeHTTP(w, r)
+					if w.Code != http.StatusConflict {
+						t.Fatalf("rewritten transcript status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+					}
+					var problem struct {
+						Code string `json:"code"`
+					}
+					if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+						t.Fatalf("decode rewritten transcript problem: %v", err)
+					}
+					if problem.Code != "transcript-cursor-invalidated" {
+						t.Fatalf("rewritten transcript problem code = %q, want transcript-cursor-invalidated", problem.Code)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestHandleSessionTranscriptNoHistoryStillValidatesCursors(t *testing.T) {
+	isolateProviderDiscovery(t)
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template: "myrig/worker",
+		Title:    "Chat",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+		Hints:    runtime.Config{},
+		ExtraMeta: map[string]string{
+			"session_origin": "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	surfaces := []struct {
+		name    string
+		path    string
+		handler http.Handler
+	}{
+		{name: "city-huma", path: cityURL(fs, "/session/") + info.ID + "/transcript", handler: h},
+		{name: "legacy", path: "/v0/session/" + info.ID + "/transcript", handler: srv.legacySessionHandler()},
+	}
+	cases := []struct {
+		name       string
+		query      string
+		wantStatus int
+	}{
+		{name: "conflicting", query: "before=older&after=newer", wantStatus: http.StatusUnprocessableEntity},
+		{name: "missing-before", query: "before=missing", wantStatus: http.StatusConflict},
+		{name: "missing-after", query: "after=missing", wantStatus: http.StatusConflict},
+	}
+
+	for _, surface := range surfaces {
+		for _, format := range []string{"conversation", "raw", "structured"} {
+			for _, tc := range cases {
+				t.Run(surface.name+"/"+format+"/"+tc.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					r := httptest.NewRequest(http.MethodGet, surface.path+"?format="+format+"&"+tc.query, nil)
+					surface.handler.ServeHTTP(w, r)
+					if w.Code != tc.wantStatus {
+						t.Fatalf("got status %d, want %d; body: %s", w.Code, tc.wantStatus, w.Body.String())
+					}
+					if tc.wantStatus == http.StatusConflict {
+						var problem struct {
+							Code string `json:"code"`
+						}
+						if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+							t.Fatalf("decode problem details: %v", err)
+						}
+						if problem.Code != "transcript-cursor-invalidated" {
+							t.Fatalf("problem code = %q, want transcript-cursor-invalidated", problem.Code)
+						}
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -5846,12 +6576,12 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{ExplicitName: "sky", Template: "myrig/worker", Title: "Sky", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSessionNamedWithTransport: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -5859,14 +6589,12 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	req := newPostRequest(cityURL(fs, "/session/sky/messages"), strings.NewReader(`{"message":"hello"}`))
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
-	}
-
-	accepted := decodeAsyncAccepted(t, rec.Body)
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil {
-		t.Fatalf("expected session message to fail for closed session, got success")
+	// The deliverability gate rejects undeliverable targets synchronously
+	// now: a closed, non-configured session can never receive the message,
+	// so the caller gets 404 instead of a 202 whose failure surfaces only
+	// as an async event (the black-holed-delivery bug, 2026-07-18).
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
@@ -5944,12 +6672,12 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -5968,12 +6696,12 @@ func TestHandleSessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -5991,12 +6719,12 @@ func TestLegacySessionStreamRawStoppedWithoutOutputReturnsNotFound(t *testing.T)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: "No Output", Command: "echo test", WorkDir: t.TempDir(), Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -6017,7 +6745,7 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6032,7 +6760,7 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6069,7 +6797,7 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	srv.sessionLogSearchPaths = []string{searchBase}
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6083,14 +6811,14 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamHeaderCommitTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(fs, "/session/")+info.ID+"/stream", nil)
 	if err != nil {
@@ -6122,7 +6850,7 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6137,7 +6865,7 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -6736,6 +7464,100 @@ func TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute(t *testing.T) {
 	}
 }
 
+func TestSessionStreamStructuredHistoryStallEmitsPending(t *testing.T) {
+	prevStallTimeout := sessionStreamPendingStallTimeout
+	sessionStreamPendingStallTimeout = 10 * time.Second
+	defer func() {
+		sessionStreamPendingStallTimeout = prevStallTimeout
+	}()
+
+	for _, route := range []struct {
+		name string
+		city bool
+	}{
+		{name: "legacy"},
+		{name: "huma-city", city: true},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			searchBase := t.TempDir()
+			srv := New(fs)
+			srv.sessionLogSearchPaths = []string{searchBase}
+			var handler http.Handler = srv
+			if route.city {
+				handler = newTestCityHandlerWith(t, fs, srv)
+			}
+
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			resume := session.ProviderResume{
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			}
+			workDir := t.TempDir()
+			info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+				`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+				`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+			)
+			fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+				RequestID: "req-structured-1",
+				Kind:      "approval",
+				Prompt:    "Proceed?",
+			})
+
+			path := "/v0/session/" + info.ID + "/stream?format=structured"
+			if route.city {
+				path = cityURL(fs, "/session/") + info.ID + "/stream?format=structured"
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+			rec := newSyncResponseRecorder()
+			done := make(chan struct{})
+			go func() {
+				handler.ServeHTTP(rec, req)
+				close(done)
+			}()
+
+			if body := waitForRecorderSubstring(t, rec, `"structured_messages"`, time.Second); !strings.Contains(body, `"operation":"snapshot"`) {
+				t.Fatalf("structured stream body missing initial history snapshot: %s", body)
+			}
+			_ = waitForRecorderSubstring(t, rec, "req-structured-1", time.Second)
+			fs.sp.SetPendingInteraction(info.SessionName, nil)
+			logPath := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir), info.SessionKey+".jsonl")
+			logFile, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+			if openErr != nil {
+				t.Fatalf("open transcript for pending resolution: %v", openErr)
+			}
+			_, writeErr := fmt.Fprintln(logFile, `{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"resolved\"}","timestamp":"2025-01-01T00:00:02Z"}`)
+			closeErr := logFile.Close()
+			if writeErr != nil {
+				t.Fatalf("append resolved transcript entry: %v", writeErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("close resolved transcript entry: %v", closeErr)
+			}
+			body := waitForRecorderSubstring(t, rec, "event: pending_cleared", time.Second)
+			cancel()
+			<-done
+
+			if !strings.Contains(body, "event: pending") {
+				t.Fatalf("structured history stream missing pending SSE event: %s", body)
+			}
+			if !strings.Contains(body, "event: pending_cleared") {
+				t.Fatalf("structured history stream missing pending-cleared SSE event: %s", body)
+			}
+			if !strings.Contains(body, `"request_id":"req-structured-1"`) {
+				t.Fatalf("structured history stream pending-cleared event missing request ID: %s", body)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStreamRawRunningSessionWithoutTranscriptOpensImmediately(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -7006,9 +7828,17 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	}
 }
 
+func codexFixtureFilename(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return "rollout-2026-05-02T00-00-00-test.jsonl"
+	}
+	return "rollout-2026-05-02T00-00-00-" + sessionKey + ".jsonl"
+}
+
 func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
@@ -7033,9 +7863,10 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	codexPayload := strings.Join([]string{
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-edit","stdout":"Success. Updated the following files:\nM city.toml\n","stderr":"","success":true,"changes":{"city.toml":{"type":"update","unified_diff":"@@\n+# Created by Chris Sells\n [workspace]\n","move_path":null}},"status":"completed"}}`,
 		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
@@ -7070,9 +7901,121 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	}
 }
 
-func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T) {
+func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "codex", WorkDir: workDir, Provider: "codex", Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	codexDir := filepath.Join(searchBase, "2026", "05", "02")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll codex session dir: %v", err)
+	}
+	codexPayload := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2025-01-01T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: city.toml\n@@\n+# Created by Chris Sells\n [workspace]\n*** End Patch\n"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-edit","stdout":"Success. Updated the following files:\nM city.toml\n","stderr":"","success":true,"changes":{"city.toml":{"type":"update","unified_diff":"@@\n+# Created by Chris Sells\n [workspace]\n","move_path":null}},"status":"completed"}}`,
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"{\"output\":\"Success. Updated the following files:\\nM city.toml\\n\"}"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
+		t.Fatalf("WriteFile codex session: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=structured&tail=0", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionTranscriptGetResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Format != "structured" {
+		t.Fatalf("Format = %q, want structured; body: %s", resp.Format, w.Body.String())
+	}
+	if resp.SchemaVersion == "" {
+		t.Fatalf("structured transcript missing schema_version: %+v", resp)
+	}
+	if resp.History == nil || resp.History.TranscriptStreamID == "" {
+		t.Fatalf("structured transcript missing history envelope: %+v", resp.History)
+	}
+	if len(structuredTranscriptMessages(resp)) != 2 {
+		t.Fatalf("got %d structured messages, want 2; body: %s", len(structuredTranscriptMessages(resp)), w.Body.String())
+	}
+	first := structuredTranscriptMessages(resp)[0]
+	if len(first.Blocks) != 1 || first.Blocks[0].Type != "tool_use" || first.Blocks[0].Name != "apply_patch" {
+		t.Fatalf("first structured message blocks = %+v, want apply_patch tool_use", first.Blocks)
+	}
+	if first.Blocks[0].Input == nil || first.Blocks[0].Input.Kind != "patch" {
+		t.Fatalf("tool input = %+v, want provider-neutral patch input", first.Blocks[0].Input)
+	}
+	if first.Blocks[0].Input.FilePath != "city.toml" {
+		t.Fatalf("tool input file_path = %q, want city.toml", first.Blocks[0].Input.FilePath)
+	}
+	if !strings.Contains(first.Blocks[0].Input.Patch, "Created by Chris Sells") {
+		t.Fatalf("tool input lost patch payload: %+v", first.Blocks[0].Input)
+	}
+	second := structuredTranscriptMessages(resp)[1]
+	if len(second.Blocks) != 1 || second.Blocks[0].Type != "tool_result" {
+		t.Fatalf("second structured message blocks = %+v, want tool_result", second.Blocks)
+	}
+	if !strings.Contains(second.Blocks[0].Content, "Success. Updated the following files") {
+		t.Fatalf("tool result lost output payload: %+v", second.Blocks[0].Content)
+	}
+	if second.Blocks[0].ToolCallID != "call-edit" {
+		t.Fatalf("tool result tool_call_id = %q, want call-edit", second.Blocks[0].ToolCallID)
+	}
+	if second.Blocks[0].Structured == nil || second.Blocks[0].Structured.Kind != "edit" {
+		t.Fatalf("tool result structured = %+v, want provider-neutral edit result", second.Blocks[0].Structured)
+	}
+	if second.Blocks[0].Structured.FilePath != "city.toml" {
+		t.Fatalf("tool result structured file_path = %q, want city.toml", second.Blocks[0].Structured.FilePath)
+	}
+	if !strings.Contains(second.Blocks[0].Structured.Patch, "Created by Chris Sells") {
+		t.Fatalf("tool result structured patch lost result-side diff: %+v", second.Blocks[0].Structured)
+	}
+	if len(second.Blocks[0].Structured.PatchHunks) != 1 {
+		t.Fatalf("tool result structured patch_hunks = %#v, want one hunk", second.Blocks[0].Structured.PatchHunks)
+	}
+	hunk := second.Blocks[0].Structured.PatchHunks[0]
+	if hunk.FilePath != "city.toml" || !stringSliceContains(hunk.Lines, "+# Created by Chris Sells") {
+		t.Fatalf("tool result structured patch_hunks[0] = %+v, want city.toml created-by hunk", hunk)
+	}
+	if !strings.Contains(second.Blocks[0].Structured.Content, "Success. Updated the following files") {
+		t.Fatalf("tool result structured content lost output payload: %+v", second.Blocks[0].Structured)
+	}
+	wire, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal structured response: %v", err)
+	}
+	if strings.Contains(string(wire), "tool_use_id") {
+		t.Fatalf("structured response leaked provider-specific tool_use_id key: %s", wire)
+	}
+	if !strings.Contains(string(wire), "tool_call_id") {
+		t.Fatalf("structured response missing provider-neutral tool_call_id key: %s", wire)
+	}
+}
+
+func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
@@ -7098,7 +8041,7 @@ func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
@@ -7123,14 +8066,14 @@ func TestHandleSessionTranscriptConversationIncludesCodexErrorFrame(t *testing.T
 	if resp.Turns[0].Role != "system" {
 		t.Fatalf("turn role = %q, want system", resp.Turns[0].Role)
 	}
-	if !strings.Contains(resp.Turns[0].Text, "usage_limit_exceeded") || !strings.Contains(resp.Turns[0].Text, "You've hit your usage limit.") {
-		t.Fatalf("turn text = %q, want Codex error code and message", resp.Turns[0].Text)
+	if resp.Turns[0].Text != "You've hit your usage limit." {
+		t.Fatalf("turn text = %q, want normalized Codex system error message", resp.Turns[0].Text)
 	}
 }
 
-func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
+func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
+	searchBase := newHermeticCodexSessionSearchPath(t)
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
@@ -7154,7 +8097,7 @@ func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
 		fmt.Sprintf(`{"timestamp":"2025-01-01T00:00:00Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(codexDir, "rollout-2026-05-02T00-00-00-test.jsonl"), []byte(codexPayload), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(codexDir, codexFixtureFilename(info.SessionKey)), []byte(codexPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
@@ -7166,8 +8109,11 @@ func TestHandleSessionStreamConversationIncludesCodexErrorFrame(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "usage_limit_exceeded") || !strings.Contains(body, "You've hit your usage limit.") {
-		t.Fatalf("conversation stream body missing Codex error frame: %s", body)
+	if !strings.Contains(body, "You've hit your usage limit.") {
+		t.Fatalf("conversation stream body missing Codex system error: %s", body)
+	}
+	if strings.Contains(body, "codex_error_info") || strings.Contains(body, "event_msg") {
+		t.Fatalf("conversation stream leaked provider-native Codex error fields: %s", body)
 	}
 }
 
@@ -7467,8 +8413,8 @@ func TestHandleSessionKillClosedSessionIsOK(t *testing.T) {
 	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "kill-closed-test")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Close(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -7511,8 +8457,8 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "queue-test")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
-	if err := mgr.Suspend(info.ID); err != nil {
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -7529,5 +8475,65 @@ func TestHandleSessionMessageQueuesWhenSuspended(t *testing.T) {
 	success, failure := waitForSessionMessageResult(t, fs.eventProv, body.RequestID)
 	if success == nil {
 		t.Fatalf("session message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+}
+
+// The async command surfaces must refuse targets that can never deliver —
+// BEFORE returning 202. A typo'd session name used to be accepted with a
+// request_id while the message silently black-holed (the failure surfaced
+// only as an event nobody correlated; 2026-07-18: drifted Slack bindings
+// dropped cross-city wakes for days on exactly this).
+func TestSessionMessageAndSubmitRejectNonexistentTargetSynchronously(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	for _, path := range []string{"/session/no-such-session-xyz/messages", "/session/no-such-session-xyz/submit"} {
+		rec := httptest.NewRecorder()
+		req := newPostRequest(cityURL(fs, path), strings.NewReader(`{"message":"hello"}`))
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404; body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A real live session still gets the async 202 accept.
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Live")
+	rec := httptest.NewRecorder()
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("live session message status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSessionMessageAndSubmitRejectAmbiguousTargetWith409 pins the error
+// contract of the deliverability gate: an ambiguous bare target (one that
+// matches multiple live sessions) is a deterministic client addressing error,
+// so the async message/submit surfaces must reject it synchronously with 409 --
+// matching /stop, /respond, and the synchronous message twin -- not the 500
+// that humaStoreError produced before the gate routed through humaResolveError.
+func TestSessionMessageAndSubmitRejectAmbiguousTargetWith409(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	// Two open live sessions share the bare alias "dup-target", so resolving it
+	// yields session.ErrAmbiguous rather than not-found.
+	for _, name := range []string{"s-dup-a", "s-dup-b"} {
+		createTestSessionBead(t, fs.cityBeadStore, map[string]string{
+			"session_name": name,
+			"alias":        "dup-target",
+			"state":        "active",
+		}, "")
+	}
+
+	for _, path := range []string{"/session/dup-target/messages", "/session/dup-target/submit"} {
+		rec := httptest.NewRecorder()
+		req := newPostRequest(cityURL(fs, path), strings.NewReader(`{"message":"hello"}`))
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d, want %d (409 for ambiguous target); body=%s", path, rec.Code, http.StatusConflict, rec.Body.String())
+		}
 	}
 }

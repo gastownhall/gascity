@@ -35,6 +35,24 @@ func (f mkdirAllErrorFS) MkdirAll(path string, perm os.FileMode) error {
 	return f.FS.MkdirAll(path, perm)
 }
 
+// writeLocalCityPacks materializes a local pack (a directory holding
+// pack.toml) at each city-relative path, so an --include naming it resolves.
+// `gc rig add` rejects include tokens that resolve to no pack, so a test that
+// exercises import composition has to supply packs that actually exist.
+func writeLocalCityPacks(t *testing.T, cityPath string, relPaths ...string) {
+	t.Helper()
+	for _, rel := range relPaths {
+		dir := filepath.Join(cityPath, filepath.FromSlash(rel))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		packToml := fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", filepath.Base(dir))
+		if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func writeSchema2RigCity(t *testing.T, cityPath, workspaceName, cityToml, siteToml string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -213,6 +231,10 @@ esac
 	if err := json.Unmarshal(metaData, &meta); err != nil {
 		t.Fatalf("Unmarshal(metadata): %v", err)
 	}
+	// server, not proxied-server: a sqlite city is not bd-contract, so the
+	// proxied path — which would make this rig provider-owned by its binding,
+	// with no exec provider able to run its lifecycle — is not available to it
+	// (council R4-F1).
 	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "server" {
 		t.Fatalf("metadata dolt_mode = %q, want server", got)
 	}
@@ -718,6 +740,7 @@ func TestDoRigAdd_ReAddWarnsDifferingFlags(t *testing.T) {
 		"[workspace]\n\n[[rigs]]\nname = \"my-frontend\"\n",
 		fmt.Sprintf("workspace_name = \"test-city\"\n\n[[rig]]\nname = \"my-frontend\"\npath = %q\n", rigPath),
 	)
+	writeLocalCityPacks(t, cityPath, "packs/new")
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
@@ -892,6 +915,7 @@ func TestDoRigAdd_ExplicitIncludeSkipsUnusedDefaultRigImportErrors(t *testing.T)
 	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("not = [valid\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeLocalCityPacks(t, cityPath, "packs/custom")
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1093,9 +1117,9 @@ func TestDoRigListJSONBuildsSessionProviderOnce(t *testing.T) {
 
 	var calls int
 	orig := rigListSessionProvider
-	rigListSessionProvider = func() runtime.Provider {
+	rigListSessionProvider = func() (runtime.Provider, error) {
 		calls++
-		return &fakeAdoptionProvider{}
+		return &fakeAdoptionProvider{}, nil
 	}
 	t.Cleanup(func() { rigListSessionProvider = orig })
 
@@ -1399,6 +1423,9 @@ ref = "v1.2.3"
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
+	// The [packs.ops] source is a non-bundled remote, so rig add resolves its
+	// version and lock the way gc import add does; fake that network leg.
+	stubRigIncludeImportSeams(t, "1.2.3")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"ops"}, "", "", "", false, false, &stdout, &stderr)
@@ -1423,6 +1450,7 @@ ref = "v1.2.3"
 func TestDoRigAdd_WithMultiplePacks(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	writeLocalCityPacks(t, cityPath, "packs/planner", "packs/architect")
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1861,6 +1889,8 @@ func TestDoRigAdd_ExplicitIncludeOverridesDefault(t *testing.T) {
 
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BEADS", "file")
+
+	writeLocalCityPacks(t, cityPath, "packs/custom")
 
 	var stdout, stderr bytes.Buffer
 	// Explicit --include should override default_rig_includes while still
@@ -2925,7 +2955,11 @@ func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
 func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
-	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	provider := filepath.Join(cityPath, "gc-beads-bd")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+provider)
 	t.Setenv("GC_DOLT", "")
 
 	origEnsure := initDirIfReadyEnsureBeadsProvider
@@ -2942,6 +2976,10 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
 		initCalls = append(initCalls, dir)
+		entry, owned, err := providerScopeOwnership(cityPath, dir)
+		if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+			t.Fatalf("new rig ownership before provider init = (%+v, %t, %v)", entry, owned, err)
+		}
 		return nil
 	}
 
@@ -2951,7 +2989,9 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	}
 
 	var stdout, stderr bytes.Buffer
-	doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "fr", "", false, false, &stdout, &stderr)
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "fr", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd = %d, stderr=%s", code, stderr.String())
+	}
 	if len(initCalls) == 0 {
 		t.Fatalf("control: non-adopt rig add invoked initAndHookDir 0 times; stub not wired in? stderr=%s", stderr.String())
 	}
@@ -3182,6 +3222,12 @@ func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
 
 func TestRouteRigList_APIJSONPreservesFallbackContract(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
+	// This test exercises the render/fallback contract, not liveness. HQ running
+	// now derives from controllerStatusForCity (false with no live controller),
+	// so pin the seam true to keep asserting the API-render shape.
+	prevHQRunning := rigListHQRunning
+	rigListHQRunning = func(string) bool { return true }
+	defer func() { rigListHQRunning = prevHQRunning }()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

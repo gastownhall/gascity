@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // ctxIgnoringStartProvider blocks inside Start until either startDelay
@@ -39,17 +40,17 @@ func (p *ctxIgnoringStartProvider) Start(ctx context.Context, name string, cfg r
 // verifies that a provider returning nil after the startup deadline cannot
 // mask the timeout as a successful wake.
 func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsDeadlineExceeded(t *testing.T) {
+	city := t.TempDir()
 	sp := &ctxIgnoringStartProvider{
 		Fake:       runtime.NewFake(),
 		startDelay: 500 * time.Millisecond,
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "deadline-witness",
-					"template":     "worker",
-				},
+			info: sessionpkg.Info{
+				SessionName:         "deadline-witness",
+				SessionNameMetadata: "deadline-witness",
+				Template:            "worker",
 			},
 			tp: TemplateParams{
 				Command:      "claude",
@@ -62,12 +63,15 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsDeadlineExceeded(t
 
 	const startupTimeout = 50 * time.Millisecond
 	before := time.Now()
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil, // store == nil uses RuntimeHandle path and skips bead-backed staleKey branch
+		nil,
 		startupTimeout,
+		1,
 	)
 	elapsed := time.Since(before)
 
@@ -110,17 +114,18 @@ func TestExecutePreparedStartWave_StartOutlivesDeadlineReportsDeadlineExceeded(t
 }
 
 func TestExecutePreparedStartWave_ResumeSessionKeyStaleCheckAfterInTimeStartStaysSuccess(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
+			info: seedSessionInfo(beads.Bead{
 				ID: "gc-resume",
 				Metadata: map[string]string{
 					"session_name": "resume-deadline-witness",
 					"session_key":  "resume-key",
 					"template":     "worker",
 				},
-			},
+			}),
 			tp: TemplateParams{
 				Command:      "claude --resume resume-key",
 				SessionName:  "resume-deadline-witness",
@@ -132,12 +137,15 @@ func TestExecutePreparedStartWave_ResumeSessionKeyStaleCheckAfterInTimeStartStay
 
 	const startupTimeout = 50 * time.Millisecond
 	before := time.Now()
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		startupTimeout,
+		1,
 	)
 	elapsed := time.Since(before)
 
@@ -168,6 +176,7 @@ func (p *ctxCancelingStartProvider) Start(ctx context.Context, name string, cfg 
 }
 
 func TestExecutePreparedStartWave_CanceledContextReportsCanceled(t *testing.T) {
+	city := t.TempDir()
 	parentCtx, cancel := context.WithCancel(context.Background())
 	sp := &ctxCancelingStartProvider{
 		Fake:   runtime.NewFake(),
@@ -175,11 +184,10 @@ func TestExecutePreparedStartWave_CanceledContextReportsCanceled(t *testing.T) {
 	}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "cancel-witness",
-					"template":     "worker",
-				},
+			info: sessionpkg.Info{
+				SessionName:         "cancel-witness",
+				SessionNameMetadata: "cancel-witness",
+				Template:            "worker",
 			},
 			tp: TemplateParams{
 				Command:      "claude",
@@ -190,12 +198,15 @@ func TestExecutePreparedStartWave_CanceledContextReportsCanceled(t *testing.T) {
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		parentCtx,
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -223,14 +234,14 @@ func (p *initializingAfterDeadlineProvider) Start(ctx context.Context, _ string,
 }
 
 func TestExecutePreparedStartWave_InitializingAfterDeadlineBacksOffSilently(t *testing.T) {
+	city := t.TempDir()
 	sp := &initializingAfterDeadlineProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
-			session: &beads.Bead{
-				Metadata: map[string]string{
-					"session_name": "initializing-witness",
-					"template":     "worker",
-				},
+			info: sessionpkg.Info{
+				SessionName:         "initializing-witness",
+				SessionNameMetadata: "initializing-witness",
+				Template:            "worker",
 			},
 			tp: TemplateParams{
 				Command:      "claude",
@@ -241,12 +252,15 @@ func TestExecutePreparedStartWave_InitializingAfterDeadlineBacksOffSilently(t *t
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		50*time.Millisecond,
+		1,
 	)
 
 	if len(results) != 1 {

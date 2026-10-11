@@ -73,6 +73,7 @@ func writeReachableProviderManagedDoltState(t *testing.T, cityPath string) int {
 	return port
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func occupyManagedDoltPort(t *testing.T, port int) {
 	t.Helper()
 
@@ -106,7 +107,8 @@ def _stop(*_args):
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 while True:
-    time.sleep(1)
+    conn, _ = sock.accept()
+    conn.close()
 `, strconv.Itoa(port))
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start managed port blocker: %v", err)

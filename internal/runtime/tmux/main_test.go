@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,10 +19,17 @@ import (
 func TestMain(m *testing.M) {
 	_ = os.Unsetenv(AgentSliceEnv)
 
-	tmuxSocketParent, err := os.MkdirTemp("/tmp", "gct-")
+	// NewSocketParentDir sweeps orphaned siblings left by a prior SIGKILL'd
+	// run before creating this run's own dir. tmuxSocketAliveSentinel must
+	// stay referenced for the process lifetime: the runtime finalizes
+	// unreachable os.Files, which would close the descriptor and release
+	// the lock, letting a concurrent sibling's sweep reclaim this still-
+	// active directory (ga-djbcqt).
+	tmuxSocketParent, sentinel, err := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
 	if err != nil {
 		panic("tmux tests: creating socket parent: " + err.Error())
 	}
+	tmuxSocketAliveSentinel = sentinel
 	tmuxSocketRoot := filepath.Join(tmuxSocketParent, "tmux")
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		_ = os.RemoveAll(tmuxSocketParent)
@@ -38,6 +46,10 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(tmuxSocketParent)
 	os.Exit(code)
 }
+
+// tmuxSocketAliveSentinel pins the alive-sentinel flock on this process's
+// tmux socket parent dir for the binary's lifetime; see TestMain.
+var tmuxSocketAliveSentinel *os.File
 
 type mainTB struct{ testing.TB }
 

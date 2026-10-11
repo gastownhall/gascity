@@ -6,7 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // ErrNotFound is returned when a bead ID does not exist in the store.
@@ -21,13 +24,43 @@ var ErrNotFound = errors.New("bead not found")
 // absent bead should check errors.Is(err, ErrIDCollision).
 var ErrIDCollision = fmt.Errorf("bd resolved a different bead ID (substring collision): %w", ErrNotFound)
 
+// ErrPinnedIDOutsideNamespace is returned by a namespace-fenced store when a
+// create pins an id in a namespace that store does not serve. It is distinct
+// from a duplicate-id error, which says the store DOES serve the namespace and
+// already holds the row.
+//
+// A fenced store must wrap this rather than rely on its message: a provider
+// contract cannot demand error prose of an out-of-tree store, only a sentinel
+// it can wrap. See beadstest.RunPinnedIDFenceConformance.
+var ErrPinnedIDOutsideNamespace = errors.New("pinned id outside this store's namespaces")
+
+// ErrMetadataParse is returned when a bead exists but its stored metadata
+// cannot be decoded into the Store object model.
+var ErrMetadataParse = errors.New("bead metadata parse")
+
 // ErrCacheUnavailable is returned by cache-only read handles when the cache
 // cannot answer without consulting the backing store.
 var ErrCacheUnavailable = errors.New("bead cache unavailable")
 
+// ErrRowRefreshFenced is returned by CachingStore.RefreshRow when a local
+// write, deletion or applied event newer than its backing read owns the row,
+// or a reconcile or full Prime merged since the read began, so the read
+// installed nothing. The caller may retry.
+var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
+
+// ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
+// projection stops when the caller's context is canceled.
+var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
+
 // ErrStoreClosed is returned when a caller uses a bead store after its backing
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
+
+// ErrSQLiteBusyExhausted marks a SQLiteStore write whose every attempt failed
+// with SQLITE_BUSY, so it committed nothing: each attempt is one transaction,
+// and SQLite applies no statement, and commits no transaction, that reports
+// BUSY. The error's message stays the driver's.
+var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
@@ -36,6 +69,21 @@ var ErrParentProjectionSuperseded = errors.New("parent projection superseded by 
 // ErrConditionalReleaseUnsupported reports that a store cannot atomically
 // release an assignment based on the current status and assignee.
 var ErrConditionalReleaseUnsupported = errors.New("conditional assignment release unsupported")
+
+// ErrConditionalWriteUnsupported reports that this store (or the bd behind it)
+// cannot perform conditional writes. Latching it per store instance is the
+// capability veto: no code path in internal/beads converts it into an
+// unconditional write. See ConditionalWriter for the full contract.
+var ErrConditionalWriteUnsupported = errors.New("conditional writes unsupported")
+
+// ErrClaimUnsupported reports that a store cannot perform the two-argument
+// compare-and-swap Claim(id, assignee) capability. It is the same shape as
+// ErrConditionalReleaseUnsupported: a capability veto a forwarding wrapper
+// (beadPolicyStore, CachingStore, the emitting class store) returns when its
+// inner store does not implement the optional
+// `Claim(id, assignee string) (Bead, bool, error)` interface, rather than a
+// conflict or not-found outcome from an inner store that does.
+var ErrClaimUnsupported = errors.New("claim unsupported")
 
 // ErrBDSilentFallback reports that a bd-backed store operation saw bd exit
 // successfully after falling back to on-disk JSONL auto-import mode. BdStore
@@ -55,14 +103,65 @@ type Bead struct {
 	Priority  *int      `json:"priority,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
-	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
-	Assignee    string    `json:"assignee,omitempty"`
-	From        string    `json:"from,omitempty"`
-	ParentID    string    `json:"parent,omitempty"`      // step → molecule; matches bd wire format
-	Ref         string    `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string  `json:"needs,omitempty"`       // dependency step refs
-	Description string    `json:"description,omitempty"` // step instructions
-	Labels      []string  `json:"labels,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+	Assignee  string    `json:"assignee,omitempty"`
+	From      string    `json:"from,omitempty"`
+	// ParentID is a CITY-SCOPED bead id held as a WEAK reference: step →
+	// molecule, matching bd's wire format.
+	//
+	// City-scoped, not store-scoped. A split city routes by CLASS, so a parent
+	// and its child are co-resident only when they classify the same way, and
+	// the cases where they do not are ordinary: a graph.v2 workflow whose root
+	// is a graph-class molecule in the binding hangs its steps off a work-class
+	// bead in a rig ledger. Nothing reconciles the two ledgers, and nothing
+	// should — a create that moved the child to reach its parent would mint it
+	// under the wrong prefix, which is unfixable afterwards.
+	//
+	// Weak, therefore, is the contract and not an admission. A store persists
+	// and filters this verbatim (Children and ListQuery.ParentID are string
+	// matches), and for any id in a namespace it does not serve it must never
+	// resolve, validate, rewrite, or place by it. A store that started
+	// rejecting an id it cannot see would break every cross-store molecule at
+	// once, and a store that started placing by it would strand the child in
+	// the parent's namespace, where no later copy can move it.
+	//
+	// The boundary is drawn at the namespace, not at the field, because that is
+	// where the backends can actually agree. A dangling id INSIDE a store's own
+	// namespace is a row that store can see the absence of, and the strong
+	// backends refuse it before writing anything; the weak ones cannot detect
+	// it at all. Which ids count as inside is read off the STORE, not off the
+	// child — a row carrying another ledger's prefix (a pinned id, a relic a
+	// migration copied in) does not move the boundary — and, on a backend whose
+	// library resolves same-prefix dependency targets itself, off the child's
+	// prefix as well. What must never be resolved is an id in a namespace
+	// neither of those names. That divergence is left explicit rather than
+	// papered over — what the conformance suite pins, and what every provider
+	// here owes except the one named next, is that a foreign parent is carried
+	// without question.
+	//
+	// MemStore, FileStore, SQLiteStore and the script-backed exec provider
+	// carry every parent verbatim, resolving none of them. NativeDoltStore
+	// carries a foreign one the same way and additionally refuses a dangling id
+	// inside the namespace it serves, before writing anything — the strong
+	// reading, which its library forces (issueops resolves a same-prefix
+	// dependency target itself, post-commit).
+	//
+	// The bd-CLI provider (BdStore) is the exception, and it is named rather
+	// than implied. It hands this field to bd as --parent on Create and Update,
+	// and bd resolves it unconditionally: an id bd cannot see fails the command
+	// outright, and one it can see supplies the child's id, so placement follows
+	// the parent's namespace instead of the child's class. That is bd's
+	// contract, not something this package layers over it, and the provider is
+	// left following the tool it drives. Nothing in CI can see the divergence
+	// either — the only conformance run over a real bd is skipped (ga-e7z613).
+	// ga-6od57 tracks making the provider comply or un-skipping that run; until
+	// one of them lands, a caller pointing a bd-backed store at a parent in
+	// another ledger gets a refusal, not a weak reference.
+	ParentID    string   `json:"parent,omitempty"`
+	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
+	Needs       []string `json:"needs,omitempty"`       // dependency step refs
+	Description string   `json:"description,omitempty"` // step instructions
+	Labels      []string `json:"labels,omitempty"`
 	// Metadata uses StringMap (not map[string]string) so decode tolerates the
 	// non-string JSON values the external bd CLI emits — `--set-metadata
 	// key=true` is type-inferred to a JSON boolean, and a strict decode of a
@@ -86,10 +185,58 @@ type Bead struct {
 	// nil or past means ready). Create paths preserve it; UpdateOpts does not
 	// mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
-	// IsBlocked carries bd's denormalized ready-work projection. Nil means the
-	// store did not provide the projection and cached ready falls back to
+	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
+	// means the store did not provide it and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CloseReason says why the bead was closed. It is empty while the bead is
+	// not closed, and when the closer gave no reason. bd-backed stores read
+	// bd's close_reason column (written by `bd close --reason`); stores that
+	// hold the whole row record the trimmed metadata.close_reason a closer
+	// stamped before closing, the same value BdStore and NativeDoltStore
+	// forward to their close. Reopening clears it.
+	CloseReason string `json:"close_reason,omitempty"`
+	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
+	// after richer statuses normalize to Gas City's three-state model. Cache
+	// notifications restore status="deferred" on the event wire so another
+	// process can reconstruct it; other JSON surfaces remain unchanged.
+	//
+	// No read surface exposes it, so the two projections of the same bead
+	// disagree by design: a direct .gc/events.jsonl reader sees the
+	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
+	// --json surfaces re-project through this struct and report status="open",
+	// defer_until=null, is_blocked=false — three signals that all read as
+	// "ready" for a bead ready deliberately excludes. An operator asking why a
+	// bead is not being picked up has nothing to read; giving the exclusion a
+	// derived read-only representation is a wire-design decision, not a
+	// consequence of this tag.
+	IndefinitelyDeferred bool `json:"-"`
+	// Revision is the store-internal optimistic-concurrency token for
+	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
+	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
+	// bead-event payload): the OpenAPI spec and generated clients are
+	// byte-untouched until the Stage-4 wire promotion flips this tag to
+	// json:"revision,omitempty". Because json:"-" also skips decode, stores are
+	// responsible for populating it internally by their own means — BdStore
+	// stamps it from bd's machine JSON via the bdIssue envelope (pre-#4682 bd
+	// omits it, leaving 0); the native Mem/File stores maintain it per bead, and
+	// FileStore must persist it out of band because json:"-" keeps it out of the
+	// on-disk []Bead too. A revision observed through a caching layer may lag its
+	// backing store until reconcile or CAS-failure eviction; callers read it only
+	// through ConditionalWriter (equality-only; see the revision contract).
+	Revision int64 `json:"-"`
+	// ClaimFence is the store-internal ownership fence: a monotonic counter
+	// bumped ONLY on ownership transitions — a claim/unclaim/release, an
+	// assignee change, or a reopen (closed→open) — never by content mutations
+	// (title, notes, metadata) or a close. It mirrors beads' claim_fence column
+	// (migration 0055) so GC-side guarded-release paths and their unit tests are
+	// non-vacuous: a guarded release compares it (bd --if-fence) and a stale
+	// incarnation holding an old fence gets a typed conflict instead of
+	// unclaiming a bead a fresh owner already re-claimed. Like Revision it is
+	// json:"-" (off every HTTP/SSE wire path); the native Mem/File stores
+	// maintain it per bead and FileStore persists it out of band. A bd-backed
+	// store leaves it 0 until the pinned bd emits claim_fence.
+	ClaimFence int64 `json:"-"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -109,8 +256,384 @@ type UpdateOpts struct {
 // ConditionalAssignmentReleaser is implemented by stores that can release an
 // in-progress assignment only when the current status and assignee still match
 // the expected snapshot.
+//
+// FAMILY DIVERGENCE LEDGER (not pinned by any conformance suite today). The
+// implementations do not agree on two edges, and both became visible when
+// NativeDoltStore moved onto issueops.Releaser (ga-8tiw9). They are recorded
+// rather than reconciled because deciding WHICH answer is right is a contract
+// question with callers on both sides:
+//
+//   - RELEASABLE STATUS. MemStore, SQLiteStore and the pre-role NativeDoltStore
+//     release only from in_progress; a row that is open but still carries an
+//     assignee is a no-op for them. issueops.Releaser's transition is defined
+//     over open ∪ in_progress, so the role-backed NativeDoltStore releases that
+//     row. The role's answer is arguably the useful one — an open row bearing
+//     an assignee is precisely the orphaned claim gc's reconcilers exist to
+//     clear — but it is a widening, and no case in
+//     storebindingtest's graph suite distinguishes the two.
+//   - AN EMPTY EXPECTED HOLDER over an in_progress row whose assignee is empty.
+//     MemStore and the pre-role NativeDoltStore report true (they compare "" to
+//     "" and release). The role-backed NativeDoltStore reports (false, nil)
+//     without dialing: the role refuses a non-nil expectation of "" as
+//     ErrValidation, and a nil one would select the unconditional path whose
+//     ownership fence's subject is the ACTOR — which for gc is the city, never
+//     the holder. "Release a row nobody holds" describes no release, so the
+//     role's own model calls this ErrNotClaimed.
+//
+// FOLLOW-UP QUESTION for the conformance suite, open as ga-0o6h8j: should
+// RunConditionalWriterConformance (or storebindingtest's graph suite) pin one
+// semantic for each? Until one does, NativeDoltStore's and MemStore's current
+// answers are pinned side by side in
+// TestReleaseIfCurrentPinsTheFamilyDivergenceEdges, so a flip in either store
+// fails a test instead of passing silently.
 type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
+}
+
+// ConditionalAssigneeTransferer is implemented by stores that can move an
+// in-progress assignment from one exact assignee spelling to another only
+// while the bead still carries the expected holder -- the same capability
+// family as ConditionalAssignmentReleaser, with the opposite terminal
+// assignee (a new holder instead of none). See BdStore.TransferIfCurrent
+// (bdstore_conditional_release.go) and NativeDoltStore.TransferIfCurrent
+// (native_dolt_store_conditional.go) for the full per-store contract,
+// including the reassignment-steal fence each skips because the CAS names
+// the holder explicitly. A store that cannot atomically transfer reports
+// ErrConditionalTransferUnsupported, discovered the same way as every other
+// optional capability here: type-assert on the resolved store, never on a
+// wrapper.
+//
+// GROUNDWORK: no production caller depends on this interface yet. Outside
+// the forwarding wrappers, the only production TransferIfCurrent call is
+// cmd/gc's hookClaimRestampWithBdStore, on a BdStore it constructs itself.
+// CachingStore and cmd/gc's emitting class-store wrapper forward the
+// capability. Wrappers that forward ReleaseIfCurrent but not this include
+// ProxiedStore, the cmd/gc policy wrapper and splittest's StrictStore, so a
+// type assertion on any of them fails even over a capable store. Wire them
+// before the first caller relies on the capability through a wrapper.
+type ConditionalAssigneeTransferer interface {
+	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
+}
+
+// AssignmentGuardedUpdater is implemented by stores whose backend can apply an
+// update only while the bead still has an expected status and assignee,
+// checked inside the same write. It fences an assignment change on the facts
+// it was decided from where the store has no revision fence: BdStore without
+// --if-revision answers it with `bd update --if-status --if-assignee`.
+//
+// An empty expectedAssignee means the bead must be unassigned. UpdateIfAssignment
+// reports true when the update landed, and false with nothing written when the
+// status or assignee no longer match or the id resolves to no bead. A store
+// whose backend lacks the guard returns ErrConditionalWriteUnsupported, also
+// with nothing written. opts follows the UpdateIfMatch shape: no labels and no
+// parent, because the guard does not cover them.
+type AssignmentGuardedUpdater interface {
+	UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error)
+}
+
+// AssignmentGuardedUpdaterFor returns the guarded-update capability of store,
+// following declared conditional-writes resolution targets exactly as
+// MetadataCASWriterFor does. Like ConditionalWriterForTarget it applies no
+// rollout mode.
+func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
+	if store == nil {
+		return nil, false
+	}
+	updater, ok := followConditionalWritesResolveTarget(store).(AssignmentGuardedUpdater)
+	return updater, ok
+}
+
+// ConditionalWriter is implemented by stores that can apply a write only when
+// the caller's snapshot of the bead is still current. It is an optional store
+// capability, discovered like ConditionalAssignmentReleaser: type-assert on the
+// resolved store (or use ConditionalWriterFor), never on a wrapper.
+//
+// REVISION CONTRACT (normative — RunConditionalWriterConformance executes this
+// table against every implementing store, including real bd under the
+// integration build tag):
+//
+//   - Every mutated bead carries a nonzero opaque int64 revision. Callers may
+//     test it only for equality; arithmetic, ordering across beads, and gap
+//     inference are undefined. A token is never intentionally reused during one
+//     bead's observed lifetime. A never-mutated bead may read back as zero on a
+//     counter-backed store, so zero means "no usable token", not "revisions
+//     unsupported".
+//   - Every successful mutation of revision-guarded whole-row content —
+//     conditional or unconditional — mints a fresh nonzero revision. This
+//     covers row-backed Update fields, metadata writes, Close, and Reopen;
+//     reads never change it. A same-value update (setting a field to what it
+//     already holds) succeeds but may leave the revision unchanged.
+//     Separate label/parent persistence and derived or heartbeat fields are
+//     outside this guarantee.
+//   - Denormalized/derived projection columns are OUTSIDE this guarantee. bd
+//     maintains a denormalized is_blocked column on the issue row that other
+//     beads' dependency/close/route writes recompute (the same reason bd pins
+//     updated_at during that recompute); whether such a derived-state rewrite
+//     bumps the revision is backend-dependent and callers must not rely on
+//     either answer. This is why every consumer treats PreconditionFailedError
+//     as a re-read trigger, never as a conclusion about what changed.
+//   - The immediately prior token is stale after a whole-row mutation and is
+//     rejected; concurrent writes with the same observed revision have exactly
+//     one winner. Backends may generate either counters or random tokens.
+//
+// GRANULARITY CONTRACT: consumers may assume NEITHER value-level nor
+// revision-level conflict semantics. Backends differ — sqlite and the native
+// library implement CompareAndSetMetadataKey as server-side value-CAS (an
+// unrelated-key write does not conflict); BdStore emulates it over --if-revision
+// (an unrelated-key write CAN produce a spurious retry internally). Callers get
+// the value-CAS RESULT either way, but must not build timing or interference
+// assumptions on top of it.
+type ConditionalWriter interface {
+	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
+	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
+	// that persists ParentID through separate writes rejects it with
+	// *ConditionalUpdateFieldUnsupportedError. Labels and RemoveLabels are
+	// applied under the same revision check only by a store that guards them
+	// (conditionalLabelsGuard: MemStore, SQLiteStore, NativeDoltStore, and a
+	// CachingStore over one of those); bd-backed stores and FileStore reject
+	// them the same way. Callers must therefore handle that error rather than
+	// assume the fields applied.
+	//
+	// On NativeDoltStore the label guarantee runs one way. A label CAS mints a
+	// revision (it advances beadmeta.LabelRevisionMetadataKey on the row), but
+	// an unconditional label-only Update does not: upstream label writes touch
+	// only the label and event tables. A CAS read before such an Update
+	// therefore still succeeds after it. Label deltas commute, so both changes
+	// survive, but a CAS cannot tell that the label set moved.
+	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
+	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
+	// otherwise it returns *PreconditionFailedError.
+	CloseIfMatch(id string, expectedRevision int64) error
+	// DeleteIfMatch deletes the bead only if its revision equals
+	// expectedRevision; otherwise it returns *PreconditionFailedError.
+	DeleteIfMatch(id string, expectedRevision int64) error
+
+	// CompareAndSetMetadataKey atomically sets metadata[key] = next iff the
+	// current value equals expected. expected == "" matches a key that is absent
+	// OR present with the empty value (the two states are indistinguishable to
+	// callers; release paths write "" to clear). Returns (true, nil) on swap,
+	// (false, nil) on a genuine value mismatch (the caller lost), and (false,
+	// err) for everything else.
+	CompareAndSetMetadataKey(id, key, expected, next string) (bool, error)
+}
+
+// AtomicConditionalCloser closes a bead and merges metadata only when the
+// bead's revision still equals expectedRevision. Implementations commit the
+// metadata and close together, or neither change persists.
+//
+// This is deliberately narrower than ConditionalWriter: it is needed only by
+// terminal-state writers that cannot tolerate a metadata/close split, and is
+// exposed only by stores that can prove both operations share one transaction.
+type AtomicConditionalCloser interface {
+	CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error)
+}
+
+// AtomicConditionalCloserHandleProvider lets a wrapper expose the atomic
+// terminal-write capability of its resolved backing without claiming it when
+// that backing cannot provide it.
+type AtomicConditionalCloserHandleProvider interface {
+	AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool)
+}
+
+// AtomicConditionalCloserFor returns the atomic terminal-write capability when
+// store implements it. Unlike ConditionalWriterFor, this is not a rollout
+// policy seam: callers must refuse when the underlying store cannot provide
+// this all-or-nothing operation.
+func AtomicConditionalCloserFor(store Store) (AtomicConditionalCloser, bool) {
+	if store == nil {
+		return nil, false
+	}
+	store = followConditionalWritesResolveTarget(store)
+	if provider, ok := store.(AtomicConditionalCloserHandleProvider); ok {
+		return provider.AtomicConditionalCloserHandle()
+	}
+	closer, ok := store.(AtomicConditionalCloser)
+	return closer, ok
+}
+
+// ErrEmptyConditionalUpdate reports an UpdateIfMatch with no fields to apply.
+// The three in-tree implementations diverged here (bd cannot express an empty
+// fenced update; the native stores validated-and-bumped), so the contract is
+// pinned as invalid input: an empty fenced update neither evaluates the fence
+// nor bumps the revision on ANY store.
+var ErrEmptyConditionalUpdate = errors.New("conditional update: empty UpdateOpts (nothing to apply)")
+
+// ConditionalUpdateFieldUnsupportedError reports an UpdateIfMatch option that
+// is not row-backed across every ConditionalWriter implementation.
+type ConditionalUpdateFieldUnsupportedError struct {
+	Field string
+}
+
+// Error reports the conditional-update field that cannot be revision-guarded.
+func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
+}
+
+// conditionalLabelsGuard is implemented by stores whose UpdateIfMatch applies
+// Labels and RemoveLabels inside its revision check and moves the revision
+// with them, so the next revision read sees the label change.
+type conditionalLabelsGuard interface {
+	conditionalLabelsGuarded() bool
+}
+
+// conditionalLabelsGuarded reports whether store guards labels in
+// UpdateIfMatch. A store that does not say so refuses them.
+func conditionalLabelsGuarded(store any) bool {
+	guard, ok := store.(conditionalLabelsGuard)
+	return ok && guard.conditionalLabelsGuarded()
+}
+
+// validateConditionalUpdateOpts rejects, before any store evaluates a revision
+// fence or mutates state, the fields the store cannot fold into the guarded
+// update: the parent always, and the labels unless labelsGuarded.
+func validateConditionalUpdateOpts(o UpdateOpts, labelsGuarded bool) error {
+	switch {
+	case o.ParentID != nil:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
+	case !labelsGuarded && len(o.Labels) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	case !labelsGuarded && len(o.RemoveLabels) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "remove_labels"}
+	case isEmptyUpdateOpts(o):
+		return ErrEmptyConditionalUpdate
+	default:
+		return nil
+	}
+}
+
+// isEmptyUpdateOpts reports whether opts carries no mutation at all.
+func isEmptyUpdateOpts(o UpdateOpts) bool {
+	return o.Title == nil && o.Status == nil && o.Type == nil && o.Priority == nil &&
+		o.Description == nil && o.ParentID == nil && o.Assignee == nil &&
+		len(o.Labels) == 0 && len(o.RemoveLabels) == 0 && len(o.Metadata) == 0
+}
+
+// ConditionalWriterHandleProvider exposes a conditional-write handle for stores
+// whose capability depends on wrapped runtime state.
+type ConditionalWriterHandleProvider interface {
+	ConditionalWriterHandle() (ConditionalWriter, bool)
+}
+
+// ConditionalWriterFor returns the conditional-write capability for store when
+// one is available. It preserves ordinary ConditionalWriter implementations and
+// lets wrappers expose a delegated handle without claiming the interface
+// globally — mirroring GraphApplyFor. It does NOT unwrap the class_store.go
+// typed wrappers (WorkStore, GraphStore, …): those embed the Store interface, so
+// optional capabilities are not promoted through them and a direct assertion on
+// the wrapper fails. A caller holding a typed class wrapper must pass its
+// unwrapped .Store field to this helper, exactly as with GraphApplyFor.
+func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	if writer, ok := store.(ConditionalWriter); ok {
+		return writer, true
+	}
+	if provider, ok := store.(ConditionalWriterHandleProvider); ok {
+		return provider.ConditionalWriterHandle()
+	}
+	return nil, false
+}
+
+// ConditionalWriterForTarget is ConditionalWriterFor on the store a wrapper
+// declares as its conditional-writes resolution target
+// (ConditionalWritesResolveTargeter), which is how MetadataCASWriterFor and
+// AtomicConditionalCloserFor find their capabilities through the cmd/gc
+// policy store and the typed class wrappers. Like them it applies no rollout
+// mode: it serves effects that must fence whenever the store can, such as a
+// destructive delete or an ownership release. A writer it returns can still
+// answer ErrConditionalWriteUnsupported at call time (BdStore without
+// --if-revision, a legacy SQLite layout), and the caller decides what that
+// means.
+func ConditionalWriterForTarget(store Store) (ConditionalWriter, bool) {
+	if store == nil {
+		return nil, false
+	}
+	return ConditionalWriterFor(followConditionalWritesResolveTarget(store))
+}
+
+// PreconditionFailedError reports that a conditional write was rejected because
+// the bead's revision moved (bd exit 9 / the store's WHERE clause matched no
+// row). Expected/Current come from the backend's machine JSON when parseable and
+// are zero otherwise; Raw preserves the backend body for forensics.
+type PreconditionFailedError struct {
+	ID       string
+	Expected int64
+	Current  int64
+	Raw      string
+}
+
+// Error reports the bead and the expected/current revisions.
+func (e *PreconditionFailedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional write on %s: precondition failed (expected revision %d, current %d)",
+		e.ID, e.Expected, e.Current)
+}
+
+// IsPreconditionFailed reports whether err is or wraps a *PreconditionFailedError.
+func IsPreconditionFailed(err error) bool {
+	var pfe *PreconditionFailedError
+	return errors.As(err, &pfe)
+}
+
+// GateRefusalError reports that the backend refused THIS conditional write for a
+// policy reason (e.g. bd's close-authority guard) rather than a revision
+// mismatch. It is per-write and never latches the store incapable.
+type GateRefusalError struct {
+	ID   string
+	Verb string
+	Code string // machine body code, "" if absent
+	Raw  string
+}
+
+// Error reports the refused verb, bead, and policy code.
+func (e *GateRefusalError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional %s on %s refused by gate (code %q)", e.Verb, e.ID, e.Code)
+}
+
+// IsGateRefusal reports whether err is or wraps a *GateRefusalError.
+func IsGateRefusal(err error) bool {
+	var gre *GateRefusalError
+	return errors.As(err, &gre)
+}
+
+// CASRetriesExhaustedError reports that BdStore's bounded metadata-CAS emulation
+// ran out of attempts under cross-key revision interference. It is distinct from
+// PreconditionFailedError: the caller did NOT lose the value race; the store
+// could not get a clean shot. Consumers back off and re-enter level-triggered.
+type CASRetriesExhaustedError struct {
+	ID, Key      string
+	Attempts     int
+	LastRevision int64
+}
+
+// Error reports the bead, key, attempt budget, and last revision observed.
+func (e *CASRetriesExhaustedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conditional metadata CAS on %s[%s] exhausted %d attempts (last revision %d)",
+		e.ID, e.Key, e.Attempts, e.LastRevision)
+}
+
+// IsCASRetriesExhausted reports whether err is or wraps a *CASRetriesExhaustedError.
+func IsCASRetriesExhausted(err error) bool {
+	var cre *CASRetriesExhaustedError
+	return errors.As(err, &cre)
+}
+
+// IsConditionalWriteUnsupported reports whether err is or wraps
+// ErrConditionalWriteUnsupported.
+func IsConditionalWriteUnsupported(err error) bool {
+	return errors.Is(err, ErrConditionalWriteUnsupported)
 }
 
 // AtomicTxStore is implemented by stores whose Tx commits the whole callback
@@ -204,16 +727,17 @@ func IsMoleculeType(t string) bool {
 // represent internal bookkeeping rather than actionable work. This
 // matches the exclusion list in the bd CLI's GetReadyWork query.
 var readyExcludeTypes = map[string]bool{
-	"merge-request": true, // processed by automation
-	"gate":          true, // async wait conditions
-	"molecule":      true, // workflow containers
-	"step":          true, // non-root formula steps; parent molecule is the actionable unit (#1039)
-	"convoy":        true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
-	"message":       true, // mail/communication items
-	"session":       true, // runtime/session continuity beads, never actionable work
-	"agent":         true, // identity/state tracking beads
-	"role":          true, // agent role definitions
-	"rig":           true, // rig identity beads
+	"merge-request":          true, // processed by automation
+	"gate":                   true, // async wait conditions
+	"molecule":               true, // workflow containers
+	"step":                   true, // non-root formula steps; parent molecule is the actionable unit (#1039)
+	"convoy":                 true, // sling-minted container; groups child beads, never actionable Ready work (#3591)
+	"message":                true, // mail/communication items
+	"session":                true, // runtime/session continuity beads, never actionable work
+	"agent":                  true, // identity/state tracking beads
+	"role":                   true, // agent role definitions
+	"rig":                    true, // rig identity beads
+	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
@@ -226,6 +750,46 @@ var readyBlockingDependencyTypes = map[string]bool{
 // bead from Ready() until the dependency target closes.
 func IsReadyBlockingDependencyType(t string) bool {
 	return readyBlockingDependencyTypes[t]
+}
+
+// DependencySatisfied reports whether a blocking dependency's current state
+// satisfies the dependent, given the dependency's status and its
+// gc.work_outcome metadata value (ga-a7v0ex).
+//
+// A dependency that has not closed never satisfies. A closed dependency
+// satisfies unless it was explicitly typed blocked: most closed beads carry
+// no gc.work_outcome yet (work_record_gate.go is warn-only), so the empty
+// value stays backward-compatible, and an unrecognized future value fails
+// open rather than newly stalling dependents it doesn't understand.
+//
+// Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
+// so a dependency whose control-plane step passed is never vetoed.
+func DependencySatisfied(depStatus, depWorkOutcome string) bool {
+	if depStatus != "closed" {
+		return false
+	}
+	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
+}
+
+// ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
+// closed dependency by. gc.outcome is the control-plane step result that
+// internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
+// work-record disposition (ADR-0009); the two vocabularies are disjoint and can
+// disagree. A step that closed with gc.outcome=pass has already been advanced
+// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
+// strands them: the graph waits on work that readiness never offers to any
+// worker. When the step passed, its work outcome does not gate readiness.
+//
+// The override applies only to formula step beads (those carrying
+// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
+// mol-do-work formula stamps it on the work bead it closes, blocked or not —
+// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
+// keeps withholding dependents.
+func ReadinessWorkOutcome(metadata map[string]string) string {
+	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+		return ""
+	}
+	return metadata[beadmeta.WorkOutcomeMetadataKey]
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from
@@ -284,11 +848,42 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden by a future defer_until,
-// mirroring bd ready's server-side filter (defer_until IS NULL OR <= now is
-// ready) and cmd_hook.isFutureDeferredHookCandidate.
+// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
+// status or temporarily by a future defer_until.
+// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
+// operates on raw bd JSON before this normalization.
 func IsDeferred(b Bead, now time.Time) bool {
-	return b.DeferUntil != nil && b.DeferUntil.After(now)
+	return b.IndefinitelyDeferred ||
+		(b.DeferUntil != nil && b.DeferUntil.After(now))
+}
+
+// setBeadStatus applies an explicit Gas City status transition. Any such
+// transition supersedes richer source status that was normalized on read. A
+// bead that is not closed has no close reason, so leaving closed drops it, as
+// bd's reopen clears its close_reason column.
+func setBeadStatus(b *Bead, status string) {
+	b.Status = status
+	b.IndefinitelyDeferred = false
+	if status != "closed" {
+		b.CloseReason = ""
+	}
+}
+
+// recordCloseReason stamps CloseReason on a bead a whole-row store (MemStore,
+// FileStore, SQLiteStore) has just moved from not-closed to closed. The reason
+// is the trimmed metadata.close_reason its closer stamped first, which is what
+// BdStore and NativeDoltStore forward to their close as well.
+func recordCloseReason(b *Bead) {
+	b.CloseReason = strings.TrimSpace(b.Metadata["close_reason"])
+}
+
+// forgetCloseReason drops the metadata.close_reason recordCloseReason reads,
+// on a bead a whole-row store has just moved from closed to not closed. That
+// reason belonged to the close the move undoes, as bd's reopen clears its
+// close_reason column; kept, the bead's next close would record it again. A
+// reason the same write sets is merged after this, so it survives.
+func forgetCloseReason(b *Bead) {
+	delete(b.Metadata, "close_reason")
 }
 
 func isReadyBlockingDependencyType(t string) bool {
@@ -357,8 +952,13 @@ type Store interface {
 	Reopen(id string) error
 
 	// CloseAll closes multiple beads in a single batch operation and sets
-	// the given metadata on each. Already-closed beads are skipped.
-	// Returns the number of beads actually closed.
+	// the given metadata on each bead it closes. An already-closed bead stays
+	// closed and is not an error. Past that, what happens to it is NOT part
+	// of this contract: stores that read each status first skip it, stores
+	// that batch without that read (bd, exec, the native Dolt store) write the
+	// metadata onto it, and bd and exec count it as closed. A caller that must
+	// leave a finished bead's metadata alone, or needs an exact count, drops
+	// its closed ids before calling. Returns the number of beads closed.
 	CloseAll(ids []string, metadata map[string]string) (int, error)
 
 	// List returns beads matching the query. Queries must include at least
@@ -381,6 +981,16 @@ type Store interface {
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
 	// in creation order. Pass IncludeClosed to include closed children.
+	//
+	// The match is a string comparison against THIS store's rows, and
+	// parentID's own row is never read. A parent that lives in another store
+	// is neither an error nor an empty answer: its children here still come
+	// back, because ParentID is a weak city-scoped reference (see Bead.ParentID)
+	// and the alternative — resolving the parent first — would make every
+	// cross-store molecule's step list depend on a lookup the store cannot do.
+	// The corollary is that a caller wanting EVERY child of a city-scoped
+	// parent must ask every store, which is the residency resolver's job, not
+	// this method's.
 	Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.
@@ -413,6 +1023,38 @@ type Store interface {
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
 
+	// SetLocalString sets a clone-local string value for a bead, keyed by an
+	// arbitrary string key. Unlike SetMetadata, values written here are never
+	// synced through Dolt/git and are never visible in Bead.Metadata — they
+	// live only in this store's local clone (in-memory, or a local sidecar
+	// file for on-disk stores). Use this for ephemeral, high-churn, or
+	// clone-specific data where cross-clone durability is unnecessary or
+	// actively undesirable (e.g. synced_at, last_woke_at,
+	// pending_create_claim — illustrative examples, not an exhaustive list).
+	// Setting value to "" clears the key. Writing here never touches the
+	// bead's UpdatedAt, since that field is Dolt-synced and a clone-local
+	// write must not appear as a durable change to other clones.
+	//
+	// Implementations that already hold the bead set in process (MemStore,
+	// FileStore) return ErrNotFound for an unknown id, matching SetMetadata.
+	// Implementations backed by an external process (BdStore, NativeDoltStore)
+	// do not perform that check here: doing so would require exactly the
+	// synchronous round-trip this method exists to avoid for high-churn
+	// writes. Callers must not rely on this method to validate bead
+	// existence; validate via Get first if that matters.
+	SetLocalString(id, key, value string) error
+
+	// GetLocalString returns the clone-local string value previously set by
+	// SetLocalString for the given bead and key, scoped to this store's
+	// local clone. Returns "" with a nil error if the key was never set, was
+	// cleared, or was set by a different clone — not ErrNotFound — mirroring
+	// the empty-string-means-absent convention SetLocalString uses for
+	// clearing. As with SetLocalString, only in-process implementations
+	// additionally return ErrNotFound for an unknown bead id; external-store
+	// implementations return "", nil instead. Callers must not rely on this
+	// method to validate bead existence.
+	GetLocalString(id, key string) (string, error)
+
 	// Tx executes fn inside a single logical transaction identified by
 	// commitMsg. Implementations without native transaction support may execute
 	// writes sequentially or stage them until fn returns; outside observers
@@ -440,6 +1082,14 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+}
+
+// ContextReadyReader is an optional Ready capability for deadline-sensitive
+// callers. Implementations must stop all work started by ReadyContext before
+// returning after ctx cancellation; callers may treat ErrCacheUnavailable as a
+// partial read and ErrReadyContextUnsupported as a capability veto.
+type ContextReadyReader interface {
+	ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error)
 }
 
 // StorageClass selects the physical bead storage tier for adapters that

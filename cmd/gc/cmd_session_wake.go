@@ -1,12 +1,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -39,6 +43,34 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
+type sessionWakeDeps struct {
+	store                     beads.Store
+	cfg                       *config.City
+	cityPath                  string
+	cityResolved              bool
+	now                       func() time.Time
+	withdrawQueuedWaitNudges  func(string, []string) error
+	cityUsesManagedReconciler func(string) bool
+	pokeController            func(string, reconcilekey.Key) error
+	// rigStores opens the rig stores the will-not-start predicate reads for
+	// assigned work; nil reads the city store only.
+	rigStores func() map[string]beads.Store
+	// sp reads the sleep policy's capability for the predicate; nil never
+	// refuses on an idle latch.
+	sp runtime.Provider
+}
+
+// wakeVerdictProvider is the session provider the will-not-start predicate
+// reads the sleep policy's capability from; nil (no idle-latch refusal) when
+// it cannot be built.
+func wakeVerdictProvider() runtime.Provider {
+	sp, err := newSessionProvider()
+	if err != nil {
+		return nil
+	}
+	return sp
+}
+
 // cmdSessionWake is the CLI entry point for "gc session wake".
 func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
@@ -52,35 +84,59 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	if cityErr == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
-	sessStore := cliSessionStore(store, cfg, cityPath)
-	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, args[0])
+	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
+		sp:                        wakeVerdictProvider(),
+		store:                     store,
+		cfg:                       cfg,
+		cityPath:                  cityPath,
+		cityResolved:              cityErr == nil,
+		now:                       time.Now,
+		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
+		cityUsesManagedReconciler: cityUsesManagedReconciler,
+		pokeController:            enqueueController,
+		rigStores: func() map[string]beads.Store {
+			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
+		},
+	})
+}
+
+func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
+	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
+	id, err := resolveSessionIDMaterializingNamed(deps.cityPath, deps.cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
-	b, err := sessStore.Get(id)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if !session.IsSessionBeadOrRepairable(b) {
-		fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
-		return 1
-	}
-	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(session.InfoFromPersistedBead(b), cfg)
-	session.RepairEmptyType(sessStore, &b)
-	nudgeIDs, err := session.WakeSession(sessStore, b, time.Now().UTC())
+	sessFront := sessionFrontDoor(sessStore)
+	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+		switch {
+		case errors.Is(err, session.ErrNotSessionBead):
+			fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
+		case errors.Is(err, beads.ErrNotFound):
+			fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+		default:
+			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
+		}
 		return 1
 	}
-	if !hasRunnableTemplate && sessionWakeRequestedCreateInfo(session.InfoFromPersistedBead(b)) {
-		if err := sessionFrontDoor(sessStore).ApplyPatch(id, map[string]string{
+	nudgeIDs := res.NudgeIDs
+	agent := sessionWakeResolveAgentInfo(res.Info, deps.cfg)
+	hasRunnableTemplate := deps.cfg == nil || agent != nil
+	startupTimeout := time.Duration(0)
+	if deps.cfg != nil {
+		startupTimeout = deps.cfg.Session.StartupTimeoutDuration()
+	}
+	createAbandoned := sessionWakeCreateAbandonedInfo(res.Info, startupTimeout)
+	rejectStuck := false
+	switch {
+	case !hasRunnableTemplate && (sessionWakeRequestedCreateInfo(res.Info) || createAbandoned):
+		if err := sessFront.ApplyPatch(id, map[string]string{
 			"state":                     string(session.StateAsleep),
 			"state_reason":              "",
 			"pending_create_claim":      "",
@@ -91,16 +147,50 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
+	// WakeSession has already recorded the wake on the bead (wake_request=explicit,
+	// wake_requested_at set, quarantine cleared) before this arm is reached, so the
+	// nonzero exit reports "wake cannot complete", not "nothing happened". The exit
+	// is deferred to after the cleanup block below so the waits WakeSession already
+	// canceled still get their queued nudges withdrawn.
+	case hasRunnableTemplate && createAbandoned:
+		since := "an unknown time"
+		if started := stuckCreatingSinceInfo(res.Info); !started.IsZero() {
+			since = started.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
+		rejectStuck = true
 	}
-	if cityErr == nil {
-		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
+	// Same "wake recorded but cannot complete" shape: the controller will not
+	// act on the wake. The one will-not-start predicate the API wake also uses
+	// says why, read on the row after the wake (and after the reset above).
+	if !rejectStuck {
+		rigStores := deps.rigStores
+		if rigStores == nil {
+			rigStores = func() map[string]beads.Store { return nil }
+		}
+		woken := res.Info
+		if info, err := sessFront.Get(id); err == nil {
+			woken = info
+		}
+		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
+			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, workStore: deps.store, rigStores: rigStores,
+		}, deps.now()); why != "" {
+			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
+			rejectStuck = true
+		}
+	}
+	if deps.cityResolved {
+		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
-		if cityUsesManagedReconciler(cityPath) {
-			if err := pokeController(cityPath); err != nil {
+		if deps.cityUsesManagedReconciler(deps.cityPath) {
+			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}
+	}
+	if rejectStuck {
+		return 1
 	}
 
 	if asJSON {
@@ -123,14 +213,62 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 	if cfg == nil {
 		return true
 	}
+	return sessionWakeResolveAgentInfo(info, cfg) != nil
+}
+
+// sessionWakeResolveAgentInfo resolves the config.Agent that owns this
+// session's template, the same lookup sessionWakeHasRunnableTemplateInfo
+// uses to decide runnability. Returns nil when cfg is nil or no agent
+// matches -- callers that also need "is there a runnable template"
+// should treat a nil cfg as runnable themselves, since this helper
+// can't distinguish "no cfg" from "no match" on its own.
+func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = info.Template
 	}
-	return findAgentByTemplate(cfg, template) != nil
+	return findAgentByTemplate(cfg, template)
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
 	return state == session.StateSuspended || state == session.StateDrained
+}
+
+// sessionWakeStuckInFlightInfo reports whether info was already mid-create
+// (creating or start-pending) before this wake call. Unlike
+// sessionWakeRequestedCreateInfo, it deliberately excludes suspended/drained:
+// those are the normal, successful wake path when a runnable template exists,
+// and must not be treated as stuck.
+func sessionWakeStuckInFlightInfo(info session.Info) bool {
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	return state == session.StateCreating || state == session.StateStartPending
+}
+
+// sessionWakeCreateAbandonedInfo reports whether an in-flight create is
+// genuinely abandoned and so may be acted on by the CLI.
+//
+// Mirrors the sweep's gate order in city_runtime.go:2853-2857: the
+// pending-create lease is checked FIRST, staleness second. Checking only
+// staleness rejects a create the reconciler still protects, because
+// pendingCreateNeverStartedTimeout (10m) is deliberately longer than
+// staleCreatingStateTimeout (1m).
+func sessionWakeCreateAbandonedInfo(info session.Info, startupTimeout time.Duration) bool {
+	return sessionWakeStuckInFlightInfo(info) &&
+		!pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) &&
+		isStaleCreatingInfo(info)
+}
+
+// stuckCreatingSinceInfo returns the timestamp isStaleCreatingInfo measures
+// staleness from (the per-attempt pending_create_started_at marker, falling
+// back to CreatedAt), so the CLI's rejection message names exactly what was
+// checked instead of duplicating the staleness decision itself.
+func stuckCreatingSinceInfo(info session.Info) time.Time {
+	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
+		return started
+	}
+	return info.CreatedAt
 }

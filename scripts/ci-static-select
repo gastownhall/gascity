@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Run changed-Go formatting checks without lossy paths."""
+
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+import sys
+
+
+class SelectionError(Exception):
+    """The changed scope could not be selected without losing coverage."""
+
+
+def command_output(args: list[str]) -> bytes:
+    try:
+        completed = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise SelectionError(f"cannot run {args[0]!r}: {error}") from error
+    if completed.returncode != 0:
+        detail = os.fsdecode(completed.stderr).strip()
+        raise SelectionError(detail or f"command failed with exit {completed.returncode}")
+    return completed.stdout
+
+
+def parse_name_status(output: bytes) -> list[tuple[str, str]]:
+    fields = output.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 2 != 0:
+        raise SelectionError("git produced a malformed NUL-delimited name-status diff")
+
+    records: list[tuple[str, str]] = []
+    for index in range(0, len(fields), 2):
+        status = os.fsdecode(fields[index])
+        path = os.fsdecode(fields[index + 1])
+        if len(status) != 1 or status not in "ACDMRT":
+            raise SelectionError(f"git produced unsupported status {status!r}")
+        if not path or os.path.isabs(path) or ".." in path.split("/"):
+            raise SelectionError(f"git produced unsafe path {path!r}")
+        records.append((status, path))
+    return records
+
+
+def diff_records() -> list[tuple[str, str]]:
+    scope = os.environ.get("LINT_CHANGED_SCOPE", "worktree")
+    ref = os.environ.get("LINT_CHANGED_REF", "HEAD")
+    common = [
+        "git",
+        "diff",
+        "--name-status",
+        "-z",
+        "--no-renames",
+        "--diff-filter=ACDMRT",
+    ]
+
+    if scope == "staged":
+        return parse_name_status(command_output([*common, "--cached", "--"]))
+    if scope not in {"tracked", "worktree"}:
+        raise SelectionError(
+            f"unknown LINT_CHANGED_SCOPE={scope}; expected staged, tracked, or worktree"
+        )
+
+    resolved_ref = os.fsdecode(
+        command_output(
+            ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"]
+        )
+    ).strip()
+    records = parse_name_status(command_output([*common, resolved_ref, "--"]))
+    if scope == "worktree":
+        untracked = command_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--"]
+        ).split(b"\0")
+        records.extend(
+            ("A", os.fsdecode(path)) for path in untracked if path
+        )
+    return sorted(set(records), key=lambda record: (record[1], record[0]))
+
+
+def run_tool(args: list[str]) -> int:
+    try:
+        return subprocess.run(args).returncode
+    except OSError as error:
+        print(f"ci-static-select: cannot run {args[0]!r}: {error}", file=sys.stderr)
+        return 127
+
+
+def fmt_check_changed(tool: str) -> int:
+    try:
+        records = diff_records()
+        paths = sorted(
+            path
+            for status, path in records
+            if status != "D" and path.endswith(".go") and is_regular_file(path)
+        )
+    except SelectionError as error:
+        print(f"fmt-check-changed: selecting full repository: {error}", file=sys.stderr)
+        return run_tool([tool, "fmt", "--diff", "./..."])
+    if not paths:
+        print("fmt-check-changed: no changed existing Go files")
+        return 0
+    return run_tool([tool, "fmt", "--diff", "--", *paths])
+
+
+def is_regular_file(path: str) -> bool:
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise SelectionError(f"cannot inspect changed Go path {path!r}: {error}") from error
+    return stat.S_ISREG(mode)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3 or argv[1] != "fmt-check-changed":
+        print("usage: ci-static-select fmt-check-changed GOLANGCI_LINT", file=sys.stderr)
+        return 2
+    return fmt_check_changed(argv[2])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

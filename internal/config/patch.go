@@ -1,12 +1,20 @@
 package config
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrPatchTargetNotFound reports a [patches] entry whose target is absent from
+// the merged config. Callers match it with errors.Is to tell a patch that names
+// a missing target (a client error) from other load failures.
+var ErrPatchTargetNotFound = errors.New("not found in merged config")
 
 // Patches holds all patch blocks from composition. Patches target existing
 // resources by identity key and modify specific fields. They are applied
 // after fragment merge, before validation.
 type Patches struct {
-	// Agents targets agents by (dir, name).
+	// Agents targets agents by rig scope + name.
 	Agents []AgentPatch `toml:"agent,omitempty"`
 	// NamedSessions targets configured named sessions by (dir, template).
 	NamedSessions []NamedSessionPatch `toml:"named_session,omitempty"`
@@ -18,12 +26,16 @@ type Patches struct {
 	GitHubPRMonitors []GitHubPRMonitorPatch `toml:"github_pr_monitor,omitempty"`
 }
 
-// AgentPatch modifies an existing agent identified by (Dir, Name).
+// AgentPatch modifies existing agents identified by rig scope and Name.
 // Pointer fields distinguish "not set" from "set to zero value."
 type AgentPatch struct {
-	// Dir is the targeting key (required with Name). Identifies the agent's
-	// working directory scope. Empty for city-scoped agents.
-	Dir string `toml:"dir" jsonschema:"required"`
+	// Dir is the legacy targeting key for rig identity. Empty means
+	// city-scoped. New configs should set Rig instead; Dir remains the
+	// canonical resolved identity that both keys feed into.
+	Dir string `toml:"dir,omitempty"`
+	// Rig is new targeting key for rig identity (replaces Dir).
+	// "*" matches all rigs + city. Empty means city-scoped unless Dir is set.
+	Rig string `toml:"rig,omitempty"`
 	// Name is the targeting key (required). Must match an existing agent's name.
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
@@ -36,9 +48,9 @@ type AgentPatch struct {
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
 	// Pool overrides legacy [pool] fields that map to session scaling.
-	Pool *PoolOverride `toml:"pool,omitempty"`
+	Pool *PoolOverride `toml:"pool,omitempty" json:"Pool,omitempty"`
 	// Env adds or overrides environment variables.
-	Env map[string]string `toml:"env,omitempty"`
+	Env map[string]string `toml:"env,omitempty" json:"Env,omitempty"`
 	// EnvRemove lists env var keys to remove after merging.
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// PreStart overrides the agent's pre_start commands.
@@ -51,6 +63,8 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty" json:"ContextAdvisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -69,9 +83,15 @@ type AgentPatch struct {
 	MaxSessionAge *string `toml:"max_session_age,omitempty"`
 	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
 	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
@@ -156,7 +176,7 @@ type AgentPatch struct {
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
-	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	OptionDefaults map[string]string `toml:"option_defaults,omitempty" json:"OptionDefaults,omitempty"`
 }
 
 // NamedSessionPatch modifies an existing named session identified by canonical
@@ -202,6 +222,10 @@ type RigPatch struct {
 	Prefix *string `toml:"prefix,omitempty"`
 	// DefaultBranch overrides the rig's recorded mainline branch.
 	DefaultBranch *string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on
+	// beads routed into this rig. Set to "" to clear the rig's default and go
+	// back to leaving merge_strategy unstamped.
+	DefaultMergeStrategy *string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated, pre-runtime-state suspension override.
 	// Parsed for backwards compatibility; `gc doctor` surfaces it as a
 	// warning and recommends the rename to SuspendedOnStart. No behavioral
@@ -213,7 +237,9 @@ type RigPatch struct {
 	// FormulaVars adds or overrides rig-scoped formula var defaults.
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
-	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	FormulaVars map[string]string `toml:"formula_vars,omitempty" json:"FormulaVars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -251,7 +277,7 @@ type ProviderPatch struct {
 	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
 	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
-	Env map[string]string `toml:"env,omitempty"`
+	Env map[string]string `toml:"env,omitempty" json:"Env,omitempty"`
 	// EnvRemove lists env var keys to remove.
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// Replace replaces the entire provider block instead of deep-merging.
@@ -363,7 +389,7 @@ func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
 		return err
 	}
 	if len(matches) == 0 {
-		return fmt.Errorf("named_session %q not found in merged config", target)
+		return fmt.Errorf("named_session %q %w", target, ErrPatchTargetNotFound)
 	}
 	if len(matches) > 1 {
 		return fmt.Errorf("named_session patch target %q is ambiguous; set name to the named_session identity", target)
@@ -404,12 +430,78 @@ func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
 	}
 }
 
-// applyAgentPatch finds an agent by (dir, name) and applies the patch.
+func agentPatchTargetDir(patch *AgentPatch) (string, error) {
+	if patch.Dir != "" && patch.Rig != "" && patch.Rig != "*" {
+		return "", fmt.Errorf("use only one of dir or rig")
+	}
+	if patch.Rig != "" && patch.Rig != "*" {
+		return patch.Rig, nil
+	}
+	return patch.Dir, nil
+}
+
+// TargetQualifiedName returns the canonical qualified identity this patch
+// targets, folding the legacy Dir key and the newer Rig key into a single
+// string so a patch authored with either key resolves to the same identity
+// ("rigA/name" whether written as dir="rigA" or rig="rigA"). The "*" wildcard
+// is preserved as its own scope ("*/name") so a wildcard patch has a stable
+// identity distinct from a city-scoped one ("name"). The HTTP patch API and
+// the config editor key on this — rather than on Dir alone — so rig- and
+// wildcard-targeted patches can be created, retrieved, and deleted by identity.
+func (p *AgentPatch) TargetQualifiedName() string {
+	dir := p.Dir
+	if p.Rig != "" {
+		dir = p.Rig
+	}
+	return qualifiedNameFromPatch(dir, p.Name)
+}
+
+// Validate reports whether the patch is a well-formed, resolvable target.
+// It enforces the AgentPatch identity contract every write boundary relies on:
+// Name is required, and the legacy Dir key and the newer Rig key (including the
+// "*" wildcard) are mutually exclusive. The HTTP patch API and the config editor
+// call this before persisting so a patch that would hard-fail the next config
+// load — an unresolvable dir+rig combination — can never be written to city.toml
+// and brick config loading. Apply-time resolution (agentPatchTargetDir and
+// applyAgentPatch) enforces the same rule for patches that arrive from other
+// sources, so this is a fail-fast guard at the edge, not the only guard.
+func (p *AgentPatch) Validate() error {
+	if p.Name == "" {
+		return fmt.Errorf("agent patch: name is required")
+	}
+	if p.Dir != "" && p.Rig != "" {
+		return fmt.Errorf("agent patch %q: use only one of dir or rig", p.Name)
+	}
+	return nil
+}
+
+// applyAgentPatch finds agent target(s) and applies patch.
 func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 	if patch.Name == "" {
 		return fmt.Errorf("agent patch: name is required")
 	}
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	if patch.Rig == "*" {
+		if patch.Dir != "" {
+			return fmt.Errorf("use only one of dir or rig")
+		}
+		matched := false
+		for i := range cfg.Agents {
+			a := &cfg.Agents[i]
+			if a.Name == patch.Name || a.BindingQualifiedName() == patch.Name {
+				applyAgentPatchFields(a, patch)
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("agent %q %w", qualifiedNameFromPatch("*", patch.Name), ErrPatchTargetNotFound)
+		}
+		return nil
+	}
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return err
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		// V2: match by qualified name so patches targeting "gastown.mayor"
@@ -419,12 +511,12 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			return nil
 		}
 		// V1 fallback: direct Dir+Name match.
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		if a.Dir == targetDir && a.Name == patch.Name {
 			applyAgentPatchFields(a, patch)
 			return nil
 		}
 	}
-	return fmt.Errorf("agent %q not found in merged config", target)
+	return fmt.Errorf("agent %q %w", target, ErrPatchTargetNotFound)
 }
 
 func applyAgentPatchFields(a *Agent, p *AgentPatch) {
@@ -470,6 +562,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	if p.Provider != nil {
 		a.Provider = *p.Provider
 	}
+	if p.ContextAdvisory != nil {
+		a.ContextAdvisory = cloneContextAdvisory(p.ContextAdvisory)
+	}
 	if p.Upstream != nil {
 		a.Upstream = *p.Upstream
 	}
@@ -494,9 +589,15 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	if p.MaxSessionAgeJitter != nil {
 		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
 	}
+	if p.AssignedWorkDeferLimit != nil {
+		a.AssignedWorkDeferLimit = p.AssignedWorkDeferLimit
+	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
 		a.SleepAfterIdleSource = sleepSource
+	}
+	if p.AutoReclaimStaleClaims != nil {
+		a.AutoReclaimStaleClaims = *p.AutoReclaimStaleClaims
 	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)
@@ -648,11 +749,18 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.DefaultBranch != nil {
 				r.DefaultBranch = *patch.DefaultBranch
 			}
+			if patch.DefaultMergeStrategy != nil {
+				r.DefaultMergeStrategy = *patch.DefaultMergeStrategy
+			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
 			}
 			if patch.SuspendedOnStart != nil {
 				r.SuspendedOnStart = *patch.SuspendedOnStart
+			}
+			if patch.BeadsProxiedIdleTimeout != nil {
+				v := *patch.BeadsProxiedIdleTimeout
+				r.BeadsProxiedIdleTimeout = &v
 			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {
@@ -665,7 +773,7 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig %q not found in merged config", patch.Name)
+	return fmt.Errorf("rig %q %w", patch.Name, ErrPatchTargetNotFound)
 }
 
 // applyGitHubPRMonitorPatch finds a GitHub PR monitor by name and applies
@@ -717,7 +825,7 @@ func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("github pr monitor %q not found in merged config", patch.Name)
+	return fmt.Errorf("github pr monitor %q %w", patch.Name, ErrPatchTargetNotFound)
 }
 
 // applyProviderPatch modifies a provider. If Replace is true, replaces the
@@ -727,11 +835,11 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		return fmt.Errorf("provider patch: name is required")
 	}
 	if cfg.Providers == nil {
-		return fmt.Errorf("provider %q not found in merged config", patch.Name)
+		return fmt.Errorf("provider %q %w", patch.Name, ErrPatchTargetNotFound)
 	}
 	spec, ok := cfg.Providers[patch.Name]
 	if !ok {
-		return fmt.Errorf("provider %q not found in merged config", patch.Name)
+		return fmt.Errorf("provider %q %w", patch.Name, ErrPatchTargetNotFound)
 	}
 	if patch.Replace {
 		// Full replacement — build a new spec from patch fields only.

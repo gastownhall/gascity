@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 type rowsErrorStore struct {
@@ -20,7 +22,11 @@ func (s *rowsErrorStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
 	return s.rows, s.err
 }
 
-func TestLastRunFuncForStoreReturnsLatestRun(t *testing.T) {
+func ordersStoreOver(store beads.Store) *Store {
+	return NewStore(beads.OrdersStore{Store: store})
+}
+
+func TestLastRunReturnsLatestRun(t *testing.T) {
 	store := beads.NewMemStore()
 
 	first, err := store.Create(beads.Bead{
@@ -43,31 +49,31 @@ func TestLastRunFuncForStoreReturnsLatestRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := LastRunFuncForStore(store)("digest")
+	got, err := ordersStoreOver(store).LastRun("digest")
 	if err != nil {
-		t.Fatalf("LastRunFuncForStore(): %v", err)
+		t.Fatalf("LastRun(): %v", err)
 	}
 	if !got.Equal(second.CreatedAt) {
-		t.Fatalf("LastRunFuncForStore() = %s, want %s (latest run should remain authoritative)", got, second.CreatedAt)
+		t.Fatalf("LastRun() = %s, want %s (latest run should remain authoritative)", got, second.CreatedAt)
 	}
 	if !second.CreatedAt.After(first.CreatedAt) {
 		t.Fatalf("test setup invalid: second.CreatedAt=%s, first.CreatedAt=%s", second.CreatedAt, first.CreatedAt)
 	}
 }
 
-func TestLastRunFuncForStoreReturnsZeroWhenNoRunsExist(t *testing.T) {
+func TestLastRunReturnsZeroWhenNoRunsExist(t *testing.T) {
 	store := beads.NewMemStore()
 
-	got, err := LastRunFuncForStore(store)("digest")
+	got, err := ordersStoreOver(store).LastRun("digest")
 	if err != nil {
-		t.Fatalf("LastRunFuncForStore(): %v", err)
+		t.Fatalf("LastRun(): %v", err)
 	}
 	if !got.IsZero() {
-		t.Fatalf("LastRunFuncForStore() = %s, want zero time", got)
+		t.Fatalf("LastRun() = %s, want zero time", got)
 	}
 }
 
-func TestLastRunFuncForStoreUsesRowsFromPartialTierError(t *testing.T) {
+func TestLastRunUsesRowsFromPartialTierError(t *testing.T) {
 	want := time.Date(2026, 5, 15, 7, 0, 0, 0, time.UTC)
 	store := &rowsErrorStore{
 		MemStore: beads.NewMemStore(),
@@ -80,16 +86,139 @@ func TestLastRunFuncForStoreUsesRowsFromPartialTierError(t *testing.T) {
 		err: errors.New("wisps tier unavailable"),
 	}
 
-	got, err := LastRunFuncForStore(store)("digest")
+	got, err := ordersStoreOver(store).LastRun("digest")
 	if err != nil {
-		t.Fatalf("LastRunFuncForStore(): %v", err)
+		t.Fatalf("LastRun(): %v", err)
 	}
 	if !got.Equal(want) {
-		t.Fatalf("LastRunFuncForStore() = %s, want %s from surviving rows", got, want)
+		t.Fatalf("LastRun() = %s, want %s from surviving rows", got, want)
 	}
 }
 
-func TestCursorFuncForStoreUsesRowsAndLogsPartialTierError(t *testing.T) {
+func TestLastRunFuncWithEventFallback_UsesStoreResult(t *testing.T) {
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	storeFn := func(string) (time.Time, error) { return want, nil }
+	ep := events.NewFake()
+	// Event with a later timestamp — must NOT be chosen when store succeeds.
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "digest-generate",
+		Ts:      want.Add(time.Hour),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want store result %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_FallsBackToEvents(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "digest-generate",
+		Ts:      want,
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want event timestamp %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_FallsBackToLatestEvent(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	older := time.Date(2026, 6, 8, 0, 23, 0, 0, time.UTC)
+	newer := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: older})
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Ts: newer})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(newer) {
+		t.Fatalf("got %s, want newest event %s", got, newer)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_IgnoresOtherOrderEvents(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "other-order",
+		Ts:      time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC),
+	})
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (event is for a different order)", got)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_NilProviderReturnsStoreResult(t *testing.T) {
+	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	storeFn := func(string) (time.Time, error) { return want, nil }
+
+	got, err := LastRunFuncWithEventFallback(storeFn, nil)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_NilProviderZeroStore(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+
+	got, err := LastRunFuncWithEventFallback(storeFn, nil)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero (nil provider, no store result)", got)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_StoreErrorPropagated(t *testing.T) {
+	wantErr := errors.New("store error")
+	storeFn := func(string) (time.Time, error) { return time.Time{}, wantErr }
+	ep := events.NewFake()
+
+	_, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("got err %v, want %v", err, wantErr)
+	}
+}
+
+func TestLastRunFuncWithEventFallback_EventErrorFailsOpen(t *testing.T) {
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	ep := events.NewFailFake()
+
+	got, err := LastRunFuncWithEventFallback(storeFn, ep)("digest-generate")
+	if err != nil {
+		t.Fatalf("expected nil error (fail-open), got: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("got %s, want zero time (fail-open on broken provider)", got)
+	}
+}
+
+func TestCursorUsesRowsAndLogsPartialTierError(t *testing.T) {
 	oldLogf := runtimeHelpersLogf
 	var logs []string
 	runtimeHelpersLogf = func(format string, args ...any) {
@@ -107,11 +236,68 @@ func TestCursorFuncForStoreUsesRowsAndLogsPartialTierError(t *testing.T) {
 		err: errors.New("wisps tier unavailable"),
 	}
 
-	got := CursorFuncForStore(store)("digest")
+	got := ordersStoreOver(store).Cursor("digest")
 	if got != 42 {
-		t.Fatalf("CursorFuncForStore() = %d, want 42 from surviving rows", got)
+		t.Fatalf("Cursor() = %d, want 42 from surviving rows", got)
 	}
 	if len(logs) == 0 || !strings.Contains(logs[0], "partially failed") {
 		t.Fatalf("logs = %#v, want partial failure log", logs)
+	}
+}
+
+// TestLastRunAcrossReturnsMaxScope proves the federation helper takes the most
+// recent run across scopes.
+func TestLastRunAcrossReturnsMaxScope(t *testing.T) {
+	early := beads.NewMemStore()
+	if _, err := early.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest"}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	late := beads.NewMemStore()
+	lateRun, err := late.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LastRunAcross([]*Store{ordersStoreOver(early), ordersStoreOver(late)})("digest")
+	if err != nil {
+		t.Fatalf("LastRunAcross(): %v", err)
+	}
+	if !got.Equal(lateRun.CreatedAt) {
+		t.Fatalf("LastRunAcross() = %s, want %s (max across scopes)", got, lateRun.CreatedAt)
+	}
+}
+
+// closedHistoryFailsStore serves every active-row read and fails, hard, every
+// read that includes closed history: the shape of a backing whose closed rows
+// are unreachable while the controller's cache still holds the open ones.
+type closedHistoryFailsStore struct{ *beads.MemStore }
+
+func (s closedHistoryFailsStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.IncludeClosed {
+		return nil, errors.New("closed history unavailable")
+	}
+	return s.MemStore.List(q)
+}
+
+// Over a CachingStore, a hard backing error on the order-run history read must
+// stay an error. Kills: a cached read that turns it into a partial result of
+// the open rows the cache holds, which LastRun and Cursor would trust as
+// surviving rows — a cooldown clock from an open run, a cursor that replays
+// consumed events.
+func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "seq:3"}}); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStore(closedHistoryFailsStore{backing}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := ordersStoreOver(cache)
+	if got, err := store.LastRun("digest"); err == nil {
+		t.Fatalf("LastRun() = %s, nil; a hard backing error was answered from the cache's open rows", got)
+	}
+	if got := store.Cursor("digest"); got != 0 {
+		t.Fatalf("Cursor() = %d, want 0 (unread); a hard backing error was answered from the cache's open rows", got)
 	}
 }

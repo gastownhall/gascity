@@ -36,6 +36,7 @@ func writeFakeBdBridgeScript(t *testing.T, binDir, envFile, argsFile string) {
 	script := `#!/bin/sh
 set -eu
 printf 'BEADS_DIR=%s
+GC_BIN=%s
 GC_DOLT_HOST=%s
 GC_DOLT_PORT=%s
 GC_DOLT_USER=%s
@@ -52,7 +53,7 @@ BEADS_BACKEND=%s
 GC_BEADS_PREFIX=%s
 BD_EXPORT_AUTO=%s
 ' \
-  "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" \
+  "${BEADS_DIR:-}" "${GC_BIN:-}" "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${GC_DOLT_USER:-}" "${GC_DOLT_PASSWORD:-}" \
   "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_SERVER_USER:-}" "${BEADS_DOLT_PASSWORD:-}" \
   "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_CREDENTIALS_FILE:-}" "${GC_BEADS:-}" "${GC_BEADS_BACKEND:-}" "${BEADS_BACKEND:-}" "${GC_BEADS_PREFIX:-}" \
   "${BD_EXPORT_AUTO:-}" > "` + envFile + `"
@@ -65,6 +66,11 @@ case "${1:-}" in
   create)
     cat <<'JSON'
 {"id":"BD-1","title":"captured","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}
+JSON
+    ;;
+  show)
+    cat <<'JSON'
+[{"id":"BD-1","title":"captured","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}]
 JSON
     ;;
   list)
@@ -103,8 +109,20 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 	envFile := filepath.Join(t.TempDir(), "bridge.env")
 	argsFile := filepath.Join(t.TempDir(), "bridge.args")
 	writeFakeBdBridgeScript(t, binDir, envFile, argsFile)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	wantGCBin, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong-db")
 	t.Setenv("BEADS_CREDENTIALS_FILE", "/tmp/stale-creds")
 	t.Setenv("GC_BEADS", "ambient-bd")
@@ -142,6 +160,9 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 	if got := envMap["BEADS_DIR"]; got != filepath.Join(scopeDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(scopeDir, ".beads"))
 	}
+	if got := envMap["GC_BIN"]; got != wantGCBin {
+		t.Fatalf("GC_BIN = %q, want canonical %q (ambient value must not leak)", got, wantGCBin)
+	}
 	if got := envMap["GC_DOLT_HOST"]; got != "db.example.internal" {
 		t.Fatalf("GC_DOLT_HOST = %q, want db.example.internal", got)
 	}
@@ -172,6 +193,47 @@ func TestBdStoreBridgeCreateCmdProjectsCanonicalEnvAndClearsAmbientAuthority(t *
 		if !strings.Contains(string(argsText), want) {
 			t.Fatalf("bd args missing %q: %s", want, string(argsText))
 		}
+	}
+}
+
+func TestBdStoreBridgeGetCmdReturnsBead(t *testing.T) {
+	scopeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	envFile := filepath.Join(t.TempDir(), "bridge.env")
+	argsFile := filepath.Join(t.TempDir(), "bridge.args")
+	writeFakeBdBridgeScript(t, binDir, envFile, argsFile)
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"bd-store-bridge",
+		"--dir", scopeDir,
+		"--host", "db.example.internal",
+		"--port", "3317",
+		"get",
+		"BD-1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+
+	var bead bdStoreBridgeBead
+	if err := json.Unmarshal(stdout.Bytes(), &bead); err != nil {
+		t.Fatalf("stdout JSON: %v\n%s", err, stdout.String())
+	}
+	if bead.ID != "BD-1" || bead.Title != "captured" || bead.Type != "task" {
+		t.Fatalf("unexpected bead payload: %#v", bead)
+	}
+
+	argsText, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	if got := strings.TrimSpace(string(argsText)); got != "show --json BD-1" {
+		t.Fatalf("get args = %q, want %q", got, "show --json BD-1")
 	}
 }
 
@@ -324,10 +386,9 @@ func TestBdStoreBridgeListCommandForwardsFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(args): %v", err)
 	}
-	// BdStore may need to merge and filter policy tiers client-side, so it
-	// requests all server-side candidates and applies the requested limit after
-	// parsing.
-	for _, want := range []string{"list", "--json", "--status=open", "--assignee=mayor", "--type=message", "--include-infra", "--include-gates", "--limit", "0"} {
+	// TierIssues + a single assignee has no Go-side-only residual filter, so
+	// BdStore pushes the caller's real limit straight to bd list (gc-i4j3y).
+	for _, want := range []string{"list", "--json", "--status=open", "--assignee=mayor", "--type=message", "--include-infra", "--include-gates", "--limit", "7"} {
 		if !strings.Contains(string(argsText), want) {
 			t.Fatalf("list args missing %q: %s", want, string(argsText))
 		}

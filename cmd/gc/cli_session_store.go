@@ -14,11 +14,12 @@ import (
 // the store verbatim there), so wrapping is byte-identical until a session
 // relocation is configured.
 //
-// The recorder is nil: a one-shot CLI command has no live event bus, matching
-// today's behavior where these paths emit no bead events. Threading a recorder
-// so relocated CLI writes emit bead.* is a separate follow-up.
+// The recorder is nil, and passing one would change nothing: resolveSessionStore
+// ignores it. What makes a relocated one-shot write observable is the emit
+// target the funnel puts on the ROUTES (class_store_emit.go), which
+// cliStorageRoutes has already applied by the time this returns.
 func cliSessionStore(store beads.Store, cfg *config.City, cityPath string) beads.Store {
-	return resolveSessionStore(store, cfg, cityPath, nil)
+	return resolveSessionStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 }
 
 // cliSessionFrontDoor builds the typed session write front door over the

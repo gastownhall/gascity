@@ -3,9 +3,28 @@ import type {
   RunDisplayNode,
   RunExecutionInstance,
   RunNodeStatus,
+  RunSessionAttachment,
 } from 'gas-city-dashboard-shared';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as SessionReads from '../../supervisor/sessionReads';
 import { RunNodeSessionPanel } from './RunNodeSessionPanel';
+
+const mockFetchSupervisorSessionTranscript = vi.hoisted(() => vi.fn());
+
+vi.mock('../../supervisor/sessionReads', async (importOriginal) => {
+  const actual = await importOriginal<typeof SessionReads>();
+  return {
+    ...actual,
+    fetchSupervisorSessionTranscript: mockFetchSupervisorSessionTranscript,
+  };
+});
+
+beforeEach(() => {
+  mockFetchSupervisorSessionTranscript.mockReset();
+  // Leave the transcript fetch pending so the panel stays in its loading state
+  // ("Fetching transcript.") instead of resolving into ready/error copy.
+  mockFetchSupervisorSessionTranscript.mockReturnValue(new Promise(() => {}));
+});
 
 afterEach(() => cleanup());
 
@@ -48,6 +67,34 @@ describe('RunNodeSessionPanel', () => {
 
     expect(screen.getByText('review-bead-a2')).toBeTruthy();
     expect(screen.queryByText('review-bead-a1')).toBeNull();
+  });
+
+  it('does not crash and shows graceful copy for an attached session with no link (public-shield shape)', () => {
+    // The public floor emits `session: { kind: 'attached' }` with no link — the
+    // shape that previously threw `undefined.sessionId` in the ErrorBoundary.
+    // The shared type now models this redacted shape directly, so the fixture is
+    // type-correct without casting around the contract.
+    const node = attachedNode({ kind: 'attached' });
+
+    expect(() => render(<RunNodeSessionPanel node={node} visible />)).not.toThrow();
+
+    expect(screen.getByText('Session transcript is unavailable for this node.')).toBeTruthy();
+    // A null id must never reach the transcript fetch.
+    expect(mockFetchSupervisorSessionTranscript).not.toHaveBeenCalled();
+  });
+
+  it('renders the transcript path for an attached session that carries a link', () => {
+    const node = attachedNode({
+      kind: 'attached',
+      streamable: false,
+      link: { sessionId: 'gc-session-review', sessionName: 'review-pipeline', assignee: 'codex' },
+    });
+
+    render(<RunNodeSessionPanel node={node} visible />);
+
+    expect(mockFetchSupervisorSessionTranscript).toHaveBeenCalledWith('gc-session-review');
+    expect(screen.getByText('Fetching transcript.')).toBeTruthy();
+    expect(screen.queryByText('Session transcript is unavailable for this node.')).toBeNull();
   });
 });
 
@@ -116,6 +163,39 @@ function node(status: RunNodeStatus, reason: 'not_started' | 'session_unresolved
         label: 'base',
         status,
         session: { kind: 'none', reason },
+        currentIteration: true,
+        historical: false,
+      },
+    ],
+    controlBadges: [],
+  };
+}
+
+function attachedNode(session: RunSessionAttachment): RunDisplayNode {
+  return {
+    id: 'review',
+    semanticNodeId: 'review',
+    title: 'Review',
+    kind: 'step',
+    constructKind: 'step',
+    status: 'active',
+    currentBeadId: 'review',
+    scope: { kind: 'run' },
+    visibleInGraph: true,
+    historicalOnly: false,
+    iterationSummary: { kind: 'single' },
+    attemptSummary: { kind: 'none' },
+    visibleExecutionInstanceId: 'review-exec',
+    executionInstances: [
+      {
+        id: 'review-exec',
+        semanticNodeId: 'review',
+        beadId: 'review-bead',
+        iteration: { kind: 'base' },
+        attempt: { kind: 'untracked' },
+        label: 'base',
+        status: 'active',
+        session,
         currentIteration: true,
         historical: false,
       },

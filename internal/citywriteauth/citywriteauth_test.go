@@ -444,7 +444,7 @@ func TestReqDigest(t *testing.T) {
 
 	// The query-less preimage must stay byte-identical to the original
 	// method"\n"path"\n"hex(sha256(body)) contract, so grants minted by the
-	// cross-repo crucible (which computes the query-less digest) and the pinned
+	// external minter (which computes the query-less digest) and the pinned
 	// golden vector keep verifying. Pin the exact preimage independently.
 	bodyHash := sha256.Sum256(body)
 	want := sha256.Sum256([]byte("POST\n" + path + "\n" + hex.EncodeToString(bodyHash[:])))
@@ -467,6 +467,49 @@ func TestReqDigest(t *testing.T) {
 	// A semantically-empty query collapses back to the query-less digest.
 	if ReqDigest("POST", path, "&", body) != base {
 		t.Fatal("semantically-empty query must equal the query-less digest")
+	}
+}
+
+// ReqDigestFromBodyHash is the body-hash-first entry point a minter uses: it
+// receives the hex sha256 of the body (never the body itself) and MUST produce
+// the identical digest ReqDigest computes from the raw body. Every case
+// ReqDigest binds — method, path, query canonicalization, empty vs non-empty
+// body, percent-encoded path — must round-trip through it byte-for-byte, or a
+// client-computed grant would never match the server's ReqDigest.
+func TestReqDigestFromBodyHash(t *testing.T) {
+	hexBody := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	cases := []struct {
+		name, method, path, rawQuery string
+		body                         []byte
+	}{
+		{"query-less", "POST", "/v0/city/acme/agents", "", []byte(`{"a":1}`)},
+		{"empty-body", "POST", "/v0/city/acme/agents", "", nil},
+		{"nil-vs-empty", "POST", "/v0/city/acme/agents", "", []byte{}},
+		{"query-bearing", "DELETE", "/v0/city/acme/workflow/x", "delete=true", []byte(`{}`)},
+		{"unordered-query", "DELETE", "/v0/city/acme/workflow/x", "b=2&a=1", []byte(`{}`)},
+		{"semantically-empty-query", "POST", "/v0/city/acme/agents", "&", []byte(`{"a":1}`)},
+		{"percent-encoded-path", "POST", "/v0/city/my%20city/agents", "", []byte(`{"a":1}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := ReqDigest(tc.method, tc.path, tc.rawQuery, tc.body)
+			got := ReqDigestFromBodyHash(tc.method, tc.path, tc.rawQuery, hexBody(tc.body))
+			if got != want {
+				t.Fatalf("ReqDigestFromBodyHash = %s, want ReqDigest = %s", got, want)
+			}
+		})
+	}
+
+	// The two entry points must diverge only on how the body reaches them: a
+	// different body hash must change the digest, proving the hash is actually
+	// folded into the preimage rather than ignored.
+	same := ReqDigestFromBodyHash("POST", "/x", "", hexBody([]byte("one")))
+	diff := ReqDigestFromBodyHash("POST", "/x", "", hexBody([]byte("two")))
+	if same == diff {
+		t.Fatal("ReqDigestFromBodyHash insensitive to the body hash")
 	}
 }
 
@@ -539,6 +582,164 @@ func TestVerify_EmptyClaimsAndZeroExpectRejected(t *testing.T) {
 	}
 }
 
+// cidFixture returns a verifier configured with the given cid/legacy-aud plus a
+// matching valid grant, mirroring the hosted (tenancy-scoped) writeauth wiring.
+func cidFixture(t *testing.T, now time.Time, cid, legacyAud string) (*Verifier, ed25519.PrivateKey, Grant, Expect) {
+	t.Helper()
+	pub, priv := newTestKeypair(t)
+	v, err := New(Options{
+		Aud:        "gc-city-write.v2",
+		LegacyAud:  legacyAud,
+		CID:        cid,
+		Keys:       map[string]ed25519.PublicKey{"k1": pub},
+		EpochFloor: 1,
+		MaxTTL:     60 * time.Second,
+		Skew:       5 * time.Second,
+		Now:        func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	body := []byte(`{"name":"worker"}`)
+	digest := ReqDigest("POST", "/v0/city/acme/agents", "", body)
+	g := Grant{
+		Kid:   "k1",
+		Aud:   "gc-city-write.v2",
+		City:  "acme",
+		CID:   cid,
+		Epoch: 7,
+		IAT:   now.Unix(),
+		Exp:   now.Add(30 * time.Second).Unix(),
+		JTI:   "jti-1",
+		Req:   digest,
+	}
+	return v, priv, g, Expect{City: "acme", ReqDigest: digest}
+}
+
+// The cid claim is the tenancy binding: when the verifier is configured with a
+// cid, every grant must carry that exact value — a mismatching or missing cid
+// fails closed. When no cid is configured the claim is not checked.
+func TestVerify_CIDEnforcement(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("matching cid passes", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		got, err := v.Verify(mintFor(t, priv, g), expect)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		if got.CID != "city_acme" {
+			t.Fatalf("grant cid = %q, want city_acme", got.CID)
+		}
+	})
+	t.Run("mismatching cid rejected", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		g.CID = "city_evil"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrCIDMismatch) {
+			t.Fatalf("got %v, want ErrCIDMismatch", err)
+		}
+	})
+	t.Run("missing cid rejected when configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		g.CID = ""
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrCIDMismatch) {
+			t.Fatalf("got %v, want ErrCIDMismatch", err)
+		}
+	})
+	t.Run("cid ignored when not configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "")
+		g.CID = "city_whatever" // signed, but the verifier has no cid to bind
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+	})
+}
+
+// A failed cid check must NOT burn the jti, like every other rejection: an
+// attacker replaying a captured grant against the wrong tenant must not be able
+// to invalidate it for the legitimate controller. The property under test is
+// that the mismatch rejection happens before jti consumption: the same verifier
+// still accepts a later matching grant carrying that same jti, proving the
+// failed attempt did not consume it.
+func TestVerify_FailedCIDCheckDoesNotConsumeJTI(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+	g.CID = "city_other"
+	token := mintFor(t, priv, g)
+	if _, err := v.Verify(token, expect); !errors.Is(err, ErrCIDMismatch) {
+		t.Fatalf("expected ErrCIDMismatch, got %v", err)
+	}
+	// The same verifier must still accept a matching grant with the same jti:
+	// the failed attempt did not consume it.
+	g.CID = "city_acme"
+	if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+		t.Fatalf("legit Verify after failed cid attempt: %v", err)
+	}
+}
+
+// LegacyAud is an optional second accepted audience so pre-cid ("gc-city-write")
+// grants keep verifying through the v2 cutover on deployments that are not
+// tenancy-scoped. Anything other than the two configured audiences stays
+// rejected, and without LegacyAud the verifier is strictly single-audience.
+func TestVerify_LegacyAudience(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("legacy aud accepted when configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "gc-city-write")
+		g.Aud = "gc-city-write"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("Verify legacy aud: %v", err)
+		}
+	})
+	t.Run("primary aud accepted alongside legacy", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "gc-city-write")
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("Verify primary aud: %v", err)
+		}
+	})
+	t.Run("unknown aud rejected despite legacy", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "gc-city-write")
+		g.Aud = "gc-city-write.v3"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("legacy aud rejected when not configured", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "")
+		g.Aud = "gc-city-write"
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("empty grant aud never matches an unset legacy aud", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "", "")
+		g.Aud = ""
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("legacy aud rejected on a tenancy-scoped verifier even with a matching cid", func(t *testing.T) {
+		// The v2 cutover regression: on a cid-scoped verifier the legacy
+		// audience is not honored even when configured, so a grant carrying the
+		// legacy audience AND a matching cid — a mis-minted or rollout-era
+		// artifact — is still rejected on the audience gate. The cid match must
+		// not carry it past the cutover.
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "gc-city-write")
+		g.Aud = "gc-city-write" // legacy audience; g.CID already matches the verifier
+		if _, err := v.Verify(mintFor(t, priv, g), expect); !errors.Is(err, ErrAudience) {
+			t.Fatalf("got %v, want ErrAudience", err)
+		}
+	})
+	t.Run("primary aud still accepted on a tenancy-scoped verifier with legacy configured", func(t *testing.T) {
+		// Suppressing the legacy audience under cid must not touch the primary
+		// (v2) path: a v2-audience grant with a matching cid still verifies.
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "gc-city-write")
+		if _, err := v.Verify(mintFor(t, priv, g), expect); err != nil {
+			t.Fatalf("primary aud on tenancy-scoped verifier: %v", err)
+		}
+	})
+}
+
 func flipLastByte(tok string) string {
 	parts := strings.SplitN(tok, ".", 2)
 	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
@@ -549,4 +750,57 @@ func flipLastByte(tok string) string {
 	// token still decodes and we exercise the signature check, not the decoder.
 	sig[0] ^= 0x01
 	return parts[0] + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+// mintShapedClaim signs a token whose payload is g with one claim replaced by
+// an arbitrary JSON value — shapes the string-typed Grant fields cannot
+// express. The signature covers the mutated payload, so a rejection exercises
+// claim decoding, never the signature check.
+func mintShapedClaim(t *testing.T, priv ed25519.PrivateKey, g Grant, claim string, value any) string {
+	t.Helper()
+	base, err := json.Marshal(g)
+	if err != nil {
+		t.Fatalf("marshal grant: %v", err)
+	}
+	var claims map[string]json.RawMessage
+	if err := json.Unmarshal(base, &claims); err != nil {
+		t.Fatalf("unmarshal grant: %v", err)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal claim %q: %v", claim, err)
+	}
+	claims[claim] = raw
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	sig := ed25519.Sign(priv, payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString(sig)
+}
+
+// A JSON-array claim where a string is expected must be rejected. Today that
+// falls out of json.Unmarshal failing on the string-typed Grant field
+// (ErrMalformed) — fail-closed, but only by construction. This pin exists so a
+// future switch of Grant.Aud (or Grant.CID) to []string turns these red and
+// forces a conscious decision about list-shaped claim semantics instead of
+// silently admitting array-shaped grants.
+func TestVerify_ArrayShapedClaimsRejected(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("array aud", func(t *testing.T) {
+		v, priv, g, expect := fixture(t, now)
+		tok := mintShapedClaim(t, priv, g, "aud", []string{g.Aud})
+		if _, err := v.Verify(tok, expect); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("array-shaped aud: got %v, want ErrMalformed", err)
+		}
+	})
+	t.Run("array cid on a tenancy-bound verifier", func(t *testing.T) {
+		v, priv, g, expect := cidFixture(t, now, "city_acme", "")
+		tok := mintShapedClaim(t, priv, g, "cid", []string{"city_acme"})
+		if _, err := v.Verify(tok, expect); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("array-shaped cid: got %v, want ErrMalformed", err)
+		}
+	})
 }

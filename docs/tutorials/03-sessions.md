@@ -84,8 +84,6 @@ mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
 $ gc session peek mc-8sfd
 › [my-city] my-project/reviewer • 2026-04-07T11:56:59
 
-  Run `gc prime` to initialize your context.
-
   # Code Reviewer Agent
   You are an agent in a Gas City workspace. Claim available work and execute it.
 
@@ -211,6 +209,15 @@ Nudged mayor   # or "Queued nudge for mayor" if the session isn't ready yet
 
 ![mayor nudge screenshot](mayor-nudge.png)
 
+Confirm the session remains available after the nudge:
+
+```shell
+~/my-city
+$ gc session list
+ID      TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
+mc-5o1  mayor     active  session,config  mayor   mayor  10h  5s ago
+```
+
 ## Session logs
 
 Peek shows the last few lines of terminal output. Logs show the full
@@ -232,9 +239,15 @@ whole conversation. Follow live output with `-f`:
 $ gc session logs mayor -f
 ```
 
-Now nudge the mayor from another terminal and the follow stream prints the
-exchange as it arrives — handy for watching a background agent without
-attaching and risking an interruption.
+Now nudge the mayor from another terminal:
+
+```shell
+~/my-city
+$ gc session nudge mayor "What's the current city status?"
+```
+
+The follow stream prints the exchange as it arrives — handy for watching a
+background agent without attaching and risking an interruption.
 
 <Accordion title="Edge: how --tail counts entries">
 A compact-boundary divider counts as an entry if one lands inside the final

@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltauth"
 )
 
 // CleanupDoltClient is the SQL surface the cleanup engine needs. The
@@ -176,9 +179,24 @@ type sqlCleanupDoltClient struct {
 }
 
 // newSQLCleanupDoltClient opens a connection to the resolved Dolt server.
-// Caller must Close() when done.
-func newSQLCleanupDoltClient(host, port string) (CleanupDoltClient, error) {
-	db, err := managedDoltOpenDB(host, port, "root")
+// The backing *sql.DB is the shared pooled handle from internal/doltpool,
+// so Close() on the client is a no-op rather than an owner release.
+func newSQLCleanupDoltClient(cityPath, host, port string) (CleanupDoltClient, error) {
+	return openSQLCleanupDoltClient(cityPath, host, port, doltauth.Resolve, managedDoltOpenDB)
+}
+
+type (
+	cleanupDoltAuthResolver func(scopeRoot, fallbackUser, host string, port int) doltauth.Resolved
+	cleanupDoltDBOpener     func(host, port, user string) (*sql.DB, error)
+)
+
+func openSQLCleanupDoltClient(cityPath, host, port string, resolve cleanupDoltAuthResolver, open cleanupDoltDBOpener) (CleanupDoltClient, error) {
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return nil, fmt.Errorf("invalid dolt port %q: %w", port, err)
+	}
+	user := resolve(cityPath, "root", host, portNum).User
+	db, err := open(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("open dolt connection: %w", err)
 	}
@@ -211,10 +229,30 @@ func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) er
 	}
 	// Escape backticks in identifiers to prevent injection (` → ``).
 	safe := strings.ReplaceAll(name, "`", "``")
-	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE `%s`", safe)) //nolint:gosec // G201: identifier-escaped
+	// IF EXISTS keeps the drop idempotent: teardown/rollback is documented as
+	// "best-effort and idempotent (a re-crash mid-sweep re-runs cleanly)", so a
+	// drop that already succeeded before a marker write failed must not error the
+	// next sweep and wedge the record — a database-not-found is success here.
+	_, err := c.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", safe)) //nolint:gosec // G201: identifier-escaped
 	return err
 }
 
+// PurgeDroppedDatabases runs Dolt's purge on rigDB.
+//
+// Connection-context hazard: c.db is the shared pooled handle from
+// internal/doltpool, opened server-level (empty database). The USE below
+// therefore mutates a connection that conn.Close() returns to the pool
+// still bound to rigDB, where any other caller may draw it next. There
+// is no restore: the connection started with no database selected, and
+// MySQL has no "USE nothing" to put it back.
+//
+// Safe today only because every other query on this pooled server-level
+// handle is database-context-independent — SHOW DATABASES, fully
+// qualified names, or its own USE. That is an invariant, not an
+// accident: any unqualified query added to a server-level pooled client
+// would silently run against whichever database a previous borrower left
+// selected. New callers must qualify their identifiers or issue their
+// own USE.
 func (c *sqlCleanupDoltClient) PurgeDroppedDatabases(ctx context.Context, rigDB string) error {
 	if !validDoltDatabaseIdentifier(rigDB) {
 		return fmt.Errorf("invalid database identifier %q", rigDB)
@@ -259,6 +297,8 @@ func (c *sqlCleanupDoltClient) ProbeLiveSessions(ctx context.Context) (map[strin
 	return out, nil
 }
 
+// Close is a no-op: the underlying *sql.DB is the shared pooled handle
+// owned by internal/doltpool and must outlive this client.
 func (c *sqlCleanupDoltClient) Close() error {
-	return c.db.Close()
+	return nil
 }

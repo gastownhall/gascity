@@ -187,6 +187,112 @@ mode = "on_demand"
 	}
 }
 
+// TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent is a regression
+// guard for #4184 problem 2: min_active_sessions=0 + max_active_sessions=0
+// is documented (TestValidateAgentsPoolMaxZeroIsValid) as the intentional
+// way to disable an agent's pool — it is not a pool. The lint rule must not
+// re-flag it as "pool-controlled" the same way it flags a real pool
+// (e.g. min=0/max=3 in TestLintRejectsNamedSessionBackedByPoolControlledAgent
+// above).
+func TestLintAllowsNamedSessionOnExplicitlyDisabledPoolAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "disabled-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 0
+max_active_sessions = 0
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on an explicitly disabled pool agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the documented max=0 disable form as pool-controlled:\n%s", stderr.String())
+	}
+}
+
+// TestLintAllowsNamedSessionSingletonAgent is a regression guard for the
+// max_active_sessions=1 named-session flavor documented by
+// (*config.Agent).SupportsInstanceExpansion: max=1 with no min/scale_check/
+// namepool is a singleton with a stable canonical identity, not a pool.
+// A [[named_session]] targeting that shape is the supported way to declare a
+// persistent seat and must lint clean.
+func TestLintAllowsNamedSessionSingletonAgent(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "singleton-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint failed on a named-session singleton agent, want pass\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pool-controlled agent") {
+		t.Fatalf("stderr wrongly flagged the max=1 named-session flavor as pool-controlled:\n%s", stderr.String())
+	}
+}
+
+// TestLintStillRejectsSingletonPoolWithMin pins the boundary of the max=1
+// exemption: an explicit min_active_sessions keeps pool semantics
+// (SupportsInstanceExpansion's pool flavor), so a named_session targeting
+// min=1/max=1 remains a conflict.
+func TestLintStillRejectsSingletonPoolWithMin(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "singleton-pool-named"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+min_active_sessions = 1
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+scope = "rig"
+mode = "on_demand"
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded, want pool conflict for min=1/max=1\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `named_session "worker" targets pool-controlled agent "worker"`) {
+		t.Fatalf("stderr missing named-session pool conflict:\n%s", stderr.String())
+	}
+}
+
 func TestLintPromptDiscoverySkipsIgnoredDirs(t *testing.T) {
 	packDir := t.TempDir()
 	writeLintPack(t, packDir, "skip-dirs", "worker", "prompts/worker.template.md")
@@ -222,6 +328,222 @@ inject_fragments = ["missing-footer"]
 	}
 	if !strings.Contains(stderr.String(), `inject_fragment "missing-footer"`) {
 		t.Fatalf("stderr missing inject fragment diagnostic:\n%s", stderr.String())
+	}
+}
+
+// TestLintResolvesOwnPackFragmentCleanly pins the baseline case Ask #3 of
+// ga-as6dhb asked for: a pack that injects a fragment it defines itself
+// must lint clean, so a future regression in the fragment-search-directory
+// logic doesn't silently start flagging valid packs again.
+func TestLintResolvesOwnPackFragmentCleanly(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "own-fragment"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(packDir, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (own-pack fragment should resolve)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "inject_fragment") {
+		t.Fatalf("stderr unexpectedly reports inject_fragment diagnostic for a fragment defined in the pack's own template-fragments/:\n%s", stderr.String())
+	}
+}
+
+// TestLintResolvesFragmentComposedViaCityRigIncludes guards ga-as6dhb: a
+// pack can depend on a fragment shipped by a sibling pack that is composed
+// in purely at the city.toml rig level (rigs[].includes), never declared by
+// the dependent pack's own pack.toml — exactly how packs/cairn-loop-orders
+// depends on packs/actual/all in production. The runtime resolves this fine
+// because resolveTemplate (template_resolve.go) renders against
+// city.PackDirsForRig(rigName), but config.LoadPackForLint only ever sees
+// the target pack's own recursive includes (empty here), so lint reported
+// the fragment "not found" even though real sessions rendered it correctly.
+// See lintFragmentSearchDirs in cmd_lint.go.
+func TestLintResolvesFragmentComposedViaCityRigIncludes(t *testing.T) {
+	root := t.TempDir()
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/actual", "packs/uses-fragment"]
+`)
+
+	actualDir := filepath.Join(root, "packs", "actual")
+	writeLintPack(t, actualDir, "actual", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(actualDir, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(actualDir, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+
+	packDir := filepath.Join(root, "packs", "uses-fragment")
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "uses-fragment"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (fragment composed in via city.toml rigs[].includes should resolve)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "inject_fragment") {
+		t.Fatalf("stderr unexpectedly reports inject_fragment diagnostic for a fragment composed in via city.toml rigs[].includes:\n%s", stderr.String())
+	}
+}
+
+// TestLintDoesNotResolveFragmentFromUnrelatedRig is the other half of
+// ga-as6dhb: widening lint's fragment search with city-composed pack dirs must
+// not widen it past what the runtime would actually resolve. A fragment defined
+// only by a pack in rigb is not on the search path of an agent in riga's pack
+// (resolveTemplate renders against city.PackDirsForRig("riga")), so lint must
+// still report it missing. Unioning every rig would turn that real error into a
+// silent pass. See lintCityComposedPackDirs in cmd_lint.go.
+func TestLintDoesNotResolveFragmentFromUnrelatedRig(t *testing.T) {
+	root := t.TempDir()
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "riga"
+includes = ["packs/riga-pack"]
+
+[[rigs]]
+name = "rigb"
+includes = ["packs/rigb-pack"]
+`)
+
+	rigbPack := filepath.Join(root, "packs", "rigb-pack")
+	writeLintPack(t, rigbPack, "rigb-pack", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(rigbPack, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(rigbPack, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+
+	rigaPack := filepath.Join(root, "packs", "riga-pack")
+	writeLintFile(t, filepath.Join(rigaPack, "pack.toml"), `[pack]
+name = "riga-pack"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(rigaPack, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", rigaPack}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint = 0, want non-zero (fragment lives only in an unrelated rig's pack)\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `inject_fragment "footer"`) {
+		t.Fatalf("stderr does not report the missing fragment from the unrelated rig:\n%s", stderr.String())
+	}
+}
+
+// TestLintIgnoresBrokenFragmentInCityComposedSiblingPack pins the ownership
+// boundary: gc lint <pack> reports on <pack>. A sibling pack composed in by the
+// city supplies fragments to the linted pack, but its own malformed fragment is
+// that sibling's lint failure, not this one's — so the parse error is recorded
+// at warning severity and the linted pack still passes. See
+// lintLoadAdvisorySharedTemplates in cmd_lint.go.
+func TestLintIgnoresBrokenFragmentInCityComposedSiblingPack(t *testing.T) {
+	root := t.TempDir()
+	writeLintFile(t, filepath.Join(root, "city.toml"), `[[rigs]]
+name = "myrig"
+includes = ["packs/actual", "packs/uses-fragment"]
+`)
+
+	actualDir := filepath.Join(root, "packs", "actual")
+	writeLintPack(t, actualDir, "actual", "helper", "prompts/helper.template.md")
+	writeLintFile(t, filepath.Join(actualDir, "prompts", "helper.template.md"), "hello {{.AgentName}}\n")
+	writeLintFile(t, filepath.Join(actualDir, "template-fragments", "footer.template.md"), `{{ define "footer" }}FOOTER{{ end }}`)
+	writeLintFile(t, filepath.Join(actualDir, "template-fragments", "broken.template.md"), `{{ define "broken" }}{{ if .AgentName }}`)
+
+	packDir := filepath.Join(root, "packs", "uses-fragment")
+	writeLintFile(t, filepath.Join(packDir, "pack.toml"), `[pack]
+name = "uses-fragment"
+version = "0.1.0"
+schema = 2
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.template.md"
+inject_fragments = ["footer"]
+`)
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"), "hello {{.AgentName}}\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (a broken fragment in a city-composed sibling must not fail this pack)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if !strings.Contains(line, "broken.template.md") {
+			continue
+		}
+		if strings.Contains(line, "error") {
+			t.Fatalf("stderr reports a sibling pack's broken fragment as an error for this pack:\n%s", stderr.String())
+		}
+	}
+}
+
+func TestLintCleanBdInvocationsProduceNoFindings(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-clean", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd update <id> --claim`\n`gc bd ready --unassigned --json`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestLintReportsUnknownBdFlag(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-typo", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd update <id> --asignee bob`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint succeeded; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	if !strings.Contains(errText, "bd-unknown-flag") || !strings.Contains(errText, `"--asignee"`) {
+		t.Fatalf("stderr missing bd-unknown-flag diagnostic:\n%s", errText)
+	}
+	if !strings.Contains(errText, "worker.template.md:2:") {
+		t.Fatalf("stderr missing correct line number for bd-unknown-flag diagnostic:\n%s", errText)
+	}
+}
+
+func TestLintSkipsOutOfScopeBdSubcommand(t *testing.T) {
+	packDir := t.TempDir()
+	writeLintPack(t, packDir, "bd-flag-out-of-scope", "worker", "prompts/worker.template.md")
+	writeLintFile(t, filepath.Join(packDir, "prompts", "worker.template.md"),
+		"Agent {{.AgentName}}\n`gc bd formula show some-formula --made-up-flag`\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc lint = %d, want 0 (out-of-scope subcommand silently skipped)\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
 }
 

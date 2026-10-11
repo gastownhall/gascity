@@ -1,5 +1,20 @@
 version: "2"
 
+# Linux lint and vet gate as nogo inside the Bazel build (//tools/nogo, see
+# TESTING.md "Lint and vet (nogo)"), which mirrors the linters, settings and
+# exclusions below. golangci-lint still runs this file for `make fmt`/
+# `make fmt-check` and for the macOS quality job (`make lint-golangci`), so
+# change the two together.
+
+run:
+  # Every golangci-lint on a host locks $TMPDIR/golangci-lint.lock and, by
+  # default, gives up after 5s ("parallel golangci-lint is running"). Deploy
+  # gates, maintainer-review gate checks and pre-commit hooks lint concurrently
+  # on shared hosts, so the later run failed before analysis. The lock guards no
+  # shared state: the result cache is safe for concurrent multi-process use.
+  allow-parallel-runners: true
+  modules-download-mode: readonly
+
 severity:
   default: error
 
@@ -13,9 +28,10 @@ formatters:
     - goimports
 
 linters:
-  # Default linters (errcheck, govet, ineffassign, staticcheck, unused)
-  # are always enabled. Add extras here.
+  # The default linters (errcheck, govet, ineffassign, staticcheck, unused)
+  # plus these extras; tools/nogo/analyzers.bzl is the nogo equivalent.
   enable:
+    - govet
     - errorlint
     - misspell
     - gocritic

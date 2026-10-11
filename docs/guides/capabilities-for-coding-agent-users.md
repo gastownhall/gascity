@@ -51,14 +51,18 @@ applies.
 - Pick the scope:
   - `skills/<name>/` at **pack level** → shared with **every** agent in the
     city.
-  - `agents/<role>/skills/<name>/` at **role level** → only agents of that role
-    (and its pooled instances). On a name collision, the role-local skill wins.
-- At startup Gas City **symlinks** both scopes into each agent's
-  provider-specific skill sink — `.claude/skills/`, `.codex/skills/`,
-  `.gemini/skills/`, `.opencode/skills/`. List with `gc skill list`.
-- It *places* files into each provider's convention; it doesn't translate them.
-  Providers whose convention isn't confirmed (copilot, cursor, pi, omp) are
-  skipped for now.
+  - `agents/<role>/skills/<name>/` at **role level** → only agents of that
+    role (and all its pooled instances). On a name collision, the role-local
+    skill wins.
+- At startup Gas City **symlinks** the pack level and role level skill directories into
+  each agent's provider-specific skill sink — `.claude/skills/`,
+  `.agents/skills/` (codex), `.gemini/skills/`, `.opencode/skills/`. List with
+  `gc skill list`.
+- It *places* the files into each provider's own convention; it doesn't
+  translate them. Providers whose convention isn't confirmed (copilot, cursor,
+  pi, omp) are skipped for now.
+- No framework *around* skills: no per-agent allow-lists. Within a scope every
+  eligible agent gets every skill; the model decides when one applies.
 - MCP is list-only today (`gc mcp list` shows what's catalogued; you wire the
   servers yourself).
 

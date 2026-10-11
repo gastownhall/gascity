@@ -45,3 +45,17 @@ func TestUnsanitizeQualifiedNameFromSession(t *testing.T) {
 		}
 	}
 }
+
+func TestQualifiedNameRoundTripIsBestEffort(t *testing.T) {
+	// A name segment may legally contain "--" (validAgentName permits repeated
+	// hyphens), so encode/decode is not a bijection. See
+	// docs/reference/specs/identity-separator-contract-v1.md §2.
+	const raw = "rig/builder--1"
+	encoded := SanitizeQualifiedNameForSession(raw)
+	if encoded != "rig--builder--1" {
+		t.Fatalf("encode = %q, want %q", encoded, "rig--builder--1")
+	}
+	if got := UnsanitizeQualifiedNameFromSession(encoded); got != "rig/builder/1" {
+		t.Fatalf("decode = %q, want %q (documented best-effort collision)", got, "rig/builder/1")
+	}
+}

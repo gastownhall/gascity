@@ -62,6 +62,40 @@ func TestSemanticNodeIDForIterationStepRef(t *testing.T) {
 // TestIsPositiveIntegerStr pins the JS isPositiveInteger semantics, including the
 // float64 exact-representability boundary (parseInt yields a float64, so values
 // beyond 2^53 only pass when they happen to be exactly representable).
+// TestPresentationStatusCanceled pins that a bead closed with gc.outcome=canceled
+// surfaces the distinct "canceled" node status rather than the generic
+// "completed", so a canceled run's steps read as canceled in the run-detail graph.
+func TestPresentationStatusCanceled(t *testing.T) {
+	cases := []struct {
+		name string
+		bead runSnapshotBead
+		want string
+	}{
+		{
+			name: "closed canceled",
+			bead: runSnapshotBead{status: "closed", metadata: map[string]string{"gc.outcome": "canceled"}},
+			want: "canceled",
+		},
+		{
+			name: "raw canceled status",
+			bead: runSnapshotBead{status: "canceled"},
+			want: "canceled",
+		},
+		{
+			name: "closed without outcome stays completed",
+			bead: runSnapshotBead{status: "closed"},
+			want: "completed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := presentationStatus(tc.bead); got != tc.want {
+				t.Fatalf("presentationStatus(%+v) = %q, want %q", tc.bead, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsPositiveIntegerStr(t *testing.T) {
 	cases := []struct {
 		value string
@@ -84,5 +118,23 @@ func TestIsPositiveIntegerStr(t *testing.T) {
 		if got := isPositiveIntegerStr(tc.value); got != tc.want {
 			t.Errorf("isPositiveIntegerStr(%q) = %v, want %v", tc.value, got, tc.want)
 		}
+	}
+}
+
+// attemptFor reports a retry attempt's own counter. Inside a ralph body
+// gc.attempt carries the iteration (the v1.4.2 contract), so the retry counter
+// has to come from gc.retry_attempt; beads minted before that key existed
+// still fall back to gc.attempt.
+func TestAttemptForPrefersRetryAttempt(t *testing.T) {
+	inLoop := runSnapshotBead{id: "b1", metadata: map[string]string{"gc.attempt": "3", "gc.iteration": "3", "gc.retry_attempt": "2"}}
+	if got, ok := attemptFor(inLoop); !ok || got != 2 {
+		t.Errorf("attemptFor(in loop) = (%d, %v), want (2, true)", got, ok)
+	}
+	if got, ok := iterationFor(inLoop); !ok || got != 3 {
+		t.Errorf("iterationFor(in loop) = (%d, %v), want (3, true)", got, ok)
+	}
+	legacy := runSnapshotBead{id: "b2", metadata: map[string]string{"gc.attempt": "2"}}
+	if got, ok := attemptFor(legacy); !ok || got != 2 {
+		t.Errorf("attemptFor(legacy) = (%d, %v), want (2, true)", got, ok)
 	}
 }

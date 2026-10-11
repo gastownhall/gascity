@@ -326,3 +326,48 @@ provider = "claude"
 		t.Fatalf("events scope cityName = %q, want registered supervisor name %q", scope.cityName, "alpha")
 	}
 }
+
+// TestResolveEventsScope_SupervisorLaneOutsideCityNoFlag locks the PC2
+// regression fix: `gc events` run OUTSIDE a city directory with no --city and no
+// remote selector, against a running supervisor, must resolve to the supervisor
+// scope — not error on the remote intercept's city-discovery failure.
+func TestResolveEventsScope_SupervisorLaneOutsideCityNoFlag(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	cityDir := filepath.Join(t.TempDir(), "alpha")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest("\n[workspace]\nname = \"alpha\"\nprovider = \"claude\"\n", "claude")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(supervisor.ConfigPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(supervisor.ConfigPath(), []byte("[supervisor]\nport = 9124\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityDir, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(t.TempDir()) // non-city cwd — the regression path
+
+	oldAlive := supervisorAliveHook
+	oldCityFlag := cityFlag
+	t.Cleanup(func() { supervisorAliveHook = oldAlive; cityFlag = oldCityFlag })
+	supervisorAliveHook = func() int { return 1234 }
+	cityFlag = "" // no --city
+
+	scope, err := resolveEventsScope("")
+	if err != nil {
+		t.Fatalf("supervisor lane must resolve outside a city dir with no --city, got %v", err)
+	}
+	if scope.gen != nil {
+		t.Fatal("supervisor scope must not carry a remote gen client")
+	}
+	if !strings.Contains(scope.apiURL, ":9124") {
+		t.Fatalf("apiURL = %q, want supervisor :9124", scope.apiURL)
+	}
+}

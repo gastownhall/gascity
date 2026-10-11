@@ -32,6 +32,12 @@ func ValidateArtifactDir(dir string) error {
 	}
 	// Canonicalize with EvalSymlinks so comparisons are consistent
 	// when the artifact root itself contains symlinked components.
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. absDir is already absolute (filepath.Abs above), so this
+	// call cannot diverge into a relative/absolute mismatch; its error path
+	// is the deliberate "artifact directory must exist" check for this
+	// function, which pathutil.NormalizePathForCompare's never-errors
+	// contract would silently swallow.
 	absDir, err = filepath.EvalSymlinks(absDir)
 	if err != nil {
 		return fmt.Errorf("resolving artifact directory: %w", err)
@@ -46,6 +52,13 @@ func ValidateArtifactDir(dir string) error {
 
 		// Check for symlinks using EvalSymlinks for full resolution
 		// (handles multi-hop chains), consistent with ResolveConditionPath.
+		// canonical-path-exception: existence/resolvability only, not
+		// comparison preparation. path comes from WalkDir(absDir, ...) and
+		// is already absolute, so this cannot diverge into a
+		// relative/absolute mismatch; a broken or unresolvable symlink
+		// target must fail directory validation here, which
+		// pathutil.NormalizePathForCompare's never-errors contract would
+		// silently paper over.
 		if typ&os.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(path)
 			if err != nil {

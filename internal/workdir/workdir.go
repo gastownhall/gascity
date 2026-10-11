@@ -23,6 +23,18 @@ type PathContext struct {
 	CityRoot      string
 	CityName      string
 	WorktreesRoot string
+	// DefaultBranch is the rig's configured mainline branch
+	// ([[rig]] default_branch, via config.Rig.EffectiveDefaultBranch). It is
+	// empty when the agent has no rig or the rig records no default_branch.
+	//
+	// Configured value only. This deliberately diverges from the prompt
+	// template's {{.DefaultBranch}}, which additionally falls back to a live
+	// origin/HEAD probe: work_dir, session_setup, and pre_start expansion run
+	// on reconciler hot paths, where a git subprocess per expansion is both a
+	// latency hazard and a resource-census regression. Setup scripts consuming
+	// this value should keep their own origin/HEAD probe as the fallback for
+	// the empty case.
+	DefaultBranch string
 }
 
 // CityName returns the effective workspace name for workdir/template expansion.
@@ -67,6 +79,21 @@ func RigRootForName(rigName string, rigs []config.Rig) string {
 	for _, rig := range rigs {
 		if rig.Name == rigName {
 			return rig.Path
+		}
+	}
+	return ""
+}
+
+// DefaultBranchForRigName returns the configured mainline branch for rigName,
+// or "" when rigName is empty or the rig records no default_branch. It never
+// probes git — see the PathContext.DefaultBranch doc comment for why.
+func DefaultBranchForRigName(rigName string, rigs []config.Rig) string {
+	if rigName == "" {
+		return ""
+	}
+	for i := range rigs {
+		if rigs[i].Name == rigName {
+			return rigs[i].EffectiveDefaultBranch()
 		}
 	}
 	return ""
@@ -124,6 +151,7 @@ func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a con
 		CityRoot:      cityPath,
 		CityName:      cityName,
 		WorktreesRoot: WorktreesRoot(cityPath),
+		DefaultBranch: DefaultBranchForRigName(rigName, rigs),
 	}
 }
 
@@ -244,6 +272,18 @@ func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config
 			if rigRoot := RigRootForName(rigName, rigs); rigRoot != "" {
 				return ResolveDirPath(cityPath, rigRoot), nil
 			}
+		}
+		// A dir-less, work_dir-less agent with no explicit pool signal still
+		// gets concurrent distinct instances in practice (dynamic aliases,
+		// wisp sessions) even though nothing in its static config predicts
+		// that. Falling through to the bare city path here would let those
+		// instances silently share a working directory. Agents that DO carry
+		// an explicit pool signal are excluded: RequiresPoolWorkDirIsolationCheck
+		// already fails config validation at init time if their work_dir
+		// doesn't vary per instance, so auto-isolating here would just mask
+		// a misconfiguration ValidatePoolWorkDirIsolation is supposed to catch.
+		if a.Dir == "" && qualifiedName != a.QualifiedName() && !RequiresPoolWorkDirIsolationCheck(a) {
+			return filepath.Join(WorktreesRoot(cityPath), agent.SanitizeQualifiedNameForSession(qualifiedName)), nil
 		}
 		return ResolveDirPath(cityPath, a.Dir), nil
 	}

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -89,29 +88,14 @@ func cmdMaintenanceDoltGC(wait, jsonOut bool, stdout, stderr io.Writer) int {
 // available. Indirected through a var so tests inject a client pointed at
 // httptest.Server or force a specific fallback reason without spinning up
 // a real controller.
-var maintenanceAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	// Maintenance has no local fallback. A supervisor-managed city omits a
-	// standalone [api] port (the supervisor serves the API on its own port via
-	// city-scoped routes), so apiClient returns nil even though the controller
-	// socket is alive; route to the supervisor-managed client directly rather
-	// than reporting controller-down. General commands keep apiClient's
-	// nil→local fallback, so this routing is scoped to maintenance. (gascity ga-tp7)
-	//
-	// Honor the GC_NO_API escape hatch: apiClient returns nil under it, and the
-	// alive-hook/supervisor client below never re-check it, so without this guard
-	// an explicit operator opt-out would be silently bypassed for maintenance.
-	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
-		if apiRouteControllerAliveHook(cityPath) != 0 {
-			if c := apiRouteSupervisorClientHook(cityPath); c != nil {
-				return c, ""
-			}
-		}
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Maintenance has no local fallback, so it uses the shared
+// supervisorFallthroughAPIClient helper (gascity ga-tp7): a supervisor-managed
+// city omits a standalone [api] port (the supervisor serves the API on its
+// own port via city-scoped routes), so apiClient alone returns nil even
+// though the controller socket is alive; route to the supervisor-managed
+// client directly rather than reporting controller-down.
+var maintenanceAPIClient = supervisorFallthroughAPIClient
 
 // routeMaintenanceStatus dispatches `gc maintenance status` to the
 // supervisor API. There is no local fallback (the in-memory ring buffer
@@ -134,13 +118,13 @@ func routeMaintenanceStatus(c *api.Client, nilReason string, jsonOut bool, stdou
 		fmt.Fprintln(stderr, "gc maintenance status: "+err.Error()) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	if !api.ShouldFallbackForRead(err) {
+	if !api.ShouldFallbackForRead(c, err) {
 		logRoute(stderr, cmdName, "api", "error")
 		fmt.Fprintf(stderr, "gc maintenance status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	fmt.Fprintf(stderr, "gc maintenance status: supervisor unavailable (%s)\n", api.FallbackReason(err)) //nolint:errcheck // best-effort stderr
+	logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+	fmt.Fprintf(stderr, "gc maintenance status: supervisor unavailable (%s)\n", api.FallbackReason(c, err)) //nolint:errcheck // best-effort stderr
 	return 2
 }
 
@@ -170,13 +154,13 @@ func routeMaintenanceDoltGC(c *api.Client, nilReason string, wait, jsonOut bool,
 		fmt.Fprintln(stderr, "gc maintenance dolt-gc: "+err.Error()) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	if !api.ShouldFallback(err) {
+	if !api.ShouldFallback(c, err) {
 		logRoute(stderr, cmdName, "api", "error")
 		fmt.Fprintf(stderr, "gc maintenance dolt-gc: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
-	fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor unavailable (%s)\n", api.FallbackReason(err)) //nolint:errcheck // best-effort stderr
+	logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+	fmt.Fprintf(stderr, "gc maintenance dolt-gc: supervisor unavailable (%s)\n", api.FallbackReason(c, err)) //nolint:errcheck // best-effort stderr
 	return 2
 }
 

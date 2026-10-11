@@ -81,6 +81,63 @@ func mailboxAddresses(b beads.Bead, includeRuntimeName bool) []string {
 	return addresses
 }
 
+// MailboxAddressFromInfo is the Info-taking twin of MailboxAddress: the primary
+// mailbox address a session publishes under — its alias if set, else its bead
+// id, else its runtime session_name. It reads Info fields that mirror the exact
+// bead metadata (Alias, ID, SessionNameMetadata — the RAW session_name without
+// the sessionNameFor fallback), so it is byte-identical to MailboxAddress.
+func MailboxAddressFromInfo(info Info) string {
+	if alias := strings.TrimSpace(info.Alias); alias != "" {
+		return alias
+	}
+	if info.ID != "" {
+		return info.ID
+	}
+	return strings.TrimSpace(info.SessionNameMetadata)
+}
+
+// MailboxAddressesFromInfo is the Info-taking twin of MailboxAddresses: every
+// address a session can receive mail at (primary, bead id, alias history),
+// falling back to session_name only when nothing else resolves.
+func MailboxAddressesFromInfo(info Info) []string {
+	return mailboxAddressesFromInfo(info, false)
+}
+
+// MailboxAddressesIncludingRuntimeNameFromInfo is the Info-taking twin of
+// MailboxAddressesIncludingRuntimeName: the API read semantics that always
+// include the runtime session_name (appended last), even when other addresses
+// resolved.
+func MailboxAddressesIncludingRuntimeNameFromInfo(info Info) []string {
+	return mailboxAddressesFromInfo(info, true)
+}
+
+// mailboxAddressesFromInfo is the Info-taking shared body behind the two Info
+// mailbox twins, byte-identical to mailboxAddresses: it reads Alias/ID
+// (via MailboxAddressFromInfo), AliasHistory, and the RAW SessionNameMetadata.
+func mailboxAddressesFromInfo(info Info, includeRuntimeName bool) []string {
+	seen := map[string]bool{}
+	var addresses []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		addresses = append(addresses, value)
+	}
+	add(MailboxAddressFromInfo(info))
+	add(info.ID)
+	for _, alias := range info.AliasHistory {
+		add(alias)
+	}
+	if includeRuntimeName {
+		add(info.SessionNameMetadata)
+	} else if len(addresses) == 0 {
+		add(strings.TrimSpace(info.SessionNameMetadata))
+	}
+	return addresses
+}
+
 // ExtmsgHandleSource returns the raw handle source for a session bead used by
 // the external-messaging handle projection: alias if set, else session_name.
 // Unlike MailboxAddress it does NOT fall back to the bead id — it preserves the

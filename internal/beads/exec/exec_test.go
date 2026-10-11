@@ -1456,3 +1456,68 @@ esac
 		t.Fatalf("list args missing type filter: %s", argsText)
 	}
 }
+
+func TestListWithSeekAfterDoesNotForwardLimitBeforeClientFilter(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{
+		Type:  "task",
+		Sort:  beads.SortCreatedDesc,
+		Limit: 7,
+		SeekAfter: &beads.SeekBoundary{
+			CreatedAt: time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
+			ID:        "gc-9",
+		},
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	// The script cannot express the compound (created_at, id) boundary; a
+	// script-side limit would cut rows before the Go-side seek filter runs.
+	if strings.Contains(argsText, "--limit=7") {
+		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
+	}
+}
+
+// A script that reports why a bead was closed (bd's close_reason field) has
+// that reason read onto the bead (gastownhall/gascity#2663).
+func TestGetReadsCloseReason(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  get)
+    echo '{"id":"'"$1"'","title":"done","status":"closed","type":"task","created_at":"2026-02-27T10:00:00Z","close_reason":"fixed in commit abc123; tests pass"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	b, err := s.Get("EX-9")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
+	}
+}

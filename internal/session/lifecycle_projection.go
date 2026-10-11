@@ -295,8 +295,7 @@ const (
 	LifecycleReasonCircuitOpen = "circuit-open"
 	// LifecycleReasonRuntimeMissing is the display reason for a session the
 	// reconciler put asleep because its runtime/process vanished. It is the
-	// durable sleep_reason written by session reconciliation and the signal the
-	// control-dispatcher rig→city fallback keys on (#3454).
+	// durable sleep_reason written by session reconciliation.
 	LifecycleReasonRuntimeMissing = "runtime-missing"
 	// SessionCircuitStateMetadataKey is the durable metadata key for session circuit breaker state.
 	SessionCircuitStateMetadataKey = "session_circuit_state"
@@ -336,6 +335,26 @@ func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]strin
 		return LifecycleReasonResetPending
 	}
 	return lifecycleDisplayReasonFromView(view, metadata)
+}
+
+// LifecycleDisplayReasonWithLivenessInfo is the session.Info twin of
+// LifecycleDisplayReasonWithLiveness: it reads the same status + metadata facts
+// off an already-projected session.Info instead of a raw metadata map, so
+// display callers holding a typed snapshot need not re-crack the bead. For any
+// info == infoFromPersistedBead(bead) it is byte-identical to
+// LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now,
+// info.SessionName, isRunning) — the sessionName the display path supplies is the
+// projected Info.SessionName. TestLifecycleDisplayReasonWithLivenessInfoEquivalence
+// pins that equivalence and asserts the circuit-open / reset-pending branches
+// directly so a mutation of either fails.
+func LifecycleDisplayReasonWithLivenessInfo(info Info, now time.Time, isRunning func(string) bool) string {
+	input := LifecycleInputFromInfo(info)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	if lifecycleResetPendingReasonVisibleInfo(view, info, isRunning) {
+		return LifecycleReasonResetPending
+	}
+	return lifecycleDisplayReasonFromViewInfo(view, info)
 }
 
 // LifecycleResetPendingReasonVisible reports whether reset-pending should
@@ -384,6 +403,45 @@ func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]stri
 	return ""
 }
 
+// lifecycleDisplayReasonFromViewInfo is the session.Info twin of
+// lifecycleDisplayReasonFromView: same branch order, reading the circuit /
+// sleep-reason / quarantine / hold / wait-hold facts off the projected Info
+// (SessionCircuitState, SleepReason, QuarantinedUntil, HeldUntil, WaitHold)
+// instead of the raw metadata map.
+func lifecycleDisplayReasonFromViewInfo(view LifecycleView, info Info) string {
+	if view.Terminal {
+		return ""
+	}
+	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
+		return ""
+	}
+	if strings.TrimSpace(info.SessionCircuitState) == SessionCircuitStateOpen {
+		return LifecycleReasonCircuitOpen
+	}
+	if raw := strings.TrimSpace(info.SleepReason); raw != "" {
+		reason := SleepReason(raw)
+		staleTimedQuarantine := (reason == SleepReasonQuarantine || reason == SleepReasonContextChurn || reason == SleepReasonRateLimit) &&
+			strings.TrimSpace(info.QuarantinedUntil) != "" &&
+			!view.HasBlocker(BlockerQuarantined)
+		staleTimedHold := reason == SleepReasonUserHold &&
+			strings.TrimSpace(info.HeldUntil) != "" &&
+			!view.HasBlocker(BlockerHeld)
+		if !staleTimedQuarantine && !staleTimedHold {
+			return raw
+		}
+	}
+	if view.HasBlocker(BlockerQuarantined) {
+		return string(SleepReasonQuarantine)
+	}
+	if strings.TrimSpace(info.WaitHold) != "" {
+		return string(SleepReasonWaitHold)
+	}
+	if view.HasBlocker(BlockerHeld) {
+		return string(SleepReasonUserHold)
+	}
+	return ""
+}
+
 func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]string, sessionName string, isRunning func(string) bool) bool {
 	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
 		return false
@@ -398,6 +456,32 @@ func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		sessionName = strings.TrimSpace(metadata["session_name"])
+	}
+	return sessionName != "" && isRunning(sessionName)
+}
+
+// lifecycleResetPendingReasonVisibleInfo is the session.Info twin of
+// lifecycleResetPendingReasonVisible: it reads the restart_requested /
+// continuation_reset_pending markers and the resolved session name off the
+// projected Info (RestartRequested, ContinuationResetPending, SessionName with
+// the SessionNameMetadata fallback) instead of the raw metadata map. The display
+// path passes Info.SessionName as its sessionName, so the primary read here
+// mirrors that; the SessionNameMetadata fallback mirrors the raw form's
+// metadata["session_name"] fallback.
+func lifecycleResetPendingReasonVisibleInfo(view LifecycleView, info Info, isRunning func(string) bool) bool {
+	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
+		return false
+	}
+	if isRunning == nil {
+		return false
+	}
+	if strings.TrimSpace(info.RestartRequested) != "true" &&
+		strings.TrimSpace(info.ContinuationResetPending) != "true" {
+		return false
+	}
+	sessionName := strings.TrimSpace(info.SessionName)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(info.SessionNameMetadata)
 	}
 	return sessionName != "" && isRunning(sessionName)
 }
@@ -440,6 +524,32 @@ func LifecycleIdentifiersReleased(metadata map[string]string) bool {
 	return strings.TrimSpace(metadata["alias"]) == "" &&
 		strings.TrimSpace(metadata["session_name"]) == "" &&
 		strings.TrimSpace(metadata["session_name_explicit"]) == ""
+}
+
+// LifecycleIdentityReleasedInfo is the session.Info twin of
+// LifecycleIdentityReleased: it projects the lifecycle off an already-projected
+// session.Info (via LifecycleInputFromInfo) and reads the identifier markers off
+// Info, so the retire lane can run over the typed candidate feed without
+// re-cracking the raw bead. For any info == infoFromPersistedBead(b) it equals
+// LifecycleIdentityReleased(b.Status, b.Metadata) — LifecycleInputFromInfo
+// reconstructs the only status fact the projection consumes (closed) from
+// Info.Closed, and LifecycleIdentifiersReleasedInfo mirrors the three identifier
+// keys. TestLifecycleIdentityReleasedInfoEquivalence pins that equivalence and
+// asserts both gates directly so a mutation of either fails.
+func LifecycleIdentityReleasedInfo(info Info) bool {
+	view := ProjectLifecycle(LifecycleInputFromInfo(info))
+	return !view.ContinuityEligible && LifecycleIdentifiersReleasedInfo(info)
+}
+
+// LifecycleIdentifiersReleasedInfo is the session.Info twin of
+// LifecycleIdentifiersReleased: it reads the same three user-facing identity
+// markers (alias, session_name, session_name_explicit) off Info (Info.Alias,
+// Info.SessionNameMetadata, Info.SessionNameExplicit) instead of a raw metadata
+// map. TestLifecycleIdentifiersReleasedInfoEquivalence pins the byte-identity.
+func LifecycleIdentifiersReleasedInfo(info Info) bool {
+	return strings.TrimSpace(info.Alias) == "" &&
+		strings.TrimSpace(info.SessionNameMetadata) == "" &&
+		strings.TrimSpace(info.SessionNameExplicit) == ""
 }
 
 // ProjectLifecycle projects raw session metadata plus external facts into the
@@ -630,8 +740,26 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 	return blockers, heldUntil, quarantinedUntil
 }
 
+// unobservedCreatingTimeout bounds how long a creating bead may sit when the
+// runtime could not be observed at all. Deliberately much longer than
+// StaleCreatingAfter: an unobserved runtime may simply be a transient probe
+// failure over a live session, so this must not fire on a normal hiccup —
+// only on a create that is definitively abandoned (ga-pofwv9).
+//
+// Reachability at this head: Runtime.Observed == false is entered in production
+// via zero-value LifecycleInput construction (cmd/gc/cmd_session.go,
+// cmd/gc/compute_awake_bridge.go, wait_store.go, manager.go), but the only
+// consumer of the fields this branch sets (RuntimeProjection, ReconciledState,
+// ResetContinuation) is cmd/gc/session_reconcile.go, which sets Observed: true.
+// So the branch is inert here rather than unreachable — defense in depth for a
+// future consumer that reads a projection built without runtime facts.
+const unobservedCreatingTimeout = 15 * time.Minute
+
 func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
 	if !input.Runtime.Observed {
+		if base == BaseStateCreating && creatingUnobservedExpired(input) {
+			return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+		}
 		return RuntimeProjectionUnknown, compat, false
 	}
 	if input.Runtime.Alive {
@@ -671,7 +799,12 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 
 func creatingStateIsStale(input LifecycleInput) bool {
 	if input.StaleCreatingAfter <= 0 {
-		return false
+		// StaleCreatingAfter is assigned in exactly one construction path
+		// (cmd/gc/session_reconcile.go). Every other path — including
+		// LifecycleInputFromMetadata, used by the wake path — leaves it
+		// unset, which must not mean "never stale" (ga-pofwv9, second gap).
+		// Fall back to the same bound used when the runtime is unobservable.
+		return creatingUnobservedExpired(input)
 	}
 	now := input.Now
 	if now.IsZero() {
@@ -689,22 +822,58 @@ func creatingStateIsStale(input LifecycleInput) bool {
 	return !now.Before(startedAt.Add(input.StaleCreatingAfter))
 }
 
+// creatingUnobservedExpired reports whether a creating bead has aged past
+// unobservedCreatingTimeout, independent of StaleCreatingAfter. It anchors on
+// PendingCreateStartedAt, then CreatedAt, matching creatingStateIsStale.
+//
+// A zero input.Now means the caller has no clock at all (e.g.
+// healStatePatchWithRollbackInfo with clk == nil) — that must mean "cannot
+// assess staleness," not "assume the current wall-clock time," or a
+// deliberately clockless caller would see old-but-otherwise-fine creating
+// beads reported as expired against whatever moment the test happens to run.
+func creatingUnobservedExpired(input LifecycleInput) bool {
+	if input.Now.IsZero() {
+		return false
+	}
+	now := input.Now
+	startedAt := input.CreatedAt
+	if v := strings.TrimSpace(input.PendingCreateStartedAt); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+			startedAt = t
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(unobservedCreatingTimeout))
+}
+
 func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason string) bool {
 	if strings.TrimSpace(input.SessionKey) == "" && strings.TrimSpace(input.StartedConfigHash) == "" {
 		return false
 	}
-	// This list deliberately diverges from IsDeliberateSleepReason's near-identical
-	// list (this one has "runtime-missing" and lacks "failed-create"): that one
-	// decides churn suppression, this one decides continuation reset on wake — do
-	// not merge the lists.
-	switch SleepReason(strings.TrimSpace(sleepReason)) {
+	if SleepReasonKeepsContinuation(sleepReason) {
+		return false
+	}
+	return base == BaseStateActive || base == BaseStateCreating
+}
+
+// SleepReasonKeepsContinuation reports whether a session that slept for
+// reason keeps its continuation when its runtime is found missing: the
+// heal resets session_key and started_config_hash otherwise. This list
+// deliberately diverges from IsDeliberateSleepReason's near-identical list
+// (this one has "runtime-missing" and lacks "failed-create"): that one
+// decides churn suppression, this one decides continuation reset on wake —
+// do not merge the lists.
+func SleepReasonKeepsContinuation(reason string) bool {
+	switch SleepReason(strings.TrimSpace(reason)) {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
 		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
 		SleepReasonRuntimeMissing:
-		return false
+		return true
 	}
-	return base == BaseStateActive || base == BaseStateCreating
+	return false
 }
 
 func projectWakeCauses(input LifecycleInput) []WakeCause {

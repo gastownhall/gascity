@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,15 +13,10 @@ import (
 type (
 	// SessionInfo describes a single session as exposed through the worker catalog.
 	SessionInfo = sessionpkg.Info
-	// SessionListResult carries a bead-backed catalog listing result.
-	SessionListResult = sessionpkg.ListResult
 	// SessionPruneResult reports the outcome of catalog pruning.
 	SessionPruneResult = sessionpkg.PruneResult
 	// SessionSubmissionCapabilities describes submit/nudge support for a session.
 	SessionSubmissionCapabilities = sessionpkg.SubmissionCapabilities
-	// SessionPersistedResponse carries the persisted half of a session's API
-	// response (status + metadata) projected from the session bead.
-	SessionPersistedResponse = sessionpkg.PersistedResponse
 )
 
 // SessionCatalog exposes worker-owned session discovery and maintenance
@@ -47,17 +43,59 @@ func (c *SessionCatalog) Get(id string) (SessionInfo, error) {
 	return c.manager.Get(id)
 }
 
-// GetWithPersistedResponse loads one session by ID, returning the
-// runtime-enriched Info plus the persisted-response projection (status +
-// metadata) in a single fetch, so the API response path avoids a redundant raw
-// store.Get beside Get.
-func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, SessionPersistedResponse, error) {
-	return c.manager.GetWithPersistedResponse(id)
+// sessionRecordViaManager is the canonical worker-boundary session read: it
+// composes the persisted read (session.Store.GetPersistedResponse) with the
+// read-path empty-type heal (RepairTypeBestEffort, a write only when the type is
+// empty) and the live runtime overlay (Manager.EnrichInfo). This is byte-identical
+// to the retired Manager.GetWithBead (loadSessionBead's heal + infoFromBead's
+// enrich) but returns the typed (Info, PersistedResponse) record instead of a raw
+// beads.Bead, so no bead crosses the boundary. It is the single source of truth
+// for every worker read that needs both the enriched Info and the persisted
+// metadata (catalog Get, factory construction, handle lifecycle/telemetry).
+//
+// The error is bridged back to the retired GetWithBead contract
+// (bridgeSessionRecordError): loadSessionBead rejected a present-but-non-session
+// bead with ErrNotSession (which the API factory-lane mappers map to 400),
+// whereas Store.GetPersistedResponse rejects it with ErrSessionNotFound (unmapped
+// → 500). Absence keeps the beads.ErrNotFound chain (→ 404) unchanged. This
+// mirrors the GET-lane bridge at internal/api/session_get_read.go exactly.
+func sessionRecordViaManager(m *sessionpkg.Manager, id string) (sessionpkg.Info, sessionpkg.PersistedResponse, error) {
+	front := m.PersistedStore()
+	info, pr, err := front.GetPersistedResponse(id)
+	if err != nil {
+		return sessionpkg.Info{}, sessionpkg.PersistedResponse{}, bridgeSessionRecordError(id, err)
+	}
+	if info.Type == "" {
+		front.RepairTypeBestEffort(id)
+		info.Type = sessionpkg.BeadType
+	}
+	return m.EnrichInfo(info), pr, nil
 }
 
-// ListFullFromBeads expands a bead set into full session listing results.
-func (c *SessionCatalog) ListFullFromBeads(all []beads.Bead, stateFilter, templateFilter string) *SessionListResult {
-	return c.manager.ListFullFromBeads(all, stateFilter, templateFilter)
+// bridgeSessionRecordError maps a session.Store persisted-read error back to the
+// error contract the API session-manager mappers (writeSessionManagerError /
+// humaSessionManagerError) and cmd/gc nudge fall-through expected from the retired
+// Manager.GetWithBead, preserving the status codes. A present-but-non-session bead
+// swaps ErrSessionNotFound for ErrNotSession (→ 400); every other error (including
+// the beads.ErrNotFound-chained absence that yields 404) passes through unchanged.
+// It is the worker-lane twin of internal/api.bridgeSessionGetError.
+func bridgeSessionRecordError(id string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sessionpkg.ErrSessionNotFound) && !errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("%w: %s", sessionpkg.ErrNotSession, id)
+	}
+	return err
+}
+
+// ListFromInfos filters a pre-loaded persisted Info feed by state and template
+// and applies the live runtime overlay to the survivors. It is the typed
+// pre-fed listing the CLI session snapshot feeds (the Info analog of the retired
+// ListFullFromBeads), keeping cmd/gc on the worker boundary while it lists off a
+// snapshot it already loaded.
+func (c *SessionCatalog) ListFromInfos(infos []SessionInfo, stateFilter, templateFilter string) []SessionInfo {
+	return c.manager.ListFromInfos(infos, stateFilter, templateFilter)
 }
 
 // SubmissionCapabilities reports whether the session can accept submit-style input.

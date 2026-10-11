@@ -6,30 +6,18 @@ package api
 // These types drive the OpenAPI spec for all /v0/session* endpoints.
 
 import (
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // SessionListInput is the Huma input for GET /v0/city/{cityName}/sessions.
+// Keyset cursors made the old "cursor present but empty" distinction moot: an
+// empty cursor is first-page paging, anything else must be a valid v1 token.
 type SessionListInput struct {
 	CityScope
 	PaginationParam
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
 	Peek     bool   `query:"peek" required:"false" doc:"Include last output preview."`
-
-	// cursorPresent is set by Resolve to distinguish "cursor absent" from
-	// "cursor present but empty" in the query string. Huma gives "" for both.
-	cursorPresent bool
-}
-
-// Resolve implements huma.Resolver to detect whether the cursor query
-// parameter was explicitly provided (even as an empty string).
-func (s *SessionListInput) Resolve(ctx huma.Context) []error {
-	// huma.Context.URL() returns the parsed URL; check raw query for cursor key.
-	u := ctx.URL()
-	s.cursorPresent = u.Query().Has("cursor")
-	return nil
 }
 
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
@@ -53,6 +41,7 @@ type SessionGetInput struct {
 	ID        string `path:"id" doc:"Session ID, alias, or runtime session_name."`
 	Peek      bool   `query:"peek" required:"false" doc:"Include last output preview."`
 	PeekLines int    `query:"peek_lines" required:"false" minimum:"0" maximum:"10000" doc:"Number of lines to include in the last output preview when peek=true. Defaults to 5."`
+	ExactID   bool   `query:"exact_id" required:"false" doc:"Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id."`
 }
 
 // sessionCreateBody is the request body for POST /v0/sessions.
@@ -97,17 +86,21 @@ type SessionIDInput struct {
 type SessionTranscriptInput struct {
 	CityScope
 	TailParam
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
-	Before string `query:"before" required:"false" doc:"Pagination cursor: return entries before this UUID."`
-	After  string `query:"after" required:"false" doc:"Pagination cursor: return entries after this UUID."`
+	ID              string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format          string `query:"format" required:"false" enum:"conversation,raw,structured" doc:"Transcript format: conversation (default), raw, or structured."`
+	IncludeThinking bool   `query:"include_thinking" required:"false" doc:"Include thinking block text and signature in structured responses. Defaults to false; both are redacted otherwise."`
+	Before          string `query:"before" required:"false" doc:"Pagination cursor: return entries before this stable transcript entry ID."`
+	After           string `query:"after" required:"false" doc:"Pagination cursor: return entries after this stable transcript entry ID."`
 }
 
 // SessionStreamInput is the Huma input for GET /v0/city/{cityName}/session/{id}/stream.
 type SessionStreamInput struct {
 	CityScope
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Format string `query:"format" required:"false" doc:"Transcript format: conversation (default) or raw."`
+	ID              string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Format          string `query:"format" required:"false" enum:"conversation,raw,structured" doc:"Transcript format: conversation (default), raw, or structured."`
+	IncludeThinking bool   `query:"include_thinking" required:"false" doc:"Include thinking block text and signature in structured stream frames. Defaults to false; both are redacted otherwise."`
+	AfterCursor     string `query:"after_cursor" required:"false" maxLength:"2048" doc:"Opaque structured transcript resume cursor from the REST snapshot. Last-Event-ID takes precedence on automatic SSE reconnect."`
+	LastEventID     string `header:"Last-Event-ID" required:"false" maxLength:"2048" doc:"Opaque structured transcript resume cursor from the last received SSE frame. Takes precedence over after_cursor."`
 
 	resolved *sessionStreamState
 }
@@ -160,10 +153,12 @@ type SessionCloseInput struct {
 // SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.
 type SessionSubmitInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
 		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		Resume  bool                 `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -177,9 +172,11 @@ type SessionSubmitOutput struct {
 // whitespace-only messages are rejected at the validation layer.
 type SessionMessageInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
+		Resume  bool   `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -191,8 +188,9 @@ type SessionMessageOutput struct {
 // SessionRespondInput is the Huma input for POST /v0/city/{cityName}/session/{id}/respond.
 type SessionRespondInput struct {
 	CityScope
-	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Body struct {
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		RequestID string            `json:"request_id,omitempty" doc:"Pending interaction request ID (optional)."`
 		Action    string            `json:"action" minLength:"1" doc:"Response action (e.g. allow, deny)."`
 		Text      string            `json:"text,omitempty" doc:"Optional response text."`

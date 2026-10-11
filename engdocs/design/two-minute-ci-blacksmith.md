@@ -7,7 +7,8 @@ title: "Two-Minute CI With Blacksmith"
 | Status | Proposed |
 | Date | 2026-04-29 |
 | Author(s) | Codex |
-| Issue | ga-nakct |
+| Program | ga-80po0c |
+| Timing/planner milestone | ga-80po0c.4 |
 | Supersedes | N/A |
 
 ## Summary

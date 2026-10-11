@@ -23,6 +23,10 @@ import (
 
 // Factory creates a (provider, config, sessionName) tuple for a single test.
 // The provider may be shared across tests; config and name must be unique.
+// The conformance runner reports cleanup failures and stops every successfully
+// started session. Factories should register only teardown that is distinct
+// from Provider.Stop, except for a documented provider whose failed Start can
+// leave partial resources and therefore still needs temporary fallback cleanup.
 type Factory func(t *testing.T) (runtime.Provider, runtime.Config, string)
 
 // Options customizes provider conformance behavior for implementations whose
@@ -53,7 +57,6 @@ func RunProviderTestsWithOptions(t *testing.T, newSession Factory, opts Options)
 	t.Run("SharedSession", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start shared session")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 		RunSessionTests(t, sp, cfg, name)
 	})
 }
@@ -77,7 +80,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("Start_CreatesRunningSession", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
 		if !sp.IsRunning(name) {
 			t.Error("IsRunning = false after Start, want true")
@@ -87,9 +89,8 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("Start_DuplicateReturnsError", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "first Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
-		err := sp.Start(context.Background(), name, cfg)
+		err := startWithCleanup(t, sp, name, cfg)
 		if err == nil {
 			t.Error("second Start should return error for duplicate name")
 		}
@@ -101,11 +102,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		_, cfg3, name3 := newSession(t)
 		names := []string{name1, name2, name3}
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
-		for _, name := range names {
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(name))
-		}
 		errs := make([]error, len(names))
 		var wg sync.WaitGroup
 		for i := range names {
@@ -116,6 +112,11 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 			}(i)
 		}
 		wg.Wait()
+		for i, err := range errs {
+			if err == nil {
+				registerStopCleanup(t, sp, names[i])
+			}
+		}
 		for i, err := range errs {
 			if err != nil {
 				handleStartError(t, opts, err, fmt.Sprintf("concurrent Start(%s)", names[i]))
@@ -138,13 +139,53 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
-	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
-		sp, _, _ := newSession(t)
-		if err := sp.Stop("never-started-conformance-session"); err != nil {
-			t.Errorf("Stop on never-started session: %v", err)
+	// Optional capability: a provider that reports liveness with an error must
+	// answer a session it stopped as confirmed absent, never as "unknown".
+	t.Run("ObserveLivenessWithError_StoppedIsAbsent", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		observer, ok := sp.(runtime.LivenessObserverWithError)
+		if !ok {
+			return
+		}
+		startOrSkip(t, opts, sp, name, cfg, "Start")
+		if err := sp.Stop(name); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		obs, err := observer.ObserveLivenessWithError(name, nil)
+		if err != nil {
+			t.Fatalf("ObserveLivenessWithError after Stop: %v, want confirmed absence (nil error)", err)
+		}
+		if obs.Running || obs.Alive {
+			t.Errorf("ObserveLivenessWithError after Stop = %+v, want absent", obs)
 		}
 	})
 
+	// Stop answers a missing session with nil only while the provider can see
+	// its inventory. The running sentinel holds the provider's backend up, so
+	// the never-started name is a missing session on a responsive provider.
+	t.Run("Stop_Idempotent_NotRunning", func(t *testing.T) {
+		sp, cfg, sentinel := newSession(t)
+		startOrSkip(t, opts, sp, sentinel, cfg, "Start sentinel")
+		if err := sp.Stop("never-started-conformance-session"); err != nil {
+			t.Errorf("Stop on never-started session beside running %q: %v", sentinel, err)
+		}
+	})
+
+	// A provider whose backend is not running at all may report that from
+	// Stop rather than certify absence — tmux does when it has no server — so
+	// the never-started case on a fresh provider is the teardown contract:
+	// runtime.StopForCleanup must find nothing left to fail on.
+	t.Run("StopForCleanup_NeverStarted", func(t *testing.T) {
+		sp, _, _ := newSession(t)
+		if err := runtime.StopForCleanup(sp, "never-started-conformance-session"); err != nil {
+			t.Errorf("StopForCleanup on never-started session: %v", err)
+		}
+	})
+
+	// Both Stops are held to the strict contract. Stopping a provider's last
+	// session must leave its backend responsive — tmux keeps an empty server up
+	// (exit-empty off) — so the second Stop meets a missing session on a
+	// responsive provider.
 	t.Run("Stop_Idempotent_AlreadyStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
@@ -193,9 +234,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		errs := make([]error, len(names))
 		var wg sync.WaitGroup
@@ -229,9 +267,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		got := make([]bool, len(names))
 		var wg sync.WaitGroup
@@ -255,11 +290,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ListRunning_FindsSessions", func(t *testing.T) {
 		sp, cfg1, name1 := newSession(t)
 		startOrSkip(t, opts, sp, name1, cfg1, fmt.Sprintf("Start %s", name1))
-		t.Cleanup(func() { _ = sp.Stop(name1) })
 
 		_, cfg2, name2 := newSession(t)
 		startOrSkip(t, opts, sp, name2, cfg2, fmt.Sprintf("Start %s", name2))
-		t.Cleanup(func() { _ = sp.Stop(name2) })
 
 		names, err := sp.ListRunning("")
 		if err != nil {
@@ -276,11 +309,9 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ListRunning_PrefixFiltering", func(t *testing.T) {
 		sp, cfg1, name1 := newSession(t)
 		startOrSkip(t, opts, sp, name1, cfg1, fmt.Sprintf("Start %s", name1))
-		t.Cleanup(func() { _ = sp.Stop(name1) })
 
 		_, cfg2, name2 := newSession(t)
 		startOrSkip(t, opts, sp, name2, cfg2, fmt.Sprintf("Start %s", name2))
-		t.Cleanup(func() { _ = sp.Stop(name2) })
 
 		// Using the full name as prefix should match only that session.
 		names, err := sp.ListRunning(name1)
@@ -314,7 +345,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ListRunning_EmptyPrefix", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
 		names, err := sp.ListRunning("")
 		if err != nil {
@@ -333,9 +363,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		results := make([][]string, len(names))
 		var wg sync.WaitGroup
@@ -364,7 +391,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 	t.Run("ProcessAlive_EmptyNamesReturnsTrue", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
-		t.Cleanup(func() { _ = sp.Stop(name) })
 
 		if !sp.ProcessAlive(name, nil) {
 			t.Error("ProcessAlive with empty names = false, want true")
@@ -391,9 +417,6 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
 		for i := range names {
 			startOrSkip(t, opts, sp, names[i], cfgs[i], fmt.Sprintf("Start(%s)", names[i]))
-			t.Cleanup(func(n string) func() {
-				return func() { _ = sp.Stop(n) }
-			}(names[i]))
 		}
 		got := make([]bool, len(names))
 		var wg sync.WaitGroup
@@ -416,9 +439,34 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 func startOrSkip(t *testing.T, opts Options, sp runtime.Provider, name string, cfg runtime.Config, label string) {
 	t.Helper()
 
-	if err := sp.Start(context.Background(), name, cfg); err != nil {
+	if err := startWithCleanup(t, sp, name, cfg); err != nil {
 		handleStartError(t, opts, err, label)
 	}
+}
+
+func startWithCleanup(t *testing.T, sp runtime.Provider, name string, cfg runtime.Config) error {
+	t.Helper()
+
+	err := sp.Start(context.Background(), name, cfg)
+	if err == nil {
+		registerStopCleanup(t, sp, name)
+	}
+	return err
+}
+
+type cleanupTB interface {
+	Helper()
+	Cleanup(func())
+	Errorf(string, ...any)
+}
+
+func registerStopCleanup(t cleanupTB, sp runtime.Provider, name string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := sp.Stop(name); err != nil {
+			t.Errorf("Stop(%q) during conformance cleanup: %v", name, err)
+		}
+	})
 }
 
 func handleStartError(t *testing.T, opts Options, err error, label string) {
@@ -484,6 +532,30 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 		}
 	})
 
+	// An empty value is a value, not a delete. Providers translate SetMeta
+	// rather than storing it verbatim — tmux maps it onto `set-environment`,
+	// where set-empty and unset are distinct states — so a caller that blanks a
+	// key to retract what it says must be able to rely on the blank landing.
+	// gc's drain-ack binding does exactly that: a pane that cannot prove its
+	// incarnation writes an empty stamp over whatever the previous occupant
+	// left, and if the old value survived it would pair with the new
+	// acknowledgement and read as proof of residue.
+	t.Run("SetMeta_EmptyValueOverwrites", func(t *testing.T) {
+		if err := sp.SetMeta(name, "empty-me", "prior-value"); err != nil {
+			t.Fatalf("SetMeta prior: %v", err)
+		}
+		if err := sp.SetMeta(name, "empty-me", ""); err != nil {
+			t.Fatalf("SetMeta empty: %v", err)
+		}
+		val, err := sp.GetMeta(name, "empty-me")
+		if err != nil {
+			t.Fatalf("GetMeta: %v", err)
+		}
+		if val != "" {
+			t.Errorf("GetMeta after SetMeta to empty = %q, want empty", val)
+		}
+	})
+
 	t.Run("SetMeta_OverwritesPrevious", func(t *testing.T) {
 		if err := sp.SetMeta(name, "key", "v1"); err != nil {
 			t.Fatalf("SetMeta v1: %v", err)
@@ -545,6 +617,24 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 			t.Errorf("ClearScrollback: %v", err)
 		}
 	})
+
+	// Optional capability: an error-bearing attachment probe separates "no
+	// client" from "could not tell", so on a healthy runtime it must not error.
+	if observer, ok := sp.(runtime.AttachmentObserverWithError); ok {
+		t.Run("IsAttachedWithError_UnattachedSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError(name)
+			if err != nil || attached {
+				t.Errorf("IsAttachedWithError = (%v, %v), want (false, nil)", attached, err)
+			}
+		})
+
+		t.Run("IsAttachedWithError_MissingSession", func(t *testing.T) {
+			attached, err := observer.IsAttachedWithError("nonexistent-conformance-session")
+			if attached || (err != nil && !errors.Is(err, runtime.ErrSessionNotFound)) {
+				t.Errorf("IsAttachedWithError on missing session = (%v, %v), want (false, nil) or ErrSessionNotFound", attached, err)
+			}
+		})
+	}
 
 	// --- Group 4b: CopyTo (best-effort) ---
 

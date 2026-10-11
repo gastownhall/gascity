@@ -19,6 +19,12 @@ type LiveObservation struct {
 	RuntimeSessionID string
 	SessionID        string
 	SessionName      string
+
+	// AttachedErr is set when the attachment probe could not tell (any error
+	// other than runtime.ErrSessionNotFound); Attached is false then. Running
+	// and Alive are unaffected. A caller gating a destructive action treats it
+	// as attached.
+	AttachedErr error
 }
 
 // ObserveHandle returns worker-owned runtime observations for handles that
@@ -41,12 +47,16 @@ func (h *SessionHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if err != nil {
 		return LiveObservation{}, err
 	}
-	runtimeObs := h.manager.ObserveRuntimeForInfo(info, h.runtimeHints().ProcessNames)
+	runtimeObs, err := h.manager.ObserveRuntimeForInfo(info, h.runtimeHints().ProcessNames)
+	if err != nil {
+		return LiveObservation{}, err
+	}
 	obs := LiveObservation{
 		Running:          runtimeObs.Running,
 		Alive:            runtimeObs.Alive,
 		Suspended:        info.State == sessionpkg.StateSuspended,
 		Attached:         runtimeObs.Attached,
+		AttachedErr:      runtimeObs.AttachedErr,
 		RuntimeSessionID: info.ID,
 		SessionID:        info.ID,
 		SessionName:      runtimeObs.SessionName,

@@ -5,13 +5,16 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // keyShape matches a literal that is a whole bead-metadata key and nothing else:
@@ -39,9 +42,19 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
-	// Cobra command annotations (CLI doc-gen plumbing, not bead metadata).
-	"gc.docgen.skip":     "cobra annotation: skip CLI doc generation",
-	"gc.json.schema_dir": "cobra annotation: JSON schema output dir",
+	// Cobra command-tree annotations (not bead metadata).
+	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
+	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",
+	"gc.productmetrics.census":      "testhook cobra annotation: omit a synthetic command from the production census",
+	"gc.productmetrics.class":       "cobra annotation: closed product-metrics command classification",
+	"gc.productmetrics.conditional": "cobra annotation: product-metrics conditional policy",
+	"gc.productmetrics.exclusion":   "cobra annotation: product-metrics exclusion reason",
+	"gc.productmetrics.id":          "cobra annotation: stable product-metrics command ID",
+	"gc.productmetrics.mode":        "cobra annotation: product-metrics command handling mode",
+	"gc.productmetrics.notice":      "cobra annotation: product-metrics notice policy",
+	"gc.productmetrics.owner":       "cobra annotation: product-metrics command owner",
+	"gc.productmetrics.recording":   "cobra annotation: product-metrics recording policy",
+	"gc.productmetrics.resolver":    "cobra annotation: product-metrics dynamic resolver",
 
 	// Generated shell-completion filenames, not metadata keys.
 	"gc.bash": "shell completion filename (cmd/gc/cmd_shell.go)",
@@ -85,59 +98,39 @@ func TestNoUndeclaredMetadataKeys(t *testing.T) {
 	}
 
 	var violations []string
-	for _, top := range []string{"internal", "cmd"} {
-		base := filepath.Join(root, top)
-		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			rel, _ := filepath.Rel(root, path)
-			rel = filepath.ToSlash(rel)
-			if d.IsDir() {
-				if d.Name() == "testdata" || isExcludedDir(rel) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			fset := token.NewFileSet()
-			f, perr := parser.ParseFile(fset, path, nil, 0)
-			if perr != nil {
-				return nil // unparseable file is not this guard's concern
-			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				lit, ok := n.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					return true
-				}
-				val, uerr := strconv.Unquote(lit.Value)
-				if uerr != nil {
-					return true
-				}
-				if !keyShape.MatchString(val) {
-					return true // not a whole bead-metadata key (bare "gc.", message, filter, ...)
-				}
-				if hasKnownPrefix(val) {
-					return true
-				}
-				if _, ok := allowedNonMetadata[val]; ok {
-					return true
-				}
-				line := fset.Position(lit.Pos()).Line
-				if _, ok := declared[val]; ok {
-					violations = append(violations, fmt.Sprintf("  %s:%d  %q is declared — reference the beadmeta constant instead of the raw literal", rel, line, val))
-				} else {
-					violations = append(violations, fmt.Sprintf("  %s:%d  %q is undeclared — declare it in internal/beadmeta/keys.go", rel, line, val))
-				}
-				return true
-			})
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("walking %s: %v", base, err)
+	for _, rel := range trackedGoFiles(t, root, []string{"internal", "cmd"}) {
+		relSlash := filepath.ToSlash(rel)
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, filepath.Join(root, rel), nil, 0)
+		if perr != nil {
+			continue // unparseable file is not this guard's concern
 		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			val, uerr := strconv.Unquote(lit.Value)
+			if uerr != nil {
+				return true
+			}
+			if !keyShape.MatchString(val) {
+				return true // not a whole bead-metadata key (bare "gc.", message, filter, ...)
+			}
+			if hasKnownPrefix(val) {
+				return true
+			}
+			if _, ok := allowedNonMetadata[val]; ok {
+				return true
+			}
+			line := fset.Position(lit.Pos()).Line
+			if _, ok := declared[val]; ok {
+				violations = append(violations, fmt.Sprintf("  %s:%d  %q is declared — reference the beadmeta constant instead of the raw literal", relSlash, line, val))
+			} else {
+				violations = append(violations, fmt.Sprintf("  %s:%d  %q is undeclared — declare it in internal/beadmeta/keys.go", relSlash, line, val))
+			}
+			return true
+		})
 	}
 
 	if len(violations) > 0 {
@@ -171,6 +164,14 @@ func isExcludedDir(rel string) bool {
 // (the directory containing go.mod).
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	// GC_TEST_REPO_ROOT lets `bazel test` point whole-repo scan guards at a
+	// real checkout; runfiles trees cannot stand in for the repository.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+			t.Fatalf("GC_TEST_REPO_ROOT=%s has no go.mod: %v", root, err)
+		}
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -185,4 +186,158 @@ func repoRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+// TestTrackedGoFilesExcludesUntrackedScaffoldNoise locks in defense against
+// the same scaffold-noise class that tripped internal/api/apierr_guard_test.go
+// before PR#4118: a raw filepath.WalkDir over the repo tree descends into
+// whatever happens to be sitting on disk, including stray ga-* bead-worktree
+// checkouts and .gascity-worktree-stage.* staging dirs that a concurrent
+// fleet agent may have left under repo root. trackedGoFiles must scan
+// git-tracked files only, so untracked scaffold noise can never be walked,
+// regardless of its name. See ga-5vzfgb.
+func TestTrackedGoFilesExcludesUntrackedScaffoldNoise(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.invalid",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.invalid",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	writeFile := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runGit("init", "-q")
+
+	// A real, git-tracked file under internal/ — must always be scanned.
+	writeFile("internal/example/tracked.go", "package example\n\nconst x = \"tracked-marker\"\n")
+	runGit("add", "internal/example/tracked.go")
+	runGit("commit", "-q", "-m", "tracked")
+
+	// Untracked nested ga-*-named worktree-shaped scaffold dir — must never
+	// be scanned, regardless of the fact that its name matches a bead id.
+	writeFile("internal/example/ga-9zzzzz-stray/scaffold.go", "package stray\n\nconst y = \"scaffold-marker\"\n")
+
+	// Untracked .gascity-worktree-stage.* staging dir — must never be scanned.
+	writeFile("internal/example/.gascity-worktree-stage.abc/scaffold.go", "package stage\n\nconst z = \"stage-marker\"\n")
+
+	got := trackedGoFiles(t, root, []string{"internal", "cmd"})
+	for i, f := range got {
+		got[i] = filepath.ToSlash(f)
+	}
+
+	if !slices.Contains(got, "internal/example/tracked.go") {
+		t.Fatalf("trackedGoFiles = %v, want to contain the tracked file", got)
+	}
+	for _, unwanted := range []string{
+		"internal/example/ga-9zzzzz-stray/scaffold.go",
+		"internal/example/.gascity-worktree-stage.abc/scaffold.go",
+	} {
+		if slices.Contains(got, unwanted) {
+			t.Fatalf("trackedGoFiles = %v must NOT contain untracked scaffold file %q", got, unwanted)
+		}
+	}
+}
+
+// trackedGoFiles returns the repo-relative paths of every git-tracked,
+// non-test .go file under any of the given top-level directories (each
+// checked against excludedDirs and a testdata skip, matching the semantics
+// filepath.WalkDir previously enforced during the walk itself), using
+// `git ls-files` instead of a filesystem walk. This is immune by
+// construction to untracked scaffold noise landing under root — a stray
+// ga-* bead-worktree checkout or .gascity-worktree-stage.* staging dir is
+// never git-tracked, so it can never appear in the result, regardless of
+// its name. Mirrors internal/api/apierr_guard_test.go (PR#4118).
+func trackedGoFiles(t *testing.T, root string, tops []string) []string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go").Output()
+	if err != nil {
+		// Bazel runfiles trees carry no .git; fall back to walking the
+		// sources shipped as test data so the guard stays effective there.
+		return walkedGoFiles(t, root, tops)
+	}
+
+	var files []string
+	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if rel == "" || strings.HasSuffix(rel, "_test.go") {
+			continue
+		}
+		relSlash := filepath.ToSlash(rel)
+		inScope := false
+		for _, top := range tops {
+			if relSlash == top || strings.HasPrefix(relSlash, top+"/") {
+				inScope = true
+				break
+			}
+		}
+		if !inScope {
+			continue
+		}
+		if strings.HasPrefix(relSlash, "testdata/") || strings.Contains(relSlash, "/testdata/") {
+			continue
+		}
+		if isExcludedDir(filepath.ToSlash(filepath.Dir(relSlash))) {
+			continue
+		}
+		files = append(files, rel)
+	}
+	return files
+}
+
+// walkedGoFiles enumerates non-test .go files under tops when the git index is
+// unavailable (Bazel runfiles trees). It mirrors trackedGoFiles' filtering so
+// both entry points enforce the same vocabulary.
+func walkedGoFiles(t *testing.T, root string, tops []string) []string {
+	t.Helper()
+	var files []string
+	for _, top := range tops {
+		base := filepath.Join(root, top)
+		err := filepath.WalkDir(base, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name != "." && strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			relSlash := filepath.ToSlash(rel)
+			if strings.Contains(relSlash, "/testdata/") || strings.HasPrefix(relSlash, "testdata/") {
+				return nil
+			}
+			if isExcludedDir(filepath.ToSlash(filepath.Dir(relSlash))) {
+				return nil
+			}
+			files = append(files, rel)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", base, err)
+		}
+	}
+	return files
 }

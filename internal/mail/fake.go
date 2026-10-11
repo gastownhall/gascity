@@ -1,7 +1,6 @@
 package mail //nolint:revive // internal package, always imported qualified
 
 import (
-	"crypto/rand"
 	"fmt"
 	"sort"
 	"sync"
@@ -15,6 +14,14 @@ type fakeMsg struct {
 	archived bool
 }
 
+// FakeOptions controls nondeterministic values emitted by [Fake]. Nil
+// suppliers use the production-like defaults: the current time and a
+// deterministic per-provider thread sequence.
+type FakeOptions struct {
+	Now         func() time.Time
+	NewThreadID func() string
+}
+
 // Fake is an in-memory mail provider for testing. It records messages and
 // supports all Provider operations. Safe for concurrent use.
 //
@@ -24,17 +31,30 @@ type Fake struct {
 	messages []fakeMsg
 	seq      int
 	broken   bool
+	now      func() time.Time
+	threadID func() string
 }
 
 // NewFake returns a ready-to-use in-memory mail provider.
 func NewFake() *Fake {
-	return &Fake{}
+	return NewFakeWithOptions(FakeOptions{})
+}
+
+// NewFakeWithOptions returns an in-memory mail provider whose time and thread
+// identifiers can be made deterministic by tests.
+func NewFakeWithOptions(options FakeOptions) *Fake {
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	return &Fake{now: options.Now, threadID: options.NewThreadID}
 }
 
 // NewFailFake returns a mail provider where all operations return errors.
 // Useful for testing error paths.
 func NewFailFake() *Fake {
-	return &Fake{broken: true}
+	fake := NewFake()
+	fake.broken = true
+	return fake
 }
 
 // Send creates a message in memory.
@@ -45,14 +65,14 @@ func (f *Fake) Send(from, to, subject, body string) (Message, error) {
 		return Message{}, fmt.Errorf("mail provider unavailable")
 	}
 	f.seq++
-	threadID := fakeThreadID()
+	threadID := f.nextThreadID()
 	m := Message{
 		ID:        fmt.Sprintf("fake-%d", f.seq),
 		From:      from,
 		To:        to,
 		Subject:   subject,
 		Body:      body,
-		CreatedAt: time.Now(),
+		CreatedAt: f.now(),
 		ThreadID:  threadID,
 	}
 	f.messages = append(f.messages, fakeMsg{msg: m})
@@ -83,7 +103,7 @@ func (f *Fake) Get(id string) (Message, error) {
 		return Message{}, fmt.Errorf("mail provider unavailable")
 	}
 	for _, fm := range f.messages {
-		if fm.msg.ID == id {
+		if fm.msg.ID == id && !fm.archived {
 			msg := fm.msg
 			msg.Read = fm.read
 			return msg, nil
@@ -100,7 +120,7 @@ func (f *Fake) Read(id string) (Message, error) {
 		return Message{}, fmt.Errorf("mail provider unavailable")
 	}
 	for i := range f.messages {
-		if f.messages[i].msg.ID == id {
+		if f.messages[i].msg.ID == id && !f.messages[i].archived {
 			f.messages[i].read = true
 			msg := f.messages[i].msg
 			msg.Read = true
@@ -118,7 +138,7 @@ func (f *Fake) MarkRead(id string) error {
 		return fmt.Errorf("mail provider unavailable")
 	}
 	for i := range f.messages {
-		if f.messages[i].msg.ID == id {
+		if f.messages[i].msg.ID == id && !f.messages[i].archived {
 			f.messages[i].read = true
 			return nil
 		}
@@ -134,7 +154,7 @@ func (f *Fake) MarkUnread(id string) error {
 		return fmt.Errorf("mail provider unavailable")
 	}
 	for i := range f.messages {
-		if f.messages[i].msg.ID == id {
+		if f.messages[i].msg.ID == id && !f.messages[i].archived {
 			f.messages[i].read = false
 			return nil
 		}
@@ -225,7 +245,7 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 
 	var original *fakeMsg
 	for i := range f.messages {
-		if f.messages[i].msg.ID == id {
+		if f.messages[i].msg.ID == id && !f.messages[i].archived {
 			original = &f.messages[i]
 			break
 		}
@@ -236,7 +256,7 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 
 	threadID := original.msg.ThreadID
 	if threadID == "" {
-		threadID = fakeThreadID()
+		threadID = f.nextThreadID()
 	}
 
 	f.seq++
@@ -246,7 +266,7 @@ func (f *Fake) Reply(id, from, subject, body string) (Message, error) {
 		To:        original.msg.From, // reply to sender
 		Subject:   subject,
 		Body:      body,
-		CreatedAt: time.Now(),
+		CreatedAt: f.now(),
 		ThreadID:  threadID,
 		ReplyTo:   id,
 	}
@@ -264,14 +284,14 @@ func (f *Fake) Thread(id string) ([]Message, error) {
 	}
 	threadID := id
 	for _, fm := range f.messages {
-		if fm.msg.ID == id {
+		if fm.msg.ID == id && !fm.archived {
 			threadID = fm.msg.ThreadID
 			break
 		}
 	}
 	var result []Message
 	for _, fm := range f.messages {
-		if fm.msg.ThreadID == threadID {
+		if fm.msg.ThreadID == threadID && !fm.archived {
 			msg := fm.msg
 			msg.Read = fm.read
 			result = append(result, msg)
@@ -313,9 +333,9 @@ func (f *Fake) Messages() []Message {
 	return result
 }
 
-// fakeThreadID generates a simple thread ID for the fake provider.
-func fakeThreadID() string {
-	b := make([]byte, 6)
-	rand.Read(b) //nolint:errcheck
-	return fmt.Sprintf("thread-%x", b)
+func (f *Fake) nextThreadID() string {
+	if f.threadID != nil {
+		return f.threadID()
+	}
+	return fmt.Sprintf("thread-fake-%d", f.seq)
 }

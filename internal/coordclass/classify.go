@@ -24,6 +24,22 @@ const (
 	// labelNudge marks queued-nudge beads.
 	// Canonical: cmd/gc/nudge_beads.go (nudgeBeadLabel).
 	labelNudge = "gc:nudge"
+	// labelNudgeQueue marks the DURABLE QUEUE's own beads, a family disjoint
+	// from the gc:nudge shadow beads above.
+	// Canonical: internal/storebinding/beads_nudge_queue.go (nudgeQueueLabel);
+	// pinned behaviorally against it by classify_nudge_queue_test.go, which
+	// lives in the external test package because storebinding imports this one.
+	//
+	// It needs its own arm because the nudge arm matches EXACTLY: "gc:nudge-queue"
+	// is not "gc:nudge", so a queue bead classified as ClassWork — a bead
+	// NewBeadsNudgeQueue physically writes into the nudges-class store, answering
+	// to the class that never holds it. That mismatch is not cosmetic: the
+	// infra-class migration selects its snapshot with a not-Work filter
+	// (cmd/gc/infra_class_migrate.go readInfraSnapshot), so queue beads were
+	// excluded from the copy and left behind in the work store. Fixing the arm
+	// makes that migration carry them, and makes an already-converged city's
+	// containment re-check name the ones it stranded — which is the true report.
+	labelNudgeQueue = "gc:nudge-queue"
 	// typeMessage is the mail bead type.
 	// Canonical: internal/mail/beadmail/beadmail.go (Type: "message").
 	typeMessage = "message"
@@ -31,9 +47,9 @@ const (
 	// label (gc:extmsg-binding, -delivery, -group, -transcript, ...).
 	// Canonical: internal/extmsg/labels.go.
 	labelExtmsgPrefix = "gc:extmsg-"
-	// typeConvoy is the convoy bead type. Convoys are work-class UNLESS marked
-	// synthetic (graph.v2 input convoys, drain-unit convoys), which fold into
-	// ClassGraph. Canonical: internal/convoy.
+	// typeConvoy is the convoy bead type. EVERY convoy is work class, including
+	// the synthetic ones the system mints as glue (graph.v2 input convoys,
+	// drain-unit convoys). Canonical: internal/convoy.
 	typeConvoy = "convoy"
 	// typeConvergence is the convergence-loop root bead type. Convergence roots
 	// carry no graph metadata, so they need an explicit arm to fold into
@@ -58,11 +74,16 @@ const (
 // classify_test.go:
 //
 //   - ClassMessaging for type=message (mail) and gc:extmsg-* (extmsg).
-//   - ClassGraph for synthetic convoys (gc.synthetic on a type=convoy bead),
-//     so graph.v2 input convoys and drain-unit convoys travel with the graph
-//     they glue, while user convoys remain ClassWork.
+//   - ClassWork for synthetic convoys (gc.synthetic / gc.synthetic_kind on a
+//     type=convoy bead), stated as an explicit arm rather than left to the
+//     default — see isSyntheticConvoy for why the arm has to be explicit and
+//     why it has to run before the workflow arm.
 //   - ClassGraph for convergence roots (type=convergence), folding the
 //     convergence engine's state in with the graph it pours.
+//
+// The nudge arm additionally matches the durable queue's own family
+// (gc:nudge-queue) beside the shadow family (gc:nudge). That was a defect
+// rather than a design choice — see labelNudgeQueue.
 //
 // These are net-new routing decisions and carry real behavior risk. Note that
 // Class (which backend) is orthogonal to beads.StorageClass (which tier): during
@@ -114,7 +135,22 @@ func ClassifyGraphPlan(plan *beads.GraphApplyPlan) Class {
 // the storage-tier policyNameForGraphPlan classifier.
 func classifyFields(beadType string, labels []string, metadata, metadataRefs map[string]string) Class {
 	switch {
-	case isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp"):
+	// The order-tracking exclusion is the one deliberate divergence from
+	// cmd/gc's policyNameForBead, and it fixes a real collision rather than
+	// introducing one. orders.RunOutcomeWisp / WispFailed / WispCanceled stamp
+	// the BARE "wisp" label on the tracking bead as an OUTCOME marker — it
+	// records that the run dispatched a wisp, not that the bead IS one. The
+	// dispatched wisp is its own bead, carrying gc:wisp or the wisp kind and no
+	// order-tracking label, so it still classifies as graph here.
+	//
+	// Without the exclusion the wisp arm ran first and took the tracking bead,
+	// so a wisp-dispatched run answered to the graph class while ListTracking
+	// and RecentRunsAll read the orders leg only — on a class-split city those
+	// runs were invisible to them. Excluding order-tracking is narrower than
+	// reordering the arms: every other bead the wisp arm claims still reaches it
+	// first.
+	case !hasLabel(labels, labelOrderTracking) &&
+		(isWispMetadata(metadata) || beadType == beadmeta.KindWisp || hasLabel(labels, "gc:wisp") || hasLabel(labels, "wisp")):
 		return ClassGraph
 	case beadType == typeMessage || hasLabelPrefix(labels, labelExtmsgPrefix):
 		return ClassMessaging
@@ -124,11 +160,14 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 		return ClassSessions
 	case hasLabel(labels, labelWait):
 		return ClassSessions
-	case hasLabel(labels, labelNudge):
+	case hasLabel(labels, labelNudge) || hasLabel(labels, labelNudgeQueue):
 		return ClassNudges
-	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
-		return ClassGraph
+	// Ahead of the workflow arm on purpose: a synthetic convoy is glue for a
+	// graph and can carry that graph's markers, and the workflow arm would take
+	// it on any one of them. See isSyntheticConvoy.
 	case beadType == typeConvoy && isSyntheticConvoy(metadata):
+		return ClassWork
+	case isWorkflowMetadata(metadata) || isWorkflowMetadata(metadataRefs):
 		return ClassGraph
 	case beadType == typeConvergence:
 		return ClassGraph
@@ -158,6 +197,24 @@ func isWorkflowMetadata(metadata map[string]string) bool {
 
 // isSyntheticConvoy reports whether a convoy bead is system-minted glue
 // (graph.v2 input convoy or drain-unit convoy) rather than a human/sling convoy.
+//
+// It exists to route those convoys to ClassWork, which is where the default
+// would put them anyway — so the arm looks redundant and is not. Two things
+// make it load-bearing:
+//
+// It has to run BEFORE the workflow arm. A synthetic convoy is minted as glue
+// for a specific graph and carries that graph's identifying metadata (a
+// drain-unit convoy names its control and its parent convoy; nothing stops a
+// future one from carrying gc.root_bead_id, which is all the workflow arm
+// needs). Left to the default, the classification of a convoy would depend on
+// which incidental keys happen to be stamped on it.
+//
+// And a misclassification here is not a routing preference, it is a hard
+// failure. A convoy exists to hold `tracks` edges to its members, its members
+// are work beads, and convoy.TrackItemIn refuses an edge whose member is owned
+// by another class because a dep row cannot reference an id its own store
+// cannot resolve. A synthetic convoy classified anywhere but Work is a convoy
+// that can never track anything.
 func isSyntheticConvoy(metadata map[string]string) bool {
 	if metadata == nil {
 		return false

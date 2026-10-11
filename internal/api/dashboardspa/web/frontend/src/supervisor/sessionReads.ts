@@ -2,16 +2,21 @@ import type {
   ListBodySessionResponse,
   OutputTurn,
   SessionResponse,
+  SessionTranscriptConversationResponse,
   SessionTranscriptGetResponse,
 } from 'gas-city-dashboard-shared/gc-supervisor';
-import type { DashboardSession } from 'gas-city-dashboard-shared';
+import { isSessionStructuredEvent } from 'gas-city-dashboard-shared';
+import type {
+  DashboardSession,
+  SessionStreamStructuredMessageEvent,
+} from 'gas-city-dashboard-shared';
 import { activeCityOrThrow } from '../api/cityBase';
 import { supervisorApi } from './client';
 
 export type SupervisorSession = SessionResponse;
 export type SupervisorSessionList = ListBodySessionResponse;
 
-export type SessionTranscriptView = SessionTranscriptGetResponse & {
+export type SessionTranscriptView = Omit<SessionTranscriptConversationResponse, 'turns'> & {
   turns: OutputTurn[];
   total_chars: number;
   captured_at: string;
@@ -28,8 +33,36 @@ export async function fetchSupervisorSessionTranscript(
   const transcript = await supervisorApi().sessionTranscript(
     activeCityOrThrow('fetch supervisor session transcript'),
     sessionId,
+    'conversation',
   );
   return sessionTranscriptView(transcript);
+}
+
+/**
+ * Fetch a session transcript as `format=structured` and narrow the generated
+ * response union at the edge. Returns null when the server fell back to a
+ * non-structured response (the caller then renders the conversation transcript
+ * instead).
+ */
+export async function fetchStructuredTranscript(
+  sessionId: string,
+): Promise<SessionStreamStructuredMessageEvent | null> {
+  const transcript = await supervisorApi().sessionTranscript(
+    activeCityOrThrow('fetch structured session transcript'),
+    sessionId,
+    'structured',
+  );
+  return structuredTranscriptOrNull(transcript);
+}
+
+export function structuredTranscriptOrNull(
+  transcript: SessionTranscriptGetResponse,
+): SessionStreamStructuredMessageEvent | null {
+  if (transcript.format !== 'structured') return null;
+  if (!isSessionStructuredEvent(transcript)) {
+    throw new Error('Malformed structured transcript response.');
+  }
+  return transcript;
 }
 
 export function normalizeSessions(list: ListBodySessionResponse): DashboardSession[] {
@@ -66,6 +99,9 @@ export function sessionTranscriptView(
   transcript: SessionTranscriptGetResponse,
   capturedAt: string = new Date().toISOString(),
 ): SessionTranscriptView {
+  if (transcript.format !== 'conversation' && transcript.format !== 'text') {
+    throw new Error(`expected conversation transcript, got ${transcript.format}`);
+  }
   const turns = transcript.turns ?? [];
   return {
     ...transcript,

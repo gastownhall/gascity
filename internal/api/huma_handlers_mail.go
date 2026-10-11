@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -172,6 +173,23 @@ func allMailProvidersFailedError(partialErrs []string, storeSlow bool) error {
 	return apierr.ServiceUnavailable.Msg(detail)
 }
 
+// mailKeysetBody assembles a mail list page: one deterministic
+// (created_at DESC, id DESC) total order (within-provider store order is
+// nondeterministic), the contiguous page suffix strictly after the keyset
+// boundary, and a continuation cursor whenever the response is truncated —
+// cursor-less requests previously truncated silently, making the remainder
+// unfetchable (the #3208 defect class the bead list already fixed).
+func mailKeysetBody(msgs []mail.Message, seek *keysetKey, limit int, partial bool, partialErrs []string) MailListBody {
+	msgKey := func(m mail.Message) keysetKey { return keysetKey{CreatedAt: m.CreatedAt, ID: m.ID} }
+	sortKeysetDesc(msgs, msgKey)
+	page, total, hasMore := resolveKeysetPage(msgs, msgKey, seek, limit)
+	next := mintKeysetNextCursor(page, msgKey, hasMore)
+	if page == nil {
+		page = []mail.Message{}
+	}
+	return MailListBody{Items: page, Total: total, NextCursor: next, Partial: partial, PartialErrors: partialErrs}
+}
+
 // humaHandleMailList is the Huma-typed handler for GET /v0/mail.
 func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (*MailListOutput, error) {
 	bp := input.toBlockingParams()
@@ -184,16 +202,16 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
@@ -223,25 +241,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				msgs = []mail.Message{}
 			}
 			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: msgs, Total: total},
-				}, nil
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
 			return &MailListOutput{
 				Index:     index,
 				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor},
+				Body:      mailKeysetBody(msgs, seek, limit, false, nil),
 			}, nil
 		}
 
@@ -266,26 +269,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
 		}
-		partial := len(partialErrs) > 0
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
 		return &MailListOutput{
 			Index:     index,
 			CacheAgeS: cacheAge,
-			Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
+			Body:      mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
 		}, nil
 
 	case "all":
@@ -308,25 +295,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				msgs = []mail.Message{}
 			}
 			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: msgs, Total: total},
-				}, nil
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
 			return &MailListOutput{
 				Index:     index,
 				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor},
+				Body:      mailKeysetBody(msgs, seek, limit, false, nil),
 			}, nil
 		}
 
@@ -351,26 +323,10 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
 		}
-		partial := len(partialErrs) > 0
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
 		return &MailListOutput{
 			Index:     index,
 			CacheAgeS: cacheAge,
-			Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
+			Body:      mailKeysetBody(allMsgs, seek, limit, len(partialErrs) > 0, partialErrs),
 		}, nil
 
 	default:
@@ -434,39 +390,23 @@ func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (
 		return nil, apierr.InvalidRequest.Msg("no mail provider available")
 	}
 
-	// Idempotency check — scope by method+path to prevent cross-endpoint collisions.
-	idemKey := ""
-	var bodyHash string
-	if input.IdempotencyKey != "" {
-		idemKey = "POST:/v0/mail:" + input.IdempotencyKey
-		bodyHash = hashBody(input.Body)
-		existing, found := s.idem.reserve(idemKey, bodyHash)
-		if found {
-			if existing.bodyHash != bodyHash {
-				return nil, apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with different request body")
+	// Idempotency: send at most once per Idempotency-Key. On replay the closure
+	// is skipped entirely, so no duplicate Send, telemetry op, or MailSent event
+	// fires. The helper guarantees the reservation is released on a send error.
+	msg, err := withIdempotency(s.idem, "/v0/mail", input.IdempotencyKey, input.Body,
+		func() (mail.Message, error) {
+			sent, sendErr := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
+			telemetry.RecordMailOp(ctx, "send", sendErr)
+			if sendErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(sendErr.Error())
 			}
-			if existing.pending {
-				return nil, apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
-			}
-			// Replay cached typed response (Fix 3l).
-			if msg, ok := replayAs[mail.Message](existing); ok {
-				return &IndexOutput[mail.Message]{
-					Index: s.latestIndex(),
-					Body:  msg,
-				}, nil
-			}
-		}
-	}
-
-	msg, err := mp.Send(input.Body.From, resolved, input.Body.Subject, input.Body.Body)
-	telemetry.RecordMailOp(ctx, "send", err)
+			sent.Rig = input.Body.Rig
+			s.recordMailEvent(events.MailSent, sent.From, sent.ID, input.Body.Rig, &sent)
+			return sent, nil
+		})
 	if err != nil {
-		s.idem.unreserve(idemKey)
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, err
 	}
-	msg.Rig = input.Body.Rig
-	s.idem.storeResponse(idemKey, bodyHash, msg)
-	s.recordMailEvent(events.MailSent, msg.From, msg.ID, input.Body.Rig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),
@@ -703,21 +643,35 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	id := input.ID
 	rig := input.Rig
 
-	mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
-	if mpErr != nil {
-		return nil, apierr.Internal.Msg(mpErr.Error())
-	}
-	if mp == nil {
-		return nil, apierr.MailNotFound.Msg("message " + id + " not found")
-	}
+	// Idempotency: reply at most once per Idempotency-Key. The message ID is
+	// folded into the cache path because it lives in the URL, not the body —
+	// the same key + body against two different messages must not collide.
+	// PathEscape keeps a crafted ID (%2F-encoded slash) from forging the
+	// "/reply:" boundary and aliasing another (id, key) pair's scope. The
+	// provider lookup stays INSIDE the closure so a replay still succeeds
+	// after the original message was archived (the closure is skipped).
+	msg, err := withIdempotency(s.idem, "/v0/mail/"+url.PathEscape(id)+"/reply", input.IdempotencyKey, input.Body,
+		func() (mail.Message, error) {
+			mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
+			if mpErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(mpErr.Error())
+			}
+			if mp == nil {
+				return mail.Message{}, apierr.MailNotFound.Msg("message " + id + " not found")
+			}
 
-	msg, err := mp.Reply(id, input.Body.From, input.Body.Subject, input.Body.Body)
-	telemetry.RecordMailOp(ctx, "reply", err)
+			sent, replyErr := mp.Reply(id, input.Body.From, input.Body.Subject, input.Body.Body)
+			telemetry.RecordMailOp(ctx, "reply", replyErr)
+			if replyErr != nil {
+				return mail.Message{}, apierr.Internal.Msg(replyErr.Error())
+			}
+			sent.Rig = resolvedRig
+			s.recordMailEvent(events.MailReplied, sent.From, sent.ID, resolvedRig, &sent)
+			return sent, nil
+		})
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		return nil, err
 	}
-	msg.Rig = resolvedRig
-	s.recordMailEvent(events.MailReplied, msg.From, msg.ID, resolvedRig, &msg)
 
 	return &IndexOutput[mail.Message]{
 		Index: s.latestIndex(),

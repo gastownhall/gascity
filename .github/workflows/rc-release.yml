@@ -70,6 +70,14 @@ jobs:
           commit="$(git rev-parse HEAD)"
           git fetch --force --tags origin
 
+          # Read-only probe: does the tag already exist? The answer picks the
+          # run's lane. A dispatch that must CREATE the tag only creates+pushes
+          # it and then stops, because pushing a tag with the release-tagger App
+          # installation token re-fires this workflow's own `push:` trigger
+          # (App-token pushes DO start new runs, unlike the default
+          # GITHUB_TOKEN). That second, tag-triggered run is the one that
+          # publishes, so the create run must NOT also publish or the same tag
+          # would draft twice.
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             tagged_commit="$(git rev-list -n 1 "$tag")"
             if [ "$tagged_commit" != "$commit" ]; then
@@ -77,22 +85,69 @@ jobs:
               exit 1
             fi
             echo "Using existing tag $tag at $commit"
+            needs_create=false
           else
             if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
               echo "ERROR: push event for $tag did not leave a local tag ref" >&2
               exit 1
             fi
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag -a "$tag" -m "Release $tag" "$commit"
-            git push origin "refs/tags/$tag"
-            echo "Created tag $tag at $commit"
+            echo "Tag $tag does not exist yet; this dispatch will create it at $commit"
+            needs_create=true
           fi
 
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "commit=$commit"
+            echo "needs_create=$needs_create"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint release-tagger token
+        # Mint only when this dispatch must create the tag. The push path and a
+        # dispatch re-draft of an already-existing tag arrive with the tag
+        # present and need no bypass token. The workflow's default GITHUB_TOKEN
+        # is not a bypass actor on the "Protect release tags" ruleset, so ref
+        # creation under refs/tags/v* is denied (GH013) — this burned the
+        # v1.4.1-rc1 dispatch. The gastownhall-release-tagger app is an
+        # Integration bypass actor on that ruleset; its short-lived token is
+        # used solely for the tag push. continue-on-error lets the create step's
+        # friendly guard report missing secrets with instructions instead of the
+        # bare "Input required and not supplied: app-id" mint failure.
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.rc.outputs.needs_create == 'true' }}
+        id: tagger-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3
+        with:
+          app-id: ${{ secrets.RELEASE_TAGGER_APP_ID }}
+          private-key: ${{ secrets.RELEASE_TAGGER_APP_PRIVATE_KEY }}
+
+      - name: Create RC tag
+        # Terminal step for the create lane: create+push the tag with the App
+        # token, then stop. The resulting tag-push event runs this workflow
+        # again to perform the single publish (see the probe comment above), so
+        # the publish steps below are gated off this lane.
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.rc.outputs.needs_create == 'true' }}
+        env:
+          TAG_NAME: ${{ steps.rc.outputs.tag }}
+          TARGET_COMMIT: ${{ steps.rc.outputs.commit }}
+          TAGGER_TOKEN: ${{ steps.tagger-token.outputs.token || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAGGER_TOKEN}" ]; then
+            echo "ERROR: cannot create $TAG_NAME — the tag ruleset restricts refs/tags/v* creation and no release-tagger token is available (RELEASE_TAGGER_APP_ID / RELEASE_TAGGER_APP_PRIVATE_KEY secrets missing?). Either configure the gastownhall-release-tagger app (see RELEASING.md) or push the tag manually and re-dispatch." >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME" "$TARGET_COMMIT"
+          # actions/checkout persists the default GITHUB_TOKEN as an
+          # http.extraheader that outranks URL-embedded credentials; blank it
+          # for this one push so the app token actually authenticates.
+          git -c "http.https://github.com/.extraheader=" \
+            push "https://x-access-token:${TAGGER_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$TAG_NAME"
+          echo "Created tag $TAG_NAME at $TARGET_COMMIT"
 
       - name: Reject replace directives in go.mod
+        if: ${{ steps.rc.outputs.needs_create != 'true' }}
         run: |
           if grep -qE '^replace\s' go.mod; then
             echo "ERROR: go.mod contains replace directives; aborting RC release." >&2
@@ -101,6 +156,7 @@ jobs:
           fi
 
       - name: Run GoReleaser draft prerelease
+        if: ${{ steps.rc.outputs.needs_create != 'true' }}
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
         with:
           version: "~> v2"
@@ -110,6 +166,7 @@ jobs:
           GORELEASER_CURRENT_TAG: ${{ steps.rc.outputs.tag }}
 
       - name: Summarize RC release
+        if: ${{ steps.rc.outputs.needs_create != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.rc.outputs.tag }}

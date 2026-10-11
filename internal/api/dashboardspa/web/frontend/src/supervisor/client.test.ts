@@ -170,6 +170,58 @@ describe('supervisor client wrapper', () => {
     );
   });
 
+  it('calls city-scoped usage and canonical runs through the generated SDK', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestedUrl(input);
+      if (new URL(url).pathname.endsWith('/usage')) {
+        return new Response(
+          JSON.stringify({
+            available: true,
+            recording: true,
+            source: 'local_estimate',
+            today: { invocations: 4, input_tokens: 100, output_tokens: 20 },
+            last_24h: { invocations: 9, input_tokens: 250, output_tokens: 60 },
+            recent: { invocations: 1, input_tokens: 25, output_tokens: 5 },
+            recent_window_secs: 300,
+            updated_at: '2026-07-14T12:00:00Z',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          status_counts: {
+            pending: 0,
+            active: 1,
+            waiting: 0,
+            canceling: 0,
+            completed: 0,
+            failed: 0,
+            canceled: 0,
+            skipped: 0,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.cityUsage('test-city')).resolves.toMatchObject({
+      available: true,
+      today: { invocations: 4 },
+    });
+    await expect(api.runCensus('test-city')).resolves.toMatchObject({
+      status_counts: { active: 1 },
+    });
+    expect(fetchSpy.mock.calls.map((call) => requestedUrl(call[0]))).toEqual([
+      'http://gc-supervisor.test/v0/city/test-city/usage?aggregate_only=true',
+      'http://gc-supervisor.test/v0/city/test-city/runs/census',
+    ]);
+  });
+
   it('calls supervisor sessions through the generated SDK without dashboard DTO stripping', async () => {
     const fetchSpy = vi.fn(
       async (_input: RequestInfo | URL) =>
@@ -208,8 +260,48 @@ describe('supervisor client wrapper', () => {
       total: 1,
     });
     expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/sessions',
+      'http://gc-supervisor.test/v0/city/test-city/sessions?limit=1000',
     );
+  });
+
+  it('walks session pages via next_cursor and merges them', async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      // Second page: the client carries the first page's next_cursor forward.
+      if (requestedUrl(input).includes('cursor=page2')) {
+        return new Response(
+          JSON.stringify({
+            items: [{ id: 'gc-session-2', session_name: 'polecat' }],
+            total: 2,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      // First page: mint a next_cursor so the client keeps walking instead of
+      // truncating at one server-cap page.
+      return new Response(
+        JSON.stringify({
+          items: [{ id: 'gc-session-1', session_name: 'mayor' }],
+          next_cursor: 'page2',
+          total: 2,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.listSessions('test-city')).resolves.toMatchObject({
+      items: [{ id: 'gc-session-1' }, { id: 'gc-session-2' }],
+      total: 2,
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const urls = fetchSpy.mock.calls.map((call) => requestedUrl(call[0]));
+    expect(urls[0]).toBe('http://gc-supervisor.test/v0/city/test-city/sessions?limit=1000');
+    expect(urls[1]).toContain('limit=1000');
+    expect(urls[1]).toContain('cursor=page2');
   });
 
   it('calls supervisor session pending interaction through the generated SDK', async () => {
@@ -502,7 +594,7 @@ describe('supervisor client wrapper', () => {
     });
   });
 
-  it('closes supervisor beads through the generated SDK with mutation headers and reason', async () => {
+  it('closes supervisor beads through the generated SDK with mutation headers', async () => {
     const fetchSpy = vi.fn(
       async (_input: RequestInfo | URL) =>
         new Response(JSON.stringify({ status: 'closed' }), {
@@ -516,11 +608,9 @@ describe('supervisor client wrapper', () => {
       fetch: fetchSpy as typeof fetch,
     });
 
-    await expect(
-      api.closeBead('test-city', 'td-bead-abc123', {
-        reason: 'operator verified duplicate',
-      }),
-    ).resolves.toMatchObject({ status: 'closed' });
+    await expect(api.closeBead('test-city', 'td-bead-abc123')).resolves.toMatchObject({
+      status: 'closed',
+    });
 
     const req = fetchSpy.mock.calls[0]?.[0];
     expect(requestedUrl(req)).toBe(
@@ -530,9 +620,7 @@ describe('supervisor client wrapper', () => {
     const request = req as Request;
     expect(request.method).toBe('POST');
     expect(request.headers.get('X-GC-Request')).toBe('dashboard');
-    await expect(request.json()).resolves.toEqual({
-      reason: 'operator verified duplicate',
-    });
+    await expect(request.text()).resolves.toBe('');
   });
 
   it('creates supervisor beads through the generated SDK with mutation headers', async () => {
@@ -617,113 +705,6 @@ describe('supervisor client wrapper', () => {
       rig: 'east',
       target: 'mayor',
     });
-  });
-
-  it('nudges unqualified supervisor agents through the generated SDK with mutation headers', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(JSON.stringify({ status: 'ok' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.nudgeAgent('test-city', 'mayor')).resolves.toMatchObject({ status: 'ok' });
-
-    const req = fetchSpy.mock.calls[0]?.[0];
-    expect(requestedUrl(req)).toBe('http://gc-supervisor.test/v0/city/test-city/agent/mayor/nudge');
-    expect(req).toBeInstanceOf(Request);
-    const request = req as Request;
-    expect(request.method).toBe('POST');
-    expect(request.headers.get('X-GC-Request')).toBe('dashboard');
-    await expect(request.text()).resolves.toBe('');
-  });
-
-  it('nudges qualified supervisor agents through the generated SDK with mutation headers', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(JSON.stringify({ status: 'ok' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.nudgeAgent('test-city', 'east/mayor')).resolves.toMatchObject({
-      status: 'ok',
-    });
-
-    const req = fetchSpy.mock.calls[0]?.[0];
-    expect(requestedUrl(req)).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/agent/east/mayor/nudge',
-    );
-    expect(req).toBeInstanceOf(Request);
-    const request = req as Request;
-    expect(request.method).toBe('POST');
-    expect(request.headers.get('X-GC-Request')).toBe('dashboard');
-    await expect(request.text()).resolves.toBe('');
-  });
-
-  it('reads unqualified supervisor agent prime prompts through the generated SDK', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(JSON.stringify({ agent: 'mayor', prompt: 'composed prompt', bytes: 15 }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.agentPrime('test-city', 'mayor')).resolves.toMatchObject({
-      agent: 'mayor',
-      prompt: 'composed prompt',
-      bytes: 15,
-    });
-
-    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/agent/mayor/prime',
-    );
-  });
-
-  it('reads qualified supervisor agent prime prompts through the generated SDK', async () => {
-    const fetchSpy = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        new Response(
-          JSON.stringify({ agent: 'east/mayor', prompt: 'qualified prompt', bytes: 16 }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-    );
-
-    const api = createSupervisorApi({
-      baseUrl: 'http://gc-supervisor.test',
-      fetch: fetchSpy as typeof fetch,
-    });
-
-    await expect(api.agentPrime('test-city', 'east/mayor')).resolves.toMatchObject({
-      agent: 'east/mayor',
-      prompt: 'qualified prompt',
-      bytes: 16,
-    });
-
-    expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/agent/east/mayor/prime',
-    );
   });
 
   it('calls supervisor mail through the generated SDK without dashboard DTO stripping', async () => {
@@ -939,6 +920,9 @@ describe('supervisor client wrapper', () => {
     expect(streamApi.sessionStreamUrl('test-city', 'gc-session-1')).toBe(
       'http://gc-supervisor.test/v0/city/test-city/session/gc-session-1/stream',
     );
+    expect(api.sessionStreamUrl('test-city', 'gc-session-1', 'st1.snapshot', 'structured')).toBe(
+      'http://gc-supervisor.test/v0/city/test-city/session/gc-session-1/stream?after_cursor=st1.snapshot&format=structured',
+    );
   });
 
   it('calls supervisor session transcripts through the generated SDK', async () => {
@@ -1124,6 +1108,96 @@ describe('supervisor client wrapper', () => {
     });
   });
 
+  it('preserves the typed problem code on supervisor errors', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: 'urn:gascity:error:city-not-found',
+            title: 'City Not Found',
+            status: 404,
+            detail: 'localized city availability detail',
+            code: 'city-not-found',
+          }),
+          {
+            status: 404,
+            headers: { 'content-type': 'application/problem+json' },
+          },
+        ),
+    );
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.listBeads('captured-city')).rejects.toMatchObject({
+      name: 'SupervisorApiError',
+      status: 404,
+      message: 'localized city availability detail',
+      code: 'city-not-found',
+    });
+  });
+
+  it('keeps an in-flight bead-list fetch pending until the caller aborts it', async () => {
+    const controller = new AbortController();
+    const abortReason = new DOMException('obsolete attention read', 'AbortError');
+    let observedSignal: AbortSignal | undefined;
+    let resolveFetch: ((response: Response) => void) | undefined;
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const fetchSpy = vi.fn(
+      (input: RequestInfo | URL) =>
+        new Promise<Response>((resolve, reject) => {
+          const request = input instanceof Request ? input : new Request(input);
+          observedSignal = request.signal;
+          resolveFetch = resolve;
+          const rejectOnAbort = () => reject(request.signal.reason);
+          if (request.signal.aborted) {
+            rejectOnAbort();
+          } else {
+            request.signal.addEventListener('abort', rejectOnAbort, { once: true });
+          }
+          notifyStarted?.();
+        }),
+    );
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    const pending = api.listBeads('captured-city', undefined, controller.signal);
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    controller.abort(abortReason);
+    const callerAbortReachedFetch = observedSignal?.aborted === true;
+    if (!callerAbortReachedFetch) {
+      resolveFetch?.(
+        new Response(JSON.stringify({ items: [], total: 0 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }
+    await pending.catch(() => undefined);
+
+    expect(callerAbortReachedFetch).toBe(true);
+    expect(settled).toBe(true);
+  });
+
   it('accepts supervisor responses whose shapes exceed the OpenAPI snapshot (r43k)', async () => {
     // Regression for r43k: the dashboard must not re-validate and reject the
     // supervisor's own valid output. Here `last_activity` is not an RFC3339
@@ -1240,6 +1314,8 @@ describe('supervisor client wrapper', () => {
       getBead: vi.fn(),
       cityHealth: vi.fn(),
       cityStatus: vi.fn(),
+      cityUsage: vi.fn(),
+      runCensus: vi.fn(),
       health: vi.fn(),
       listAgents: vi.fn(),
       listRigs: vi.fn(),
@@ -1260,8 +1336,6 @@ describe('supervisor client wrapper', () => {
       createBead: vi.fn(),
       updateBead: vi.fn(),
       closeBead: vi.fn(),
-      nudgeAgent: vi.fn(),
-      agentPrime: vi.fn(),
       sling: vi.fn(),
       cityEventStreamUrl: vi.fn(() => '/gc-supervisor/v0/city/test-city/events/stream'),
       sessionStreamUrl: vi.fn(() => '/gc-supervisor/v0/city/test-city/session/gc-session-1/stream'),

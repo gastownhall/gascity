@@ -24,11 +24,20 @@ vi.mock('./supervisor/client', () => ({
       items: [{ name: 'test-city', path: '/srv/gc/test-city', running: true }],
       total: 1,
     })),
+    // Routing-level tests do not exercise bead/session data; these stubs exist
+    // so the attention cohort's reads resolve empty instead of tripping over a
+    // missing method.
+    listSessions: vi.fn(async () => ({ items: [], total: 0 })),
+    listBeads: vi.fn(async () => ({ items: [], total: 0 })),
   }),
 }));
 
 vi.mock('./routes/Runs', () => ({
   RunsPage: () => <h1>Runs route</h1>,
+}));
+
+vi.mock('./routes/CockpitHome', () => ({
+  CockpitHomePage: () => <h1>Cockpit home route</h1>,
 }));
 
 function LocationProbe() {
@@ -86,5 +95,12 @@ describe('App routes', () => {
 
     expect(await screen.findByRole('heading', { name: 'Runs route' })).toBeTruthy();
     expect(screen.getByTestId('pathname').textContent).toBe('/runs');
+  });
+
+  it('/ renders the live cockpit fallback', async () => {
+    renderAt('/');
+
+    expect(await screen.findByRole('heading', { name: 'Cockpit home route' })).toBeTruthy();
+    expect(screen.getByTestId('pathname').textContent).toBe('/');
   });
 });

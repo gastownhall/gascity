@@ -21,6 +21,8 @@ export interface ListSupervisorBeadsOptions {
   includeBookkeeping?: boolean;
   rigFilter?: string;
   limit?: number;
+  city?: string;
+  signal?: AbortSignal;
 }
 
 // Pre-exposure load bounds (gascity-dashboard-q89b): board and detail-fallback
@@ -47,7 +49,7 @@ const ENGINEERING_BEAD_TYPES: ReadonlySet<string> = new Set([
 export async function listSupervisorBeads(
   options: ListSupervisorBeadsOptions = {},
 ): Promise<SupervisorBeadList> {
-  const cityName = activeCityOrThrow('list supervisor beads');
+  const cityName = options.city ?? activeCityOrThrow('list supervisor beads');
   const limit = options.limit ?? BEADS_FETCH_LIMIT;
   const rigFilter = options.rigFilter?.trim() ?? '';
   const includeClosed = options.includeClosed ?? false;
@@ -57,8 +59,27 @@ export async function listSupervisorBeads(
     ...(includeClosed ? { all: true } : {}),
     ...(rigFilter.length === 0 ? {} : { rig: rigFilter }),
   };
-  const list = await supervisorApi().listBeads(cityName, baseQuery);
-  const items = uniqueById(list.items ?? []);
+  // The windowed list is newest-created-first, so long-running in-progress work
+  // ages out of it — exactly the beads an operator most needs to see (gp-6xd
+  // F1: 7 of 9 in-progress beads sat past the window). A second, dedicated
+  // status=in_progress leg fetches that set whole — it is tiny by definition —
+  // and merges into the window. Best-effort: if the leg fails, the board
+  // degrades to the window (with its truncation notice) instead of blanking.
+  const inProgressQuery: NonNullable<GetV0CityByCityNameBeadsData['query']> = {
+    limit,
+    status: 'in_progress',
+    ...(rigFilter.length === 0 ? {} : { rig: rigFilter }),
+  };
+  const listWith = (query: NonNullable<GetV0CityByCityNameBeadsData['query']>) =>
+    options.signal === undefined
+      ? supervisorApi().listBeads(cityName, query)
+      : supervisorApi().listBeads(cityName, query, options.signal);
+  const [list, inProgress] = await Promise.all([
+    listWith(baseQuery),
+    listWith(inProgressQuery).catch(() => null),
+  ]);
+  const windowItems = uniqueById(list.items ?? []);
+  const items = uniqueById([...windowItems, ...(inProgress?.items ?? [])]);
   const statusFiltered = includeClosed ? items : items.filter((bead) => bead.status !== 'closed');
   const filtered = includeBookkeeping ? statusFiltered : statusFiltered.filter(defaultBeadFilter);
   const upstreamTotal = countAsNumber(list.total);
@@ -66,7 +87,11 @@ export async function listSupervisorBeads(
     items: filtered,
     total: filtered.length,
     ...(upstreamTotal === undefined ? {} : { upstream_total: upstreamTotal }),
-    upstream_fetched: items.length,
+    // Counted from the WINDOW leg alone, against which `upstream_total` is
+    // reported. Counting the merged array would let beads recovered by the
+    // in-progress leg pad the figure past the window size and silence the
+    // truncation notice precisely when window beads really were dropped.
+    upstream_fetched: windowItems.length,
     fetch_limit: limit,
   };
 }

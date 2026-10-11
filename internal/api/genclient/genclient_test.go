@@ -2,10 +2,15 @@ package genclient_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestGeneratedClientInSync regenerates client_gen.go from the live spec
@@ -17,22 +22,30 @@ import (
 // guard the spec → committed-artifact pipeline so the typed contract
 // can't drift unnoticed.
 func TestGeneratedClientInSync(t *testing.T) {
-	if _, err := exec.LookPath("oapi-codegen"); err != nil {
-		// CI installs oapi-codegen via `make spec-ci`, which also runs
-		// regeneration and fails on drift. Only skip when running locally
-		// without the tool — CI has the GC_REQUIRE_OAPI_CODEGEN=1 env set.
-		if os.Getenv("GC_REQUIRE_OAPI_CODEGEN") == "1" {
-			t.Fatalf("oapi-codegen not on PATH; install via `go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0`")
-		}
-		t.Skip("oapi-codegen not on PATH; install via `go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0` (or set GC_REQUIRE_OAPI_CODEGEN=1 in CI to fatal)")
-	}
+	oapiCodegen := oapiCodegenBinary(t)
 
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		t.Fatalf("find repo root: %v", err)
 	}
 
-	cmd := exec.Command("go", "run", "./cmd/gen-client")
+	// Under bazel the prebuilt gen-client binary ships in runfiles; the
+	// `go run` fallback covers plain `go test` (and needs a module cache).
+	// Kept to a single call site: the source-resource census counts these.
+	genClient := "go"
+	args := []string{"run", "./cmd/gen-client"}
+	for _, rf := range runfilesRoots() {
+		bin := filepath.Join(rf, "_main", "cmd", "gen-client", "gen-client_", "gen-client")
+		if _, statErr := os.Stat(bin); statErr == nil {
+			genClient = bin
+			args = nil
+			break
+		}
+	}
+	if oapiCodegen != "" {
+		args = append(args, "-oapi-codegen", oapiCodegen)
+	}
+	cmd := exec.Command(genClient, args...)
 	cmd.Dir = repoRoot
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
@@ -53,9 +66,88 @@ func TestGeneratedClientInSync(t *testing.T) {
 	}
 }
 
+func TestEventStreamEnvelopePreservesTopologyPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		deps        *[]string
+		wantPresent bool
+	}{
+		{name: "unknown"},
+		{name: "root", deps: ptrToStrings([]string{}), wantPresent: true},
+		{name: "dependent", deps: ptrToStrings([]string{"build"}), wantPresent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded, err := json.Marshal(genclient.EventStreamEnvelope{DependsOnStepIds: tc.deps})
+			if err != nil {
+				t.Fatalf("marshal envelope: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatalf("unmarshal fields: %v", err)
+			}
+			_, present := fields["depends_on_step_ids"]
+			if present != tc.wantPresent {
+				t.Fatalf("topology field present = %v, want %v; JSON = %s", present, tc.wantPresent, encoded)
+			}
+
+			var decoded genclient.EventStreamEnvelope
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if !sameStepDependencies(decoded.DependsOnStepIds, tc.deps) {
+				t.Fatalf("round-trip dependencies = %#v, want %#v", decoded.DependsOnStepIds, tc.deps)
+			}
+		})
+	}
+}
+
+func ptrToStrings(values []string) *[]string { return &values }
+
+func sameStepDependencies(got, want *[]string) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return slices.Equal(*got, *want)
+}
+
+// oapiCodegenBinary returns the oapi-codegen the drift check runs, or ""
+// to let cmd/gen-client pick (PATH, else `go run` of its pinned version).
+// Under bazel it is the hermetic MODULE.bazel-pinned build named by
+// GC_OAPI_CODEGEN (a runfiles path); a missing build fails the test, as does
+// any gen-client failure, so the drift check never silently skips.
+func oapiCodegenBinary(t *testing.T) string {
+	t.Helper()
+	rel := os.Getenv("GC_OAPI_CODEGEN")
+	if rel == "" {
+		return ""
+	}
+	for _, rf := range runfilesRoots() {
+		bin := filepath.Join(rf, filepath.FromSlash(rel))
+		if _, err := os.Stat(bin); err == nil {
+			return bin
+		}
+	}
+	t.Fatalf("GC_OAPI_CODEGEN=%q not found under runfiles %v", rel, runfilesRoots())
+	return ""
+}
+
+// runfilesRoots lists the bazel runfiles directories in lookup order.
+func runfilesRoots() []string {
+	var roots []string
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf != "" {
+			roots = append(roots, rf)
+		}
+	}
+	return roots
+}
+
 // findRepoRoot walks up from the current working directory until it
 // finds a go.mod file.
 func findRepoRoot() (string, error) {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root, nil
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", err

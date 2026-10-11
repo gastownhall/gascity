@@ -1,6 +1,33 @@
 package acceptancehelpers
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestStageIdleProviderBinary(t *testing.T) {
+	binDir := t.TempDir()
+	if err := StageIdleProviderBinary(binDir, "claude"); err != nil {
+		t.Fatalf("StageIdleProviderBinary: %v", err)
+	}
+
+	path := filepath.Join(binDir, "claude")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat staged provider: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("staged provider mode = %v, want executable", info.Mode())
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read staged provider: %v", err)
+	}
+	if got, want := string(body), "#!/bin/sh\nexec sleep 3600\n"; got != want {
+		t.Fatalf("staged provider body = %q, want %q", got, want)
+	}
+}
 
 func TestProviderShimCommand_UsesDefaultWhenEnvUnset(t *testing.T) {
 	shim, ok := providerShimCommand("claude_test_default", "aimux run claude --")

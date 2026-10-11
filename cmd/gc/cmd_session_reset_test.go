@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -65,8 +67,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -75,21 +76,7 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
-	lis, err := startControllerSocket(
-		cityDir,
-		func() {},
-		nil,
-		nil,
-		make(chan reloadRequest),
-		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
-	)
-	if err != nil {
-		t.Fatalf("startControllerSocket: %v", err)
-	}
-	defer lis.Close()                              //nolint:errcheck
-	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+	startSessionResetTestController(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionReset([]string{identity}, &stdout, &stderr); code != 0 {
@@ -111,6 +98,67 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	}
 	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
 		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+}
+
+func TestCmdSessionReset_ProviderConstructionFailureReturnsError(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "broken")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-provider-error-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	writeBuiltinImportsFixture(t, cityDir, "core")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "manual session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:session-a"},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"template":     "session-a",
+			"session_name": "s-gc-reset-provider-error",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		controllerHostingStandalone,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+	if got, want := stderr.String(), "gc session reset: constructing session provider: injected provider failure\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
@@ -167,8 +215,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -179,13 +226,13 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -274,13 +321,13 @@ func TestCmdSessionKill_SyncsBeadToAsleep(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -344,8 +391,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		Window:      30 * time.Minute,
 		MaxRestarts: 3,
 	})
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 4; i++ {
 		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
@@ -356,13 +402,13 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -619,7 +665,9 @@ func TestCmdSessionReset_RequestsFreshRestartWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantExact := []string{"ping\n", "poke\n", "poke\n"}
+	// The probe poke is key-less; the post-reset enqueue carries the
+	// session key.
+	wantExact := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(bead.ID)) + "\n"}
 	for i, want := range wantExact {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
@@ -838,4 +886,91 @@ template = "session-a"
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+}
+
+// TestCmdSessionReset_RollsBackStuckPendingCreate: reset is what an operator
+// reaches for when a session is stuck in creating. An in-place restart leaves
+// the pending-create claim and the alias in place, so the controller re-enters
+// the same failing start; reset must roll the unfinished create back instead,
+// release the alias, and say so on the wire.
+func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-reset-pc-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	now := time.Now().UTC()
+	bead, err := store.Create(beads.Bead{
+		Title:  "stuck create",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                     "sky",
+			"template":                  "worker",
+			"session_name":              "s-gc-reset-pc-test",
+			"state":                     "creating",
+			"generation":                "3",
+			"instance_token":            "tok-stuck",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+			"last_woke_at":              now.Add(-time.Hour).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	startSessionResetTestController(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{"sky"}, &stdout, &stderr, true); code != 0 {
+		t.Fatalf("cmdSessionReset = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"mode":"rollback"`) {
+		t.Fatalf("reset JSON does not report the rollback: %s", stdout.String())
+	}
+
+	reloaded, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(reload): %v", err)
+	}
+	got, err := reloaded.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed: reset left the unfinished create holding its claim (pending_create_claim=%q)", got.Status, got.Metadata["pending_create_claim"])
+	}
+	if err := session.EnsureAliasAvailable(reloaded, "sky", ""); err != nil {
+		t.Fatalf("alias still held after reset: %v", err)
+	}
+}
+
+// startSessionResetTestController serves the real controller socket for
+// cityDir until the test ends.
+func startSessionResetTestController(t *testing.T, cityDir string) {
+	t.Helper()
+	lis, err := startControllerSocket(
+		cityDir,
+		controllerHostingStandalone,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()                              //nolint:errcheck
+		os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+	})
 }

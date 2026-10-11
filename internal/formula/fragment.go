@@ -249,11 +249,7 @@ func ApplyFragmentRecipeGraphControls(fragment *FragmentRecipe) {
 		return
 	}
 
-	for i := range fragment.Deps {
-		if replacement, ok := replacements[fragment.Deps[i].DependsOnID]; ok {
-			fragment.Deps[i].DependsOnID = replacement
-		}
-	}
+	RewriteRecipeDepsToControls(fragment.Deps, fragment.Steps, controls, replacements)
 	fragment.Steps = append(fragment.Steps, controls...)
 	fragment.Deps = append(fragment.Deps, controlDeps...)
 	fragment.Entries = fragmentEntryStepIDs(fragment)

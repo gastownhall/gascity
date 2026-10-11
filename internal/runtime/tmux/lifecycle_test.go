@@ -1,7 +1,10 @@
 package tmux
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestConfigureServerSendsSetOptionExitEmptyOff verifies that ConfigureServer
@@ -22,14 +25,15 @@ func TestConfigureServerSendsSetOptionExitEmptyOff(t *testing.T) {
 	t.Fatalf("ConfigureServer did not issue set-option -g exit-empty off; calls = %v", fe.calls)
 }
 
-// TestConfigureServerIsIdempotentViaSyncOnce verifies that calling ConfigureServer
-// multiple times on the same *Tmux issues set-option -g exit-empty off exactly once.
-// The configureOnce sync.Once field must enforce this property.
-func TestConfigureServerIsIdempotentViaSyncOnce(t *testing.T) {
+// TestConfigureServerReappliesExitEmptyForReplacementServer verifies that
+// server configuration is applied on every call. A Tmux wrapper can outlive
+// the server bound to its socket; per-instance sync.Once would leave a
+// replacement server at tmux's unsafe exit-empty=on default.
+func TestConfigureServerReappliesExitEmptyForReplacementServer(t *testing.T) {
 	fe := &fakeExecutor{}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	for i := 0; i < 5; i++ {
+	for i := range 2 {
 		if err := tm.ConfigureServer(); err != nil {
 			t.Fatalf("ConfigureServer() call %d error = %v", i, err)
 		}
@@ -41,8 +45,87 @@ func TestConfigureServerIsIdempotentViaSyncOnce(t *testing.T) {
 			count++
 		}
 	}
-	if count != 1 {
-		t.Fatalf("set-option -g exit-empty off issued %d times across 5 ConfigureServer calls, want exactly 1", count)
+	if count != 2 {
+		t.Fatalf("set-option -g exit-empty off issued %d times across 2 ConfigureServer calls, want 2", count)
+	}
+}
+
+func TestConfigureServerRetriesExitEmptyAfterFailure(t *testing.T) {
+	firstAttempt := errors.New("set option unavailable")
+	fe := &fakeExecutor{errs: []error{firstAttempt, nil}}
+	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
+
+	if err := tm.ConfigureServer(); !errors.Is(err, firstAttempt) {
+		t.Fatalf("first ConfigureServer() error = %v, want %v", err, firstAttempt)
+	}
+	if err := tm.ConfigureServer(); err != nil {
+		t.Fatalf("second ConfigureServer() error = %v, want nil after retry", err)
+	}
+
+	count := 0
+	for _, call := range fe.calls {
+		if containsSetOptionExitEmptyWithValue(call, "off") {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("set-option -g exit-empty off issued %d times across failed retry, want 2", count)
+	}
+}
+
+// TestProviderStopDistinguishesMissingSessionFromMissingServer pins the Stop
+// contract: a responsive server's missing-session answer is idempotent
+// success, while a missing server reaches the caller. Teardown callers still
+// absorb every row through runtime.StopForCleanup, which accepts an error only
+// when each leaf is a gone answer — so this also pins that the real
+// missing-server shape (pane capture and kill-session both failing) carries
+// nothing but ErrNoServer leaves.
+func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) {
+	tests := []struct {
+		name     string
+		stopErr  error
+		stopErrs []error
+		wantErr  error
+	}{
+		{
+			name:    "responsive server missing session is idempotent",
+			stopErr: ErrSessionNotFound,
+		},
+		{
+			name:    "responsive empty server is idempotent",
+			stopErr: ErrNoCurrentTarget,
+		},
+		{
+			name:    "missing server remains uncertain",
+			stopErr: ErrNoServer,
+			wantErr: ErrNoServer,
+		},
+		{
+			name:     "missing server at kill outranks an earlier missing pane",
+			stopErrs: []error{ErrSessionNotFound, ErrNoServer},
+			wantErr:  ErrNoServer,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Each Stop gets its own executor: a sequenced fake is spent by
+			// one Stop, so a shared one would answer the cleanup leg's pane
+			// capture with empty output instead of replaying the row.
+			newProvider := func() *Provider {
+				provider := NewProviderWithConfig(Config{SocketName: "gctest-stop-outcome"})
+				provider.tm.exec = &fakeExecutor{err: test.stopErr, errs: test.stopErrs}
+				return provider
+			}
+
+			err := newProvider().Stop("worker")
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("Stop() error = %v, want %v", err, test.wantErr)
+			}
+			if err := runtime.StopForCleanup(newProvider(), "worker"); err != nil {
+				t.Fatalf("runtime.StopForCleanup() error = %v, want nil", err)
+			}
+		})
 	}
 }
 

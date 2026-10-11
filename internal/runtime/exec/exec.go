@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -35,6 +36,10 @@ type Provider struct {
 	handshakeOnce sync.Once
 	handshakeInfo runtime.ProtocolInfo
 	handshakeErr  error
+
+	// readyPrompts maps a session name to the ready-prompt prefix it was
+	// started with, so WaitForIdle scans for that agent's prompt (see idle.go).
+	readyPrompts sync.Map
 }
 
 type startupWatchEvent struct {
@@ -65,8 +70,9 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 // optionally piping stdinData to its stdin. Returns the trimmed stdout
 // on success.
 //
-// Exit code 2 is treated as success (unknown operation — forward compatible).
-// Any other non-zero exit code returns an error wrapping stderr.
+// Exit code 2 is treated as success (unknown operation — forward compatible)
+// on every op but is-attached; see [classifyExecExit]. Any other non-zero exit
+// code returns an error wrapping stderr.
 func (p *Provider) runWithTimeout(dur time.Duration, stdinData []byte, args ...string) (string, error) {
 	return p.runWithContext(context.Background(), dur, stdinData, args...)
 }
@@ -78,10 +84,15 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	// WaitDelay ensures Go forcibly closes I/O pipes after the context
-	// expires, even if grandchild processes (e.g. sleep in a shell script)
-	// still hold them open.
-	cmd.WaitDelay = 2 * time.Second
+	// Run the adapter in its own process group with TERM-then-kill
+	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
+	// foreground child (e.g. a readiness sleep in the adapter), not just the
+	// shell leader — without this the shell defers its rollback trap until
+	// the child returns, and the forced kill wins first, leaking any resource
+	// the adapter already created (e.g. a Docker container). The grace also
+	// ensures Go forcibly closes I/O pipes after the context expires, even if
+	// grandchild processes (e.g. sleep in a shell script) still hold them open.
+	cancellationAccepted := execgrace.Apply(cmd, 2*time.Second)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -92,25 +103,101 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	}
 
 	err := cmd.Run()
-	if err != nil {
-		// Check for exit code 2 → unknown operation → success.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if exitErr.ExitCode() == 2 {
-				return "", nil
-			}
-		}
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		if len(args) > 0 && args[0] == "start" && strings.Contains(strings.ToLower(errMsg), "already exists") {
-			return "", fmt.Errorf("%w: exec provider %s %s: %s", runtime.ErrSessionExists, p.script, strings.Join(args, " "), errMsg)
-		}
-		return "", fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg)
+	if err == nil {
+		return strings.TrimRight(stdout.String(), "\n"), nil
 	}
 
-	return strings.TrimRight(stdout.String(), "\n"), nil
+	// An accepted cancellation action wins over the adapter's exit status. In
+	// particular, a TERM trap may use protocol-reserved exit 2; treating that as
+	// an unsupported operation would turn cancellation into success. Signal can
+	// race with process completion: a delivered SIGTERM makes cancellation the
+	// observed winner, while os.ErrProcessDone leaves the flag false and
+	// preserves the ordinary exit result because completion was observed first.
+	// Neither result claims physical signal-delivery ordering.
+	if cancellationAccepted.Delivered() {
+		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
+	}
+	return "", p.runError(err, stderr.String(), args)
+}
+
+// cancellationError formats the error returned when a delivered cancellation
+// wins over the adapter's own exit status, preferring the context's cause and
+// attaching any adapter stderr for context.
+func (p *Provider) cancellationError(ctxErr error, stderr string, args []string) error {
+	cancelErr := ctxErr
+	if cancelErr == nil {
+		cancelErr = context.Canceled
+	}
+	if errMsg := strings.TrimSpace(stderr); errMsg != "" {
+		return fmt.Errorf("exec provider %s %s: %s: %w", p.script, strings.Join(args, " "), errMsg, cancelErr)
+	}
+	return fmt.Errorf("exec provider %s %s: %w", p.script, strings.Join(args, " "), cancelErr)
+}
+
+// startCollisionPhrases are the adapter stderr idioms that mean "a live session
+// already owns this name". exec is the only provider that INFERS
+// [runtime.ErrSessionExists] from the adapter's message instead of returning it
+// structurally, so this list is the whole detector — and packs word the refusal
+// differently ("already exists" and "already running" are both in use).
+//
+// Under-matching is the dangerous direction: the sentinel is what stops
+// cleanupAfterStartFailure from tearing down the box a healthy session is
+// already running in, so an unrecognized phrasing costs a live session. A false
+// match only forgoes cleanup of one box.
+var startCollisionPhrases = []string{"already exists", "already running"}
+
+// runError maps an ordinary (non-cancellation) cmd.Run failure onto the
+// provider's contract via [classifyExecExit]. A failure that is not an exit
+// status (the script could not run at all) classifies as no exit code.
+func (p *Provider) runError(runErr error, stderr string, args []string) error {
+	code := -1
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		code = exitErr.ExitCode()
+	}
+	errMsg := strings.TrimSpace(stderr)
+	if errMsg == "" {
+		errMsg = runErr.Error()
+	}
+	op := ""
+	if len(args) > 0 {
+		op = args[0]
+	}
+	return classifyExecExit(op, code, errMsg, fmt.Errorf("exec provider %s %s: %s", p.script, strings.Join(args, " "), errMsg))
+}
+
+// classifyExecExit maps an adapter op's exit code and message onto the
+// provider's contract. base is the formatted adapter error. Exit code 2 is an
+// unknown operation treated as success (forward compatible, nil error),
+// except from is-attached: that op runs only for a pack that declared
+// report-attachment, and a declared op cannot be unknown, so its exit 2 is a
+// failure that [Provider.IsAttachedWithError] reports as "could not tell". A
+// start-op name collision maps to [runtime.ErrSessionExists]; a start-op
+// [runtime.ExitCodeTempFail] is an endpoint capacity refusal
+// ([runtime.CapacityError]); everything else is base unchanged.
+func classifyExecExit(op string, code int, msg string, base error) error {
+	switch {
+	case code == 2 && op != "is-attached":
+		return nil
+	case op == "start" && isStartCollision(msg):
+		return fmt.Errorf("%w: %w", runtime.ErrSessionExists, base)
+	case op == "start" && code == runtime.ExitCodeTempFail:
+		return &runtime.CapacityError{ExitCode: code, Source: runtime.CapacitySourceExitStatus, Err: base}
+	default:
+		return base
+	}
+}
+
+// isStartCollision reports whether a failed start op's message says the name is
+// already taken by a live session.
+func isStartCollision(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	for _, phrase := range startCollisionPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // runWithTTY executes the script with the terminal inherited (for Attach).
@@ -130,25 +217,66 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
+	// Was this name already occupied before we touched it? Asked structurally,
+	// before the attempt, because it is the only question whose answer cannot
+	// be garbled by how the adapter happens to word a refusal — and it is the
+	// question the teardown below actually depends on.
+	occupiedBefore, occupancyKnown := p.boxOccupancy(name)
+	foreignBox := occupancyKnown && occupiedBefore
+
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
-		return err
+		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
+	p.publishReadyPrompt(ctx, name, cfg)
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
-		if stopErr := p.Stop(name); stopErr != nil {
-			return errors.Join(
-				fmt.Errorf("exec provider: dismissing startup dialogs: %w", err),
-				fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr),
-			)
-		}
-		return fmt.Errorf("exec provider: dismissing startup dialogs: %w", err)
+		return p.cleanupAfterStartFailure(name, fmt.Errorf("exec provider: dismissing startup dialogs: %w", err), foreignBox)
 	}
 
 	return nil
+}
+
+// cleanupAfterStartFailure tears down the box the adapter may already have
+// created before startErr, and returns the error Start should report. By the
+// time the `start` op fails the box usually exists — the adapter provisions it
+// and then blocks polling for readiness, so the common failure is gc hitting
+// its own startTimeout with the box already up. Without this teardown that box
+// is orphaned, and because a fresh session name is minted per attempt the retry
+// leaks another one.
+//
+// Two conditions skip the teardown, because in both of them the box belongs to
+// a live session rather than to this attempt, and stopping it would destroy a
+// healthy session:
+//
+//   - [runtime.ErrSessionExists] — the adapter refused in wording
+//     startCollisionPhrases recognizes.
+//   - foreignBox — the adapter reported the box already up BEFORE this attempt
+//     ran, which is the same fact established structurally instead of by
+//     reading prose. That distinction matters wherever a session name is a
+//     function of agent identity (named sessions, tmux_alias pools): a retry
+//     deliberately re-targets the name the previous attempt used, so collisions
+//     are steady state, and a
+//     phrasing this package has never seen would otherwise tear down a live
+//     agent's box on an ordinary retry (ga-vcjr9). A pack that cannot answer
+//     `is-running` reports neither occupancy nor vacancy and keeps the previous
+//     behavior exactly — the gate only ever withholds a teardown, never adds
+//     one.
+//
+// Stop deliberately runs on its own background context (see run), so cleanup
+// still happens when the caller's context is the thing that died.
+func (p *Provider) cleanupAfterStartFailure(name string, startErr error, foreignBox bool) error {
+	if foreignBox || errors.Is(startErr, runtime.ErrSessionExists) {
+		return startErr
+	}
+	if stopErr := p.Stop(name); stopErr != nil {
+		return errors.Join(startErr, fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr))
+	}
+	return startErr
 }
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
@@ -166,6 +294,7 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // agent is launched separately by launchAgent. Otherwise it falls back to the
 // welded Start (which both provisions and launches). (Un-weld B3b.)
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return p.Start(ctx, name, cfg)
 	}
@@ -186,6 +315,7 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
+	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
@@ -204,6 +334,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
 	}
+	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }
 
@@ -223,14 +354,15 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
-	if cfg.AcceptStartupDialogs != nil && !*cfg.AcceptStartupDialogs {
-		return nil
-	}
-	if cfg.AcceptStartupDialogs == nil && !cfg.EmitsPermissionWarning && len(cfg.ProcessNames) == 0 {
+	if !runtime.ShouldAcceptStartupDialogs(cfg) {
 		return nil
 	}
 
 	dialogTimeout := runtime.StartupDialogTimeout()
+	// Gate external-CLAUDE.md-import auto-acceptance to imports within this
+	// session's own repository; an import that escapes the repo (a third-party
+	// or system path) is left for a human rather than auto-trusted.
+	trustRoot := runtime.WithTrustedImportRoot(runtime.WorkspaceImportTrustRoot(ctx, cfg.WorkDir))
 	snapshots, closeWatch, ok, err := p.startStartupWatch(ctx, name, startupWatchFirstEventTimeout())
 	if err != nil {
 		return err
@@ -238,6 +370,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	if ok {
 		streamObserved, streamErr := runtime.AcceptStartupDialogsFromStreamWithStatus(ctx, dialogTimeout, snapshots,
 			func(keys ...string) error { return p.SendKeys(name, keys...) },
+			trustRoot,
 		)
 		closeErr := closeWatch()
 		switch {
@@ -249,6 +382,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 			return runtime.AcceptStartupDialogs(ctx,
 				func(lines int) (string, error) { return p.Peek(name, lines) },
 				func(keys ...string) error { return p.SendKeys(name, keys...) },
+				trustRoot,
 			)
 		}
 	}
@@ -256,6 +390,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	return runtime.AcceptStartupDialogs(ctx,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
 		func(keys ...string) error { return p.SendKeys(name, keys...) },
+		trustRoot,
 	)
 }
 
@@ -438,6 +573,16 @@ func formatStartupWatchError(stderr string, err error) error {
 
 // DismissKnownDialogs best-effort clears known trust/permissions dialogs on a
 // running session using a bounded timeout.
+//
+// Unlike the startup path (dismissStartupDialogs), this mid-session clear is
+// deliberately not given a trusted import root: exec has no reliable
+// mid-session work-dir lookup for a running box (the workdir is provision-half
+// and is not persisted to queryable meta), so there is no exec analog of tmux's
+// GetPaneWorkDir here. Leaving the root empty means the external-CLAUDE.md-import
+// modal fails closed on this path — it is left for a human rather than
+// auto-accepted — which is the safe asymmetry: the common startup case is
+// gated, and the rare mid-session re-surface (resume/reattach) never
+// auto-trusts an unverified import.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
@@ -447,6 +592,7 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 
 // Stop destroys the named session: script stop <name>
 func (p *Provider) Stop(name string) error {
+	p.forgetReadyPrompt(name)
 	_, err := p.run(nil, "stop", name)
 	return err
 }
@@ -518,26 +664,40 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning checks if the session is alive: script is-running <name>
 // Returns true only if stdout is "true". Errors → false.
 func (p *Provider) IsRunning(name string) bool {
+	occupied, _ := p.boxOccupancy(name)
+	return occupied
+}
+
+// boxOccupancy asks `is-running <name>` and reports both the answer and
+// whether there was one. Only a literal "true" or "false" is an answer; an op
+// error, an unknown op (exit 2 on a pack with no is-running), or empty output
+// means the adapter could not tell.
+//
+// [Provider.IsRunning] flattens that to a bool because its callers only need
+// "treat as not running". A caller deciding whether it may destroy the box
+// needs the distinction: "no" authorizes a teardown, "I don't know" must not.
+func (p *Provider) boxOccupancy(name string) (occupied, definite bool) {
 	out, err := p.run(nil, "is-running", name)
 	if err != nil {
-		return false
+		return false, false
 	}
-	return strings.TrimSpace(out) == "true"
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // IsAttached reports terminal attachment via `script is-attached <name>`
 // when the executable declared the report-attachment capability in its
 // protocol handshake; otherwise it is always false. Op errors read as
-// not attached.
+// not attached; [Provider.IsAttachedWithError] keeps them.
 func (p *Provider) IsAttached(name string) bool {
-	if !p.handshakeCapability(runtime.ProtocolCapabilityReportAttachment) {
-		return false
-	}
-	out, err := p.run(nil, "is-attached", name)
-	if err != nil {
-		return false
-	}
-	return out == "true"
+	attached, err := p.IsAttachedWithError(name)
+	return attached && err == nil
 }
 
 // Attach connects the terminal to the session: script attach <name>
@@ -675,9 +835,17 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports that exec-backed sessions support timed-only idle
-// sleep via controller-driven lifecycle decisions.
+// SleepCapability reports the idle-sleep capability the pack's handshake
+// supports. A pack that declares report-activity, report-attachment and
+// proc.exec gets full idle sleep: it has an activity clock, an attachment
+// probe, and an idle boundary read from its in-box tmux pane (WaitForIdle).
+// Every other pack keeps the timed-only floor. The floor is never disabled:
+// non-interactive sleep and the queued-nudge poller rely on timed-only for
+// exec runtimes that report no activity.
 func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
+	if p.idleBoundaryDeclared() {
+		return runtime.SessionSleepCapabilityFull
+	}
 	return runtime.SessionSleepCapabilityTimedOnly
 }
 
@@ -701,8 +869,12 @@ func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 
 // Provider implements the optional connection primitive.
 var (
-	_ runtime.ExecProvider     = (*Provider)(nil)
-	_ runtime.RelaunchProvider = (*Provider)(nil)
+	_ runtime.ExecProvider                = (*Provider)(nil)
+	_ runtime.RelaunchProvider            = (*Provider)(nil)
+	_ runtime.SleepCapabilityProvider     = (*Provider)(nil)
+	_ runtime.IdleWaitProvider            = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError = (*Provider)(nil)
+	_ runtime.IdleProbeBudgetProvider     = (*Provider)(nil)
 )
 
 // Exec runs argv inside the session via the RPP `exec` op and implements

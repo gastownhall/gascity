@@ -19,5 +19,9 @@ func strictWarningIsNonFatal(warning string) bool {
 	return config.IsNonFatalSiteBindingWarning(warning) ||
 		config.IsLegacyV1SurfaceWarning(warning) ||
 		config.IsLegacyWorkspaceFieldWarning(warning) ||
-		config.IsIdleSleepMaskedByIdleTimeoutWarning(warning)
+		config.IsIdleSleepMaskedByIdleTimeoutWarning(warning) ||
+		config.IsAlwaysFreshWakeModeWarning(warning) ||
+		config.IsRetiredKeyWarning(warning) ||
+		config.IsSessionReconcilerAliasWarning(warning) ||
+		config.IsSessionSetupTimeoutAdvisory(warning)
 }

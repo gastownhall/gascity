@@ -137,6 +137,36 @@ func errorStatuses(codes ...int) func(o *huma.Operation) {
 	}
 }
 
+// describes sets an operation's description, so a contract a caller cannot
+// infer from the method and path is published in the spec rather than left in
+// the handler's Go doc. Generated clients and the OpenAPI document are all most
+// consumers ever see; a semantic the handler comment alone records is, in
+// practice, undocumented.
+func describes(text string) func(o *huma.Operation) {
+	return func(o *huma.Operation) {
+		if o.Description == "" {
+			o.Description = text
+			return
+		}
+		o.Description += "\n\n" + text
+	}
+}
+
+// listOrder documents a list endpoint's total order and cursor contract in
+// its operation description. Every keyset list declares its order here so
+// consumers never have to reverse-engineer it from behavior (the pre-S4
+// audit found five endpoints with three different undocumented orders).
+func listOrder(order string) func(o *huma.Operation) {
+	return func(o *huma.Operation) {
+		text := "Results are ordered " + order + ". A truncated response always carries next_cursor; passing it back returns the next page in the same order. Invalid or legacy cursors are rejected with a typed 400 (invalid-cursor)."
+		if o.Description == "" {
+			o.Description = text
+			return
+		}
+		o.Description += "\n\n" + text
+	}
+}
+
 // cityGet registers a per-city GET op at /v0/city/{cityName}+tail.
 // The tail starts with "/" (e.g. "/agents") or is "" for the
 // city-detail base path. Optional opts (e.g. errorStatuses) customize the
@@ -228,6 +258,19 @@ func sseCityStream[I any](sm *SupervisorMux,
 	fn func(*Server, huma.Context, *I, sse.Sender),
 ) func(huma.Context, *I, sse.Sender) {
 	return func(hctx huma.Context, input *I, send sse.Sender) {
+		srv := sm.resolveCityServer(cityScopeName(input))
+		if srv == nil {
+			return
+		}
+		fn(srv, hctx, input, send)
+	}
+}
+
+// sseCityStringIDStream is the string-cursor sibling of sseCityStream.
+func sseCityStringIDStream[I any](sm *SupervisorMux,
+	fn func(*Server, huma.Context, *I, StringIDSender),
+) func(huma.Context, *I, StringIDSender) {
+	return func(hctx huma.Context, input *I, send StringIDSender) {
 		srv := sm.resolveCityServer(cityScopeName(input))
 		if srv == nil {
 			return

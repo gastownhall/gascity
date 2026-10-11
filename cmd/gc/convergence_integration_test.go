@@ -52,7 +52,7 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 
 	// Initialize the city/HQ convergence scope (mimics initConvergenceHandler).
 	cr.convScopes = map[string]*convergenceScope{
-		"": cr.newConvergenceScope("", store, cr.cityPath, []string{sharedTestFormulaDir}),
+		"": cr.newConvergenceScope("", store, cr.cityPath, []string{sharedTestFormulaDir}, false),
 	}
 
 	return cr, store
@@ -76,7 +76,7 @@ func addConvergenceRigScope(cr *CityRuntime, rig string, store beads.Store) *con
 }
 
 func addConvergenceRigScopeAt(cr *CityRuntime, rig string, store beads.Store, storePath string) *convergenceScope {
-	scope := cr.newConvergenceScope(rig, store, storePath, []string{sharedTestFormulaDir})
+	scope := cr.newConvergenceScope(rig, store, storePath, []string{sharedTestFormulaDir}, false)
 	cr.convScopes[rig] = scope
 	if cr.cfg != nil {
 		found := false
@@ -539,7 +539,7 @@ func TestConvergence_GateConditionUsesRigStorePath(t *testing.T) {
 
 func TestConvergence_TickIsolatesPanickingScope(t *testing.T) {
 	cr, _ := setupConvergenceRuntime(t)
-	cr.convScopes[""] = cr.newConvergenceScope("", getPanicStore{Store: beads.NewMemStore()}, cr.cityPath, []string{sharedTestFormulaDir})
+	cr.convScopes[""] = cr.newConvergenceScope("", getPanicStore{Store: beads.NewMemStore()}, cr.cityPath, []string{sharedTestFormulaDir}, false)
 	hqScope(t, cr).adapter.activeIndex = map[string]string{"panic-root": "test-agent"}
 
 	rigStore := beads.NewMemStore()
@@ -583,7 +583,7 @@ func TestConvergence_StartupReconcileMarksFailedScopeComplete(t *testing.T) {
 	cr.convScopes[""] = cr.newConvergenceScope("", convergenceListErrorStore{
 		Store: beads.NewMemStore(),
 		err:   errors.New("injected list failure"),
-	}, cr.cityPath, []string{sharedTestFormulaDir})
+	}, cr.cityPath, []string{sharedTestFormulaDir}, false)
 
 	rigStore := beads.NewMemStore()
 	rigScope := addConvergenceRigScope(cr, "healthy-rig", rigStore)
@@ -1003,7 +1003,7 @@ metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/wo
 	}
 
 	store := beads.NewMemStore()
-	adapter := newConvergenceStoreAdapter(store, []string{dir})
+	adapter := newConvergenceStoreAdapter(store, []string{dir}, false)
 	parent, err := store.Create(beads.Bead{Title: "root", Type: "convergence"})
 	if err != nil {
 		t.Fatalf("creating parent: %v", err)
@@ -1083,7 +1083,7 @@ title = "Work {{convoy_id}}"
 	}
 
 	store := beads.NewMemStore()
-	adapter := newConvergenceStoreAdapter(store, []string{dir})
+	adapter := newConvergenceStoreAdapter(store, []string{dir}, false)
 	parent, err := store.Create(beads.Bead{Title: "root", Type: "convergence"})
 	if err != nil {
 		t.Fatalf("creating parent: %v", err)
@@ -1102,7 +1102,7 @@ title = "Work {{convoy_id}}"
 
 func TestConvergenceIndex_PopulateAndQuery(t *testing.T) {
 	store := beads.NewMemStore()
-	adapter := newConvergenceStoreAdapter(store, nil)
+	adapter := newConvergenceStoreAdapter(store, nil, false)
 
 	// Create some convergence beads in various states.
 	active, _ := store.Create(beads.Bead{Title: "active", Type: "convergence", Status: "in_progress"})
@@ -1142,7 +1142,7 @@ func TestConvergenceIndex_PopulateAndQuery(t *testing.T) {
 
 func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 	store := beads.NewMemStore()
-	adapter := newConvergenceStoreAdapter(store, nil)
+	adapter := newConvergenceStoreAdapter(store, nil, false)
 
 	// Start with an empty index.
 	adapter.activeIndex = make(map[string]string)

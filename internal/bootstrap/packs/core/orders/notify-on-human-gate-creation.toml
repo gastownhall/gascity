@@ -1,0 +1,30 @@
+# notify-on-human-gate-creation mails + nudges the addressee of a human
+# gate the moment the gate bead is created. Without it, creating a
+# `type=human` gate produces ZERO notification — the gate bead is built,
+# the blocks edge is added, a line prints to stdout, and the human who
+# must resolve it is never told (proven ABSENT in gascity/beads: gate
+# creation has no post-create notify hook; the only gate watcher skips
+# human gates entirely). Doctrine compensates by hand ("on the predecessor
+# close, mail+nudge the addressee"); this ships that reflex.
+#
+# Triggers on bead.created — the event the reconciler synthesizes for any
+# newly-appeared bead, regardless of which binary wrote it. The event
+# payload does not carry await_type, so the script re-fetches the gate via
+# `gc bd show --json` to confirm it is an open human gate and to resolve
+# the addressee (assignee -> gc.deferred_assignee -> escalation recipient).
+#
+# Notification rides `gc mail send --notify`, which mails the addressee and
+# nudges them when they are a real session — and deliberately skips the
+# tmux-nudge for the "human" recipient (humans have no session; cmd_mail.go
+# to != "human"). Undeliverable sends surface loudly and are NOT recorded as
+# done, so the next sweep retries them (loud-fail, gastownhall/gascity#4543).
+# Idempotent: a given gate is notified at most once. See
+# assets/scripts/notify-on-human-gate-creation.sh.
+#
+# Resolving the addressee and sending mail is mechanical (bead read +
+# mail send). No LLM judgment needed, so the controller runs it via exec.
+[order]
+description = "Mail + nudge the addressee when a human gate bead is created"
+trigger = "event"
+on = "bead.created"
+exec = "$PACK_DIR/assets/scripts/notify-on-human-gate-creation.sh"

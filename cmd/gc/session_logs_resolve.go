@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -25,7 +24,11 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, sessFront 
 		return "", "", false, ""
 	}
 	if logCtx.sessionID != "" {
-		handle, err := workerHandleForSessionWithConfig(cityPath, sessFront.Store().Store, newSessionProvider(), cfg, logCtx.sessionID)
+		sp, err := newSessionProvider()
+		if err != nil {
+			return "", logCtx.provider, true, err.Error()
+		}
+		handle, err := workerHandleForSessionWithConfig(cityPath, sessFront.Store().Store, sp, cfg, logCtx.sessionID)
 		if err == nil {
 			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
 				return path, logCtx.provider, true, ""
@@ -76,11 +79,10 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, sessFront *sess
 	if err != nil {
 		return sessionLogContext{}, false
 	}
-	b, err := store.Get(sessionID)
+	info, err := sessFront.Get(sessionID)
 	if err != nil {
 		return sessionLogContext{}, false
 	}
-	info := sessionpkg.InfoFromPersistedBead(b)
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
 		return sessionLogContext{}, false
@@ -106,26 +108,25 @@ func canFallbackStoredSessionLogByWorkDir(sessFront *sessionpkg.Store, logCtx se
 	return err == nil && len(siblings) == 1
 }
 
-// sessionLogFallbackSiblings returns the live same-workdir session beads that a
-// workdir-based transcript fallback would be ambiguous across. canFallback...
-// gates on exactly one; resolveCodexSiblingLogPath uses the full set to order
-// Codex transcripts. The filters mirror the pre-split raw-metadata version but
-// read through the session.Info codec (class-store leak closure).
-func sessionLogFallbackSiblings(sessFront *sessionpkg.Store, logCtx sessionLogContext) ([]beads.Bead, error) {
+// sessionLogFallbackSiblings returns the live same-workdir sessions (as session.Info)
+// that a workdir-based transcript fallback would be ambiguous across. canFallback...
+// gates on exactly one; resolveCodexSiblingLogPath uses the full set to order Codex
+// transcripts. The candidates arrive already projected to Info from the store edge
+// (ListByMetadataInfos), so no raw bead crosses this boundary.
+func sessionLogFallbackSiblings(sessFront *sessionpkg.Store, logCtx sessionLogContext) ([]sessionpkg.Info, error) {
 	all, err := sessionLogFallbackCandidates(sessFront, logCtx.workDir, logCtx.provider)
 	if err != nil {
 		return nil, err
 	}
 	targetLive := false
-	for _, b := range all {
-		if b.ID == logCtx.sessionID {
-			targetLive = sessionLogFallbackCandidateLive(sessionpkg.InfoFromPersistedBead(b))
+	for _, info := range all {
+		if info.ID == logCtx.sessionID {
+			targetLive = sessionLogFallbackCandidateLive(info)
 			break
 		}
 	}
-	var matches []beads.Bead
-	for _, b := range all {
-		info := sessionpkg.InfoFromPersistedBead(b)
+	var matches []sessionpkg.Info
+	for _, info := range all {
 		if !sessionpkg.IsSessionBeadOrRepairableInfo(info) {
 			continue
 		}
@@ -142,7 +143,7 @@ func sessionLogFallbackSiblings(sessFront *sessionpkg.Store, logCtx sessionLogCo
 		if targetLive && info.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(info) {
 			continue
 		}
-		matches = append(matches, b)
+		matches = append(matches, info)
 	}
 	return matches, nil
 }
@@ -164,16 +165,15 @@ func resolveCodexSiblingLogPath(sessFront *sessionpkg.Store, searchPaths []strin
 	return path
 }
 
-func sessionLogFallbackCandidates(sessFront *sessionpkg.Store, workDir, provider string) ([]beads.Bead, error) {
-	store := sessFront.Store().Store
-	candidates := make(map[string]beads.Bead)
+func sessionLogFallbackCandidates(sessFront *sessionpkg.Store, workDir, provider string) ([]sessionpkg.Info, error) {
+	candidates := make(map[string]sessionpkg.Info)
 	add := func(filters map[string]string) error {
-		found, err := store.ListByMetadata(filters, 0)
+		found, err := sessFront.ListByMetadataInfos(filters, 0)
 		if err != nil {
 			return err
 		}
-		for _, b := range found {
-			candidates[b.ID] = b
+		for _, in := range found {
+			candidates[in.ID] = in
 		}
 		return nil
 	}
@@ -189,9 +189,9 @@ func sessionLogFallbackCandidates(sessFront *sessionpkg.Store, workDir, provider
 			return nil, err
 		}
 	}
-	out := make([]beads.Bead, 0, len(candidates))
-	for _, b := range candidates {
-		out = append(out, b)
+	out := make([]sessionpkg.Info, 0, len(candidates))
+	for _, in := range candidates {
+		out = append(out, in)
 	}
 	return out, nil
 }

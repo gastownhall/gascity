@@ -28,7 +28,7 @@ import (
 //
 //	PROVISION (box):  Env (allow-listed), FingerprintExtra, PreStart,
 //	                  OverlayDir, OverlayProviders, CopyFiles.
-//	LAUNCH (agent):   Command, Lifecycle, Upstream, MCPServers,
+//	LAUNCH (agent):   Command, Lifecycle, Upstream, OperatorEnv, MCPServers,
 //	                  AcceptStartupDialogs, MouseOn, SessionSetup,
 //	                  SessionSetupScript.
 //
@@ -129,4 +129,15 @@ func hashLaunchFields(h hash.Hash, cfg Config) {
 	// conditional framing as hashCoreFields, so an unset Upstream contributes
 	// nothing. The resolved credentials in Env are NOT hashed (allow-list).
 	hashOptionalString(h, "upstream", cfg.Upstream)
+
+	// OperatorEnv (Option A', ga-3a42sp) is LAUNCH-half: the agent reads
+	// config-authored env at invoke time, so a change relaunches the agent in
+	// the existing warm box rather than reprovisioning. Same conditional
+	// "operator_env" framing as hashCoreFields, so an unset OperatorEnv
+	// contributes nothing.
+	if len(cfg.OperatorEnv) > 0 {
+		h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
+		hashSortedMap(h, cfg.OperatorEnv)
+	}
 }

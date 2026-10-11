@@ -7,11 +7,11 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -105,13 +105,13 @@ func materializeSessionForTemplateWithOptions(
 			// identity and reopen it rather than creating a new one.
 			// This preserves the bead ID so existing references (slings,
 			// convoys, messages) continue to work. Supersedes PR #204.
-			if bead, ok := reopenClosedConfiguredNamedSessionBead(
+			// (The reopened bead was formerly added back to `snapshot` here, but
+			// that snapshot is discarded on the next-line return — a no-op — so the
+			// dead add is dropped with the raw sessionBeadSnapshot.add in W-pool.)
+			if _, sn, ok := reopenClosedConfiguredNamedSessionBead(
 				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, stderr,
-			); ok {
-				if sn := strings.TrimSpace(session.InfoFromPersistedBead(bead).SessionNameMetadata); sn != "" {
-					snapshot.add(bead)
-					return sn, nil
-				}
+			); ok && sn != "" {
+				return sn, nil
 			}
 		}
 
@@ -120,7 +120,10 @@ func materializeSessionForTemplateWithOptions(
 			return "", err
 		}
 		sessionTransport := config.ResolveSessionCreateTransport(spec.Agent.Session, resolved)
-		sp := newSessionProvider()
+		sp, err := newSessionProvider()
+		if err != nil {
+			return "", err
+		}
 		if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
 			return "", err
 		}
@@ -196,7 +199,7 @@ func materializeSessionForTemplateWithOptions(
 					return createErr
 				})
 				if createErr == nil {
-					_ = pokeController(cityPath)
+					_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
@@ -277,7 +280,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		return "", err
 	}
 	sessionTransport := config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
-	sp := newSessionProvider()
+	sp, err := newSessionProvider()
+	if err != nil {
+		return "", err
+	}
 	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
 		return "", err
 	}
@@ -348,7 +354,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				return createErr
 			})
 			if createErr == nil {
-				_ = pokeController(cityPath)
+				_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 				return info.SessionName, nil
 			}
 			return "", createErr

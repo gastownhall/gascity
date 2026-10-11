@@ -21,7 +21,10 @@ import (
 // are preserved).
 var (
 	// sessionsCacheTTL bounds how long a cached sessions read is served before a
-	// refetch. A var (not a const) so tests can shorten it.
+	// refetch. A var (not a const) so tests can shorten it — but it is captured
+	// by newRunTailerManager at construction (the sessions compute can run on
+	// the tailer loop's detached prime goroutine, where a live read of this var
+	// would race with a test mutating it), so set it BEFORE building the plane.
 	sessionsCacheTTL = 3 * time.Second
 	// formulaCacheTTL bounds how long a successfully-compiled formula detail is
 	// served. Compiled formulas change rarely (an authored TOML edit), so this is
@@ -32,6 +35,19 @@ var (
 	// promptly instead of being pinned missing for the full success TTL. A var so
 	// tests can shorten it.
 	formulaNotFoundTTL = 5 * time.Second
+	// retiredSessionCacheTTL bounds how long a retired session resolved by id is
+	// served before a re-read. A closed session is terminal — its display fields
+	// do not move — so this is long; it exists to bound staleness against a
+	// deleted or repaired bead, not to track change. A var so tests can shorten it.
+	retiredSessionCacheTTL = 5 * time.Minute
+	// retiredSessionMissTTL bounds how long a FIRST by-id miss (the supervisor
+	// does not know the id, or the read failed) is served before a re-read. It
+	// is short so a session bead still landing when the run was first viewed is
+	// enriched promptly instead of being pinned bare for the positive TTL. Each
+	// consecutive miss doubles it up to retiredSessionCacheTTL (retiredMissTTL),
+	// so an id that never resolves is not polled at this cadence forever. A var
+	// so tests can shorten it.
+	retiredSessionMissTTL = 5 * time.Second
 	// singleFlightComputeTimeout bounds the elected single-flight compute, which
 	// runs under a context DETACHED from the electing caller's request (see get).
 	// Detaching stops the caller disconnecting from canceling the shared upstream
@@ -323,6 +339,30 @@ func (c *singleFlightCache[K, V]) invalidate(key K) {
 	c.mu.Unlock()
 }
 
+// discard removes one ownership generation from the cache. Unlike invalidate,
+// an already-running compute may still finish for callers that joined it, but
+// it publishes only to the detached entry and cannot repopulate this key. A
+// subsequent get creates a fresh entry and compute. Version reset is deliberate:
+// discard is reserved for identity changes whose downstream memos are replaced
+// at the same boundary, not ordinary same-identity refreshes.
+func (c *singleFlightCache[K, V]) discard(key K) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
+// discardMatching applies discard semantics to every matching key. It is used
+// for formula entries whose composite keys share a rebound city name.
+func (c *singleFlightCache[K, V]) discardMatching(match func(K) bool) {
+	c.mu.Lock()
+	for key := range c.entries {
+		if match(key) {
+			delete(c.entries, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
 // ── Cached payload shapes ─────────────────────────────────────────────────
 
 // cachedSessions is the value stored in the sessions cache: the projected
@@ -330,6 +370,31 @@ func (c *singleFlightCache[K, V]) invalidate(key K) {
 // fresh slice), so it is safe to share across callers by value.
 type cachedSessions struct {
 	items []runproj.DashboardSession
+}
+
+// retiredSessionKey identifies one by-id session read: the city and the durable
+// session id. Keyed across cities in one manager-wide cache so the LRU bound is
+// process-wide (a per-city map would grow with the number of cities viewed).
+type retiredSessionKey struct {
+	name string
+	id   string
+}
+
+// cachedRetiredSession is the value stored in the retired-session cache: the
+// projected session when the supervisor knows the id (found), or a negative
+// (found=false) for an id it does not — or could not answer for: every by-id
+// outcome that is not a hit is cached as a miss, so no failure mode re-issues
+// the read per render. expires carries the entry's own deadline —
+// retiredSessionCacheTTL for a hit, retiredMissTTL(misses) for a miss — because
+// the LRU that holds it bounds population, not age (see lruSingleFlight.forget).
+// misses counts the consecutive misses this entry closes (0 for a hit) and
+// drives the next miss's back-off. Immutable after build, so it is shared
+// read-only across callers.
+type cachedRetiredSession struct {
+	session runproj.DashboardSession
+	found   bool
+	misses  int
+	expires time.Time
 }
 
 // cachedFormulaDetail is the value stored in the formula cache. It preserves the

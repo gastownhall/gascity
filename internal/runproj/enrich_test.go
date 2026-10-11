@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,10 +28,13 @@ func TestEnrichRunSummaryGolden(t *testing.T) {
 	inFlight = append(inFlight, base.BlockedLanes...)
 	marks := AdvanceProgressMarks(nil, inFlight)
 
-	// Must equal the generation time frozen into runsummary_enriched_golden.json
-	// (captured from the now-retired gen-run-goldens.mts; the golden is the
-	// Go-owned source of truth).
-	nowMs := mustMillis(t, "2026-06-09T00:00:00Z")
+	// Generation time frozen into runsummary_enriched_golden.json (the golden is
+	// the Go-owned source of truth). Chosen inside the staleRunSilenceMs (72h)
+	// window of the fixture's active beads (2026-06-01..03) so those runs render
+	// active — keeping the golden representative of the live path — while staying
+	// past the 24h session-less latch. isStaleRun's own path is covered by
+	// TestEnrichRunSummaryMarksStaleLanes; health derivation is nowMs-independent.
+	nowMs := mustMillis(t, "2026-06-04T06:00:00Z")
 	enriched := EnrichRunSummary(base, sessions, true, nowMs, marks)
 
 	got, err := canonicalJSON(enriched)
@@ -43,6 +47,33 @@ func TestEnrichRunSummaryGolden(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("enriched run summary does not match golden:\n%s", unifiedDiff(string(want), string(got)))
+	}
+}
+
+// TestEnrichRunSummaryWarmingPathMarshalsArraysNotNull is a regression guard
+// for #4142: the dashboard warming snapshot (cityRunTailer.enrichedSummary,
+// served while the run projection is still cold-replaying) enriches a
+// zero-value RunSummary. EnrichRunSummary sets Lanes/BlockedLanes/RunCounts/
+// Census but never touched HistoricalLanes/RecentChanges, so those two
+// stayed nil and marshaled as JSON null. The SPA's strict edge decoder
+// (decodeRunSummary) requires all four array fields to be actual arrays —
+// Array.isArray(null) is false — so a warming response threw
+// ApiResponseDecodeError on an HTTP 200, and AmbientHome permanently showed
+// "Run data is unavailable" for the life of the tab (only a manual reload
+// after warm-up recovered it).
+func TestEnrichRunSummaryWarmingPathMarshalsArraysNotNull(t *testing.T) {
+	enriched := EnrichRunSummary(RunSummary{}, nil, false, 0, nil)
+	enriched.LanesPartial = true
+
+	raw, err := json.Marshal(enriched)
+	if err != nil {
+		t.Fatalf("marshal warming summary: %v", err)
+	}
+	body := string(raw)
+	for _, field := range []string{"lanes", "historicalLanes", "blockedLanes", "recentChanges"} {
+		if strings.Contains(body, `"`+field+`":null`) {
+			t.Errorf("warming summary marshals %q as null (SPA decodeRunSummary requires an array): %s", field, body)
+		}
 	}
 }
 
@@ -158,6 +189,98 @@ func TestIsStaleSessionlessLatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsStaleRun(t *testing.T) {
+	nowMs := mustMillis(t, "2026-06-20T00:00:00Z")
+	at := func(deltaMs int64) RunLaneUpdatedAt {
+		return RunLaneUpdatedAt{Status: "available", At: time.UnixMilli(nowMs - deltaMs).UTC().Format(time.RFC3339)}
+	}
+	base := RunLane{ID: "run-1", Phase: "implementation", UpdatedAt: at(0)}
+	clone := func(mut func(*RunLane)) RunLane {
+		l := base
+		mut(&l)
+		return l
+	}
+	day := int64(24 * 60 * 60 * 1000)
+	cases := []struct {
+		name string
+		lane RunLane
+		want bool
+	}{
+		{"fresh run not stale", clone(func(l *RunLane) { l.UpdatedAt = at(60_000) }), false},
+		{"long-but-active 2 days not stale", clone(func(l *RunLane) { l.UpdatedAt = at(2 * day) }), false},
+		{"silent 12 days is stale", clone(func(l *RunLane) { l.UpdatedAt = at(12 * day) }), true},
+		{"boundary just under 72h stays", clone(func(l *RunLane) { l.UpdatedAt = at(staleRunSilenceMs - 1_000) }), false},
+		{"boundary at 72h is stale", clone(func(l *RunLane) { l.UpdatedAt = at(staleRunSilenceMs) }), true},
+		{"never stale when complete", clone(func(l *RunLane) { l.Phase = "complete"; l.UpdatedAt = at(12 * day) }), false},
+		{"never stale when blocked", clone(func(l *RunLane) { l.Phase = "blocked"; l.UpdatedAt = at(12 * day) }), false},
+		{"no verdict without known age", clone(func(l *RunLane) {
+			l.UpdatedAt = RunLaneUpdatedAt{Status: "unavailable", Error: "run update time unavailable"}
+		}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStaleRun(tc.lane, nowMs); got != tc.want {
+				t.Errorf("isStaleRun = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnrichRunSummaryMarksStaleLanes covers the zombie shape the user sees: an
+// in-flight lane that still LOOKS active (an active step, so it passes the
+// session-less latch) but whose bead activity is days old. It stays visible in
+// Lanes flagged Stale (with StaleSince) and drops out of the active count —
+// while a fresh long-running lane stays live and unflagged.
+func TestEnrichRunSummaryMarksStaleLanes(t *testing.T) {
+	nowMs := mustMillis(t, "2026-06-20T00:00:00Z")
+	at := func(deltaMs int64) RunLaneUpdatedAt {
+		return RunLaneUpdatedAt{Status: "available", At: time.UnixMilli(nowMs - deltaMs).UTC().Format(time.RFC3339)}
+	}
+	mk := func(id string, agoMs int64) RunLane {
+		return RunLane{
+			ID:              id,
+			Phase:           "implementation",
+			ActiveAssignees: []string{},
+			UpdatedAt:       at(agoMs),
+			// An active step passes isStaleSessionlessLatch, so isStaleRun decides.
+			Progress: RunLaneProgress{Status: "active_step", StepID: "implementation.patch"},
+		}
+	}
+	day := int64(24 * 60 * 60 * 1000)
+	zombie := mk("run-zombie", 12*day)
+	base := RunSummary{Lanes: []RunLane{mk("run-fresh", 30*60_000), zombie}}
+
+	out := EnrichRunSummary(base, nil, true, nowMs, nil)
+
+	if out.TotalActive != 1 {
+		t.Errorf("TotalActive = %d, want 1 (stale zombie excluded from active count)", out.TotalActive)
+	}
+	// Both lanes stay visible in Lanes; the zombie is flagged stale in place.
+	if len(out.Lanes) != 2 {
+		t.Fatalf("Lanes ids = %v, want run-fresh and run-zombie both kept visible", laneIDsOf(out.Lanes))
+	}
+	byID := map[string]RunLane{}
+	for _, l := range out.Lanes {
+		byID[l.ID] = l
+	}
+	if z, ok := byID["run-zombie"]; !ok || !z.Stale {
+		t.Errorf("run-zombie stale = %v (found=%v), want true", z.Stale, ok)
+	} else if z.StaleSince != zombie.UpdatedAt.At {
+		t.Errorf("StaleSince = %q, want %q", z.StaleSince, zombie.UpdatedAt.At)
+	}
+	if byID["run-fresh"].Stale {
+		t.Errorf("run-fresh must not be marked stale")
+	}
+}
+
+func laneIDsOf(lanes []RunLane) []string {
+	ids := make([]string, len(lanes))
+	for i, l := range lanes {
+		ids[i] = l.ID
+	}
+	return ids
 }
 
 // TestAdvanceProgressMarksThrash exercises the cross-generation monotonicity the

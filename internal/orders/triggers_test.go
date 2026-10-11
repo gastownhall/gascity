@@ -2,6 +2,7 @@ package orders
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -9,7 +10,11 @@ import (
 	"testing"
 	"time"
 
+	// Embedded zoneinfo: named-zone results must not depend on the host's tzdata.
+	_ "time/tzdata"
+
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
@@ -81,11 +86,18 @@ func TestCheckTriggerCronEveryMinuteStepMatched(t *testing.T) {
 
 func TestCheckTriggerCronNotMatched(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
-	// 12:00 UTC — should not match.
+	// 12:00 UTC — should not match. Uses a warm lastRun (a minute ago, not a
+	// scheduled boundary) rather than neverRan: since #3947's fix, a never-run
+	// order's own bounded catch-up window would otherwise legitimately find
+	// today's already-elapsed 03:00 occurrence and correctly report Due — this
+	// test isolates the plain "off-schedule minute, nothing to catch up"
+	// case instead of confounding it with that separate cold-start path.
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
-	result := CheckTrigger(a, now, neverRan, nil, nil)
+	lastRun := now.Add(-1 * time.Minute)
+	lastRunFn := func(_ string) (time.Time, error) { return lastRun, nil }
+	result := CheckTrigger(a, now, lastRunFn, nil, nil)
 	if result.Due {
-		t.Errorf("Due = true, want false (schedule doesn't match 12:00)")
+		t.Errorf("Due = true, want false (schedule doesn't match 12:00, nothing to catch up since lastRun)")
 	}
 }
 
@@ -106,6 +118,43 @@ func TestCheckTriggerCronCatchesUpMissedBoundary(t *testing.T) {
 	}
 }
 
+// TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary is the
+// regression for #3947: the catch-up scan added by the fix above was
+// gated on a non-zero lastRun, so a freshly-installed narrow-window order
+// (e.g. a daily-once schedule) that never happens to be evaluated on its
+// exact scheduled minute could never fire at all — not even once — since
+// there was no lastRun to catch up from and no restart recovers it either.
+func TestCheckTriggerCronNeverRunCatchesUpRecentMissedBoundary(t *testing.T) {
+	a := Order{Name: "janitor-worktree-gc", Trigger: "cron", Schedule: "20 4 * * *"}
+	// Scheduled minute (04:20) elapsed less than an hour ago; the
+	// controller's coarse eval cadence never landed on it exactly.
+	now := time.Date(2026, 7, 5, 5, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (never-run order should catch up its recent missed 04:20 occurrence); reason=%q", result.Reason)
+	}
+}
+
+// TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence guards the
+// #3947 fix's own safety bound: a never-run order must not reach back
+// through its full history and fire for a schedule occurrence that
+// elapsed long before it was even installed — only the warm (non-zero
+// lastRun) catch-up path gets the full year-long lookback. A daily
+// schedule's most recent occurrence is always <=24h before now, so this
+// needs a weekly schedule to construct a "most recent occurrence is
+// clearly outside the never-run bootstrap window" case.
+func TestCheckTriggerCronNeverRunDoesNotCatchUpAncientOccurrence(t *testing.T) {
+	a := Order{Name: "weekly-report", Trigger: "cron", Schedule: "0 4 * * 0"} // Sundays 04:00
+	// 2026-07-05 is a Sunday; evaluating three days later, the most recent
+	// occurrence (07-05 04:00) is ~74h in the past — well outside any
+	// reasonable never-run bootstrap window, and next Sunday hasn't come yet.
+	now := time.Date(2026, 7, 8, 6, 0, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if result.Due {
+		t.Errorf("Due = true, want false (never-run bootstrap window must not reach back days); reason=%q", result.Reason)
+	}
+}
+
 func TestCheckTriggerCronAlreadyRunThisMinute(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
 	now := time.Date(2026, 2, 27, 3, 0, 30, 0, time.UTC)
@@ -119,11 +168,14 @@ func TestCheckTriggerCronAlreadyRunThisMinute(t *testing.T) {
 }
 
 func TestCheckTriggerCondition(t *testing.T) {
-	a := Order{Name: "check", Trigger: "condition", Check: "true"}
+	a := Order{Name: "check", Trigger: "condition", Check: "echo warning >&2; exit 0"}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTrigger(a, now, neverRan, nil, nil)
 	if !result.Due {
 		t.Errorf("Due = false, want true (exit 0)")
+	}
+	if result.Reason != "condition: check passed (exit 0)" {
+		t.Errorf("Reason = %q, want unchanged success reason", result.Reason)
 	}
 }
 
@@ -150,12 +202,261 @@ func TestCheckTriggerConditionUsesOptions(t *testing.T) {
 	}
 }
 
-func TestCheckTriggerConditionFails(t *testing.T) {
-	a := Order{Name: "check", Trigger: "condition", Check: "false"}
+func TestCheckTriggerConditionHonorsOrderCheckTimeoutWithoutOptions(t *testing.T) {
+	// Regression (PR #4190 iter-3 N1): check_timeout must be honored on every
+	// trigger-evaluation entry point, not only the callers (controller dispatch
+	// and the store-aware CLI check) that populate TriggerOptions.ConditionTimeout.
+	// Bare CheckTrigger callers — the API GET /v0/orders/check evaluator and the
+	// storeless CLI check — pass an empty TriggerOptions, so before the fix
+	// checkCondition fell back to the fixed 10s defaultConditionCheckTimeout and
+	// silently ignored the order's own check_timeout. A slow condition could then
+	// be reported timed-out at 10s by the dashboard/API while controller dispatch
+	// waited the configured duration. Prove the order-configured deadline now
+	// applies through the empty-opts path: a check that outlives a small
+	// check_timeout (but would finish within the 10s default) must be killed and
+	// reported timed out, not allowed to run to the default and pass.
+	a := Order{
+		Name:         "check",
+		Trigger:      "condition",
+		Check:        "sleep 2",
+		CheckTimeout: "200ms",
+	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTrigger(a, now, neverRan, nil, nil)
 	if result.Due {
-		t.Errorf("Due = true, want false (exit non-zero)")
+		t.Fatalf("Due = true, want false: bare CheckTrigger must honor the order's 200ms check_timeout, not the 10s default")
+	}
+	if !strings.Contains(result.Reason, ConditionCheckTimedOutMarker) {
+		t.Fatalf("Reason = %q, want it to contain %q", result.Reason, ConditionCheckTimedOutMarker)
+	}
+	if !result.TimedOut {
+		t.Fatal("TimedOut = false, want true for check_timeout deadline")
+	}
+}
+
+func TestCheckTriggerConditionHonorsParentContextCancel(t *testing.T) {
+	// Regression (PR #4190 major finding): a condition check must derive its
+	// process deadline from the caller's context, not context.Background(). Now
+	// that check_timeout is operator-configurable well above the old fixed 10s, a
+	// canceled dispatch tick / controller shutdown / config reload must abort the
+	// check promptly instead of blocking for the full configured deadline. Before
+	// the fix opts.ConditionCtx was ignored: the check ran under a fresh 30s
+	// timeout and canceling the parent had no effect, so this call blocked for
+	// the whole deadline. The cancel is issued before the check can finish; the
+	// select proves prompt return without depending on wall-clock sleeps.
+	a := Order{Name: "check", Trigger: "condition", Check: "sleep 30"}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan TriggerResult, 1)
+	go func() {
+		done <- CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+			ConditionCtx:     ctx,
+			ConditionTimeout: 30 * time.Second,
+		})
+	}()
+	cancel()
+
+	select {
+	case result := <-done:
+		if result.Due {
+			t.Fatalf("Due = true, want false after parent context cancel: %s", result.Reason)
+		}
+		if strings.Contains(result.Reason, "condition: not met") {
+			t.Fatalf("Reason = %q; a canceled check is a real failure, not a quiet not-met tick", result.Reason)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("checkCondition did not return within 10s of parent cancel; want prompt abort well under the 30s check_timeout")
+	}
+}
+
+func TestCheckTriggerConditionFails(t *testing.T) {
+	for _, check := range []string{"exit 1", "printf ' \\n\\t' >&2; exit 1"} {
+		a := Order{Name: "check", Trigger: "condition", Check: check}
+		now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+		result := CheckTrigger(a, now, neverRan, nil, nil)
+		if result.Due {
+			t.Errorf("Due = true, want false (exit non-zero)")
+		}
+		if result.Reason != "condition: not met (exit 1)" {
+			t.Errorf("Reason = %q, want byte-identical silent not-met reason", result.Reason)
+		}
+		if result.TimedOut {
+			t.Fatal("TimedOut = true, want false for ordinary exit 1")
+		}
+	}
+}
+
+func TestCheckTriggerConditionFailureIncludesStderr(t *testing.T) {
+	result := checkCondition(Order{Check: "echo 'Error: no beads database found' >&2; exit 1"}, TriggerOptions{})
+
+	if result.Due {
+		t.Fatal("Due = true, want false for exit 1")
+	}
+	if !strings.Contains(result.Reason, "Error: no beads database found") {
+		t.Fatalf("Reason = %q, want stderr excerpt", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureKeepsStderrTailOnOneLine(t *testing.T) {
+	result := checkCondition(Order{Check: "printf 'first line\\nsecond line\\nLAST LINE\\n' >&2; exit 1"}, TriggerOptions{})
+
+	if strings.ContainsAny(result.Reason, "\r\n") {
+		t.Fatalf("Reason contains a line break: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "LAST LINE") {
+		t.Fatalf("Reason = %q, want final stderr line", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureBoundsStderrTail(t *testing.T) {
+	const marker = "FINAL-STDERR-MARKER"
+	result := checkCondition(Order{
+		Check: `dd if=/dev/zero bs=1048576 count=4 2>/dev/null | tr '\000' x >&2; printf '\nFINAL-STDERR-MARKER\n' >&2; exit 1`,
+	}, TriggerOptions{})
+
+	const prefix = "check command failed: exit status 1: stderr: "
+	if got, limit := len([]rune(result.Reason)), len([]rune(prefix))+300; got > limit {
+		t.Fatalf("Reason is %d runes, want at most %d", got, limit)
+	}
+	if !strings.Contains(result.Reason, marker) {
+		t.Fatalf("Reason = %q, want final marker", result.Reason)
+	}
+	if !strings.HasPrefix(result.Reason, prefix+"…") {
+		t.Fatalf("Reason = %q, want truncated excerpt to start with ellipsis", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsPartialSecretLine(t *testing.T) {
+	const secret = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-_"
+	check := `head -c 5000 /dev/zero | tr '\000' x >&2; printf '\n%s' "$ORDER_API_TOKEN" >&2; printf '%4070s' '' >&2; exit 1`
+	result := checkCondition(Order{Check: check}, TriggerOptions{
+		ConditionEnv: []string{"ORDER_API_TOKEN=" + secret},
+	})
+
+	const want = "check command failed: exit status 1: stderr: …[redacted]"
+	if result.Reason != want {
+		t.Fatalf("Reason = %q, want %q", result.Reason, want)
+	}
+	for i := 0; i+8 <= len(secret); i++ {
+		if fragment := secret[i : i+8]; strings.Contains(result.Reason, fragment) {
+			t.Fatalf("Reason leaked secret fragment %q: %q", fragment, result.Reason)
+		}
+	}
+}
+
+func TestCheckTriggerConditionFailureOverflowStartsAtCompleteLine(t *testing.T) {
+	check := `i=1; while [ "$i" -le 200 ]; do printf 'line-%05d padding-padding-padding\n' "$i" >&2; i=$((i + 1)); done; printf 'LAST-LINE\n' >&2; printf '%3900s' '' >&2; exit 1`
+	result := checkCondition(Order{Check: check}, TriggerOptions{})
+
+	const prefix = "check command failed: exit status 1: stderr: …"
+	if !strings.HasPrefix(result.Reason, prefix) {
+		t.Fatalf("Reason = %q, want prefix %q", result.Reason, prefix)
+	}
+	if !strings.HasSuffix(result.Reason, "LAST-LINE") {
+		t.Fatalf("Reason = %q, want final line", result.Reason)
+	}
+	fields := strings.Fields(strings.TrimPrefix(result.Reason, prefix))
+	if len(fields) == 0 || fields[0] != "line-00196" {
+		t.Fatalf("first token after ellipsis = %q, want line-00196 (reason %q)", fields, result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureCapsExcerptRunes(t *testing.T) {
+	check := `i=1; while [ "$i" -le 20 ]; do printf 'line-%05d padding-padding-padding\n' "$i" >&2; i=$((i + 1)); done; printf 'LAST-LINE\n' >&2; exit 1`
+	result := checkCondition(Order{Check: check}, TriggerOptions{})
+
+	const prefix = "check command failed: exit status 1: stderr: "
+	excerpt := strings.TrimPrefix(result.Reason, prefix)
+	if excerpt == result.Reason {
+		t.Fatalf("Reason = %q, want prefix %q", result.Reason, prefix)
+	}
+	if got := len([]rune(excerpt)); got != conditionCheckStderrExcerptRunes {
+		t.Fatalf("excerpt is %d runes, want %d: %q", got, conditionCheckStderrExcerptRunes, excerpt)
+	}
+	if !strings.HasPrefix(excerpt, "…") || !strings.HasSuffix(excerpt, "LAST-LINE") {
+		t.Fatalf("excerpt = %q, want leading ellipsis and final line", excerpt)
+	}
+}
+
+func TestCheckTriggerConditionFailureSanitizesControlCharacters(t *testing.T) {
+	result := checkCondition(Order{Check: `printf '\033[31mboom\033[0m\177\n' >&2; exit 1`}, TriggerOptions{})
+
+	for _, b := range []byte(result.Reason) {
+		if b < 0x20 || b == 0x7f {
+			t.Fatalf("Reason contains control byte 0x%02x: %q", b, result.Reason)
+		}
+	}
+	if !strings.Contains(result.Reason, "boom") {
+		t.Fatalf("Reason = %q, want retained stderr excerpt", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureSanitizesNonPrintCharacters(t *testing.T) {
+	result := checkCondition(Order{Check: `printf 'safe\342\200\256evil\342\200\250next\342\200\213end\n' >&2; exit 1`}, TriggerOptions{})
+
+	for _, want := range []string{"safe", "evil", "next"} {
+		if !strings.Contains(result.Reason, want) {
+			t.Fatalf("Reason = %q, want %q", result.Reason, want)
+		}
+	}
+	for _, forbidden := range []rune{'\u202e', '\u2028', '\u200b'} {
+		if strings.ContainsRune(result.Reason, forbidden) {
+			t.Fatalf("Reason contains non-printing rune %U: %q", forbidden, result.Reason)
+		}
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsSensitiveEnvironment(t *testing.T) {
+	const secret = "condition-check-secret-value"
+	result := checkCondition(Order{Check: `printf '%s\n' "$ORDER_API_TOKEN" >&2; exit 1`}, TriggerOptions{
+		ConditionEnv: []string{"ORDER_API_TOKEN=" + secret},
+	})
+
+	if strings.Contains(result.Reason, secret) {
+		t.Fatalf("Reason leaked sensitive environment value: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "[redacted]") {
+		t.Fatalf("Reason = %q, want redaction marker", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsMultilineSecretAcrossTailBoundary(t *testing.T) {
+	const secret = "ABCDE\nleaked-secret-suffix"
+	result := checkCondition(Order{
+		Check: `printf '%s' "$ORDER_API_TOKEN" >&2; printf '%4075s' '' >&2; exit 1`,
+	}, TriggerOptions{ConditionEnv: []string{"ORDER_API_TOKEN=" + secret}})
+
+	if strings.Contains(result.Reason, "leaked-secret-suffix") {
+		t.Fatalf("Reason leaked sensitive environment suffix: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, execenv.Redacted) {
+		t.Fatalf("Reason = %q, want redaction marker", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureRedactsShortSensitiveEnvironment(t *testing.T) {
+	const secret = "abc"
+	result := checkCondition(Order{
+		Check: `printf '%s' "$ORDER_API_TOKEN" >&2; exit 1`,
+	}, TriggerOptions{ConditionEnv: []string{"ORDER_API_TOKEN=" + secret}})
+
+	if strings.Contains(result.Reason, secret) {
+		t.Fatalf("Reason leaked short sensitive environment value: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, execenv.Redacted) {
+		t.Fatalf("Reason = %q, want redaction marker", result.Reason)
+	}
+}
+
+func TestCheckTriggerConditionFailureMentioningTimedOutIsNotTimeout(t *testing.T) {
+	result := checkCondition(Order{Check: "echo 'connection timed out' >&2; exit 1"}, TriggerOptions{})
+
+	if result.TimedOut {
+		t.Fatalf("TimedOut = true for ordinary failure: %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "connection timed out") {
+		t.Fatalf("Reason = %q, want stderr excerpt", result.Reason)
 	}
 }
 
@@ -227,22 +528,151 @@ func TestCheckTriggerConditionKillsProcessGroupAfterWaitDelay(t *testing.T) {
 }
 
 func TestCronFieldMatches(t *testing.T) {
+	const (
+		minuteLo, minuteHi = 0, 59
+		hourLo, hourHi     = 0, 23
+		domLo, domHi       = 1, 31
+		monthLo, monthHi   = 1, 12
+	)
 	tests := []struct {
-		field string
-		value int
-		want  bool
+		name    string
+		field   string
+		value   int
+		lo, hi  int
+		want    bool
+		wantErr bool
 	}{
-		{"*", 5, true},
-		{"5", 5, true},
-		{"5", 3, false},
-		{"1,3,5", 3, true},
-		{"1,3,5", 2, false},
+		{name: "star", field: "*", value: 5, lo: minuteLo, hi: minuteHi, want: true},
+		{name: "exact hit", field: "5", value: 5, lo: minuteLo, hi: minuteHi, want: true},
+		{name: "exact miss", field: "5", value: 3, lo: minuteLo, hi: minuteHi, want: false},
+		{name: "list hit", field: "1,3,5", value: 3, lo: minuteLo, hi: minuteHi, want: true},
+		{name: "list miss", field: "1,3,5", value: 2, lo: minuteLo, hi: minuteHi, want: false},
+
+		// Ranges — the syntax the runtime matcher used to drop silently (#5709).
+		{name: "hour range low edge", field: "16-23", value: 16, lo: hourLo, hi: hourHi, want: true},
+		{name: "hour range high edge", field: "16-23", value: 23, lo: hourLo, hi: hourHi, want: true},
+		{name: "hour range below", field: "16-23", value: 15, lo: hourLo, hi: hourHi, want: false},
+		{name: "hour range above", field: "9-17", value: 18, lo: hourLo, hi: hourHi, want: false},
+		{name: "hour range inside", field: "9-17", value: 12, lo: hourLo, hi: hourHi, want: true},
+		{name: "range in list", field: "0,9-17", value: 9, lo: hourLo, hi: hourHi, want: true},
+
+		// Steps.
+		{name: "step hit", field: "*/15", value: 30, lo: minuteLo, hi: minuteHi, want: true},
+		{name: "step miss", field: "*/15", value: 31, lo: minuteLo, hi: minuteHi, want: false},
+		{name: "range step hit", field: "5-59/10", value: 25, lo: minuteLo, hi: minuteHi, want: true},
+		{name: "range step miss", field: "5-59/10", value: 30, lo: minuteLo, hi: minuteHi, want: false},
+		{name: "range step outside range", field: "5-59/10", value: 0, lo: minuteLo, hi: minuteHi, want: false},
+
+		// Step anchoring on 1-based fields: "*/N" steps from the field's lower
+		// bound, so day-of-month "*/2" means the 1st, 3rd, 5th — not the even
+		// days. This is standard cron, and differs from the pre-#5709 runtime
+		// matcher, which tested value%step == 0.
+		{name: "dom step from 1", field: "*/2", value: 1, lo: domLo, hi: domHi, want: true},
+		{name: "dom step skips 2", field: "*/2", value: 2, lo: domLo, hi: domHi, want: false},
+		{name: "dom step hits 3", field: "*/2", value: 3, lo: domLo, hi: domHi, want: true},
+		{name: "month step from 1", field: "*/3", value: 1, lo: monthLo, hi: monthHi, want: true},
+		{name: "month step skips 3", field: "*/3", value: 3, lo: monthLo, hi: monthHi, want: false},
+		{name: "month step hits 4", field: "*/3", value: 4, lo: monthLo, hi: monthHi, want: true},
+		{name: "minute step still from 0", field: "*/15", value: 0, lo: minuteLo, hi: minuteHi, want: true},
+
+		// Out-of-bounds and malformed fields are errors, not quiet non-matches.
+		{name: "value above bound", field: "60", value: 0, lo: minuteLo, hi: minuteHi, wantErr: true},
+		{name: "value below bound", field: "0", value: 1, lo: domLo, hi: domHi, wantErr: true},
+		{name: "range above bound", field: "20-24", value: 20, lo: hourLo, hi: hourHi, wantErr: true},
+		{name: "range inverted", field: "17-9", value: 12, lo: hourLo, hi: hourHi, wantErr: true},
+		{name: "non-numeric", field: "abc", value: 0, lo: minuteLo, hi: minuteHi, wantErr: true},
+		{name: "zero step", field: "*/0", value: 0, lo: minuteLo, hi: minuteHi, wantErr: true},
+		{name: "empty field", field: "", value: 0, lo: minuteLo, hi: minuteHi, wantErr: true},
+		// A bad part must not hide behind an earlier part that matched.
+		{name: "bad part after a match", field: "5,abc", value: 5, lo: minuteLo, hi: minuteHi, wantErr: true},
 	}
 	for _, tt := range tests {
-		got := cronFieldMatches(tt.field, tt.value)
-		if got != tt.want {
-			t.Errorf("cronFieldMatches(%q, %d) = %v, want %v", tt.field, tt.value, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CronFieldMatches(tt.field, tt.value, tt.lo, tt.hi)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("CronFieldMatches(%q, %d, %d, %d) = %v, want error", tt.field, tt.value, tt.lo, tt.hi, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CronFieldMatches(%q, %d, %d, %d) returned unexpected error: %v", tt.field, tt.value, tt.lo, tt.hi, err)
+			}
+			if got != tt.want {
+				t.Errorf("CronFieldMatches(%q, %d, %d, %d) = %v, want %v", tt.field, tt.value, tt.lo, tt.hi, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCronScheduleMatchesAtRanges pins the whole-schedule path for the report
+// in #5709: "*/15 16-23 * * 1-5" fired on no minute at all before the fix.
+func TestCronScheduleMatchesAtRanges(t *testing.T) {
+	const schedule = "*/15 16-23 * * 1-5"
+	tests := []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{name: "weekday in window on a step minute", at: time.Date(2026, 3, 4, 16, 30, 0, 0, time.UTC), want: true},
+		{name: "weekday in window off a step minute", at: time.Date(2026, 3, 4, 16, 31, 0, 0, time.UTC), want: false},
+		{name: "weekday outside the hour window", at: time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC), want: false},
+		{name: "weekend in window", at: time.Date(2026, 3, 7, 16, 30, 0, 0, time.UTC), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CronScheduleMatchesAt(strings.Fields(schedule), tt.at)
+			if err != nil {
+				t.Fatalf("CronScheduleMatchesAt(%q, %v) returned unexpected error: %v", schedule, tt.at, err)
+			}
+			if got != tt.want {
+				t.Errorf("CronScheduleMatchesAt(%q, %v) = %v, want %v", schedule, tt.at, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCronScheduleMatchesAtReportsLaterMalformedField pins the doc-comment
+// contract: a field the matcher cannot read is an error even when an earlier
+// field already missed, so a broken schedule can never read as merely not due.
+func TestCronScheduleMatchesAtReportsLaterMalformedField(t *testing.T) {
+	// Minute "0" misses at :30, and the day-of-week field behind it is garbage.
+	const schedule = "0 * * * abc"
+	at := time.Date(2026, 3, 4, 16, 30, 0, 0, time.UTC)
+
+	got, err := CronScheduleMatchesAt(strings.Fields(schedule), at)
+	if err == nil {
+		t.Fatalf("CronScheduleMatchesAt(%q, %v) = %v, nil; want an error naming the malformed field", schedule, at, got)
+	}
+	if !strings.Contains(err.Error(), "day-of-week") {
+		t.Errorf("error = %q, want it to name the day-of-week field", err)
+	}
+}
+
+// TestCheckCronRangeSchedule proves the reported schedule now reaches the
+// runtime trigger, not just the parser.
+func TestCheckCronRangeSchedule(t *testing.T) {
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cron", Schedule: "*/15 16-23 * * 1-5"}
+	never := func(string) (time.Time, error) { return time.Time{}, nil }
+
+	due := checkCron(a, time.Date(2026, 3, 4, 16, 30, 0, 0, time.UTC), never)
+	if !due.Due {
+		t.Errorf("Due = false for a matching minute, want true (reason %q)", due.Reason)
+	}
+}
+
+// TestCheckCronRejectsUnparseableSchedule pins the loud failure: a field the
+// matcher cannot read is reported as a bad schedule, not as "not matched".
+func TestCheckCronRejectsUnparseableSchedule(t *testing.T) {
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cron", Schedule: "0 25-30 * * *"}
+	never := func(string) (time.Time, error) { return time.Time{}, nil }
+
+	result := checkCron(a, time.Date(2026, 3, 4, 16, 30, 0, 0, time.UTC), never)
+	if result.Due {
+		t.Fatal("Due = true for an unparseable schedule, want false")
+	}
+	if !strings.Contains(result.Reason, "bad cron schedule") {
+		t.Errorf("Reason = %q, want it to name a bad cron schedule", result.Reason)
 	}
 }
 
@@ -513,5 +943,222 @@ func TestMaxSeqFromLabelsEmpty(t *testing.T) {
 				t.Errorf("MaxSeqFromLabels = %d, want 0", got)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cron time-zone handling (fix/cron-catchup-single-location; follow-up to the
+// #2721 catch-up scan).
+//
+// checkCron used to mix two time domains: the live match (a) evaluated cron
+// fields in `now`'s location, while the catch-up scan (b) walked minutes in
+// the last-run bead's location — which the doltlite store ALWAYS returns
+// UTC-located (parseTimeString). On a non-UTC box a zone-anchored order fired
+// at the UTC reading of its slot ("30 19 * * *" fired at 19:30Z == 15:30 ET)
+// and then AGAIN at the real local slot: two fires per day. These tests pin
+// the fix: one explicit location (order tz → city default → process-local),
+// with both `now` and lastRun normalized into it. All orders here set tz so
+// the tests are independent of the test box's TZ.
+// ---------------------------------------------------------------------------
+
+func etCronOrder(t *testing.T, schedule string) (Order, *time.Location) {
+	t.Helper()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("load America/New_York: %v", err)
+	}
+	return Order{Name: "et-order", Trigger: "cron", Schedule: schedule, TZ: "America/New_York"}, loc
+}
+
+func fixedLastRun(last time.Time) LastRunFunc {
+	return func(string) (time.Time, error) { return last, nil }
+}
+
+// Regression: PM early fire at the UTC reading. Schedule "30 19 * * *" means
+// 19:30 ET (23:30Z during EDT). Last correct fire Jul 6 23:30Z (store-shaped:
+// UTC-located). Tick at Jul 7 19:30:30Z == 15:30:30 ET must NOT fire.
+// Pre-fix: due=true "cron: caught up missed occurrence" — the catch-up scan
+// matched hour 19 on the UTC wall clock.
+func TestCheckTriggerCronCatchupDoesNotFireAtUTCReadingPM(t *testing.T) {
+	a, loc := etCronOrder(t, "30 19 * * *")
+	last := time.Date(2026, 7, 6, 23, 30, 0, 0, time.UTC) // == Jul 6 19:30 ET
+	now := time.Date(2026, 7, 7, 15, 30, 30, 0, loc)      // == 19:30:30Z
+	res := checkCron(a, now, fixedLastRun(last))
+	if res.Due {
+		t.Errorf("due=true reason=%q at %s, want false (next fire is 19:30 ET / 23:30Z)",
+			res.Reason, now.UTC().Format(time.RFC3339))
+	}
+}
+
+// Regression: AM early fire — the exact live signature (dispatch at
+// 07:00:19Z == 03:00:19 ET for a "0 7 * * *" order meant as 07:00 ET).
+func TestCheckTriggerCronCatchupDoesNotFireAtUTCReadingAM(t *testing.T) {
+	a, loc := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC) // == Jul 6 07:00 ET
+	now := time.Date(2026, 7, 7, 3, 0, 19, 0, loc)       // == 07:00:19Z
+	res := checkCron(a, now, fixedLastRun(last))
+	if res.Due {
+		t.Errorf("due=true reason=%q at %s, want false (next fire is 07:00 ET / 11:00Z)",
+			res.Reason, now.UTC().Format(time.RFC3339))
+	}
+}
+
+// Control: at the real zone slot the order fires.
+func TestCheckTriggerCronFiresAtRealZoneSlot(t *testing.T) {
+	a, loc := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 7, 7, 0, 30, 0, loc) // 07:00:30 ET == 11:00:30Z
+	res := checkCron(a, now, fixedLastRun(last))
+	if !res.Due {
+		t.Errorf("due=false reason=%q, want true at the real 07:00 ET slot", res.Reason)
+	}
+}
+
+// The order's tz — not the caller's location and not time.Local — decides
+// the wall clock: with tz=America/New_York and UTC-located nows, 11:00:19Z
+// (07:00 ET) fires and 07:00:19Z (03:00 ET) does not.
+func TestCheckTriggerCronSpecTZIndependentOfCallerLocation(t *testing.T) {
+	a, _ := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 6, 11, 0, 0, 0, time.UTC)
+
+	atSlot := time.Date(2026, 7, 7, 11, 0, 19, 0, time.UTC) // == 07:00:19 ET
+	if res := checkCron(a, atSlot, fixedLastRun(last)); !res.Due {
+		t.Errorf("at 11:00:19Z (07:00 ET): due=false reason=%q, want true", res.Reason)
+	}
+
+	offSlot := time.Date(2026, 7, 7, 7, 0, 19, 0, time.UTC) // == 03:00:19 ET
+	if res := checkCron(a, offSlot, fixedLastRun(last)); res.Due {
+		t.Errorf("at 07:00:19Z (03:00 ET): due=true reason=%q, want false", res.Reason)
+	}
+}
+
+// A full simulated day of 30s ticks yields exactly one fire, at the zone
+// slot. Pre-fix this produced two fires: 15:30 ET (the UTC reading, via
+// catch-up) and 19:30 ET (the live match). The store round-trips lastRun
+// UTC-located, as doltlite does; the caller's tick location must not matter.
+func TestCheckTriggerCronExactlyOneFirePerSlot(t *testing.T) {
+	_, et := etCronOrder(t, "30 19 * * *")
+	for name, callerLoc := range map[string]*time.Location{"utc-caller": time.UTC, "et-caller": et} {
+		t.Run(name, func(t *testing.T) {
+			a, _ := etCronOrder(t, "30 19 * * *")
+			last := time.Date(2026, 7, 6, 23, 30, 5, 0, time.UTC) // yesterday's correct fire
+			lastRunFn := func(string) (time.Time, error) { return last, nil }
+
+			start := time.Date(2026, 7, 7, 0, 0, 0, 0, et).In(callerLoc)
+			var fires []string
+			for tick := start; tick.Before(start.Add(24 * time.Hour)); tick = tick.Add(30 * time.Second) {
+				if res := checkCron(a, tick, lastRunFn); res.Due {
+					fires = append(fires, tick.In(et).Format(time.RFC3339)+" ("+res.Reason+")")
+					last = tick.UTC() // store round-trip: doltlite returns UTC-located
+				}
+			}
+			if len(fires) != 1 || !strings.HasPrefix(fires[0], "2026-07-07T19:30:00-04:00") {
+				t.Errorf("fires = %v, want exactly one at 2026-07-07T19:30 ET", fires)
+			}
+		})
+	}
+}
+
+// Catch-up still works in-zone across a multi-day gap: a missed occurrence
+// between lastRun and now fires with the catch-up reason.
+func TestCheckTriggerCronCatchupAcrossMultiDayGapInZone(t *testing.T) {
+	a, loc := etCronOrder(t, "0 7 * * *")
+	last := time.Date(2026, 7, 4, 11, 0, 0, 0, time.UTC) // Jul 4 07:00 ET
+	now := time.Date(2026, 7, 7, 3, 0, 0, 0, loc)        // off-slot eval, two slots missed
+	res := checkCron(a, now, fixedLastRun(last))
+	if !res.Due || res.Reason != "cron: caught up missed occurrence" {
+		t.Errorf("due=%v reason=%q, want catch-up fire for the missed Jul 5/6 07:00 ET slots", res.Due, res.Reason)
+	}
+}
+
+// DST fall-back (US 2026-11-01: 02:00 EDT → 01:00 EST): the 01:xx hour
+// repeats. Policy: at most one fire per wall-clock slot — the repeated
+// reading is deduped against lastRun by wall-clock date+HH:MM.
+func TestCheckTriggerCronDSTFallBackFiresOncePerWallClockSlot(t *testing.T) {
+	t.Run("live repeat deduped", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 1 * * *")
+		// Fired at 01:30 EDT (05:30Z); store hands it back UTC-located.
+		last := time.Date(2026, 11, 1, 5, 30, 10, 0, time.UTC)
+		now := time.Date(2026, 11, 1, 6, 30, 20, 0, time.UTC).In(loc) // second 01:30 (EST)
+		res := checkCron(a, now, fixedLastRun(last))
+		if res.Due {
+			t.Errorf("due=true reason=%q, want false (01:30 already fired this wall-clock day)", res.Reason)
+		}
+	})
+	t.Run("catch-up repeat deduped", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 1 * * *")
+		last := time.Date(2026, 11, 1, 5, 30, 10, 0, time.UTC)       // 01:30:10 EDT
+		now := time.Date(2026, 11, 1, 6, 45, 0, 0, time.UTC).In(loc) // 01:45 EST; scan crosses 01:30 EST
+		res := checkCron(a, now, fixedLastRun(last))
+		if res.Due {
+			t.Errorf("due=true reason=%q, want false (catch-up must not re-fire the repeated 01:30)", res.Reason)
+		}
+	})
+	t.Run("one fire across the transition night", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 1 * * *")
+		last := time.Date(2026, 10, 31, 5, 30, 0, 0, time.UTC) // yesterday's 01:30 EDT
+		lastRunFn := func(string) (time.Time, error) { return last, nil }
+		start := time.Date(2026, 11, 1, 0, 0, 0, 0, loc) // 00:00 EDT
+		var fires []string
+		for tick := start; tick.Before(start.Add(5 * time.Hour)); tick = tick.Add(30 * time.Second) {
+			if res := checkCron(a, tick, lastRunFn); res.Due {
+				fires = append(fires, tick.Format(time.RFC3339)+" ("+res.Reason+")")
+				last = tick.UTC()
+			}
+		}
+		if len(fires) != 1 || !strings.HasPrefix(fires[0], "2026-11-01T01:30:00-04:00") {
+			t.Errorf("fires = %v, want exactly one at the first (EDT) 01:30", fires)
+		}
+	})
+}
+
+// DST spring-forward (US 2027-03-14: 02:00 EST → 03:00 EDT): the 02:xx hour
+// does not exist. Policy: a schedule inside the gap fires once at the first
+// real minute after the jump (03:00), via the catch-up scan's gap detection.
+func TestCheckTriggerCronDSTSpringForwardGapFiresAtNextRealMinute(t *testing.T) {
+	t.Run("gap schedule fires at 03:00", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 2 * * *")
+		last := time.Date(2027, 3, 13, 7, 30, 0, 0, time.UTC) // yesterday's 02:30 EST
+		now := time.Date(2027, 3, 14, 3, 0, 10, 0, loc)       // first real minute after the gap
+		res := checkCron(a, now, fixedLastRun(last))
+		if !res.Due || res.Reason != "cron: caught up occurrence skipped by DST spring-forward" {
+			t.Errorf("due=%v reason=%q, want spring-forward gap fire at 03:00 EDT", res.Due, res.Reason)
+		}
+	})
+	t.Run("no second fire after the gap fire", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 2 * * *")
+		last := time.Date(2027, 3, 14, 7, 0, 10, 0, time.UTC) // the 03:00:10 EDT gap fire, store-shaped
+		now := time.Date(2027, 3, 14, 3, 5, 0, 0, loc)
+		res := checkCron(a, now, fixedLastRun(last))
+		if res.Due {
+			t.Errorf("due=true reason=%q, want false (gap already caught up)", res.Reason)
+		}
+	})
+	t.Run("one fire across the transition night", func(t *testing.T) {
+		a, loc := etCronOrder(t, "30 2 * * *")
+		last := time.Date(2027, 3, 13, 7, 30, 0, 0, time.UTC)
+		lastRunFn := func(string) (time.Time, error) { return last, nil }
+		start := time.Date(2027, 3, 14, 0, 0, 0, 0, loc)
+		var fires []string
+		for tick := start; tick.Before(start.Add(5 * time.Hour)); tick = tick.Add(30 * time.Second) {
+			if res := checkCron(a, tick, lastRunFn); res.Due {
+				fires = append(fires, tick.Format(time.RFC3339)+" ("+res.Reason+")")
+				last = tick.UTC()
+			}
+		}
+		if len(fires) != 1 || !strings.HasPrefix(fires[0], "2027-03-14T03:00:00-04:00") {
+			t.Errorf("fires = %v, want exactly one at 03:00 EDT (the minute after the skipped 02:30)", fires)
+		}
+	})
+}
+
+// A bad tz never silently falls back: checkCron refuses to evaluate.
+// (Order load rejects it earlier — see TestValidateCronBadTZ.)
+func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
+	a := Order{Name: "bad-tz", Trigger: "cron", Schedule: "0 7 * * *", TZ: "America/New_Yrok"}
+	now := time.Date(2026, 7, 7, 11, 0, 19, 0, time.UTC)
+	res := CheckTrigger(a, now, neverRan, nil, nil)
+	if res.Due || !strings.Contains(res.Reason, "bad tz") {
+		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
 	}
 }

@@ -14,13 +14,18 @@ import (
 	"testing"
 	"time"
 
+	goruntime "runtime"
+
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -182,13 +187,26 @@ func configureFSPressureForTests() {
 // an active root (ga-djbcqt).
 var testTempRootAliveSentinel *os.File
 
+// tmuxSocketAliveSentinel pins the alive-sentinel flock on this process's
+// tmux socket parent dir (tmuxtest.SocketParentDirPrefix) for the binary's
+// lifetime, for the same reason as testTempRootAliveSentinel above.
+var tmuxSocketAliveSentinel *os.File
+
 type cleanupTestingM struct {
 	m     testscript.TestingM
 	paths []string
 }
 
+// noCityGuardTestingM fails the run on a start or stop refused for want of a
+// city that no test expected (session.FailOnNoCityRefusals).
+type noCityGuardTestingM struct{ m testscript.TestingM }
+
+func (m noCityGuardTestingM) Run() int {
+	return sessionpkg.FailOnNoCityRefusals(m.m.Run, os.Stderr)
+}
+
 func (m cleanupTestingM) Run() int {
-	code := m.m.Run()
+	code := sessionpkg.FailOnKeyViolations(m.m.Run(), os.Stderr) // a guard panic a recover() swallowed still fails
 	for _, path := range m.paths {
 		if path != "" {
 			_ = os.RemoveAll(path)
@@ -197,7 +215,18 @@ func (m cleanupTestingM) Run() int {
 	return code
 }
 
+// testscriptGC is the testscript "gc" command, the test binary re-executed
+// as gc: it runs under the no-city gate, as the parent's tests do.
+func testscriptGC() {
+	configureTestscriptEnvDefaults()
+	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
+}
+
 func TestMain(m *testing.M) {
+	maybeRunHostedBeadsCredentialProvider()
+	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunFakeDoltSQLServer()
+
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
 	// already owns the fixtures. Just configure hooks and forward.
@@ -205,10 +234,7 @@ func TestMain(m *testing.M) {
 		configureFSPressureForTests()
 		configureSupervisorHooksForTests()
 		testscript.Main(m, map[string]func(){
-			"gc": func() {
-				configureTestscriptEnvDefaults()
-				os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
-			},
+			"gc": testscriptGC,
 			"bd": bdTestCmd,
 		})
 		return
@@ -233,22 +259,35 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
-		panic(err)
-	}
-	tmuxSocketRoot, tmuxSocketCleanupRoot, err := cmdGCTmuxSocketRoot(testTempRoot)
+	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
 	if err != nil {
 		panic(err)
 	}
+	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
+	if tmuxSocketParentRoot == "" {
+		tmuxSocketParentRoot = "/tmp"
+	}
+	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot, tmuxSocketParentRoot)
+	if err != nil {
+		panic(err)
+	}
+	tmuxSocketAliveSentinel = tmuxSentinel
+	// testscript.Main below exits via os.Exit, which skips defers, so the
+	// normal path removes the tmux socket parent through cleanupTestingM. A
+	// setup panic before testscript.Main is reached still unwinds through
+	// defers, so cover that window here or it leaks /tmp/gct-<pid>-* until a
+	// later aged sweep. cmdGCTmuxSocketRoot returns an empty cleanup root when
+	// it fell back to a dir under TMPDIR (swept separately), so only the real
+	// /tmp parent is removed here.
+	defer func() {
+		if tmuxSocketCleanupRoot != "" {
+			_ = os.RemoveAll(tmuxSocketCleanupRoot)
+		}
+	}()
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
@@ -261,6 +300,14 @@ func TestMain(m *testing.M) {
 	}
 	if err := os.Setenv("GC_HOME", gcHome); err != nil {
 		panic(err)
+	}
+	// The shared GC_HOME has no registries.toml, which means the public
+	// default registry; an add without --version would fetch that catalog
+	// over the network into the shared home, where it changes what later
+	// tests resolve (registry pack names). Command tests that exercise
+	// registry defaults configure their own GC_HOME and restore this seam.
+	resolveImportRegistryRelease = func(string, string) (packman.RegistryRelease, bool, error, error) {
+		return packman.RegistryRelease{}, false, nil, nil
 	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
@@ -278,15 +325,22 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
+	// In-process init stays off the network by default. Testscript "gc"
+	// children above keep the real installer: their scripts run follow-on
+	// commands that need the installed imports.
+	configureInitRemoteImportsForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// The tmux leak guard wraps outside the dolt guard and inside
+	// cleanupTestingM: it must observe and kill leaked tmux servers while the
+	// per-run socket root still exists (dip-73cr05 — city-name sockets like
+	// -L test-city have exit-empty off and outlive their sessions forever).
+	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
+	testRunner = noCityGuardTestingM{m: testRunner}
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
 	testscript.Main(testRunner, map[string]func(){
-		"gc": func() {
-			configureTestscriptEnvDefaults()
-			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
-		},
+		"gc": testscriptGC,
 		"bd": bdTestCmd,
 	})
 }
@@ -747,6 +801,11 @@ func TestResolveCityFlag(t *testing.T) {
 	})
 
 	t.Run("flag_empty_fallback", func(t *testing.T) {
+		t.Skip("ga-klo4gz: this subtest's purpose is exercising resolveCity's " +
+			"ambient cwd-based fallback (step 10), which is now unconditionally " +
+			"refused inside test binaries; an explicit override would make it a " +
+			"no-op test rather than a fix")
+
 		// With empty flag, should fall back to cwd-based discovery.
 		// Clear GC_CITY so the cwd fallback is actually exercised.
 		t.Setenv("GC_CITY", "")
@@ -2803,6 +2862,9 @@ version = "` + config.PublicGascityPackVersion + `"
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
 # "7d" is not a valid Go duration.
+# It also sets how long a read mail bead stays open before the nudge-mail
+# sweep closes it: unset keeps that sweep's own 60m default, while "0"
+# disables the close phase too, leaving read mail beads open.
 # retention_ttl = "0"
 `
 	if got != want {
@@ -2826,7 +2888,7 @@ version = "` + config.BundledPackImportVersion + `"
 [imports.core]
 source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
 version = "` + config.BundledPackImportVersion + `"
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "` + config.PublicGascityPackVersion + `"
 
@@ -3723,7 +3785,7 @@ func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 }
 
 func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
-	if _, err := initWizardConfig("not-a-provider", ""); err == nil {
+	if _, err := initWizardConfig("not-a-provider", "", false); err == nil {
 		t.Fatal("expected error for unknown provider")
 	}
 }
@@ -3732,6 +3794,7 @@ func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
 	var stdout, stderr bytes.Buffer
@@ -3762,7 +3825,7 @@ func TestInitWizardConfigFromFlagsRejectsUnknownTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	template, _ := cmd.Flags().GetString("template")
-	if _, _, err := initWizardConfigFromFlags(cmd, "", "", nil, template, "", hostedDoltInitOptions{}); err == nil {
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", nil, template, "", hostedDoltInitOptions{}, false); err == nil {
 		t.Fatal("expected error for unknown template")
 	}
 }
@@ -3811,7 +3874,7 @@ func TestInitWizardConfigFromFlagsDefaultProviderInfersProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultProvider, _ := cmd.Flags().GetString("default-provider")
-	wiz, mode, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, "", "", hostedDoltInitOptions{})
+	wiz, mode, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, "", "", hostedDoltInitOptions{}, false)
 	if err != nil {
 		t.Fatalf("initWizardConfigFromFlags: %v", err)
 	}
@@ -3836,7 +3899,7 @@ func TestInitWizardConfigFromFlagsProvidersCanonicalOrder(t *testing.T) {
 	}
 	defaultProvider, _ := cmd.Flags().GetString("default-provider")
 	providers, _ := cmd.Flags().GetStringArray("providers")
-	wiz, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, providers, "", "", hostedDoltInitOptions{})
+	wiz, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, providers, "", "", hostedDoltInitOptions{}, false)
 	if err != nil {
 		t.Fatalf("initWizardConfigFromFlags: %v", err)
 	}
@@ -3851,7 +3914,7 @@ func TestInitWizardConfigFromFlagsProvidersRequireDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	providers, _ := cmd.Flags().GetStringArray("providers")
-	if _, _, err := initWizardConfigFromFlags(cmd, "", "", providers, "", "", hostedDoltInitOptions{}); err == nil {
+	if _, _, err := initWizardConfigFromFlags(cmd, "", "", providers, "", "", hostedDoltInitOptions{}, false); err == nil {
 		t.Fatal("expected --providers without --default-provider to fail")
 	}
 }
@@ -3862,7 +3925,7 @@ func TestInitWizardConfigFromFlagsRejectsProviderListTypo(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, _ := cmd.Flags().GetString("provider")
-	_, _, err := initWizardConfigFromFlags(cmd, provider, "", nil, "", "", hostedDoltInitOptions{})
+	_, _, err := initWizardConfigFromFlags(cmd, provider, "", nil, "", "", hostedDoltInitOptions{}, false)
 	if err == nil {
 		t.Fatal("expected deprecated --provider list typo to fail")
 	}
@@ -3881,7 +3944,7 @@ func TestInitWizardConfigFromFlagsTemplateCustomRejectsProviders(t *testing.T) {
 	}
 	template, _ := cmd.Flags().GetString("template")
 	defaultProvider, _ := cmd.Flags().GetString("default-provider")
-	if _, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, template, "", hostedDoltInitOptions{}); err == nil {
+	if _, _, err := initWizardConfigFromFlags(cmd, "", defaultProvider, nil, template, "", hostedDoltInitOptions{}, false); err == nil {
 		t.Fatal("expected --template custom with provider flags to fail")
 	}
 }
@@ -3894,7 +3957,7 @@ func TestInitProviderFlagIsHidden(t *testing.T) {
 }
 
 func TestInitWizardConfigNormalizesBootstrapAliases(t *testing.T) {
-	wiz, err := initWizardConfig("codex", "kubernetes")
+	wiz, err := initWizardConfig("codex", "kubernetes", false)
 	if err != nil {
 		t.Fatalf("initWizardConfig returned error: %v", err)
 	}
@@ -4378,6 +4441,10 @@ func TestDoInitPreservesExistingPackToml(t *testing.T) {
 // pins the wrapper's default-path behavior itself.
 func TestCmdInitFromFileWithOptionsUsesCWDWhenArgsEmpty(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
+
+	old := stdinIsRealTerminal
+	stdinIsRealTerminal = func() bool { return true }
+	t.Cleanup(func() { stdinIsRealTerminal = old })
 
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -5488,6 +5555,8 @@ func TestInitFromSkip(t *testing.T) {
 		{filepath.Join(".gc", "agents", "mayor.json"), false, true},
 		{filepath.Join(".gc", "prompts"), true, true},
 		{filepath.Join(".gc", "prompts", "mayor.md"), false, true},
+		{".beads", true, true},
+		{filepath.Join(".beads", "metadata.json"), false, true},
 		{"gastown_test.go", false, true},
 		{filepath.Join("sub", "foo_test.go"), false, true},
 		{"city.toml", false, false},
@@ -5501,6 +5570,36 @@ func TestInitFromSkip(t *testing.T) {
 				t.Errorf("initFromSkip(%q, %v) = %v, want %v", tt.relPath, tt.isDir, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDoInitFromDirExcludesProviderOwnedBeadsState(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	parent := t.TempDir()
+	srcDir := filepath.Join(parent, "template")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".beads", "provider-runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte("[workspace]\nname = \"template\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "provider-runtime", "state"), []byte("provider-owned"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(parent, "city")
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDir(srcDir, cityPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("doInitFromDir = %d; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("provider-owned .beads state was copied, stat err = %v", err)
 	}
 }
 
@@ -5819,18 +5918,21 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 	}
 }
 
-func TestDoStopStopError(t *testing.T) {
-	sp := runtime.NewFailFake() // Stop will fail
+func TestDoStopBrokenRuntimeFailsClosed(t *testing.T) {
+	sp := runtime.NewFailFake() // ListRunning and Stop fail; IsRunning is false
 
 	var stdout, stderr bytes.Buffer
 	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
+	// The runtime could not be listed, so gc stop cannot know that nothing is
+	// running: it must not report success.
+	if code != 1 {
+		t.Fatalf("doStop = %d, want 1 for an unlistable runtime; stderr: %s", code, stderr.String())
 	}
-	// FailFake makes IsRunning return false, so no stop attempt.
-	// Should still print "City stopped."
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Errorf("stdout missing 'City stopped.': %q", stdout.String())
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("stdout reported City stopped. for an unlistable runtime: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: session unavailable") {
+		t.Errorf("stderr = %q, want the listing failure", stderr.String())
 	}
 }
 
@@ -6082,6 +6184,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"mayor"}, &stdout, &stderr)
@@ -6123,6 +6226,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_AGENT", "mayor")
 
 	var stdout, stderr bytes.Buffer
@@ -6162,6 +6266,7 @@ name = "test-city"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"ada"}, &stdout, &stderr)
@@ -6196,6 +6301,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"nonexistent"}, &stdout, &stderr)
@@ -6232,6 +6338,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"nonexistent"}, &stdout, &stderr, false, true)
@@ -6278,6 +6385,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
@@ -6339,6 +6447,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode(nil, &stdout, &stderr, false, true)
@@ -6385,6 +6494,7 @@ max_active_sessions = 1
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
@@ -6426,6 +6536,7 @@ prompt_template = "prompts/does-not-exist.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
@@ -6470,6 +6581,7 @@ prompt_template = %q
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
@@ -6524,6 +6636,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	// Clear GC_RIG so .RigName evaluates to empty and the conditional
 	// short-circuits. Without this, an ambient GC_RIG would produce output.
@@ -6566,6 +6679,7 @@ name = "mayor"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	t.Setenv("GC_SESSION_ID", "test-session-123")
 	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-123")
@@ -6612,7 +6726,7 @@ prompt_template = "prompts/does-not-exist.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "mayor",
-		Type:  "task",
+		Type:  "session",
 		Labels: []string{
 			"gc:session",
 			"template:mayor",
@@ -6633,6 +6747,7 @@ prompt_template = "prompts/does-not-exist.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	t.Setenv("GC_SESSION_ID", sessionBead.ID)
 	t.Setenv("GC_PROVIDER_SESSION_ID", "provider-session-missing-template")
@@ -6689,6 +6804,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	t.Setenv("GC_SESSION_ID", "test-session-456")
 
@@ -6749,6 +6865,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"mayor"}, &stdout, &stderr, false, true)
@@ -6791,6 +6908,7 @@ suspended = true
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	t.Setenv("GC_SESSION_ID", "test-session-suspended")
 
@@ -6866,6 +6984,7 @@ max = 3
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"polecat"}, &stdout, &stderr)
@@ -6909,6 +7028,7 @@ max = -1
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"polecat"}, &stdout, &stderr)
@@ -6964,6 +7084,7 @@ max = -1
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrime([]string{"worker"}, &stdout, &stderr)
@@ -7021,6 +7142,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_AGENT", "mayor")
 
 	reader, writer, err := os.Pipe()
@@ -7098,9 +7220,9 @@ prompt_template = "prompts/probe.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
-		Type:  "task",
+		Type:  sessionBeadType,
 		Labels: []string{
-			"gc:session",
+			sessionBeadLabel,
 			"template:probe",
 		},
 		Metadata: map[string]string{
@@ -7120,6 +7242,7 @@ prompt_template = "prompts/probe.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_AGENT", "probe")
 	t.Setenv("GC_SESSION_ID", sessionBead.ID)
 	t.Setenv("GEMINI_SESSION_ID", "gemini-provider-session")
@@ -7177,7 +7300,7 @@ prompt_template = "prompts/probe.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
-		Type:  "task",
+		Type:  "session",
 		Labels: []string{
 			"gc:session",
 			"template:probe",
@@ -7199,6 +7322,7 @@ prompt_template = "prompts/probe.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_AGENT", "probe")
 	t.Setenv("GC_SESSION_ID", sessionBead.ID)
 	t.Setenv("GC_PROVIDER_SESSION_ID", "omp-provider-session")
@@ -7251,7 +7375,7 @@ base = "builtin:codex"`)
 	}
 }
 
-func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
+func TestDoPrimeClaudeHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) {
 	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
 base = "builtin:claude"`)
 	setPrimeHookStdinJSON(t, map[string]string{
@@ -7274,8 +7398,36 @@ base = "builtin:claude"`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "claude-provider-session" {
+		t.Fatalf("session_key = %q, want Claude provider session id from hook stdin", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForUnsupportedProvider(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "gemini", `[providers.gemini]
+base = "builtin:gemini"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "gemini-provider-session",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
-		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+		t.Fatalf("session_key = %q, want empty for hook stdin session id from a provider outside the hook-stdin allowlist (gemini surfaces its id via env)", got)
 	}
 }
 
@@ -7350,9 +7502,9 @@ prompt_template = "prompts/probe.md"
 	}
 	sessionBead, err := store.Create(beads.Bead{
 		Title: "probe",
-		Type:  "task",
+		Type:  sessionBeadType,
 		Labels: []string{
-			"gc:session",
+			sessionBeadLabel,
 			"template:probe",
 		},
 		Metadata: map[string]string{
@@ -7372,8 +7524,10 @@ prompt_template = "prompts/probe.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_AGENT", "probe")
 	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+	t.Setenv("GC_SESSION_NAME", "probe")
 
 	return dir, sessionBead.ID
 }
@@ -7429,6 +7583,7 @@ prompt_template = "prompts/probe.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_ALIAS", "probe-live")
 	t.Setenv("GC_TEMPLATE", "probe")
 
@@ -7494,6 +7649,7 @@ prompt_template = "prompts/probe.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_ALIAS", "probe-live")
 	t.Setenv("GC_SESSION_ID", sessionBead.ID)
 	t.Setenv("GC_TEMPLATE", "")
@@ -7543,6 +7699,7 @@ prompt_template = "prompts/mayor.md"
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_CITY_PATH", dir)
 	t.Setenv("GC_AGENT", "bl-9jl") // bead ID, not an agent name
 	t.Setenv("GC_ALIAS", "mayor")
 
@@ -7855,4 +8012,30 @@ func TestDoAgentResumeNotFound(t *testing.T) {
 	if !strings.Contains(stderr.String(), "not found") {
 		t.Errorf("stderr = %q, want 'not found'", stderr.String())
 	}
+}
+
+// gcCallerDir resolves the cmd/gc package directory from a runtime.Caller
+// file path. Under `bazel test` the caller path is runfiles-relative, so the
+// real checkout from GC_TEST_REPO_ROOT stands in for the package directory.
+func gcCallerDir(currentFile string) string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "cmd", "gc")
+	}
+	return filepath.Dir(currentFile)
+}
+
+// gcRepoRootFromEnv resolves the repository root for source-scanning guards.
+func gcRepoRootFromEnv() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
+	_, file, _, _ := goruntime.Caller(0)
+	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+}
+
+// chdirToRealPackageDir moves the working directory to the cmd/gc package
+// in the real checkout under `bazel test` (see bazeltest.ChdirPackageDir).
+func chdirToRealPackageDir(t *testing.T) {
+	t.Helper()
+	bazeltest.ChdirPackageDir(t, "cmd/gc")
 }

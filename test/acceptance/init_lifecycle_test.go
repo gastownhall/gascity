@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -43,6 +44,9 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir)
+	if err := helpers.StageIdleProviderBinary(filepath.Join(gcHome, "bin"), "claude"); err != nil {
+		panic("acceptance: staging idle Claude process double: " + err.Error())
+	}
 
 	// In-process config loads and packman cache lookups must resolve the
 	// same isolated GC_HOME the subprocess env uses. internal/testenv
@@ -52,11 +56,46 @@ func TestMain(m *testing.M) {
 		panic("acceptance: setting GC_HOME: " + err.Error())
 	}
 
+	// A bd binary that disagrees with the linked beads library about the Dolt
+	// schema version cannot characterise any topology honestly — it produces
+	// what look like gc and beads defects on the shapes where one database is
+	// shared between gc's native path and the bd CLI. Answer it here, once,
+	// before any test builds a city. Only when a real bd is configured: without
+	// one every bd-dependent shape skips typed anyway.
+	if bdPath := helpers.FindBD(); bdPath != "" {
+		if err := helpers.RequireBdSchemaParity(bdPath); err != nil {
+			panic("acceptance: " + err.Error())
+		}
+	}
+
 	code := m.Run()
 
 	// Best-effort supervisor stop.
 	helpers.RunGC(testEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck
+	// The supervisor (and the controllers it runs) logs to the shared
+	// GC_HOME, which no single test's temp dir contains; keep it on a failed
+	// run alongside the per-test Dolt logs.
+	if code != 0 {
+		testutil.SaveDiagnostics("TestMain", gcHome)
+	}
 	os.Exit(code)
+}
+
+func TestTierAUsesHermeticClaudeProcessDouble(t *testing.T) {
+	wantDir := filepath.Join(testEnv.Get("GC_HOME"), "bin")
+	pathEntries := filepath.SplitList(testEnv.Get("PATH"))
+	if len(pathEntries) == 0 || pathEntries[0] != wantDir {
+		t.Fatalf("Tier A PATH starts with %v, want hermetic provider directory %q", pathEntries, wantDir)
+	}
+
+	wantPath := filepath.Join(wantDir, "claude")
+	info, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatalf("Tier A Claude process double: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("Tier A Claude process double mode = %v, want executable", info.Mode())
+	}
 }
 
 // TestInitMinimal verifies that gc init with the default minimal

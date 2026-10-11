@@ -43,7 +43,7 @@ func (idx *sessionIndex) populateIndex(sessFront *session.Store, stderr io.Write
 		return
 	}
 
-	loaded, err := loadSessionBeads(sessFront.Store().Store)
+	loaded, err := sessFront.ListAll(session.ListAllOptions{})
 	if err != nil {
 		fmt.Fprintf(stderr, "session index: populate: %v\n", err) //nolint:errcheck
 		return
@@ -53,8 +53,7 @@ func (idx *sessionIndex) populateIndex(sessFront *session.Store, stderr io.Write
 	defer idx.mu.Unlock()
 
 	idx.entries = make(map[string]*sessionEntry, len(loaded))
-	for _, b := range loaded {
-		info := session.InfoFromPersistedBead(b)
+	for _, info := range loaded {
 		state := info.MetadataState
 		// Skip archived/closed — they don't affect reconciliation.
 		// Check both metadata state (includes legacy "stopped" mapped to

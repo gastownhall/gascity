@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -272,7 +274,7 @@ func TestAgentEffectivelySuspendedDirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker", Suspended: true}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent with Suspended=true should be effectively suspended")
 	}
 }
@@ -283,8 +285,31 @@ func TestAgentEffectivelySuspendedViaRig(t *testing.T) {
 		Agents:    []config.Agent{{Name: "polecat", Dir: "myrig"}},
 		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent in rig with suspended_on_start=true should be effectively suspended")
+	}
+}
+
+// TestAgentEffectivelySuspendedViaRigDirPath verifies that an agent whose Dir
+// is a filesystem path pointing at the rig root — rather than the literal rig
+// name — is still recognized as rig-suspended. Third-party-pack agents bound
+// into a rig through a dir override carry a path-form Dir, so name-only rig
+// matching missed them: a suspended rig kept waking them even though the
+// desired-state build (which resolves the rig path-aware, via agentInSuspendedRig)
+// had already dropped them, producing the start/drain wake loop. The awake-set
+// gate must resolve the rig the same path-aware way the desired-state build does.
+func TestAgentEffectivelySuspendedViaRigDirPath(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{{
+			Name:        "cashtuner",
+			BindingName: "qa-wonks",
+			Dir:         "/tmp/myrig", // the rig PATH, not the rig NAME
+		}},
+		Rigs: []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
+	}
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
+		t.Error("agent whose Dir is the suspended rig's path should be effectively suspended")
 	}
 }
 
@@ -293,7 +318,7 @@ func TestAgentEffectivelySuspendedViaCity(t *testing.T) {
 		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if !isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent in city with suspended_on_start=true should be effectively suspended")
 	}
 }
@@ -303,7 +328,7 @@ func TestAgentEffectivelySuspendedNot(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
+	if isAgentEffectivelySuspendedWith(cfg, "", &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("non-suspended agent should not be effectively suspended")
 	}
 }
@@ -324,8 +349,68 @@ func TestSuspendInheritance(t *testing.T) {
 	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if !isAgentEffectivelySuspendedWith(cfg, a, suspensionstate.State{}) {
+		if !isAgentEffectivelySuspendedWith(cfg, "", a, suspensionstate.State{}) {
 			t.Errorf("agent %q should be suspended when city has suspended_on_start=true", a.QualifiedName())
 		}
 	}
+}
+
+// TestSuspendRecordsEventInTargetCity is a regression guard for ga-41g9gr.
+//
+// doSuspendCity writes suspension state to its cityPath argument but used to
+// record the lifecycle event through openCityRecorder, which re-resolves the
+// *ambient* city from cwd/env independently of cityPath. Suspending an
+// explicitly named city from inside a different, live city therefore appended
+// city.suspended/city.resumed to the wrong city's event log — 23 spurious
+// pairs a day on the fleet's real city, which never itself suspended.
+//
+// The event must land in the city whose state actually changed.
+func TestSuspendRecordsEventInTargetCity(t *testing.T) {
+	ambient := newRealCityDir(t, "ambient")
+	target := newRealCityDir(t, "target")
+
+	// Ambient resolution (openCityRecorder -> resolveCity) points at a
+	// city that is NOT the suspend target.
+	t.Setenv("GC_CITY", ambient)
+
+	var stdout, stderr bytes.Buffer
+	if code := doSuspendCity(fsys.OSFS{}, target, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("suspend code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	ambientEvents := filepath.Join(ambient, ".gc", "events.jsonl")
+	if data, err := os.ReadFile(ambientEvents); err == nil && strings.Contains(string(data), events.CitySuspended) {
+		t.Errorf("city.suspended leaked into the ambient city's event log %s:\n%s",
+			ambientEvents, data)
+	}
+
+	targetEvents := filepath.Join(target, ".gc", "events.jsonl")
+	data, err := os.ReadFile(targetEvents)
+	if err != nil {
+		t.Fatalf("target city recorded no event at %s: %v", targetEvents, err)
+	}
+	if !strings.Contains(string(data), events.CitySuspended) {
+		t.Errorf("target event log %s = %q, want a %s record",
+			targetEvents, data, events.CitySuspended)
+	}
+}
+
+// newRealCityDir creates a minimal city on the real filesystem. The event
+// recorder always uses the OS filesystem regardless of the fsys.FS handed to
+// doSuspendCity, so this regression test cannot use fsys.NewFake.
+func newRealCityDir(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultCity(name)
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

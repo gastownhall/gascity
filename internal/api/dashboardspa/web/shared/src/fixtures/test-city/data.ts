@@ -86,6 +86,7 @@ function specToAgent(spec: AgentSpec, iso: (offsetMs: number) => string): AgentR
     provider: spec.provider,
     model: spec.model,
     rig: spec.rig,
+    pack_derived: false,
   };
   if (spec.activeBead !== undefined) agent.active_bead = spec.activeBead;
   if (spec.contextPct !== undefined) agent.context_pct = spec.contextPct;

@@ -94,7 +94,7 @@ func TestListSessionWaits_ReturnsProjectedWaitInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wait: %v", err)
 	}
-	waits, err := ListSessionWaits(store, "gc-session")
+	waits, err := waitStoreOver(store).WaitsForSession("gc-session")
 	if err != nil {
 		t.Fatalf("ListSessionWaits: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestWaitNudgeIDs_AcceptsLegacyWaitBeadsWithoutLegacyTypeQuery(t *testing.T)
 		t.Fatalf("create legacy wait: %v", err)
 	}
 
-	got, err := WaitNudgeIDs(store, "gc-session")
+	got, err := waitStoreOver(store).WaitNudgeIDs("gc-session")
 	if err != nil {
 		t.Fatalf("WaitNudgeIDs: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestWaitNudgeIDs_UsesBoundedDeterministicSessionLookup(t *testing.T) {
 	}
 	store := &sessionWaitListQueryCaptureStore{Store: mem}
 
-	got, err := WaitNudgeIDs(store, "gc-session")
+	got, err := waitStoreOver(store).WaitNudgeIDs("gc-session")
 	if err != nil {
 		t.Fatalf("WaitNudgeIDs: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestWaitNudgeIDs_UsesBoundedDeterministicSessionLookup(t *testing.T) {
 func TestListSessionWaits_AllowsExactLookupLimit(t *testing.T) {
 	store := &sessionWaitExactLimitStore{Store: beads.NewMemStore()}
 
-	waits, err := ListSessionWaits(store, "gc-session")
+	waits, err := waitStoreOver(store).WaitsForSession("gc-session")
 	if err != nil {
 		t.Fatalf("ListSessionWaits: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestListSessionWaits_AllowsExactLookupLimit(t *testing.T) {
 }
 
 func TestListSessionWaits_ReportsLimitWithFilteredPartial(t *testing.T) {
-	waits, err := ListSessionWaits(sessionWaitLimitStore{Store: beads.NewMemStore()}, "gc-session")
+	waits, err := waitStoreOver(sessionWaitLimitStore{Store: beads.NewMemStore()}).WaitsForSession("gc-session")
 	if !beads.IsLookupLimitError(err) {
 		t.Fatalf("ListSessionWaits error = %v, want lookup limit", err)
 	}
@@ -263,7 +263,7 @@ func TestListSessionWaits_ReportsLimitWithFilteredPartial(t *testing.T) {
 }
 
 func TestWaitNudgeIDs_ReportsSessionWaitLookupLimit(t *testing.T) {
-	_, err := WaitNudgeIDs(sessionWaitLimitStore{Store: beads.NewMemStore()}, "gc-session")
+	_, err := waitStoreOver(sessionWaitLimitStore{Store: beads.NewMemStore()}).WaitNudgeIDs("gc-session")
 	if !beads.IsLookupLimitError(err) || !strings.Contains(err.Error(), "wait lookup hit limit") {
 		t.Fatalf("WaitNudgeIDs error = %v, want wait lookup limit", err)
 	}
@@ -301,7 +301,7 @@ func TestWakeSessionContinuesAfterWaitLookupLimit(t *testing.T) {
 		}
 	}
 
-	nudgeIDs, err := WakeSession(store, sessionBead, now)
+	nudgeIDs, err := waitStoreOver(store).wakeSessionFromBead(sessionBead, now)
 	if err != nil {
 		t.Fatalf("WakeSession: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestCancelWaitsAndCollectNudgeIDsReturnsAllNudgesAfterLookupLimit(t *testin
 		}
 	}
 
-	nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(store, sessionID, now)
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(sessionID, now)
 	if err != nil {
 		t.Fatalf("CancelWaitsAndCollectNudgeIDs: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestCancelWaitsAndCollectNudgeIDsReturnsObservedNudgesOnCancelError(t *test
 	}
 	store := cancelWaitMetadataFailStore{MemStore: mem, failID: wait.ID}
 
-	nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(store, "gc-session", time.Now().UTC())
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits("gc-session", time.Now().UTC())
 	if err == nil || !strings.Contains(err.Error(), "cancel wait metadata failed") {
 		t.Fatalf("CancelWaitsAndCollectNudgeIDs error = %v, want cancel wait metadata failed", err)
 	}
@@ -453,7 +453,7 @@ func TestWakeSessionClosesTerminalOpenWaitsAfterLookupLimit(t *testing.T) {
 		}
 	}
 
-	nudgeIDs, err := WakeSession(store, sessionBead, now)
+	nudgeIDs, err := waitStoreOver(store).wakeSessionFromBead(sessionBead, now)
 	if err != nil {
 		t.Fatalf("WakeSession: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestReassignWaitsConvergesAfterWaitLookupLimit(t *testing.T) {
 		}
 	}
 
-	if err := ReassignWaits(store, oldSessionID, newSessionID); err != nil {
+	if err := waitStoreOver(store).ReassignWaits(oldSessionID, newSessionID); err != nil {
 		t.Fatalf("ReassignWaits: %v", err)
 	}
 	oldRows, err := store.List(beads.ListQuery{Label: oldLabel})
@@ -545,7 +545,7 @@ func TestCancelWaits_CancelsLegacyWaitBeadsWithoutLegacyTypeQuery(t *testing.T) 
 		t.Fatalf("create legacy wait: %v", err)
 	}
 
-	if err := CancelWaits(store, "gc-session", time.Now().UTC()); err != nil {
+	if _, _, err := waitStoreOver(store).CancelWaits("gc-session", time.Now().UTC()); err != nil {
 		t.Fatalf("CancelWaits: %v", err)
 	}
 	updated, err := store.Get(wait.ID)
@@ -578,7 +578,7 @@ func TestWakeSessionRecordsExplicitWakeForSuspendedBead(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	if _, err := WakeSession(store, sessionBead, now); err != nil {
+	if _, err := waitStoreOver(store).wakeSessionFromBead(sessionBead, now); err != nil {
 		t.Fatalf("WakeSession: %v", err)
 	}
 
@@ -637,7 +637,7 @@ func TestWakeSessionRejectsArchivedHistoricalBead(t *testing.T) {
 		t.Fatalf("create wait: %v", err)
 	}
 
-	if _, err := WakeSession(store, sessionBead, time.Now().UTC()); err == nil {
+	if _, err := waitStoreOver(store).wakeSessionFromBead(sessionBead, time.Now().UTC()); err == nil {
 		t.Fatal("WakeSession returned nil error, want archived-session rejection")
 	}
 
@@ -691,7 +691,7 @@ func TestWakeSessionRecordsExplicitWakeForContinuityEligibleArchivedBead(t *test
 		t.Fatalf("create wait: %v", err)
 	}
 
-	if _, err := WakeSession(store, sessionBead, now); err != nil {
+	if _, err := waitStoreOver(store).wakeSessionFromBead(sessionBead, now); err != nil {
 		t.Fatalf("WakeSession: %v", err)
 	}
 

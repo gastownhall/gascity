@@ -143,3 +143,34 @@ func TestResolveEmptyStoreListIsNotFound(t *testing.T) {
 		t.Fatalf("Resolve(nil) error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestScopeRigContext(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		storeRef   string
+		rigContext string
+		ok         bool
+	}{
+		{name: "city", storeRef: "city:test-city", ok: true},
+		{name: "rig", storeRef: "rig:frontend", rigContext: "frontend", ok: true},
+		{name: "trims whitespace", storeRef: "  rig:frontend  ", rigContext: "frontend", ok: true},
+		// A class binding is a CITY-scope store: it serves the whole city's
+		// relocated classes and belongs to no rig. Answering ok=false here
+		// would make every binding-resident row look scope-less to
+		// rootStoreRefMatchesCandidate, which is how a census that names the
+		// binding as its own leg starts dropping the rows it just gained.
+		{name: "class binding", storeRef: "class:gmnos", ok: true},
+		{name: "empty", storeRef: ""},
+		{name: "bare legacy label", storeRef: "frontend"},
+		{name: "missing rig name", storeRef: "rig:"},
+		{name: "missing city name", storeRef: "city:"},
+		{name: "missing class token", storeRef: "class:"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rigContext, ok := ScopeRigContext(tt.storeRef)
+			if rigContext != tt.rigContext || ok != tt.ok {
+				t.Fatalf("ScopeRigContext(%q) = (%q, %v), want (%q, %v)", tt.storeRef, rigContext, ok, tt.rigContext, tt.ok)
+			}
+		})
+	}
+}

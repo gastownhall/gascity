@@ -32,6 +32,57 @@ func codexTurnContextLine(ts, model string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"turn_context","payload":{"turn_id":"019d9845-45f6-70d2-86e8-53d8a44a830f","cwd":"/work/dir","current_date":"2026-04-16","timezone":"Etc/UTC","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"model":%q,"personality":"pragmatic"}}`, ts, model)
 }
 
+// codexLineBytes is the on-disk size of one line written by
+// writeCodexUsageLines, including its trailing newline. Byte-exact sizes are
+// what let a test place the tail-window or seed-budget edge on a chosen byte.
+func codexLineBytes(line string) int64 {
+	return int64(len(line)) + 1
+}
+
+// codexLinesBytes is the on-disk size of lines written by writeCodexUsageLines.
+func codexLinesBytes(lines []string) int64 {
+	total := int64(0)
+	for _, line := range lines {
+		total += codexLineBytes(line)
+	}
+	return total
+}
+
+// codexFillerLine returns a response_item line occupying exactly n bytes on
+// disk, newline included. Filler carries no usage and no model, so it only
+// moves the offsets the window and budget edges are measured from.
+func codexFillerLine(t *testing.T, n int64) string {
+	t.Helper()
+	line := func(content string) string {
+		return fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			content)
+	}
+	pad := n - codexLineBytes(line(""))
+	if pad < 0 {
+		t.Fatalf("filler size %d is smaller than the %d-byte envelope", n, codexLineBytes(line("")))
+	}
+	return line(strings.Repeat("x", int(pad)))
+}
+
+// codexFillerLines returns filler lines occupying exactly total bytes on disk,
+// each short enough for the seed scanner's line buffer so the filler itself
+// never aborts a scan.
+func codexFillerLines(t *testing.T, total int64) []string {
+	t.Helper()
+	const chunk = 16 * 1024
+	var lines []string
+	for total > 0 {
+		n := int64(chunk)
+		if total < 2*chunk {
+			n = total // fold the remainder in rather than emit a sub-envelope line
+		}
+		lines = append(lines, codexFillerLine(t, n))
+		total -= n
+	}
+	return lines
+}
+
 func codexSessionMetaLine(ts, cwd string) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":"019d9845-4273-7ee3-a7d7-15b71ec6f096","timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.121.0","source":"cli","model_provider":"openai"}}`, ts, ts, cwd)
 }
@@ -79,11 +130,17 @@ func TestExtractCodexTailUsage(t *testing.T) {
 	if first.OutputTokens != 355 {
 		t.Errorf("first.OutputTokens = %d, want 355 (reasoning is a subset, not added)", first.OutputTokens)
 	}
+	if first.ReasoningTokens != 166 {
+		t.Errorf("first.ReasoningTokens = %d, want 166", first.ReasoningTokens)
+	}
 	if first.CacheReadTokens != 10624 {
 		t.Errorf("first.CacheReadTokens = %d, want 10624", first.CacheReadTokens)
 	}
 	if first.CacheCreationTokens != 0 {
 		t.Errorf("first.CacheCreationTokens = %d, want 0", first.CacheCreationTokens)
+	}
+	if first.ContextWindowTokens != 258400 {
+		t.Errorf("first.ContextWindowTokens = %d, want 258400", first.ContextWindowTokens)
 	}
 
 	second := usages[1]
@@ -102,8 +159,40 @@ func TestExtractCodexTailUsage(t *testing.T) {
 	if second.OutputTokens != 309 {
 		t.Errorf("second.OutputTokens = %d, want 309", second.OutputTokens)
 	}
+	if second.ReasoningTokens != 28 {
+		t.Errorf("second.ReasoningTokens = %d, want 28", second.ReasoningTokens)
+	}
 	if second.CacheReadTokens != 15232 {
 		t.Errorf("second.CacheReadTokens = %d, want 15232", second.CacheReadTokens)
+	}
+	if second.ContextWindowTokens != 258400 {
+		t.Errorf("second.ContextWindowTokens = %d, want 258400", second.ContextWindowTokens)
+	}
+}
+
+// TestExtractCodexTailUsageCapturesEntryTimestamp verifies Timestamp is
+// parsed from the same line the string-valued EntryUUID already carries.
+func TestExtractCodexTailUsageCapturesEntryTimestamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-timestamp.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.4"),
+		codexTokenCountLine("2026-04-16T21:49:38.304Z", 15917, 15562, 10624, 355, 166),
+	})
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	want, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	if !usages[0].Timestamp.Equal(want) {
+		t.Errorf("usages[0].Timestamp = %v, want %v", usages[0].Timestamp, want)
 	}
 }
 
@@ -137,6 +226,16 @@ func TestExtractCodexTailUsageDuplicateKeepsFirstModel(t *testing.T) {
 	}
 	if usages[0].EntryUUID != "2026-04-16T21:49:40.470Z" {
 		t.Errorf("first.EntryUUID = %q, want the last duplicate's timestamp (collapse still refreshes the rest)", usages[0].EntryUUID)
+	}
+	// Timestamp, unlike EntryUUID, keeps the first-observed line's time: the
+	// invocation completed at 21:49:38.304Z and was merely replayed at
+	// 21:49:40.470Z, under the next turn_context.
+	wantFirstTime, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	if !usages[0].Timestamp.Equal(wantFirstTime) {
+		t.Errorf("first.Timestamp = %v, want the original emission %v (not the re-emission)", usages[0].Timestamp, wantFirstTime)
 	}
 	if usages[1].Model != "gpt-5.5" {
 		t.Errorf("second.Model = %q, want gpt-5.5 (new invocation under the new turn_context)", usages[1].Model)
@@ -189,6 +288,676 @@ func TestExtractCodexTailUsageModelMissing(t *testing.T) {
 	}
 	if usages[0].InputTokens != 15562-10624 {
 		t.Errorf("InputTokens = %d, want %d", usages[0].InputTokens, 15562-10624)
+	}
+}
+
+// TestExtractCodexTailUsageModelBeyondTailWindow pins the long-session fix: the
+// model is announced once in a turn_context near the top, then the session runs
+// long enough that the turn_context scrolls past the tail window before the
+// recent token_count events. A bounded backward scan from the window must still
+// reach that announcement — otherwise mc's long-lived dispatcher/wisp sessions
+// mint model facts with an empty model that the pricing lookup treats as
+// unpriced (the "burn $/hr reads 0" gap).
+func TestExtractCodexTailUsageModelBeyondTailWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-longsession.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	// Filler > tailChunkSize so the turn_context is outside the tail window that
+	// readTail scans; these response_item lines carry no usage and are skipped.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	// Recent invocations sit in the tail window with no nearby turn_context.
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.6-terra" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.6-terra (recovered by the backward scan from the turn_context preceding the tail window)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageSeedsNearestPrecedingModel pins the mid-rollout
+// switch case: two distinct turn_context models are announced before the tail
+// window, so the seed must name the LAST one — the model actually in effect
+// when the tail invocations ran. Seeding the session's first model instead
+// would silently mislabel post-switch tail usage with the pre-switch model,
+// trading an obvious unpriced $0 for a plausible wrong price.
+func TestExtractCodexTailUsageSeedsNearestPrecedingModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-headswitch.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		// Two distinct models announced near the top: a real mid-rollout switch.
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+		codexTurnContextLine("2026-04-16T21:49:31.901Z", "gpt-5.7-nova"),
+	}
+	// Filler > tailChunkSize so BOTH turn_contexts scroll out of the tail
+	// window; the recent token_counts sit in the tail with no in-window model.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (the nearest turn_context preceding the tail window, not the session's first)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageSwitchBeyondSeedBudget pins the case a head scan
+// gets wrong: the pre-switch model is announced so far back that it falls
+// outside the backward budget entirely, and the post-switch model sits between
+// the budget edge and the tail window. The backward scan must find the nearest
+// preceding turn_context; a scan anchored at the head of the file would never
+// see the switch and would price the tail with the stale model.
+func TestExtractCodexTailUsageSwitchBeyondSeedBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-farswitch.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	filler := strings.Repeat("x", 2048)
+	fillerLine := func(i int) string {
+		return fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler)
+	}
+	// Filler > codexModelSeedScanBudget so the pre-switch turn_context is out of
+	// backward-scan reach.
+	for i := 0; i < (codexModelSeedScanBudget/2048)+8; i++ {
+		lines = append(lines, fillerLine(i))
+	}
+	lines = append(lines, codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova"))
+	// Filler > tailChunkSize so the post-switch turn_context is out of the tail
+	// window too — reachable only by the backward scan.
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fillerLine(i))
+	}
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (the model in effect at the tail, switched to beyond the seed budget)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageInWindowModelOverridesSeed pins that a turn_context
+// inside the tail window always beats a non-empty backward-scan seed: the seed
+// only stands in for an announcement the window cannot see.
+func TestExtractCodexTailUsageInWindowModelOverridesSeed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-inwindow.jsonl")
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	// Filler > tailChunkSize so the first turn_context is only reachable by the
+	// backward scan, which seeds gpt-5.6-terra.
+	filler := strings.Repeat("x", 2048)
+	for i := 0; i < (tailChunkSize/2048)+8; i++ {
+		lines = append(lines, fmt.Sprintf(
+			`{"timestamp":"2026-04-16T21:50:%02d.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":%q}}`,
+			i%60, filler))
+	}
+	// A switch announced inside the tail window must override that seed.
+	lines = append(lines,
+		codexTurnContextLine("2026-04-16T22:10:30.000Z", "gpt-5.7-nova"),
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if usages[0].Model != "gpt-5.7-nova" {
+		t.Errorf("usages[0].Model = %q, want gpt-5.7-nova (an in-window turn_context overrides the seed)", usages[0].Model)
+	}
+}
+
+// TestExtractCodexTailUsageSeedsModelStraddlingWindowBoundary pins the line that
+// belongs to neither scan. The backward seed covers [rangeStart, windowStart)
+// and readTail starts at exactly windowStart with no line-boundary snapping, so
+// a turn_context whose bytes span windowStart is a prefix for one scan and a
+// suffix for the other and parses for neither. Dropping it prices the tail with
+// the model the session already switched away from, and because a minted usage
+// fact's idempotency key excludes the model, that wrong price is durable.
+func TestExtractCodexTailUsageSeedsModelStraddlingWindowBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-straddle.jsonl")
+	head := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	straddling := codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova")
+	tail := []string{
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	}
+	// windowStart is tailChunkSize bytes before EOF, so sizing everything after
+	// the switch announcement to tailChunkSize minus half that line's length
+	// puts windowStart in the middle of it.
+	straddlingBytes := codexLineBytes(straddling)
+	afterStraddling := int64(tailChunkSize) - straddlingBytes/2
+
+	lines := make([]string, 0, len(head)+2+len(tail))
+	lines = append(lines, head...)
+	lines = append(lines, straddling)
+	lines = append(lines, codexFillerLine(t, afterStraddling-codexLinesBytes(tail)))
+	lines = append(lines, tail...)
+	writeCodexUsageLines(t, path, lines)
+
+	// The case only exists while windowStart lands strictly inside the switch
+	// announcement, so pin the geometry rather than let it drift silently.
+	straddlingStart := codexLinesBytes(head)
+	windowStart := codexLinesBytes(lines) - int64(tailChunkSize)
+	if windowStart <= straddlingStart || windowStart >= straddlingStart+straddlingBytes-1 {
+		t.Fatalf("windowStart %d does not fall strictly inside the straddling turn_context [%d,%d)",
+			windowStart, straddlingStart, straddlingStart+straddlingBytes)
+	}
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (the switch announced on the line straddling the window boundary)", i, u.Model)
+		}
+	}
+}
+
+// TestExtractCodexTailUsageOversizedSeedLineFallsBackToEmpty pins the honest
+// floor when the backward scan cannot finish. Codex rollouts embed whole tool
+// outputs and file reads in a single response_item line, so a line past the seed
+// scanner's buffer is ordinary; it aborts the scan mid-range and leaves any
+// later switch unseen. Reporting the model found before that line replaces an
+// obvious unpriced $0 with a plausible wrong price that no later sweep corrects,
+// and the oversized line stays in range across a long stretch of file growth, so
+// it would mislabel every sweep in that stretch rather than one.
+func TestExtractCodexTailUsageOversizedSeedLineFallsBackToEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-oversized.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+		codexFillerLine(t, codexSeedScanLineMax+1024),
+		codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova"),
+		// Push both announcements out of the tail window.
+		codexFillerLine(t, int64(tailChunkSize)+4096),
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+	})
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 1 {
+		t.Fatalf("got %d usages, want 1: %+v", len(usages), usages)
+	}
+	if usages[0].Model != "" {
+		t.Errorf("usages[0].Model = %q, want empty: an aborted seed scan never saw the gpt-5.7-nova switch after the oversized line, so the honest unpriced floor is the only correct answer", usages[0].Model)
+	}
+}
+
+// TestExtractCodexTailUsageSeedsModelAtBudgetLineStart pins the budget edge. The
+// seed range is truncated to codexModelSeedScanBudget bytes before the window,
+// and that cut can land exactly on a line boundary — readTailWindow documents
+// the same thing and peeks the preceding byte to tell the two apart. Skipping
+// the first line unconditionally drops a complete turn_context that is the only
+// announcement in reach.
+func TestExtractCodexTailUsageSeedsModelAtBudgetLineStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-budgetedge.jsonl")
+	head := []string{codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir")}
+	announcement := codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova")
+	tail := []string{
+		codexTokenCountLine("2026-04-16T22:10:38.304Z", 15917, 15562, 10624, 355, 166),
+		codexTokenCountLine("2026-04-16T22:10:45.100Z", 34114, 17888, 15232, 309, 28),
+	}
+	// rangeStart is codexModelSeedScanBudget+tailChunkSize bytes before EOF, so
+	// sizing the announcement and everything after it to exactly that many bytes
+	// starts the announcement on rangeStart itself.
+	inRange := int64(codexModelSeedScanBudget) + int64(tailChunkSize)
+
+	lines := make([]string, 0, len(head)+8+len(tail))
+	lines = append(lines, head...)
+	lines = append(lines, announcement)
+	lines = append(lines, codexFillerLines(t, inRange-codexLineBytes(announcement)-codexLinesBytes(tail))...)
+	lines = append(lines, tail...)
+	writeCodexUsageLines(t, path, lines)
+
+	announcementStart := codexLinesBytes(head)
+	rangeStart := codexLinesBytes(lines) - inRange
+	if rangeStart != announcementStart {
+		t.Fatalf("rangeStart %d does not land on the announcement's first byte %d", rangeStart, announcementStart)
+	}
+
+	usages, err := ExtractCodexTailUsage(path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailUsage: %v", err)
+	}
+	if len(usages) != 2 {
+		t.Fatalf("got %d usages, want 2: %+v", len(usages), usages)
+	}
+	for i, u := range usages {
+		if u.Model != "gpt-5.7-nova" {
+			t.Errorf("usages[%d].Model = %q, want gpt-5.7-nova (a complete turn_context starting on the budget edge is not a partial line)", i, u.Model)
+		}
+	}
+}
+
+// TestCodexPrecedingModelUsesCallerWindow pins the seed's window contract: it
+// scans the range ending at the offset the caller passes, and lines starting at
+// or after that offset belong to the in-window scan. ExtractCodexTailUsage takes
+// one Seek(0, io.SeekEnd) and threads it into both reads on that basis, so a
+// rollout appended to mid-extraction cannot grow a gap between them.
+func TestCodexPrecedingModelUsesCallerWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-2026-04-16T21-49-29-window.jsonl")
+	head := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.6-terra"),
+	}
+	lines := append(append([]string{}, head...), codexTurnContextLine("2026-04-16T22:00:12.000Z", "gpt-5.7-nova"))
+	writeCodexUsageLines(t, path, lines)
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only test file
+
+	// A window starting exactly where the switch is announced excludes it: that
+	// line is the in-window scan's to read.
+	model, err := codexPrecedingModel(f, codexLinesBytes(head))
+	if err != nil {
+		t.Fatalf("codexPrecedingModel: %v", err)
+	}
+	if model != "gpt-5.6-terra" {
+		t.Errorf("model = %q, want gpt-5.6-terra for a window starting at the switch announcement", model)
+	}
+
+	// A window starting after it includes it.
+	model, err = codexPrecedingModel(f, codexLinesBytes(lines))
+	if err != nil {
+		t.Fatalf("codexPrecedingModel: %v", err)
+	}
+	if model != "gpt-5.7-nova" {
+		t.Errorf("model = %q, want gpt-5.7-nova for a window starting past the switch announcement", model)
+	}
+}
+
+func TestExtractCodexTailMetaUsesLatestRealUsageShape(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "2026", "04", "16", "rollout-2026-04-16T21-49-29-meta.jsonl")
+	writeCodexUsageLines(t, path, []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+		codexTokenCountLine("2026-04-16T21:49:38.304Z", 10_000, 9_000, 8_000, 1_000, 100),
+		codexTokenCountLine("2026-04-16T21:49:45.100Z", 15_917, 15_562, 10_624, 355, 166),
+		codexNullInfoTokenCountLine,
+		`{"timestamp":"2026-04-16T21:49`, // torn trailing line remains observable
+	})
+
+	meta, err := ExtractCodexTailMetaFromSearchPaths([]string{root}, path)
+	if err != nil {
+		t.Fatalf("ExtractCodexTailMetaFromSearchPaths: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("ExtractCodexTailMetaFromSearchPaths = nil, want metadata")
+	}
+	if meta.Model != "gpt-5.5" {
+		t.Errorf("Model = %q, want gpt-5.5", meta.Model)
+	}
+	if meta.ContextUsage == nil {
+		t.Fatal("ContextUsage = nil, want latest non-null token_count info")
+	}
+	if got, want := meta.ContextUsage.InputTokens, 15_562; got != want {
+		t.Errorf("InputTokens = %d, want %d (cached input is already included)", got, want)
+	}
+	if got, want := meta.ContextUsage.ContextWindow, 258_400; got != want {
+		t.Errorf("ContextWindow = %d, want %d", got, want)
+	}
+	if got, want := meta.ContextUsage.Percentage, 15_562*100/258_400; got != want {
+		t.Errorf("Percentage = %d, want %d", got, want)
+	}
+	if !meta.MalformedTail {
+		t.Error("MalformedTail = false, want true for torn trailing JSONL")
+	}
+}
+
+func TestExtractCodexTailMetaContextWindowFallbackAndClamp(t *testing.T) {
+	t.Run("duplicate cumulative snapshot keeps its first model", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-duplicate-model-pair.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			codexTokenCountLine("2026-04-16T21:49:38.304Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			// Codex re-emits the prior turn's final cumulative snapshot
+			// after the new turn_context. It is not usage from the new model.
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-4o"; got != want {
+			t.Errorf("Model = %q, want usage-producing model %q", got, want)
+		}
+	})
+
+	t.Run("distinct cumulative snapshot advances to the new model", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-distinct-model-pair.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			codexTokenCountLine("2026-04-16T21:49:38.304Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTokenCountLine("2026-04-16T21:49:45.100Z", 34_114, 17_888, 15_232, 309, 28),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want new usage-producing model %q", got, want)
+		}
+		if got, want := meta.ContextUsage.InputTokens, 17_888; got != want {
+			t.Errorf("InputTokens = %d, want new distinct usage %d", got, want)
+		}
+	})
+
+	t.Run("usage stays paired with its preceding turn model", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-model-pair.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":64000,"cached_input_tokens":32000}}}}`,
+			// A new turn has selected a different model but has not emitted
+			// usage yet. Do not combine that model with the prior turn's usage.
+			codexTurnContextLine("2026-04-16T21:50:00.000Z", "gpt-5.5"),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-4o"; got != want {
+			t.Errorf("Model = %q, want usage-producing model %q", got, want)
+		}
+		if got, want := meta.ContextUsage.ContextWindow, 128_000; got != want {
+			t.Errorf("ContextWindow = %d, want paired model-family window %d", got, want)
+		}
+		if got, want := meta.ContextUsage.Percentage, 50; got != want {
+			t.Errorf("Percentage = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("absent window falls back to model family", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-fallback.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":129000,"cached_input_tokens":64000}}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want context usage", meta)
+		}
+		if got, want := meta.ContextUsage.ContextWindow, 258_000; got != want {
+			t.Errorf("ContextWindow = %d, want model-family fallback %d", got, want)
+		}
+		if got, want := meta.ContextUsage.Percentage, 50; got != want {
+			t.Errorf("Percentage = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("present window is authoritative and percentage is clamped", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-clamp.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":1100},"model_context_window":1000}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want context usage", meta)
+		}
+		if got, want := meta.ContextUsage.ContextWindow, 1_000; got != want {
+			t.Errorf("ContextWindow = %d, want provider value %d", got, want)
+		}
+		if got, want := meta.ContextUsage.Percentage, 100; got != want {
+			t.Errorf("Percentage = %d, want clamped %d", got, want)
+		}
+	})
+
+	t.Run("present zero window does not use model fallback", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-zero-window.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":1100},"model_context_window":0}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil {
+			t.Fatal("ExtractCodexTailMeta = nil, want model metadata")
+		}
+		if meta.ContextUsage != nil {
+			t.Errorf("ContextUsage = %#v, want nil for explicitly unusable context window", meta.ContextUsage)
+		}
+	})
+
+	t.Run("negative input is clamped to zero", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-negative-input.jsonl")
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1},"last_token_usage":{"input_tokens":-1},"model_context_window":1000}}}`,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want sanitized context usage", meta)
+		}
+		if meta.ContextUsage.InputTokens != 0 || meta.ContextUsage.Percentage != 0 {
+			t.Errorf("ContextUsage = %#v, want zero-clamped input and percentage", meta.ContextUsage)
+		}
+	})
+
+	t.Run("percentage calculation does not overflow", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "rollout-large-input.jsonl")
+		maxInt := int(^uint(0) >> 1)
+		inputTokens := maxInt/100 + 1
+		contextWindow := inputTokens * 2
+		line := fmt.Sprintf(`{"timestamp":"2026-04-16T21:49:45.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1},"last_token_usage":{"input_tokens":%d},"model_context_window":%d}}}`, inputTokens, contextWindow)
+		writeCodexUsageLines(t, path, []string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+			line,
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want context usage", meta)
+		}
+		if got, want := meta.ContextUsage.Percentage, 50; got != want {
+			t.Errorf("Percentage = %d, want overflow-safe %d", got, want)
+		}
+	})
+}
+
+func TestExtractCodexTailMetaTruncatedWindowFailsClosedOnFirstCumulativeTotal(t *testing.T) {
+	writeBoundaryFixture := func(t *testing.T, tailLines []string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "rollout-tail-boundary.jsonl")
+		outsideWindow := strings.Join([]string{
+			codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-4o"),
+			codexTokenCountLine("2026-04-16T21:49:38.304Z", 15_917, 15_562, 10_624, 355, 166),
+		}, "\n") + "\n"
+
+		insideWindow := strings.Join(tailLines, "\n") + "\n"
+		const fillerPrefix = `{"timestamp":"2026-04-16T21:49:39.000Z","type":"ignored","payload":{"padding":"`
+		const fillerSuffix = `"}}` + "\n"
+		fillerBytes := int(tailChunkSize) - len(insideWindow) - len(fillerPrefix) - len(fillerSuffix)
+		if fillerBytes < 0 {
+			t.Fatalf("tail fixture is %d bytes larger than tailChunkSize", -fillerBytes)
+		}
+		tailWindow := fillerPrefix + strings.Repeat("x", fillerBytes) + fillerSuffix + insideWindow
+		if got, want := len(tailWindow), int(tailChunkSize); got != want {
+			t.Fatalf("tail fixture size = %d, want %d", got, want)
+		}
+		if err := os.WriteFile(path, []byte(outsideWindow+tailWindow), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+		return path
+	}
+
+	t.Run("duplicate whose producer is outside the window has no context usage", func(t *testing.T) {
+		path := writeBoundaryFixture(t, []string{
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			// The original 15,917 snapshot was produced by gpt-4o outside
+			// the tail. This in-window re-emission must not be attributed to
+			// the latest turn_context merely because it is first observed.
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil {
+			t.Fatal("ExtractCodexTailMeta = nil, want model-only metadata")
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want latest in-window turn model %q", got, want)
+		}
+		if meta.ContextUsage != nil {
+			t.Errorf("ContextUsage = %#v, want nil for usage with an unknown producing model", meta.ContextUsage)
+		}
+	})
+
+	t.Run("later distinct total pairs with its in-window model", func(t *testing.T) {
+		path := writeBoundaryFixture(t, []string{
+			codexTurnContextLine("2026-04-16T21:49:40.000Z", "gpt-5.5"),
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTokenCountLine("2026-04-16T21:49:45.100Z", 34_114, 17_888, 15_232, 309, 28),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil || meta.ContextUsage == nil {
+			t.Fatalf("ExtractCodexTailMeta = %#v, want paired model/context usage", meta)
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want usage-producing model %q", got, want)
+		}
+		if got, want := meta.ContextUsage.InputTokens, 17_888; got != want {
+			t.Errorf("InputTokens = %d, want later distinct usage %d", got, want)
+		}
+	})
+
+	t.Run("later distinct total without an in-window model stays closed", func(t *testing.T) {
+		path := writeBoundaryFixture(t, []string{
+			codexTokenCountLine("2026-04-16T21:49:40.470Z", 15_917, 15_562, 10_624, 355, 166),
+			codexTokenCountLine("2026-04-16T21:49:45.100Z", 34_114, 17_888, 15_232, 309, 28),
+			codexTurnContextLine("2026-04-16T21:50:00.000Z", "gpt-5.5"),
+		})
+
+		meta, err := ExtractCodexTailMeta(path)
+		if err != nil {
+			t.Fatalf("ExtractCodexTailMeta: %v", err)
+		}
+		if meta == nil {
+			t.Fatal("ExtractCodexTailMeta = nil, want later model-only metadata")
+		}
+		if got, want := meta.Model, "gpt-5.5"; got != want {
+			t.Errorf("Model = %q, want latest in-window turn model %q", got, want)
+		}
+		if meta.ContextUsage != nil {
+			t.Errorf("ContextUsage = %#v, want nil without an in-window producing model", meta.ContextUsage)
+		}
+	})
+}
+
+func TestExtractCodexTailMetaFromSearchPathsRejectsEscapedPath(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "rollout-outside.jsonl")
+	writeCodexUsageLines(t, outside, []string{
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+	})
+
+	if _, err := ExtractCodexTailMetaFromSearchPaths([]string{root}, outside); err == nil {
+		t.Fatal("path outside merged codex roots must be rejected")
 	}
 }
 
@@ -499,6 +1268,163 @@ func TestFindCodexSessionFileNear(t *testing.T) {
 		}
 		if got := FindCodexSessionFileNear([]string{root}, workDir, anchor, 0); got != "" {
 			t.Fatalf("zero window: got %q, want empty", got)
+		}
+	})
+}
+
+// TestFindCodexSessionFileNearScanReportsScanCleanliness pins the P3 fix: the
+// keyless-codex sweep fallback must distinguish a genuine zero/ambiguous match
+// (permanent — settle) from a result clouded by a transient IO fault (retry).
+// scanClean carries that distinction — false not only for an empty clouded scan
+// but also for a lone visible match under a dirty scan, which a hidden second
+// same-cwd rollout could turn into an ambiguity refusal. Both dirty sources are
+// covered: a day/root ReadDir fault and a per-file cwd-probe open fault.
+func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
+	anchor := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
+	window := 10 * time.Minute
+	workDir := "/work/near-scan"
+
+	t.Run("clean hit reports scanClean=true", func(t *testing.T) {
+		root := t.TempDir()
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000001", workDir)
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != want || !clean {
+			t.Fatalf("got (%q,%v), want (%q,true)", got, clean, want)
+		}
+	})
+
+	t.Run("clean zero-match reports scanClean=true", func(t *testing.T) {
+		root := t.TempDir() // no rollouts
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != "" || !clean {
+			t.Fatalf("got (%q,%v), want (\"\",true) for a clean empty scan", got, clean)
+		}
+	})
+
+	t.Run("ambiguous match reports scanClean=true (definitive refusal)", func(t *testing.T) {
+		root := t.TempDir()
+		writeCodexRolloutAt(t, root, anchor.Add(time.Minute), "019d9845-cccc-7000-8000-000000000003", workDir)
+		writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000004", workDir)
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != "" || !clean {
+			t.Fatalf("got (%q,%v), want (\"\",true) — ambiguity is a clean, definitive refusal", got, clean)
+		}
+	})
+
+	t.Run("dirty scan (unreadable day dir) reports scanClean=false on a miss, recovers when cleared", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod-000 unreadable dir is not enforced for root")
+		}
+		root := t.TempDir()
+		// A rollout that WOULD match, sealed behind an unreadable day directory so the
+		// enumerating os.ReadDir fails with EACCES (a non-ENOENT IO fault).
+		path := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000005", workDir)
+		dayDir := filepath.Dir(path)
+		if err := os.Chmod(dayDir, 0o000); err != nil {
+			t.Fatalf("chmod 000: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dayDir, 0o755) })
+
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != "" {
+			t.Fatalf("got %q, want empty (the matching rollout is behind an unreadable dir)", got)
+		}
+		if clean {
+			t.Fatal("a non-ENOENT readdir fault during the scan must report scanClean=false")
+		}
+
+		// Fault clears → the same scan is clean and finds the rollout.
+		if err := os.Chmod(dayDir, 0o755); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got2 != path || !clean2 {
+			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, path)
+		}
+	})
+
+	t.Run("dirty singleton via unreadable sibling day dir reports scanClean=false, recovers when cleared", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod-000 unreadable dir is not enforced for root")
+		}
+		root := t.TempDir()
+		// One visible in-window match in the anchor's day dir...
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000007", workDir)
+		// ...plus a SEPARATE day dir inside the scanned [firstDay-1, lastDay+1]
+		// range, sealed unreadable so its os.ReadDir faults with EACCES. That fault
+		// could be hiding a second same-cwd rollout, so the lone visible match is
+		// non-definitive: the path is returned but scanClean=false.
+		sibling := time.Date(2026, 6, 11, 0, 0, 0, 0, time.Local)
+		siblingDay := filepath.Join(root, sibling.Format("2006"), sibling.Format("01"), sibling.Format("02"))
+		if err := os.MkdirAll(siblingDay, 0o755); err != nil {
+			t.Fatalf("mkdir sibling day: %v", err)
+		}
+		if err := os.Chmod(siblingDay, 0o000); err != nil {
+			t.Fatalf("chmod 000: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(siblingDay, 0o755) })
+
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != want {
+			t.Fatalf("got %q, want the one visible match %q (the wrapper path is unchanged by dirtiness)", got, want)
+		}
+		if clean {
+			t.Fatal("a dirty scan with one visible match must report scanClean=false (a hidden second rollout would make it ambiguous)")
+		}
+
+		// Fault clears → the (now clean) singleton is definitive: (path, true).
+		if err := os.Chmod(siblingDay, 0o755); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got2 != want || !clean2 {
+			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, want)
+		}
+	})
+
+	t.Run("dirty singleton via per-file cwd-probe open fault reports scanClean=false, recovers to ambiguity", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("chmod-000 unreadable file is not enforced for root")
+		}
+		root := t.TempDir()
+		// One visible in-window match...
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000008", workDir)
+		// ...plus a second in-window rollout in the SAME day dir whose cwd-probe
+		// os.Open faults with EACCES (chmod 000). codexSessionCWDMatchesScan cannot
+		// confirm its cwd, so it is not counted as a match, but it clouds the scan:
+		// it could be a second same-cwd rollout, so the visible singleton is
+		// non-definitive.
+		sealed := writeCodexRolloutAt(t, root, anchor.Add(4*time.Minute), "019d9845-cccc-7000-8000-000000000009", workDir)
+		if err := os.Chmod(sealed, 0o000); err != nil {
+			t.Fatalf("chmod 000: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(sealed, 0o644) })
+
+		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got != want {
+			t.Fatalf("got %q, want the one visible match %q", got, want)
+		}
+		if clean {
+			t.Fatal("a per-file cwd-probe open fault with one visible match must report scanClean=false")
+		}
+
+		// Fault clears → the sealed file now reads as a SECOND same-cwd match, so
+		// the scan is clean but ambiguous: ("", true). This confirms the dirty
+		// singleton was correctly withheld — a real second rollout was hidden.
+		if err := os.Chmod(sealed, 0o644); err != nil {
+			t.Fatalf("restore chmod: %v", err)
+		}
+		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if got2 != "" || !clean2 {
+			t.Fatalf("after fault cleared: got (%q,%v), want (\"\",true) — two visible same-cwd matches are a clean ambiguity refusal", got2, clean2)
+		}
+	})
+
+	t.Run("string wrapper FindCodexSessionFileNear stays zero-semantic", func(t *testing.T) {
+		root := t.TempDir()
+		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000006", workDir)
+		if got := FindCodexSessionFileNear([]string{root}, workDir, anchor, window); got != want {
+			t.Fatalf("FindCodexSessionFileNear wrapper = %q, want %q", got, want)
 		}
 	})
 }

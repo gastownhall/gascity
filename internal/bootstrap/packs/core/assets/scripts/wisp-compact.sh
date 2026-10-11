@@ -24,7 +24,7 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CITY="${GC_CITY:-.}"
 
 # Get all ephemeral beads.
-ALL=$(bd list --json --all -n 0 2>/dev/null) || exit 0
+ALL=$(gc bd list --json --all -n 0 2>/dev/null) || exit 0
 EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true)]' 2>/dev/null) || exit 0
 
 if [ -z "$EPHEMERALS" ] || [ "$EPHEMERALS" = "[]" ]; then
@@ -80,14 +80,14 @@ while IFS= read -r bead; do
     if [ "$comment_count" -gt 0 ] || echo "$labels" | grep -q '^keep$' || [ "$status" != "closed" ]; then
         REASON="proven value"
         [ "$status" != "closed" ] && REASON="open past TTL (stuck detection)"
-        bd update "$id" --persistent 2>/dev/null || true
-        bd comment "$id" "Promoted from wisp: $REASON" 2>/dev/null || true
+        gc bd update "$id" --persistent 2>/dev/null || true
+        gc bd comment "$id" "Promoted from wisp: $REASON" 2>/dev/null || true
         PROMOTED=$((PROMOTED + 1))
         continue
     fi
 
     # Closed + past TTL + no special attributes → delete.
-    bd delete "$id" --force 2>/dev/null || true
+    gc bd delete "$id" --force 2>/dev/null || true
     DELETED=$((DELETED + 1))
 done <<< "$BEADS"
 

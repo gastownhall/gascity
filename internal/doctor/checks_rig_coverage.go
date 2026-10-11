@@ -82,7 +82,7 @@ func (c *RigPackCoverageCheck) Run(_ *CheckContext) *CheckResult {
 
 		var uncovered []string
 		for _, rig := range activeRigs {
-			if !rigHasPackDir(c.cfg.RigPackDirs, rig.Name, packDir) {
+			if !c.rigCoversPack(rig.Name, packDir, packName, sessions) {
 				uncovered = append(uncovered, rig.Name)
 			}
 		}
@@ -179,4 +179,49 @@ func rigHasPackDir(rigPackDirs map[string][]string, rigName, packDir string) boo
 		}
 	}
 	return false
+}
+
+// rigCoversPack reports whether rig rigName satisfies the always-session
+// coverage that packDir/packName declares — either by importing packDir
+// exactly, or by importing a rig-local pack with the same [pack].name
+// that declares at least the same rig-scoped always named_session
+// template(s). A rig-local replacement (a distinct namepool, local
+// prompt/formula changes, and so on) is a deliberate override, not a
+// coverage gap (#3907); exact-dir comparison alone can never recognize
+// one, since a real replacement's whole point is to live at a different
+// path than the pack it replaces.
+func (c *RigPackCoverageCheck) rigCoversPack(rigName, packDir, packName string, want []rigAlwaysSession) bool {
+	if rigHasPackDir(c.cfg.RigPackDirs, rigName, packDir) {
+		return true
+	}
+	for _, dir := range c.cfg.RigPackDirs[rigName] {
+		have, err := rigAlwaysSessions(dir)
+		if err != nil || len(have) == 0 {
+			continue
+		}
+		if have[0].packName != packName {
+			continue
+		}
+		if alwaysSessionTemplatesCovered(want, have) {
+			return true
+		}
+	}
+	return false
+}
+
+// alwaysSessionTemplatesCovered reports whether have declares at least
+// every template want requires. A same-named local replacement may add
+// extra sessions of its own; it just needs to keep the ones the city
+// pack's coverage check is tracking.
+func alwaysSessionTemplatesCovered(want, have []rigAlwaysSession) bool {
+	haveTemplates := make(map[string]bool, len(have))
+	for _, s := range have {
+		haveTemplates[s.template] = true
+	}
+	for _, s := range want {
+		if !haveTemplates[s.template] {
+			return false
+		}
+	}
+	return true
 }

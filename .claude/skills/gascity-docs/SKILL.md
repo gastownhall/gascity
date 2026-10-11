@@ -186,8 +186,9 @@ freshness test (`TestCLIDocsFreshness`) fails if they drift.
 Run the gates in [references/verification.md](references/verification.md). The
 durable repo gates are **`make check-docs`** (nav↔file + local markdown links),
 **`make diagrams-excalidraw`** (if you touched diagrams), `go run ./cmd/genschema`
-(if you touched generated docs), and **`make dashboard-check`** (if you touched
-`internal/api/`, the OpenAPI spec, or the dashboard). Beyond the gates: every TOML
+(if you touched generated docs), and **`make dashboard-ci`** (if you touched
+`internal/api/`, the OpenAPI spec, or the dashboard — `dashboard-check` alone
+does not catch a stale generated client). Beyond the gates: every TOML
 fence must parse, every internal link and anchor must resolve, no page is orphaned
 from the nav, and no body H1 was introduced. Preview on the live site with `make
 docs-dev` (or `./mint.sh dev`) at `localhost:3000`.

@@ -17,18 +17,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // shortTempDir returns a temp directory short enough for Unix socket paths
 // (macOS limit is 104 bytes). t.TempDir() paths often exceed this.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gc-t-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testutil.ShortTempDir(t, "gc-t-")
 }
 
 // newTestProvider creates an ACP provider with an isolated temp directory.
@@ -118,6 +114,85 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 
 	if !p.IsRunning(name) {
 		t.Error("IsRunning = false after Start, want true")
+	}
+}
+
+func TestStart_EmptyEnvOverrideIsAbsentFromAgent(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+	marker := filepath.Join(t.TempDir(), "env.txt")
+	command := `env | sort > "$GC_ENV_MARKER"; ` + fakeACPShellCommand()
+	p := newTestProvider(t)
+	name := testName()
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: command,
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DOLT_SERVER_HOST": "",
+			"BEADS_DIR":              "/selected/.beads",
+			"GC_ENV_MARKER":          marker,
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "BEADS_DB=") || strings.Contains(got, "BEADS_DOLT_SERVER_HOST=") {
+		t.Fatalf("withheld variables reached agent: %q", got)
+	}
+	if !strings.Contains(got, "BEADS_DIR=/selected/.beads\n") {
+		t.Fatalf("explicit environment did not reach agent: %q", got)
+	}
+}
+
+// The control-socket marker is provider-authoritative: FindRuntimesBySessionID
+// decides tracking from it, so a caller must not be able to set it (pointing
+// at a live listener to look tracked) or withhold it with the empty spelling
+// that withholds inherited variables.
+func TestStart_ControlSocketMarkerOutranksEnvOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		override string
+	}{
+		{name: "forged value", override: "/tmp/gc-forged-marker.sock"},
+		{name: "withheld", override: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "env.txt")
+			command := `env | sort > "$GC_ENV_MARKER"; ` + fakeACPShellCommand()
+			p := newTestProvider(t)
+			name := testName()
+			if err := p.Start(context.Background(), name, runtime.Config{
+				Command: command,
+				WorkDir: t.TempDir(),
+				Env: map[string]string{
+					controlSocketEnv: tt.override,
+					"GC_ENV_MARKER":  marker,
+				},
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(func() { _ = p.Stop(name) })
+
+			data, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(data)
+			want := controlSocketEnv + "=" + p.controlSocketMarker(name) + "\n"
+			if !strings.Contains(got, want) {
+				t.Fatalf("agent environment lacks the provider marker %q: %q", want, got)
+			}
+			if tt.override != "" && strings.Contains(got, tt.override) {
+				t.Fatalf("caller override %q reached agent: %q", tt.override, got)
+			}
+		})
 	}
 }
 
@@ -536,7 +611,7 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
@@ -556,7 +631,7 @@ func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)
-	sc.clearActivePrompt(42)
+	sc.abandonPrompt(42, errors.New("test abandon"))
 
 	select {
 	case ok := <-done:
@@ -1143,7 +1218,7 @@ func TestReadLoopDeath_ClearsBusyState(t *testing.T) {
 	}
 
 	// Simulate readLoop exit (calls drainPending).
-	sc.drainPending()
+	sc.drainPending(nil)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after drainPending")
@@ -1169,8 +1244,8 @@ func TestDrainPending_Idempotent(t *testing.T) {
 	sc.mu.Unlock()
 
 	// Call twice — should not panic on double-close.
-	sc.drainPending()
-	sc.drainPending() // second call should be a no-op
+	sc.drainPending(nil)
+	sc.drainPending(nil) // second call should be a no-op
 
 	if sc.isBusy() {
 		t.Error("should not be busy after double drain")
@@ -1279,7 +1354,7 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 
 	// sc.done is intentionally left open: if the new branch mis-routes
 	// non-pipe errors through the select, the call will hang until
-	// nudgePostWriteDrainTimeout and the test will fail.
+	// the configured stop grace and the test will fail.
 	done := make(chan error, 1)
 	go func() {
 		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
@@ -1295,5 +1370,22 @@ func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
+	}
+}
+
+// LL6, I24: acp is already fresh-only. A held name returns ErrSessionExists
+// with FreshOnly set, and the holder is neither replaced nor stopped. Kills a
+// recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{})
+	holder := &sessionConn{done: make(chan struct{})}
+	p.conns["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.conns["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
 	}
 }

@@ -2,7 +2,8 @@
 # gc dolt health — Lightweight Dolt data-plane health report.
 #
 # Checks server status and latency, per-database commit counts and open
-# beads, backup freshness, orphan databases, and zombie Dolt processes.
+# beads, backup freshness, orphan databases, active compaction quarantine
+# markers, and zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
 #              GC_DOLT_PASSWORD, GC_DOLT_RIG_LIST_TIMEOUT_SECS
@@ -10,6 +11,9 @@ set -e
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+# --json callers get a skip document rather than runtime.sh's plain line, so
+# this command handles the bd-owned proxied case itself (after flag parsing).
+GC_DOLT_PROXIED_HANDLED=1
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
 metadata_files() {
@@ -70,6 +74,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# bd owns this scope's Dolt lifecycle: nothing here is ours to probe.
+if [ "${GC_DOLT_SCOPE_BD_PROXIED:-0}" = "1" ]; then
+  if [ "$json_output" = true ]; then
+    print_proxied_skip_json
+  else
+    printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE"
+  fi
+  exit 0
+fi
+
 # Note: run_bounded / TIMEOUT_BIN are provided by assets/scripts/runtime.sh.
 
 # Determine host for probing.
@@ -92,18 +106,43 @@ now_ms() {
   esac
 }
 
-is_local_probe_host() {
-  case "$1" in
-    ""|0.0.0.0|127.*|localhost|::1|"[::1]") return 0 ;;
-    *) return 1 ;;
+# marker_epoch — convert an RFC3339 UTC timestamp (e.g. 2026-06-14T23:22:55Z)
+# to epoch seconds, portably across GNU and BSD date(1). Empty output on a
+# missing or unparseable timestamp so the caller can fall back to file mtime.
+marker_epoch() {
+  _ts="$1"
+  case "$_ts" in
+    ''|*[!0-9TZ:.+-]*) return 0 ;;
   esac
+  # GNU date parses the RFC3339 string directly; BSD/macOS date needs an
+  # explicit input format and the -j (do-not-set-clock) flag.
+  # Use `if` rather than `&&` so a failed date(1) doesn't set a non-zero
+  # exit status that would trigger `set -e` in the caller's subshell.
+  if _e=$(date -u -d "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  if _e=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_ts" +%s 2>/dev/null); then printf '%s' "$_e"; return 0; fi
+  return 0
+}
+
+# human_duration — format a whole-second count as a compact age string
+# (e.g. 12d3h, 5h2m, 7m1s, 9s). Used for compaction quarantine marker age.
+human_duration() {
+  _s="$1"
+  case "$_s" in ''|*[!0-9]*) printf '0s'; return ;; esac
+  _d=$((_s / 86400)); _h=$(((_s % 86400) / 3600))
+  _m=$(((_s % 3600) / 60)); _sec=$((_s % 60))
+  if [ "$_d" -gt 0 ]; then printf '%dd%dh' "$_d" "$_h"
+  elif [ "$_h" -gt 0 ]; then printf '%dh%dm' "$_h" "$_m"
+  elif [ "$_m" -gt 0 ]; then printf '%dm%ds' "$_m" "$_sec"
+  else printf '%ds' "$_sec"; fi
 }
 
 # Find dolt PID by port for local managed servers. External Dolt endpoints do
 # not listen on 127.0.0.1, so do not let the local TCP precheck suppress the
-# real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT.
+# real SQL ping to GC_DOLT_HOST:GC_DOLT_PORT. is_local_dolt_host is provided by
+# runtime.sh and shared with the status/logs commands.
 should_probe_sql=false
-if is_local_probe_host "$host"; then
+is_external=false
+if is_local_dolt_host "$host"; then
   pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
   if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
     server_running=true
@@ -111,6 +150,13 @@ if is_local_probe_host "$host"; then
     should_probe_sql=true
   fi
 else
+  # Configured external Dolt endpoint (non-local GC_DOLT_HOST). GC does not own
+  # a local managed process here, so server.running / server.pid keep their
+  # local-process defaults (false / 0). Reachability is decided by the SQL ping
+  # below and reported honestly via server.reachable + server.external — a
+  # reachable remote endpoint must not read as a downed local server
+  # (gastownhall/gascity su-deol8).
+  is_external=true
   should_probe_sql=true
 fi
 
@@ -155,74 +201,239 @@ trap 'rm -f "$_meta_cache" "$_zombie_scan_out"' EXIT
 # processes and wedging the health CLI. Query the running server via
 # SQL instead — it's the authoritative source, never deadlocks with
 # itself, and is cheap (dolt_log is indexed by commit hash).
-db_info=""
-if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
-  for d in "$data_dir"/*/; do
-    [ ! -d "$d/.dolt" ] && continue
-    name="$(basename "$d")"
-    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
-    # Reject names with anything outside [A-Za-z0-9_-] before interpolating
-    # into the SQL identifier. The first byte must still be alnum/underscore
-    # to avoid option-shaped names. Dolt permits directory names that shell
-    # basename happily returns (e.g. backticks, semicolons) but which
-    # would break out of the identifier and execute attacker-chosen SQL
-    # as the patrol user. Not an external-attack surface today — data
-    # directories are server-controlled — but fragile enough under
-    # config drift that it's worth skipping rather than probing.
-    case "$name" in
-      [A-Za-z0-9_]*)
-        case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
-        ;;
-      *) continue ;;
+
+# db_name_is_safe NAME — accept NAME only when its first byte is alnum/underscore
+# and every byte is in [A-Za-z0-9_-], before it is interpolated into a
+# backtick-quoted SQL identifier. Dolt derives names from directory names
+# (local) or returns them from SHOW DATABASES (external); either source could in
+# principle carry characters (backticks, semicolons, leading dashes) that break
+# out of the identifier and execute attacker-chosen SQL as the patrol user. Not
+# an external-attack surface today — the catalog is server-controlled — but
+# fragile enough under config drift that it is worth skipping rather than probing.
+db_name_is_safe() {
+  case "$1" in
+    [A-Za-z0-9_]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# db_commit_and_open_counts NAME — emit `NAME|commits|open_beads` by querying the
+# running server for NAME's commit count (dolt_log) and open-bead count (issues
+# WHERE status='open'). Both counts come from SQL against the live server: it is
+# authoritative, never deadlocks with an on-disk dolt client, and is cheap.
+# 0 on timeout, error, or a database without the table (a non-beads DB) — the
+# same fail-soft contract for every database so one bad DB never hangs the
+# report. Under managed Dolt the beads live in the server's `issues` table, not
+# an on-disk beads.jsonl (absent or stale), which the old file grep reported as
+# open_beads=0 for every live database (#3200). Extract the first fully-numeric
+# line rather than a fixed row so a future `USE`/warning banner cannot silently
+# collapse the count to 0.
+db_commit_and_open_counts() {
+  _name="$1"
+  _commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "USE \`$_name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
+  _commits=$(printf '%s\n' "$_commits_csv" | grep -E '^[0-9]+$' | head -1)
+  case "$_commits" in ''|*[!0-9]*) _commits=0 ;; esac
+  _open_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "USE \`$_name\`; SELECT COUNT(*) FROM issues WHERE status='open';" 2>/dev/null || true)
+  _open_beads=$(printf '%s\n' "$_open_csv" | grep -E '^[0-9]+$' | head -1)
+  case "$_open_beads" in ''|*[!0-9]*) _open_beads=0 ;; esac
+  printf '%s|%s|%s\n' "$_name" "$_commits" "$_open_beads"
+}
+
+# external_database_names — list user databases on a configured external Dolt
+# endpoint via SQL. The databases live on the remote server, so the on-disk
+# data-dir scan used for managed Dolt reports none (databases=[]); SHOW DATABASES
+# is the authoritative catalog for a remote endpoint (su-deol8). The CSV header
+# and system databases are filtered; unsafe identifiers are skipped.
+external_database_names() {
+  _show_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "SHOW DATABASES;" 2>/dev/null || true)
+  printf '%s\n' "$_show_csv" | while IFS= read -r _raw; do
+    _name=$(printf '%s' "$_raw" | tr -d '\r' | sed 's/^"//; s/"$//')
+    [ -n "$_name" ] || continue
+    [ "$_name" = "Database" ] && continue
+    case "$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')" in
+      information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) continue ;;
     esac
-    # Count commits via SQL (bounded). 0 on timeout or error — keep
-    # going rather than hang the whole report. Extract the first
-    # fully-numeric line rather than `sed -n '2p'`: future dolt builds
-    # may emit a status row for `USE` or a warning banner, in which
-    # case positional parsing silently collapses the count to 0 and the
-    # "empty repo" fallback masks the parse miss. Numeric-line grep
-    # gives a deterministic result or clearly-failed parse.
-    commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
-      -q "USE \`$name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
-    commits=$(printf '%s\n' "$commits_csv" | grep -E '^[0-9]+$' | head -1)
-    # JSON consumers require a number; use 0 on failure.
-    case "$commits" in
-      ''|*[!0-9]*) commits=0 ;;
-    esac
-    # Count open beads from the running server (authoritative). Under managed
-    # Dolt the beads live in the server's `issues` table, not an on-disk
-    # beads.jsonl — that file is absent or stale, so the old file grep reported
-    # open_beads=0 for every live database (#3200). 0 on timeout, error, or a
-    # database without an `issues` table (a non-beads DB) — same fail-soft
-    # contract as the commit count above.
-    open_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
-      -q "USE \`$name\`; SELECT COUNT(*) FROM issues WHERE status='open';" 2>/dev/null || true)
-    open_beads=$(printf '%s\n' "$open_csv" | grep -E '^[0-9]+$' | head -1)
-    case "$open_beads" in
-      ''|*[!0-9]*) open_beads=0 ;;
-    esac
-    db_info="$db_info$name|$commits|$open_beads
-"
+    db_name_is_safe "$_name" || continue
+    printf '%s\n' "$_name"
   done
+}
+
+db_info=""
+if [ "$server_reachable" = true ]; then
+  if [ "$is_external" = true ]; then
+    # External endpoint: enumerate databases from the reachable remote server
+    # via SQL, then count each. The on-disk scan below cannot see remote
+    # databases, so it would report databases=[] despite healthy SQL (su-deol8).
+    db_info=$(external_database_names | while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      db_commit_and_open_counts "$name"
+    done)
+  elif [ -d "$data_dir" ]; then
+    # Local managed Dolt: the on-disk data dir is authoritative for which
+    # databases exist. Scan it, then count each via SQL against the server.
+    for d in "$data_dir"/*/; do
+      [ ! -d "$d/.dolt" ] && continue
+      name="$(basename "$d")"
+      case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+      db_name_is_safe "$name" || continue
+      line=$(db_commit_and_open_counts "$name")
+      db_info="$db_info$line
+"
+    done
+  fi
 fi
 
 # Check backup freshness.
+#
+# Two unrelated artifacts have both been called "backups" in this report, and
+# the JSON field names promise the one the old probe did not read. The `dolt_*`
+# fields now measure the Dolt backup remotes under GC_BACKUP_ARTIFACT_DIR
+# (default $GC_CITY_PATH/.dolt-backup), which is what the backup order writes
+# and what an operator means when they ask whether the bead store is backed up.
+# The migration snapshots that `gc dolt rollback` restores live under
+# $GC_CITY_PATH/migration-backup-* and are still reported, now as `migration_*`.
+# Reading one and labelling it the other is why a city could run 18 hours with
+# no bead-store backup while this command printed nothing unusual.
+#
+# `dolt_measured` exists because the previous shape had no way to say "I did
+# not look". It initialised freshness to "", age to 0 and stale to false, then
+# skipped the block that would overwrite them whenever nothing was found, so a
+# probe that measured nothing rendered as a confident dolt_stale:false — the
+# one reading an operator must never get from a backup check. The flag is
+# spelled affirmatively so its zero value is the cautious claim, and dolt_stale
+# is null rather than false whenever nothing was measured.
+
+# Format an age in seconds the way this report has always formatted it.
+format_age() {
+  fa_sec="$1"
+  if [ "$fa_sec" -ge 3600 ]; then
+    printf '%dh%dm' "$((fa_sec / 3600))" "$((fa_sec % 3600 / 60))"
+  elif [ "$fa_sec" -ge 60 ]; then
+    printf '%dm%ds' "$((fa_sec / 60))" "$((fa_sec % 60))"
+  else
+    printf '%ds' "$fa_sec"
+  fi
+}
+
+path_mtime() {
+  pm_value=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
+  case "$pm_value" in
+    ''|*[!0-9]*) pm_value=0 ;;
+  esac
+  printf '%s' "$pm_value"
+}
+
+# Stale threshold for Dolt backup remotes. Defaults to twice the 6h backup
+# interval, matching mol-dog-doctor.sh so the two paths cannot disagree about
+# the same database; GC_DOCTOR_BACKUP_STALE_S is honoured for the same reason.
+backup_stale_after="${GC_HEALTH_BACKUP_STALE_S:-${GC_DOCTOR_BACKUP_STALE_S:-43200}}"
+case "$backup_stale_after" in
+  ''|*[!0-9]*) backup_stale_after=43200 ;;
+esac
+
+backup_artifact_dir="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+backup_measured=false
+backup_worst_seen=false
 backup_freshness=""
-backup_stale=false
+backup_stale=null
 backup_age_sec=0
+backup_db_list=""
+now=$(date +%s)
+
+# A database is backup-eligible when the artifact directory holds a
+# same-named subdirectory, which is where the backup order points every remote
+# it configures (file://$BACKUP_ARTIFACT_DIR/<db>). This costs no dolt call, so
+# it stays inside the patrol's fork budget. An eligible database whose
+# directory holds no manifest yet is measured and reported stale: never
+# having been backed up is a known-bad state, not an unknown one.
+#
+# The manifest's mtime is the age of the newest restorable backup. `dolt backup
+# sync` writes chunk data first and adopts it by rewriting the manifest last,
+# so a sync cut off in between leaves chunks newer than anything the manifest
+# references, and the newest file of any kind would date a backup that does
+# not exist.
+if [ -d "$backup_artifact_dir" ]; then
+  for bdir in "$backup_artifact_dir"/*/; do
+    [ -d "$bdir" ] || continue
+    bname="$(basename "$bdir")"
+    case "$(printf '%s' "$bname" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+    case "$bname" in
+      [A-Za-z0-9_]*)
+        case "$bname" in *[!A-Za-z0-9_-]*) continue ;; esac
+        ;;
+      *) continue ;;
+    esac
+    backup_measured=true
+    db_newest=0
+    [ -f "${bdir}manifest" ] && db_newest=$(path_mtime "${bdir}manifest")
+    if [ "$db_newest" -le 0 ]; then
+      db_age=-1
+      db_stale=true
+      db_fresh=""
+    else
+      db_age=$((now - db_newest))
+      [ "$db_age" -lt 0 ] && db_age=0
+      db_fresh=$(format_age "$db_age")
+      db_stale=false
+      [ "$db_age" -gt "$backup_stale_after" ] && db_stale=true
+    fi
+    backup_db_list="$backup_db_list$bname|$db_age|$db_fresh|$db_stale
+"
+    # The aggregate reports the WORST eligible database, so a single stale
+    # database can never be averaged away by a healthy sibling.
+    if [ "$db_stale" = true ]; then
+      backup_stale=true
+    elif [ "$backup_stale" = null ]; then
+      backup_stale=false
+    fi
+    # The age follows the same worst-first rule, which a plain `-gt` against a
+    # zero seed gets wrong in two directions. A database that has never
+    # produced a backup carries -1, and that is the worst state there is rather
+    # than the smallest number, so it has to win outright or the aggregate
+    # reports 0 for a city with no backup at all — the same confident zero from
+    # an unmeasured probe that this block exists to stop emitting. A genuine
+    # age of 0 also has to be able to seed the aggregate, or a database synced
+    # in the second the check runs reports the empty freshness of one that was
+    # never measured.
+    if [ "$backup_worst_seen" != true ]; then
+      backup_worst_seen=true
+      backup_age_sec="$db_age"
+      backup_freshness="$db_fresh"
+    elif [ "$backup_age_sec" -ge 0 ]; then
+      if [ "$db_age" -lt 0 ] || [ "$db_age" -gt "$backup_age_sec" ]; then
+        backup_age_sec="$db_age"
+        backup_freshness="$db_fresh"
+      fi
+    fi
+  done
+fi
+if [ "$backup_measured" != true ]; then
+  backup_age_sec=0
+  backup_freshness=""
+  backup_stale=null
+fi
+
+# Migration snapshots: what this block used to measure, under a name that says so.
+migration_measured=false
+migration_freshness=""
+migration_stale=null
+migration_age_sec=0
 newest_backup=$(ls -1d "$GC_CITY_PATH"/migration-backup-* 2>/dev/null | sort -r | head -1 || true)
 if [ -n "$newest_backup" ]; then
-  backup_mtime=$(stat -c %Y "$newest_backup" 2>/dev/null || stat -f %m "$newest_backup" 2>/dev/null || echo 0)
-  now=$(date +%s)
-  backup_age_sec=$((now - backup_mtime))
-  if [ "$backup_age_sec" -ge 3600 ]; then
-    backup_freshness="$((backup_age_sec / 3600))h$((backup_age_sec % 3600 / 60))m"
-  elif [ "$backup_age_sec" -ge 60 ]; then
-    backup_freshness="$((backup_age_sec / 60))m$((backup_age_sec % 60))s"
-  else
-    backup_freshness="${backup_age_sec}s"
-  fi
-  [ "$backup_age_sec" -gt 1800 ] && backup_stale=true
+  migration_measured=true
+  migration_mtime=$(path_mtime "$newest_backup")
+  migration_age_sec=$((now - migration_mtime))
+  [ "$migration_age_sec" -lt 0 ] && migration_age_sec=0
+  migration_freshness=$(format_age "$migration_age_sec")
+  migration_stale=false
+  [ "$migration_age_sec" -gt 1800 ] && migration_stale=true
 fi
 
 # Find orphan databases.
@@ -291,13 +502,62 @@ if [ -d "$data_dir" ]; then
   done
 fi
 
+# Detect active compaction quarantine markers.
+#
+# `gc dolt compact` writes a per-database marker under
+# $PACK_STATE_DIR/compact-quarantine/<db> when a post-flatten integrity probe
+# trips (value-hash drift, row-count change, etc. — see commands/compact/run.sh).
+# While a marker stands, auto-GC and scheduled compaction for that database are
+# blocked indefinitely until an operator clears it, so the working set can grow
+# unbounded and degrade the managed sql-server. Nothing else in this report
+# surfaces the marker, so a quarantine can sit unnoticed for many days
+# (gascity#3729). Scan filesystem-only — independent of server reachability,
+# since a wedged server may itself be a downstream symptom of the un-GC'd
+# bloat — and report each marker's db, reason, and age. The directory and
+# one-file-per-db key=value body layout mirror compact/run.sh exactly.
+quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
+quarantine_list=""
+quarantine_count=0
+if [ -d "$quarantine_dir" ]; then
+  for marker in "$quarantine_dir"/*; do
+    [ -f "$marker" ] || continue
+    q_db=$(basename "$marker")
+    # compact/run.sh writes transient files into this same directory:
+    # `mktemp "$dir/$db.tmp.XXXXXX"` (write_compact_marker) and
+    # `mktemp "$dir/$db.probe.XXXXXX"` (ensure_compact_marker_writable, run on
+    # EVERY flatten). Neither is a marker; reading one yields a phantom entry
+    # and a spurious exit 2.
+    case "$q_db" in *.tmp.*|*.probe.*) continue ;; esac
+    # Anchor each key to column 1 with index()==1 — the same reader idiom
+    # compact/run.sh uses; the substr offset skips the "reason="/"created_at="
+    # key (8 and 12 = key length + 1).
+    q_reason=$(awk 'index($0, "reason=") == 1 { print substr($0, 8); exit }' "$marker" 2>/dev/null || true)
+    q_created=$(awk 'index($0, "created_at=") == 1 { print substr($0, 12); exit }' "$marker" 2>/dev/null || true)
+    [ -n "$q_reason" ] || q_reason="unknown"
+    q_epoch=$(marker_epoch "$q_created")
+    if [ -z "$q_epoch" ]; then
+      q_epoch=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null || echo "")
+    fi
+    q_age_sec=0
+    if [ -n "$q_epoch" ]; then
+      q_now=$(date +%s)
+      q_age_sec=$((q_now - q_epoch))
+      [ "$q_age_sec" -lt 0 ] && q_age_sec=0
+    fi
+    quarantine_list="$quarantine_list$q_db|$q_reason|$q_age_sec
+"
+    quarantine_count=$((quarantine_count + 1))
+  done
+fi
+
 # Check for zombie dolt processes.
 # Use pgrep -x to match only processes named "dolt", then verify
 # each is actually running sql-server via ps. This avoids false
 # positives from processes that merely mention "dolt" in their args
 # (e.g., Claude sessions whose prompt text contains "dolt sql-server").
 #
-# Rig-local Dolt servers (configured via dolt.port in config.yaml)
+# Rig-local Dolt servers (configured via dolt.port in config.yaml, flat or
+# nested)
 # are legitimate — exclude any PID listening on a known rig port.
 #
 # Foreign Dolt servers (managed by OTHER cities on the same host) are
@@ -332,7 +592,7 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -f "$meta" ] || continue
     config_file="$(dirname "$meta")/config.yaml"
     [ -f "$config_file" ] || continue
-    rig_port=$(grep '^dolt\.port:' "$config_file" 2>/dev/null | sed "s/^dolt\\.port:[[:space:]]*//; s/[[:space:]]*#.*$//; s/['\\\"]//g; s/[[:space:]]*$//" | head -1)
+    rig_port=$(beads_config_value "$config_file" dolt.port)
     case "$rig_port" in ''|*[!0-9]*) continue ;; esac
     [ "$rig_port" = "$GC_DOLT_PORT" ] && continue
     rig_pid=$(managed_runtime_listener_pid "$rig_port" || true)
@@ -426,12 +686,19 @@ if [ "$json_output" = true ]; then
   # SELECT 1). Consumers should key health off
   # `server.reachable`, not `server.running`, because a process can
   # hold the port while its goroutines are wedged.
+  #
+  # `server.external` distinguishes a configured remote endpoint from a local
+  # managed server. For an external endpoint GC owns no local process, so
+  # `server.running` / `server.pid` are local-process defaults (false / 0) and
+  # MUST NOT be read as a downed server — a reachable remote endpoint is
+  # healthy at `server.reachable=true, server.external=true` (su-deol8).
   cat <<JSONEOF
 {
   "timestamp": "$timestamp",
   "server": {
     "running": $server_running,
     "reachable": $server_reachable,
+    "external": $is_external,
     "pid": $server_pid,
     "port": $GC_DOLT_PORT,
     "latency_ms": $server_latency
@@ -448,9 +715,28 @@ JSONEOF
 
   ],
   "backups": {
+    "dolt_measured": $backup_measured,
     "dolt_freshness": "$backup_freshness",
     "dolt_age_sec": $backup_age_sec,
-    "dolt_stale": $backup_stale
+    "dolt_stale": $backup_stale,
+    "migration_measured": $migration_measured,
+    "migration_freshness": "$migration_freshness",
+    "migration_age_sec": $migration_age_sec,
+    "migration_stale": $migration_stale,
+    "dolt_databases": [
+JSONEOF
+  first=true
+  echo "$backup_db_list" | while IFS='|' read -r b_name b_age b_fresh b_stale; do
+    [ -z "$b_name" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    # age_sec is -1 for an eligible database that has never produced a backup
+    # file; stale is true there, so no consumer reads -1 as a fresh age.
+    printf '      {"name": "%s", "age_sec": %s, "freshness": "%s", "stale": %s}' \
+      "$b_name" "$b_age" "$b_fresh" "$b_stale"
+  done
+  cat <<JSONEOF
+
+    ]
   },
   "orphans": [
 JSONEOF
@@ -459,6 +745,20 @@ JSONEOF
     [ -z "$name" ] && continue
     if [ "$first" = true ]; then first=false; else echo ","; fi
     printf '    {"name": "%s", "size": "%s"}' "$name" "$size"
+  done
+  cat <<JSONEOF
+
+  ],
+  "quarantine": [
+JSONEOF
+  first=true
+  echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
+    [ -z "$q_db" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    # db and reason both come from the filesystem; escape backslash then quote.
+    q_db_esc=$(printf '%s' "$q_db" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    q_reason_esc=$(printf '%s' "$q_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '    {"db": "%s", "reason": "%s", "age_sec": %s}' "$q_db_esc" "$q_reason_esc" "$q_age_sec"
   done
   cat <<JSONEOF
 
@@ -479,9 +779,16 @@ JSONEOF
   exit 0
 fi
 
-# Human-readable output.
+# Human-readable output. For a configured external endpoint GC owns no local
+# process, so report reachability of the remote server rather than the
+# local-process "not running" signal that would misread as a downed server
+# (su-deol8).
 if [ "$server_running" = true ]; then
   echo "Server: running (PID $server_pid, port $GC_DOLT_PORT, latency ${server_latency}ms)"
+elif [ "$is_external" = true ] && [ "$server_reachable" = true ]; then
+  echo "Server: external endpoint reachable ($host:$GC_DOLT_PORT, latency ${server_latency}ms)"
+elif [ "$is_external" = true ]; then
+  echo "Server: external endpoint unreachable ($host:$GC_DOLT_PORT)"
 else
   echo "Server: not running"
 fi
@@ -495,14 +802,35 @@ if [ -n "$db_info" ]; then
   done
 fi
 
-if [ -n "$backup_freshness" ]; then
-  stale=""
-  [ "$backup_stale" = true ] && stale=" [STALE]"
-  echo ""
-  echo "Backups: ${backup_freshness} ago${stale}"
+echo ""
+if [ "$backup_measured" = true ]; then
+  echo "Backups:"
+  echo "$backup_db_list" | while IFS='|' read -r b_name b_age b_fresh b_stale; do
+    [ -z "$b_name" ] && continue
+    if [ "$b_age" -lt 0 ]; then
+      echo "  $b_name: never backed up [STALE]"
+    elif [ "$b_stale" = true ]; then
+      echo "  $b_name: ${b_fresh} ago [STALE]"
+    else
+      echo "  $b_name: ${b_fresh} ago"
+    fi
+  done
 else
+  echo "Backups: not measured (no backup remotes under $backup_artifact_dir)"
+fi
+if [ "$migration_measured" = true ]; then
+  migration_stale_note=""
+  [ "$migration_stale" = true ] && migration_stale_note=" [STALE]"
+  echo "Migration snapshots: ${migration_freshness} ago${migration_stale_note}"
+fi
+
+if [ "$quarantine_count" -gt 0 ]; then
   echo ""
-  echo "Backups: none found"
+  echo "Compaction quarantine: $quarantine_count (auto-GC blocked)"
+  echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
+    [ -z "$q_db" ] && continue
+    echo "  $q_db: $q_reason (held $(human_duration "$q_age_sec"))"
+  done
 fi
 
 if [ "$orphan_count" -gt 0 ]; then
@@ -525,9 +853,19 @@ fi
 # process that isn't speaking MySQL. Stale backups, orphans, and
 # zombies are informational and do not fail the exit code.
 #
+# A standing compaction quarantine is the exception: auto-GC for that
+# database is blocked until an operator clears the marker, so it is a
+# real (if non-fatal) data-plane degradation. Signal it with a distinct
+# non-zero code (2) so CLI and CI callers can catch a blocked compaction
+# without conflating it with an unreachable server (1).
+#
 # JSON mode is unconditionally exit 0 (see above) — programmatic
-# consumers read `server.reachable` from the payload instead.
+# consumers read `server.reachable` and the `quarantine` array from the
+# payload instead.
 if [ "$server_reachable" = true ]; then
+  if [ "$quarantine_count" -gt 0 ]; then
+    exit 2
+  fi
   exit 0
 fi
 exit 1

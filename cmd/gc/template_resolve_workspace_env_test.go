@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -75,5 +76,37 @@ func TestResolveTemplateAgentEnvWinsOverWorkspaceEnv(t *testing.T) {
 	}
 	if got := tp.Env["GC_TARGET_BRANCH"]; got != "boylec/special" {
 		t.Errorf("GC_TARGET_BRANCH = %q, want %q (agent env must override workspace env)", got, "boylec/special")
+	}
+}
+
+func TestResolveTemplateDisablesProductMetricsForManagedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{Name: "worker", Env: map[string]string{
+		execenv.UsageMetricsDisableEnv: "0",
+		"BD_DISABLE_METRICS":           "leave-beads-alone",
+	}}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got := tp.Env[execenv.UsageMetricsDisableEnv]; got != execenv.UsageMetricsDisableValue {
+		t.Fatalf("%s = %q, want %q", execenv.UsageMetricsDisableEnv, got, execenv.UsageMetricsDisableValue)
+	}
+	if got := tp.Env["BD_DISABLE_METRICS"]; got != "leave-beads-alone" {
+		t.Fatalf("BD_DISABLE_METRICS = %q, want unchanged", got)
 	}
 }

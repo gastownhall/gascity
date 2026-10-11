@@ -92,6 +92,10 @@ func requestIDFromPayload(payload events.Payload) string {
 		return p.RequestID
 	case SessionSubmitSucceededPayload:
 		return p.RequestID
+	case RigCreateSucceededPayload:
+		return p.RequestID
+	case RigProvisionProgressPayload:
+		return p.RequestID
 	case RequestFailedPayload:
 		return p.RequestID
 	default:
@@ -113,10 +117,13 @@ func (s *Server) emitSessionCreateFailed(requestID, errorCode, errorMessage stri
 }
 
 // emitSessionMessageSucceeded records a request.result.session.message event.
-func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string) {
+func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome) {
 	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
-		RequestID: requestID,
-		SessionID: sessionID,
+		RequestID:          requestID,
+		SessionID:          sessionID,
+		Queued:             out.Queued,
+		WillStart:          out.willStart,
+		WillNotStartReason: out.willNotStartReason,
 	})
 }
 
@@ -126,16 +133,42 @@ func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage str
 }
 
 // emitSessionSubmitSucceeded records a request.result.session.submit event.
-func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, queued bool, intent string) {
+func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string) {
 	s.emitAsyncResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
-		RequestID: requestID,
-		SessionID: sessionID,
-		Queued:    queued,
-		Intent:    intent,
+		RequestID:          requestID,
+		SessionID:          sessionID,
+		Queued:             out.Queued,
+		Intent:             intent,
+		WillStart:          out.willStart,
+		WillNotStartReason: out.willNotStartReason,
 	})
 }
 
 // emitSessionSubmitFailed records a request.failed event for session.submit.
 func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage string) {
 	s.emitRequestFailed(requestID, RequestOperationSessionSubmit, errorCode, errorMessage)
+}
+
+// emitRigCreateSucceeded records a request.result.rig.create event — the
+// terminal success of an async server-side rig add.
+func (s *Server) emitRigCreateSucceeded(requestID, rig, prefix, defaultBranch string) {
+	s.emitAsyncResult(events.RequestResultRigCreate, rig, RigCreateSucceededPayload{
+		RequestID:     requestID,
+		Rig:           rig,
+		Prefix:        prefix,
+		DefaultBranch: defaultBranch,
+	})
+}
+
+// emitRigProvisionProgress records a rig.provision.progress event for one
+// provisioning step. It is best-effort telemetry: the caller wraps it in a
+// recover so an event-bus hiccup never fails a rig add.
+func (s *Server) emitRigProvisionProgress(requestID, rig, step, detail string, warn bool) {
+	s.emitAsyncResult(events.RigProvisionProgress, rig, RigProvisionProgressPayload{
+		RequestID: requestID,
+		Rig:       rig,
+		Step:      step,
+		Detail:    detail,
+		Warn:      warn,
+	})
 }

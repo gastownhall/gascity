@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -131,7 +133,7 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 		return startResult{
 			prepared: preparedStart{
 				candidate: startCandidate{
-					session: session,
+					info: seedSessionInfo(*session),
 					tp: TemplateParams{
 						SessionName:  "sky",
 						TemplateName: "helper",
@@ -193,6 +195,389 @@ func TestCommitStartResult_RecordsAgentStartMetric(t *testing.T) {
 			t.Fatalf("gc.agent.starts.total datapoints = %+v, want none when the durable commit failed", points)
 		}
 	})
+}
+
+// TestCommitStartFailure_DoesNotDuplicateFailedStartMetricAcrossBranches pins that
+// every failure arm of commitStartFailure — terminal provider error,
+// rate-limit hold, and the generic wake-failure fallthrough (the
+// rollback-pending arm, the actual trust-dialog-abort shape, is covered
+// end-to-end by
+// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
+// below) — records gc.agent.starts.total exactly once with status="error".
+// The RecordAgentStart call sits unconditionally at the top of
+// commitStartFailure, before any of these branches fork, so no single arm
+// can skip it or fire it twice; this test guards that invariant directly
+// against each branch instead of relying on it by code inspection.
+func TestCommitStartFailure_DoesNotDuplicateFailedStartMetricAcrossBranches(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	newSession := func(t *testing.T, store beads.Store) *beads.Bead {
+		t.Helper()
+		session, err := store.Create(beads.Bead{
+			Title:  "helper",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name": "sky",
+				"state":        "creating",
+			},
+		})
+		if err != nil {
+			t.Fatalf("store.Create: %v", err)
+		}
+		return &session
+	}
+	failResult := func(session *beads.Bead, err error, rollbackPending, rateLimitScreen bool) startResult {
+		return startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					info: seedSessionInfo(*session),
+					tp: TemplateParams{
+						SessionName:  "sky",
+						TemplateName: "helper",
+					},
+				},
+			},
+			err:             err,
+			outcome:         "failed",
+			rollbackPending: rollbackPending,
+			rateLimitScreen: rateLimitScreen,
+		}
+	}
+	assertSingleFailedStart := func(t *testing.T, reader *sdkmetric.ManualReader) {
+		t.Helper()
+		points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
+		if len(points) != 1 {
+			t.Fatalf("gc.agent.starts.total datapoints = %+v, want exactly 1 (no duplicate, no drop)", points)
+		}
+		if points[0].Value != 1 {
+			t.Fatalf("gc.agent.starts.total value = %d, want 1", points[0].Value)
+		}
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "helper", "status": "error"}) {
+			t.Fatalf("gc.agent.starts.total has no datapoint with agent=helper status=error: %+v", points)
+		}
+	}
+
+	t.Run("terminal provider error records exactly one failed start", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := beads.NewMemStore()
+		session := newSession(t, store)
+		result := failResult(session, errors.New("insufficient_quota: account over limit"), false, false)
+		if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false on failure")
+		}
+		assertSingleFailedStart(t, reader)
+	})
+
+	t.Run("rate-limit hold records exactly one failed start", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := beads.NewMemStore()
+		session := newSession(t, store)
+		result := failResult(session, errors.New("rate limited"), false, true)
+		if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false on failure")
+		}
+		assertSingleFailedStart(t, reader)
+	})
+
+	t.Run("generic wake failure records exactly one failed start", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		store := beads.NewMemStore()
+		session := newSession(t, store)
+		result := failResult(session, errors.New("start failed: connection refused"), false, false)
+		if commitStartResult(result, sessionFrontDoor(store), clk, events.NewFake(), 0, ioDiscard{}, ioDiscard{}) {
+			t.Fatal("commitStartResult returned true, want false on failure")
+		}
+		assertSingleFailedStart(t, reader)
+	})
+}
+
+// TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric extends
+// TestExecutePreparedStartWave_RecyclesZombieSession (session_lifecycle_parallel_test.go):
+// recycling a zombie session (pane up, agent process dead — the shape a
+// folder-trust-dialog abort leaves behind for the next retry to find) during
+// a start retry must increment gc.agent.crashes.total. The raw sp.Stop() call
+// in that recycle branch previously recorded nothing; this is recorded as a
+// crash rather than a stop because gc did not deliberately shut down a live
+// agent here — it discovered and cleared wreckage the agent process's own
+// exit left behind, the same condition the steady-state reconciler's zombie
+// detector already classifies as a crash.
+func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *testing.T) {
+	city := t.TempDir()
+	reader := installManualMetricReader(t)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	sp.Zombies["test-agent"] = true
+	item := preparedStart{
+		candidate: startCandidate{
+			info: sessionpkg.Info{
+				ID:                  "gc-102",
+				SessionName:         "test-agent",
+				SessionNameMetadata: "test-agent",
+				Template:            "worker",
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWaveForCity(
+		context.Background(),
+		[]preparedStart{item},
+		city,
+		sp,
+		nil,
+		nil,
+		10*time.Second,
+		1,
+	)
+	if len(results) != 1 || results[0].err != nil {
+		t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.crashes.total")
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker"}) {
+		t.Fatalf("gc.agent.crashes.total has no datapoint with agent=worker: %+v", points)
+	}
+}
+
+// TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric pins the
+// two zombie-recycle shapes that must not increment gc.agent.crashes.total: a
+// pane showing a provider rate-limit screen (mirrors the steady-state zombie
+// detector's exclusion), and a recycle whose Stop fails (the start retries,
+// so recording before the Stop would count the same zombie once per retry).
+func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *testing.T) {
+	city := t.TempDir()
+	newZombie := func(t *testing.T) (*runtime.Fake, preparedStart) {
+		t.Helper()
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+			t.Fatalf("Start existing session: %v", err)
+		}
+		sp.Zombies["test-agent"] = true
+		return sp, preparedStart{
+			candidate: startCandidate{
+				info: sessionpkg.Info{
+					ID:                  "gc-102",
+					SessionName:         "test-agent",
+					SessionNameMetadata: "test-agent",
+					Template:            "worker",
+				},
+				tp: TemplateParams{
+					Command:      "claude",
+					SessionName:  "test-agent",
+					TemplateName: "worker",
+				},
+			},
+			cfg: runtime.Config{
+				Command:      "claude",
+				ProcessNames: []string{"claude"},
+			},
+		}
+	}
+
+	t.Run("rate-limit screen is not a crash", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp, item := newZombie(t)
+		sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
+
+		results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
+		if len(results) != 1 || results[0].err != nil {
+			t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
+		}
+		if points := collectCounterDataPoints(t, reader, "gc.agent.crashes.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.crashes.total datapoints = %+v, want none for a rate-limit screen", points)
+		}
+	})
+
+	t.Run("failed stop records no crash", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp, item := newZombie(t)
+		sp.StopErrors["test-agent"] = errors.New("stop failed")
+
+		results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, city, sp, nil, nil, 10*time.Second, 1)
+		if len(results) != 1 || results[0].err == nil {
+			t.Fatalf("expected 1 failed result when the zombie recycle Stop fails, got %+v", results)
+		}
+		if points := collectCounterDataPoints(t, reader, "gc.agent.crashes.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.crashes.total datapoints = %+v, want none when the recycle Stop fails", points)
+		}
+	})
+}
+
+// TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric verifies that killing
+// a runtime session left over from a superseded async start (a different
+// session generation/instance_token now owns the pending create) increments
+// gc.agent.stops.total with reason "stale-async-start" — a second raw
+// sp.Stop() call that previously recorded nothing. Unlike the zombie-recycle
+// crash above, this is a deliberate stop: the runtime may still be alive and
+// fine, it is simply no longer wanted.
+func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
+	const sessionName = "sky"
+	const identity = "helper"
+
+	t.Run("matching stale runtime records the stop", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if err := sp.SetMeta(sessionName, "GC_INSTANCE_TOKEN", "tok-1"); err != nil {
+			t.Fatalf("SetMeta: %v", err)
+		}
+		result := startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{
+						ID:                  "gc-stale-1",
+						SessionNameMetadata: sessionName,
+						InstanceToken:       "tok-1",
+					},
+					tp: TemplateParams{TemplateName: identity},
+				},
+			},
+		}
+		var stderr bytes.Buffer
+		stopStaleAsyncStartRuntime(result, sp, &stderr)
+
+		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
+		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "stale-async-start", "status": "ok"}) {
+			t.Fatalf("gc.agent.stops.total has no datapoint with agent=%s reason=stale-async-start status=ok: %+v", identity, points)
+		}
+	})
+
+	t.Run("no matching stale runtime records nothing", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		sp := runtime.NewFake()
+		// No sp.Start for sessionName here, so the identity/token match in
+		// attributePendingCreateRuntime fails on its own terms
+		// (rather than short-circuiting on a blank info.ID as the guard above
+		// would) — this exercises the "found a runtime but it isn't the one
+		// this pending create owns" branch, not the trivial empty-ID guard.
+		result := startResult{
+			prepared: preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{
+						ID:                  "gc-stale-2",
+						SessionNameMetadata: sessionName,
+						InstanceToken:       "tok-1",
+					},
+					tp: TemplateParams{TemplateName: identity},
+				},
+			},
+		}
+		var stderr bytes.Buffer
+		stopStaleAsyncStartRuntime(result, sp, &stderr)
+
+		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
+			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when there is no matching stale runtime to stop", points)
+		}
+	})
+}
+
+// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric
+// pins that a session start that dies before creation_complete on the
+// rollback-pending arm of commitStartFailure (the shape produced by a repeated
+// provider start error, e.g. a folder-trust-dialog abort) still increments
+// gc.agent.starts.total with status="error" instead of silently dropping the
+// failure. Drives the exact fixture from
+// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError through the
+// real reconciler so this pins the production code path, not just the
+// helper.
+func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError_RecordsFailedStartMetric(t *testing.T) {
+	reader := installManualMetricReader(t)
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	sp.StartErrors = map[string]error{"sky": fmt.Errorf("start failed")}
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"sky": {
+			Command:      "test-cmd",
+			SessionName:  "sky",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "helper",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "test-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), t.TempDir(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"helper": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "helper", "status": "error"}) {
+		t.Fatalf("gc.agent.starts.total has no datapoint with agent=helper status=error: %+v", points)
+	}
+}
+
+// TestCommitStartResult_SuccessDoesNotDuplicateStartMetric guards against a
+// regression where commitStartFailure's new failure-path RecordAgentStart
+// call (added alongside the fix above) could also fire on the success path
+// and double-count gc.agent.starts.total. commitStartFailure is only ever
+// reached from the `result.err != nil` branch of commitStartResultTraced,
+// which returns before falling through to the success tail, so the two call
+// sites are structurally exclusive; this test pins that behavior against a
+// real successful reconcile tick rather than relying on that invariant
+// staying true by inspection alone.
+func TestCommitStartResult_SuccessDoesNotDuplicateStartMetric(t *testing.T) {
+	reader := installManualMetricReader(t)
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+
+	points := collectCounterDataPoints(t, reader, "gc.agent.starts.total")
+	if len(points) != 1 {
+		t.Fatalf("gc.agent.starts.total datapoints = %+v, want exactly 1 (success must not also trip the failure-path counter)", points)
+	}
+	if points[0].Value != 1 {
+		t.Fatalf("gc.agent.starts.total value = %d, want 1 (no duplicate increment on a single successful start)", points[0].Value)
+	}
+	if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "worker", "status": "ok"}) {
+		t.Fatalf("gc.agent.starts.total has no datapoint with agent=worker status=ok: %+v", points)
+	}
+	if hasDataPointWithStringAttrs(points, map[string]string{"status": "error"}) {
+		t.Fatalf("gc.agent.starts.total must not carry a status=error datapoint on a successful start: %+v", points)
+	}
 }
 
 // TestStopTargetsBounded_RecordsAgentStopMetric verifies both emission
@@ -271,7 +656,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 	finalize := func(t *testing.T, rec events.Recorder) *sdkmetric.ManualReader {
 		t.Helper()
 		reader := installManualMetricReader(t)
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
 		// createSessionBead ties agent_name to the session name; override it so
@@ -285,13 +670,18 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		}
 		session.Metadata = patch.Apply(session.Metadata)
 
-		finalizeDrainAckStoppedSession(
-			"", env.cfg, env.store, nil, &session, sessionpkg.InfoFromPersistedBead(session), identity, true,
+		result := finalizeDrainAckStoppedSession(
+			env.city, env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
 			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr,
 		)
 
-		if session.Status != "closed" {
-			t.Fatalf("session status = %q, want closed (fixture must reach the recordStopped path)", session.Status)
+		// W-tick dropped the raw session.Status="closed" mirror; the close is now
+		// carried by the store write AND the result's MarkClosed fold (result.closed).
+		if got, err := env.store.Get(session.ID); err != nil || got.Status != "closed" {
+			t.Fatalf("store session status = %q (err %v), want closed (fixture must reach the recordStopped path)", got.Status, err)
+		}
+		if !result.applyTo(sessiontest.SeedBead(t, session)).Closed {
+			t.Fatalf("drain-ack result fold not Closed; the recordStopped path must MarkClosed the snapshot")
 		}
 		return reader
 	}
@@ -320,6 +710,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 // with the qualified agent identity resolved from the session bead, not the
 // sanitized runtime session name.
 func TestDoHandoffRemote_RecordsAgentStopMetric(t *testing.T) {
+	city := t.TempDir()
 	const sessionName = "gascity--gc__worker" // sanitized runtime session name
 	const identity = "gascity/gc.worker"      // qualified agent identity
 	reader := installManualMetricReader(t)
@@ -343,8 +734,8 @@ func TestDoHandoffRemote_RecordsAgentStopMetric(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHandoffRemote(store, store, rec, sp, sessionName, sessionName, "sender",
-		[]string{"Context refresh", "body"}, &stdout, &stderr)
+	code := doHandoffRemoteWithForce(city, store, store, rec, sp, sessionName, sessionName, "sender",
+		[]string{"Context refresh", "body"}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -416,7 +807,8 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gascity--gc__worker",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -438,7 +830,8 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "worker-1",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] != "" {
 			t.Fatal("fixture must not quarantine below threshold")
@@ -457,7 +850,8 @@ func TestRecordWakeFailure_QuarantineRecordsMetric(t *testing.T) {
 			"session_name":  "gc-city-dog-1",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		syncBeadFromStore(&session, store)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.quarantines.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "dog-1"}) {
@@ -482,7 +876,8 @@ func TestRecordChurn_QuarantineRecordsMetric(t *testing.T) {
 		"session_name": "gascity--gc__worker",
 	})
 
-	recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
 
 	if session.Metadata["quarantined_until"] == "" {
 		t.Fatal("fixture must quarantine at max churn cycles")
@@ -550,13 +945,13 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 
 	lis, err := startControllerSocket(
 		cityDir,
+		controllerHostingStandalone,
 		func() {},
 		nil,
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
@@ -602,10 +997,17 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 // same store fails first), so this helper-level test is the only way to pin
 // it.
 func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
+	// The fixtures below are deliberately degraded (empty ID / no session type),
+	// so they cannot round-trip through a store double — the front door would
+	// reject them. They are built as session.Info struct literals directly.
+	// recordSessionKillStop reads only SessionNameMetadata and the agent-identity
+	// fields (AgentName / "agent:" Labels / Template / PoolSlot), never
+	// Info.SessionName, so leaving SessionName zero is intentional and
+	// outcome-identical to the former InfoFromPersistedBead projection.
 	t.Run("bead load failure records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{}), errors.New("store unavailable"), nil)
+		recordSessionKillStop(sessionpkg.Info{}, errors.New("store unavailable"), nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the bead failed to load", points)
@@ -615,7 +1017,7 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("empty session name records nothing", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{"session_name": "  "}}), nil, nil)
+		recordSessionKillStop(sessionpkg.Info{SessionNameMetadata: "  "}, nil, nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none for a blank session name", points)
@@ -625,10 +1027,10 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 	t.Run("loaded bead records the stop", func(t *testing.T) {
 		reader := installManualMetricReader(t)
 
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{
-			"session_name": "gascity--gc__worker",
-			"agent_name":   "gascity/gc.worker",
-		}}), nil, nil)
+		recordSessionKillStop(sessionpkg.Info{
+			SessionNameMetadata: "gascity--gc__worker",
+			AgentName:           "gascity/gc.worker",
+		}, nil, nil)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": "gascity/gc.worker", "reason": "killed", "status": "ok"}) {
@@ -646,9 +1048,9 @@ func TestRecordSessionKillStop_SkipOnUnknown(t *testing.T) {
 		// or template passes the session-name guard yet resolves to an empty
 		// agent identity. The RecordAgentStop backstop must drop it so the
 		// counter is never polluted with a blank, unjoinable agent series.
-		recordSessionKillStop(sessionpkg.InfoFromPersistedBead(beads.Bead{Metadata: map[string]string{
-			"session_name": "gascity--gc__worker",
-		}}), nil, nil)
+		recordSessionKillStop(sessionpkg.Info{
+			SessionNameMetadata: "gascity--gc__worker",
+		}, nil, nil)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when the agent identity resolves empty", points)
@@ -681,7 +1083,7 @@ func TestReconcileSessionBeads_RecordsReconcileCycleMetric(t *testing.T) {
 
 	t.Run("completed tick records the cycle", func(t *testing.T) {
 		reader := installManualMetricReader(t)
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 
 		env.reconcile(nil)
 
@@ -690,14 +1092,15 @@ func TestReconcileSessionBeads_RecordsReconcileCycleMetric(t *testing.T) {
 
 	t.Run("canceled context still records the cycle", func(t *testing.T) {
 		reader := installManualMetricReader(t)
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		reconcileSessionBeads(
-			ctx, nil, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
-			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{},
+		reconcileSessionBeadsAtPath(
+			ctx, env.city, nil, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+			env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{},
 			false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+			withAsyncDrainAckStopTracker(env.stops),
 		)
 
 		assertCycleRecorded(t, reader)
@@ -841,7 +1244,7 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 	const sessionName = "gascity--gc__worker"
 	const identity = "gascity/gc.worker"
 	reader := installManualMetricReader(t)
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 
 	session := env.createSessionBead(sessionName, identity)
@@ -859,13 +1262,15 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 		t.Fatalf("pre-closing the bead to force the witness branch: %v", err)
 	}
 
-	finalizeDrainAckStoppedSession(
-		"", env.cfg, env.store, nil, &session, sessionpkg.InfoFromPersistedBead(session), identity, true,
+	result := finalizeDrainAckStoppedSession(
+		env.city, env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
 		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr,
 	)
 
-	if session.Status != "closed" {
-		t.Fatalf("session status = %q, want closed (fixture must reach the witness branch)", session.Status)
+	// W-tick dropped the raw session.Status="closed" mirror; the witness close is
+	// carried by result.witnessInfo (Closed), which applyTo folds onto the snapshot.
+	if !result.applyTo(sessiontest.SeedBead(t, session)).Closed {
+		t.Fatalf("witness-branch result fold not Closed; the witness path must fold the authoritative closed Info")
 	}
 	if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 		t.Fatalf("gc.agent.stops.total datapoints = %+v, want none on the witness branch", points)
@@ -892,7 +1297,8 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-dog-3-legacy",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -919,7 +1325,8 @@ func TestRecordWakeFailure_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name":  "s-fenrir-legacy",
 		})
 
-		recordWakeFailure(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max attempts")
@@ -950,7 +1357,8 @@ func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name": "s-dog-3-legacy",
 		})
 
-		recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max churn cycles")
@@ -977,7 +1385,8 @@ func TestRecordChurn_QuarantineLegacyPooledIdentity(t *testing.T) {
 			"session_name": "s-wolf-legacy",
 		})
 
-		recordChurn(&session, sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		recordChurn(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, cfg))
+		syncBeadFromStore(&session, store)
 
 		if session.Metadata["quarantined_until"] == "" {
 			t.Fatal("fixture must quarantine at max churn cycles")

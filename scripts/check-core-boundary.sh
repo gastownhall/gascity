@@ -26,6 +26,14 @@
 #       the check the `org_` grep (b) cannot see: a workspace-id / user-id / email
 #       context threaded into core would sail past (b). INERT until the OpenFeature
 #       dependency lands in core (Phase 1) — wired now so it bites the moment it does.
+#   (f) a commercial-semantics JSON field (trial/billing/credit/plan/invoice/
+#       subscription/quota/coupon/entitlement) appears in a wire struct on the
+#       hosted-service surface (internal/cliauth, internal/serviceproto, the
+#       gc login/whoami commands). The structural checks above cannot see a
+#       commercial FIELD in a generic-looking wire type; account/commercial
+#       policy must travel only in the opaque message/links fields the CLI prints
+#       verbatim (service-protocol-v0 §5). Annotate a benign line with
+#       `// boundary:allow commercial`.
 #
 # FAILS CLOSED: if a check cannot evaluate (e.g. go.mod is unreadable), that is a
 # violation, not a pass. A guard that silently passes when it cannot evaluate
@@ -33,8 +41,8 @@
 #
 # REQUIRED / BLOCKING as of the Phase-0 promotion (feature-flag ADR Resolved
 # decision 1; operator-authorized 2026-07-05). The baseline was verified clean on
-# origin/main before the flip. It runs as a blocking step in preflight-static — a
-# violation fails the check and blocks the merge.
+# origin/main before the flip. It runs as //scripts:check_core_boundary_test in
+# the required Bazel lane — a violation fails the check and blocks the merge.
 set -uo pipefail # intentionally NOT -e: run every check and aggregate.
 
 # Known commercial module paths that must never appear in the OSS module.
@@ -44,10 +52,70 @@ COMMERCIAL_MODULES="github.com/gastownhall/gascity-hosted"
 failed=0
 note() { echo "check-core-boundary: $*" >&2; }
 
-# Non-test core .go surface (whole module tree minus vendor/testdata/tests).
+# Non-test core .go surface: TRACKED .go files only (vendor/testdata
+# excluded), never an untracked directory. Scanning `git ls-files` instead of
+# walking the working tree means any in-tree Go build-cache or artifact
+# directory is invisible to the scan regardless of its name — the prior
+# --exclude-dir=vendor --exclude-dir=testdata walk false-positived on
+# third-party module sources under a project-local GOMODCACHE (the GitLab CI
+# convention is $CI_PROJECT_DIR/.cache/go-mod, but any in-tree cache layout
+# hit the same bug; gascity#4479).
+#
+# The surface is enumerated ONCE, here, and NUL-delimited so that a tracked
+# path containing whitespace survives the hand-off to grep. Enumeration fails
+# CLOSED per this script's header contract: if the tracked set cannot be
+# listed at all, that is a violation, not a pass.
+CORE_GO_LIST=$(mktemp "${TMPDIR:-/tmp}/ccb-gofiles.XXXXXX") || exit 1
+CORE_GO_RAW=$(mktemp "${TMPDIR:-/tmp}/ccb-gofiles-raw.XXXXXX") || exit 1
+trap 'rm -f "$CORE_GO_LIST" "$CORE_GO_RAW"' EXIT
+
+#
+# --declared-tree (the Bazel sh_test, //scripts:check_core_boundary_test)
+# scans every .go file under the working directory instead. There Bazel
+# builds that directory from exactly the declared source tree (runfiles
+# symlinks, followed), so the untracked-cache hazard cannot arise and there
+# is no git work tree to ask. An empty tree means the inputs were not wired
+# and fails closed.
+declared_tree=0
+case "${1:-}" in
+"") ;;
+--declared-tree) declared_tree=1 ;;
+*)
+	note "usage: $0 [--declared-tree]"
+	exit 2
+	;;
+esac
+
+if [ "$declared_tree" -eq 1 ]; then
+	if ! find -L . -name '*.go' -type f -print0 >"$CORE_GO_RAW"; then
+		note "BLOCKED — cannot enumerate the declared .go tree (fail-closed)"
+		failed=1
+	elif [ ! -s "$CORE_GO_RAW" ]; then
+		note "BLOCKED — the declared tree holds no .go files; inputs are not wired (fail-closed)"
+		failed=1
+	fi
+elif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	note "BLOCKED — not a git work tree; cannot enumerate the tracked .go surface (fail-closed)"
+	failed=1
+elif ! git ls-files -z -- '*.go' >"$CORE_GO_RAW" 2>/dev/null; then
+	note "BLOCKED — git ls-files failed; cannot enumerate the tracked .go surface (fail-closed)"
+	failed=1
+fi
+if [ "$failed" -eq 0 ]; then
+	while IFS= read -r -d '' f; do
+		case "$f" in
+		vendor/* | */vendor/* | testdata/* | */testdata/* | *_test.go) continue ;;
+		esac
+		printf '%s\0' "$f"
+	done <"$CORE_GO_RAW" >"$CORE_GO_LIST"
+fi
+
+# scan <regex>: grep the pre-enumerated core surface. -H is mandatory — a
+# single-file xargs batch would otherwise omit the filename, stripping the
+# location from every BLOCKED report.
 scan() {
-	grep -rn --include='*.go' --exclude-dir=vendor --exclude-dir=testdata "$1" . 2>/dev/null \
-		| grep -v '_test\.go:'
+	[ -s "$CORE_GO_LIST" ] || return 0
+	xargs -0 grep -Hn -e "$1" <"$CORE_GO_LIST" 2>/dev/null
 }
 
 # (a) source-level import of a commercial module. This is a source-level HINT
@@ -115,6 +183,30 @@ if [ -n "$evalctx$evalctx_lit" ]; then
 	note "  Core must evaluate flags with an EMPTY context; per-tenant targeting is hosted-only."
 	note "  Use NewEvaluationContext(\"\", nil), or annotate a benign line with '// boundary:allow evalctx':"
 	printf '%s\n' "$evalctx" "$evalctx_lit" | grep -v '^$' >&2
+	failed=1
+fi
+
+# (f) commercial-semantics wire field on the hosted-service surface. Scoped to the
+# onboarding packages/files so it targets the exact leak (a commercial field in a
+# generic wire struct) without false-positiving on unrelated core code. Matches a
+# json struct tag whose key carries account/commercial semantics; a genuinely
+# benign line is annotated with `// boundary:allow commercial`.
+COMMERCIAL_SURFACE="internal/cliauth internal/serviceproto cmd/gc/cmd_login.go"
+COMMERCIAL_FIELD_RE='json:"[^"]*(trial|billing|credit|plan|invoice|subscription|quota|coupon|entitlement)'
+commercial_fields=""
+for p in $COMMERCIAL_SURFACE; do
+	[ -e "$p" ] || continue
+	hits=$(grep -RnE --include='*.go' "$COMMERCIAL_FIELD_RE" "$p" 2>/dev/null \
+		| grep -v '_test\.go:' | grep -v 'boundary:allow commercial')
+	if [ -n "$hits" ]; then
+		commercial_fields="${commercial_fields}${hits}"$'\n'
+	fi
+done
+commercial_fields=$(printf '%s' "$commercial_fields" | grep -v '^$')
+if [ -n "$commercial_fields" ]; then
+	note "BLOCKED (f) — commercial-semantics wire field on the hosted-service surface."
+	note "  Account/commercial policy must travel only in opaque message/links (service-protocol-v0 §5):"
+	printf '%s\n' "$commercial_fields" >&2
 	failed=1
 fi
 

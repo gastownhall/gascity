@@ -2,7 +2,7 @@
 title: "Dispatch (Sling)"
 ---
 
-> Last verified against code: 2026-05-21
+> Last verified against code: 2026-07-11
 
 ## Summary
 
@@ -159,12 +159,21 @@ resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
 canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
 the temporary migration predicate reads `gc.run_target=<target>` only on
 `gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
-work-query form appends `--sort oldest --limit=1` to the canonical probe
-and prints the first match, then filters the migration probe to roots with
-empty `gc.routed_to`. That is an intentional routed-queue policy:
-unassigned routed pool work is FIFO before priority, so newer
-high-priority work does not jump ahead of older ready work already queued
-for the same target. The count form unions canonical and migration
+work-query form appends `--limit=20` to the canonical probe and serves the
+head of the reader's canonical (priority, created_at, id) default order,
+then filters the migration probe to roots with empty `gc.routed_to`. The
+routed-queue policy is priority-first, FIFO within a priority band: the
+created_at term keeps same-priority work in arrival order, and the
+canonical order is what both readers already default to (`bd ready`'s
+default `--sort priority`; the federated reader's merged
+`beads.SortBeadsReadyOrder`). The previous policy pinned `--sort oldest`
+(strict FIFO across priorities) so newer high-priority work could not jump
+older queued work — but combined with the bounded window it made the claim
+tier priority-blind in the strong sense: a routed high-priority bead behind
+more than the window of older rows was never served at all until the older
+rows drained (measured on a live 14-seat city: 13 P0 rows unreachable
+behind 34 older rows for hours). The migration fallback keeps
+`--sort oldest` for its retirement window. The count form unions canonical and migration
 probes and deduplicates by bead ID before piping through `jq 'length'`.
 Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
@@ -259,8 +268,8 @@ regressions.
     `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
     worker and reconciler must also share the temporary migration predicate
     for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
-    `gc.routed_to`; only the worker's first-row form adds native
-    `bd ready --sort oldest --limit=1` selection to the canonical probe.
+    `gc.routed_to`; only the worker's first-row form bounds the canonical probe
+    (`--limit=20`) and serves the reader's canonical priority-first order.
     Any pool-demand predicate change to one (added filter, modified target
     resolution, new state) MUST be reflected in the other. Diverging the two
     re-introduces the protocol-mismatch class — the reconciler
@@ -276,50 +285,37 @@ regressions.
     refactor adds that filter to the default count form and makes the
     equivalence structural rather than coincidental.
 
-## Rig-local control-dispatcher fallback
+## Store-scoped control-dispatcher ownership
 
-Every graph.v2 workflow gets an auto-injected `gc.kind=workflow-finalize` sink
-step (and any other `gc.kind` control steps) routed to the **control
-dispatcher** by `graphroute.ControlDispatcherBinding`. For a rig-scoped
-molecule that resolves the **rig-local** `<rig>/control-dispatcher` and pins the
-control steps to its session. A rig-local dispatcher can decay silently: if its
-runtime/process vanishes, the session reconciler puts it `asleep` with
-`sleep_reason=runtime-missing`, and it can sit that way for weeks. Until then
-every new molecule's finalize step is pinned to a session that never wakes, so
-the molecule cannot reach CLOSED — and nothing surfaces the stall until a halt
-exposes the orphaned step beads (gastownhall/gascity#3454).
+Every formulas v2 graph gets an auto-injected
+`gc.kind=workflow-finalize` sink and may contain other `gc.kind` control steps.
+The graph and its control beads live in the store selected for the launch:
+city graphs use the city store; rig graphs use the owning rig store.
+`graphroute.ControlDispatcherBinding` therefore selects the dispatcher from the
+same scope and stamps its canonical qualified route:
 
-`ControlDispatcherBinding` therefore falls back to the **city-level** dispatcher
-when the rig-local one is unhealthy:
+| Graph store | Control route | Claiming dispatcher |
+|---|---|---|
+| City | `core.control-dispatcher` | City dispatcher |
+| Rig `fixture` | `fixture/core.control-dispatcher` | `fixture` dispatcher |
 
-- **Detection contract.** The rig-local dispatcher is "unhealthy" when its
-  session bead (selected by the `agent:<qualified>` label in the *city* store)
-  projects `session.LifecycleDisplayReason == "runtime-missing"` — the durable,
-  reconciler-written `sleep_reason`. Evaluated at **sling time only** (per
-  molecule). This threshold was chosen over "ever bound" (too strict) and
-  "alive in the last N seconds" (needs a runtime-liveness probe the routing
-  layer does not have); `runtime-missing` is the exact observed decay state and
-  is derivable from the store alone.
-- **Plumbing.** Session beads are city-scoped while the routing store is
-  rig-scoped and cannot see them, so detection is injected as
-  `graphroute.Deps.ControlDispatcherRuntimeMissing` (mirroring
-  `DirectSessionResolver`). The cmd layer (`cliGraphrouteDeps`) supplies a
-  city-store-backed implementation (`controlDispatcherSessionRuntimeMissing`);
-  `graphroute` stays a pure decorator. A nil checker disables the fallback.
-- **Fallback target.** The city-level dispatcher, resolved by re-running the
-  resolution with an **empty rig context**. The fallback fires only when (a)
-  routing is rig-scoped, (b) the rig dispatcher is runtime-missing, and (c) the
-  city dispatcher resolves to a *distinct* agent. Otherwise the original binding
-  is kept (the decay stays localized rather than mis-routing). It applies to the
-  whole control route, not just finalize: a dead rig dispatcher can serve none
-  of the molecule's control beads.
-- **Observability.** Each re-routed control step is stamped
-  `gc.control_dispatcher_fallback=<rig-local>-><city>`
-  (`beadmeta.ControlDispatcherFallbackMetadataKey`). Operators detect a decayed
-  rig-local dispatcher with
-  `bd list --has-metadata-key gc.control_dispatcher_fallback` instead of reading
-  every workflow's finalize step — without this signal the fallback itself would
-  become the new silent decay.
+The core pack declares an unscoped control-dispatcher agent. City import
+expansion materializes one city config and one config per rig.
+`max_active_sessions = 1` applies independently to each qualified config; it is
+not a fleet-wide singleton cap.
+
+Dispatcher startup follows the same route identity. The control-dispatcher tick
+keeps every configured copy in scope, scans city and rig stores for open routed
+control work, and keys desired-state demand by the canonical route. A missing or
+`runtime-missing` rig process is recovered by normal desired-state reconciliation
+without changing the bead's route. If no dispatcher is configured for the graph
+scope, graph decoration fails instead of creating unreachable work.
+
+Each dispatcher serve loop opens only its own store and claims its qualified
+route plus the binding-stripped alias from pre-1.3 builds. A rig dispatcher never
+accepts a city route, and a city dispatcher never stands in for a rig route.
+This keeps `gc.routed_to`, physical storage, demand, and the eventual executor
+in agreement.
 
 ## Interactions
 
@@ -385,8 +381,9 @@ name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
 # Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
-#   --unassigned --exclude-type=epic --json --sort oldest --limit=1,
-#   then a temporary gc.run_target workflow-root migration fallback
+#   --unassigned --exclude-type=epic --json --limit=20 (canonical
+#   priority-first order), then a temporary gc.run_target workflow-root
+#   migration fallback
 ```
 
 System formulas are embedded in the `gc` binary and materialized to

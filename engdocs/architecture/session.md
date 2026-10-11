@@ -205,7 +205,7 @@ Stored config hashes carry a `vN:` prefix. The version literal comes from
 `runtime.FingerprintVersion` in
 [`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go).
 `ConfigFingerprint`, `CoreFingerprint`, and `LiveFingerprint` all emit
-`<FingerprintVersion>:<sha256-hex>`. The current version is `v1`.
+`<FingerprintVersion>:<sha256-hex>`. The current version is `v5`.
 
 The reconciler treats two stored-hash cases as silent rebaseline rather than
 drift:
@@ -271,6 +271,7 @@ For PRs that touch `internal/runtime/fingerprint.go`:
 | Version | Adopted    | Change |
 |---|---|---|
 | `v1` | 2026-04-27 | Initial introduction of the `vN:` prefix. Pre-existing unversioned hashes are silently rebaselined to `v1` on the first reconciler tick after upgrade. |
+| `v5` | 2026-07-01 | Operational/host-tooling scripts (`city-*.sh`, `update-*.sh`) excluded from the `.gc/scripts` probed CopyFiles content hash, so editing one no longer flips every agent's fingerprint into a fleet-wide drift. Existing hashes rebaseline silently on upgrade. (#3840) |
 
 ## Known Limitations
 

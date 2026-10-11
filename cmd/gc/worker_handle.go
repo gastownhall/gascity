@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -25,6 +28,16 @@ func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runti
 }
 
 func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.Factory, error) {
+	return workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, nil)
+}
+
+func workerFactoryWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	waiter session.StaleKeyDetectionWaiter,
+) (*worker.Factory, error) {
 	var (
 		resolveTransport func(template, provider string) string
 		searchPaths      []string
@@ -66,14 +79,17 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:                 store,
-		Provider:              sp,
-		CityPath:              cityPath,
-		SearchPaths:           searchPaths,
-		UsageSink:             usageSinkForCity(cfg, cityPath),
-		ResolveTransport:      resolveTransport,
-		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
-		Pricing:               cfg.PricingRegistry(),
+		Store:                   store,
+		Provider:                sp,
+		CityPath:                cityPath,
+		SearchPaths:             searchPaths,
+		Recorder:                cliFactoryEventsRecorder(cityPath, cfg),
+		UsageSink:               usageSinkForCity(cfg, cityPath),
+		ResolveTransport:        resolveTransport,
+		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
+		StaleKeyDetectionWaiter: waiter,
+		Pricing:                 cfg.PricingRegistry(),
+		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
 	})
 }
 
@@ -181,14 +197,14 @@ func resolvedRuntimeMCPServersWithConfig(
 		identity = strings.TrimSpace(provider)
 	}
 	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
-		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir)
+		catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agentCfg, identity, workDir, config.QueryTopology{})
 		if err != nil {
 			return nil, fmt.Errorf("loading effective MCP: %w", err)
 		}
 		return materialize.RuntimeMCPServers(catalog.Servers), nil
 	}
 	synthetic := &config.Agent{Provider: provider}
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, synthetic, identity, workDir, config.QueryTopology{})
 	if err != nil {
 		return nil, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -278,6 +294,13 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	if err != nil {
 		return nil, err
 	}
+	// Direct CLI creates use this resolver rather than resolveTemplate, so
+	// project the workspace environment here before handing the runtime to the
+	// worker factory. In particular, workspace.env BD_BIN must follow the same
+	// schema-compatible executable as the controller and resumed sessions.
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionCfg.Runtime.SessionEnv = sessionEnv
+	sessionCfg.Runtime.Hints.Env = sessionEnv
 	// Stage provider-overlay hooks on the CLI create path the same way the
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
@@ -338,7 +361,12 @@ func resolvedWorkerSessionConfigWithConfig(
 	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
 	// API-side seeding in internal/api/session_resolved_config.go.
 	// Regression for upstream gastownhall/gascity#101 (re-opened).
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env)
+	//
+	// The controller-only overlay goes last for the same reason it does in
+	// template_resolve.go: resolved.Env is config-authored, so a provider spec
+	// naming one of those keys would otherwise overwrite the empty value the
+	// passthrough pinned. This resolver never routes through ScrubTokenEnv.
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, processenv.ControllerOnlyEnvOverlay())
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
@@ -370,8 +398,44 @@ func resolvedWorkerSessionConfigWithConfig(
 	})
 }
 
+// resolvedWorkerSessionEnvWithConfig composes the environment for worker
+// create and resume paths. Workspace environment belongs between the ambient
+// provider process context and provider-authored values, matching the
+// canonical resolveTemplate layering. Identity and controller-only overlays
+// remain authoritative at the end.
+func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider) map[string]string {
+	if resolved == nil {
+		return nil
+	}
+	var workspaceEnv map[string]string
+	if cfg != nil {
+		workspaceEnv = cfg.Workspace.Env
+	}
+	sessionEnv := mergeEnv(
+		providerProcessPassthroughEnv(),
+		expandEnvMap(workspaceEnv),
+		expandEnvMap(resolved.Env),
+		processenv.ControllerOnlyEnvOverlay(),
+	)
+	if strings.TrimSpace(cityPath) != "" {
+		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
+	}
+	return sessionEnv
+}
+
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	return workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, id, nil)
+}
+
+func workerHandleForSessionWithStaleKeyDetectionWaiter(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	id string,
+	waiter session.StaleKeyDetectionWaiter,
+) (worker.Handle, error) {
+	factory, err := workerFactoryWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, waiter)
 	if err != nil {
 		return nil, err
 	}
@@ -392,8 +456,8 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 		return nil, err
 	}
 	if store != nil {
-		if bead, _, err := session.ResolveSessionBeadByExactID(store, target); err == nil {
-			return factory.SessionByLoadedBead(bead)
+		if info, pr, err := session.ResolveSessionRecordByExactID(store, target); err == nil {
+			return factory.SessionByRecord(info, pr)
 		}
 		if id, err := session.ResolveSessionID(store, target); err == nil {
 			return factory.SessionByID(id)
@@ -431,20 +495,62 @@ func runtimeWorkerHandleWithConfig(
 	return factory.RuntimeHandle(sessionName, providerName, transport, processNames)
 }
 
-func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
-	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
-	if err != nil {
-		return err
-	}
-	return handle.Kill(context.Background())
+// sessionActor is kind's Actor on cityPath. A cityPath that names no city
+// directory gives an Actor with no City, whose verbs that take the runtime
+// lease refuse with session.ErrRuntimeLeaseNoCity.
+func sessionActor(kind session.ActorKind, cityPath string) session.Actor {
+	city, _ := session.NewCityDir(cityPath)
+	return session.Actor{Kind: kind, City: city}
 }
 
-func workerStopSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+// workerKillSessionTargetWithConfig is an operator's kill: it waits for the
+// session's runtime lease (CONTRACT O3).
+func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+	return workerKillSessionTargetCtx(context.Background(), sessionActor(session.ActorOperator, cityPath), cityPath, store, sp, cfg, target)
+}
+
+// controllerKillSessionRow is the controller's kill of the row it decided
+// on (legacyAct.Stop): it never waits for the runtime lease, and once it
+// holds the lease it reads the row fresh and stops only while the row still
+// carries decided's facts (sessionpkg.FactsLegacyKill); otherwise it returns
+// session.ErrKillPremiseMoved, which the caller defers like a busy lease.
+func controllerKillSessionRow(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, decided session.Info) error {
+	return legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg}.Stop(session.Decide(decided, session.FactsLegacyKill))
+}
+
+// controllerKillRowCtx is a controller kill by by (ActorController, and
+// by.Lease when the caller holds one), under ctx's kill premise, resolved
+// strictly by the row's ID: a row that does not resolve (gone, unreadable) is
+// an error the caller defers on, never a runtime handle named after the ID.
+func controllerKillRowCtx(ctx context.Context, by session.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) error {
+	if store == nil || strings.TrimSpace(id) == "" {
+		return fmt.Errorf("controller kill: no session row to resolve (id %q)", id)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
+	if err != nil {
+		return err
+	}
+	return handle.Kill(ctx, by)
+}
+
+// workerKillSessionTargetCtx kills target in by's lease mode.
+func workerKillSessionTargetCtx(ctx context.Context, by session.Actor, cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
 	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return err
 	}
-	return handle.Stop(context.Background())
+	return handle.Kill(ctx, by)
+}
+
+// workerStopSessionTargetForShutdownWithConfig is the city stop/restart sweep's
+// stop. It is separate from workerStopSessionTargetWithConfig so the draining
+// latitude reaches only the sweep and never a targeted operator command.
+func workerStopSessionTargetForShutdownWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
+	handle, err := workerHandleForSessionTargetWithConfig(cityPath, store, sp, cfg, target)
+	if err != nil {
+		return err
+	}
+	return handle.StopForShutdown(context.Background())
 }
 
 func workerInterruptSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
@@ -483,12 +589,43 @@ func workerSessionTargetAliveWithConfig(store beads.Store, sp runtime.Provider, 
 	return obs.Alive, nil
 }
 
+// workerSessionTargetAttachedWithConfig reports whether target has an attached
+// terminal. An attachment probe that could not tell answers (true, err) with
+// err wrapping runtime.ErrRuntimeUnavailable, so a destructive caller holds.
 func workerSessionTargetAttachedWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (bool, error) {
 	obs, err := workerObserveSessionTargetWithConfig(cityPath, store, sp, cfg, target)
 	if err != nil {
 		return false, err
 	}
+	if obs.AttachedErr != nil {
+		return true, attachProbeUnavailable(target, obs.AttachedErr)
+	}
 	return obs.Attached, nil
+}
+
+// attachmentHolds reports whether a destructive action against name must hold
+// because a human may be attached: the probe answered attached, or it could
+// not tell. In the second case err is the probe error, wrapping
+// runtime.ErrRuntimeUnavailable. A vanished session (runtime.ErrSessionNotFound)
+// is not attached and answers (false, nil).
+func attachmentHolds(sp runtime.Provider, name string) (bool, error) {
+	attached, err := runtime.IsAttachedWithError(sp, name)
+	if !runtime.AttachProbeHolds(attached, err) {
+		return false, nil
+	}
+	if err != nil {
+		return true, attachProbeUnavailable(name, err)
+	}
+	return true, nil
+}
+
+// attachProbeUnavailable names an attachment probe failure as "unknown" for
+// callers that defer on runtime.ErrRuntimeUnavailable.
+func attachProbeUnavailable(name string, err error) error {
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		return fmt.Errorf("observe attachment for %q: %w", name, err)
+	}
+	return fmt.Errorf("observe attachment for %q: %w: %w", name, runtime.ErrRuntimeUnavailable, err)
 }
 
 func workerSessionTargetLastActivityWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (time.Time, error) {
@@ -575,7 +712,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
@@ -589,10 +726,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
 		setupCtx.Session = info.SessionName
 		setupCtx.WorkDir = workDir
-		setupCtx.ConfigDir = cityPath
-		if agentCfg.SourceDir != "" {
-			setupCtx.ConfigDir = agentCfg.SourceDir
-		}
+		setupCtx.ConfigDir = resolveConfigDir(cityPath, agentCfg.SourceDir)
 		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
 	}
 	// Project the resolved hint subset through the single StartupHints →
@@ -651,6 +785,8 @@ func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.
 			if shouldPreserveStoredRuntimeCommandForTransport(command, desiredCommand, transport, optionOverrides) {
 				desiredCommand = command
 			}
+		} else {
+			log.Printf("WARNING: unhonored option pin (%v); launching without schema flags", err)
 		}
 	}
 	if !shouldPreserveStoredRuntimeCommand(command, desiredCommand) {

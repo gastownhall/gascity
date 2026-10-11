@@ -30,8 +30,8 @@ const AgentsPage = lazy(() => import('./routes/Agents').then((m) => ({ default: 
 const AgentDetailPage = lazy(() =>
   import('./routes/AgentDetail').then((m) => ({ default: m.AgentDetailPage })),
 );
-const AmbientHomePage = lazy(() =>
-  import('./routes/AmbientHome').then((m) => ({ default: m.AmbientHomePage })),
+const CockpitHomePage = lazy(() =>
+  import('./routes/CockpitHome').then((m) => ({ default: m.CockpitHomePage })),
 );
 const BeadsPage = lazy(() => import('./routes/Beads').then((m) => ({ default: m.BeadsPage })));
 const MailPage = lazy(() => import('./routes/Mail').then((m) => ({ default: m.MailPage })));
@@ -109,13 +109,7 @@ export function App() {
  * Runs badge reads the same shared run-summary source the /runs page renders
  * (gascity-dashboard-2j8e.7), then expose the composed model to the tree.
  */
-function AttentionRoot({
-  operator,
-  children,
-}: {
-  operator: OperatorConfig;
-  children: ReactNode;
-}) {
+function AttentionRoot({ operator, children }: { operator: OperatorConfig; children: ReactNode }) {
   const { source } = useRunSummary();
   const contributors = useLiveAttentionContributors(operator, source);
   return <AttentionProvider contributors={contributors}>{children}</AttentionProvider>;
@@ -145,7 +139,7 @@ function RoutedMain({
         <Routes>
           {/* `/` resolution (PRD §6 / bead 9yj.5):
               DEFAULT_VIEW env → descriptor `defaultRoute: true` →
-              kb3 ambient home fallback. The resolver runs once per
+              live cockpit home fallback. The resolver runs once per
               enabled-set / env change; warnings surface in the
               browser console for premortem #5 visibility. */}
           <Route
@@ -156,7 +150,7 @@ function RoutedMain({
               ) : DefaultViewElement !== null ? (
                 <DefaultViewElement />
               ) : (
-                <AmbientHomePage />
+                <CockpitHomePage />
               )
             }
           />

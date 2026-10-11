@@ -55,7 +55,8 @@ func (i *AgentGetQualifiedInput) QualifiedName() string {
 // AgentCreateInput is the Huma input for POST /v0/city/{cityName}/agents.
 type AgentCreateInput struct {
 	CityScope
-	Body struct {
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           struct {
 		Name     string `json:"name" doc:"Agent name." minLength:"1" example:"deacon-1"`
 		Dir      string `json:"dir,omitempty" doc:"Working directory (rig name)."`
 		Provider string `json:"provider" doc:"Provider name." minLength:"1" example:"claude"`

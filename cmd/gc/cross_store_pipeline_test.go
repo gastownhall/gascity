@@ -10,11 +10,11 @@ import (
 )
 
 // TestCrossStorePipeline_ReadThenClaim verifies the composition of the
-// cross-store read half (firstStoreWithWork) and the write half
+// cross-store read half (bestStoreWithWork) and the write half
 // (crossStoreClaimDir): a bead ID surfaced by federation from a rig store
 // must be correctly redirected to that same rig store by the claim path.
 //
-// Uses the same injectable-runner approach as TestFirstStoreWithWork so no
+// Uses the same injectable-runner approach as TestBestStoreWithWork so no
 // real Dolt or gc subprocess is needed.
 func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 	rigPath := t.TempDir()
@@ -38,9 +38,9 @@ func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 		return `[]`, nil
 	}
 
-	out, gotStore, err := firstStoreWithWork("fake-query", stores, stores[0], run)
+	out, gotStore, err := bestStoreWithWork("fake-query", stores, stores[0], run)
 	if err != nil {
-		t.Fatalf("firstStoreWithWork: %v", err)
+		t.Fatalf("bestStoreWithWork: %v", err)
 	}
 	if filepath.Clean(gotStore.dir) != filepath.Clean(rigPath) {
 		t.Fatalf("selected store = %q, want %q (rig store)", gotStore.dir, rigPath)

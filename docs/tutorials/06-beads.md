@@ -17,6 +17,36 @@ formula cooked, and `mayor` / `reviewer` / `worker` agents (see
 [Tutorial 05](/tutorials/05-formulas)). Everything below runs against the bead
 store with the `bd` tool.
 
+Confirm the local pack, rig registration, and reviewer binding carried forward
+from the earlier tutorials:
+
+```shell
+~/my-city
+$ cat pack.toml
+[pack]
+name = "my-city"
+schema = 2
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+
+~/my-city
+$ cat city.toml
+[workspace]
+provider = "claude"
+
+... # content elided
+
+[[rigs]]
+name = "my-project"
+
+~/my-city
+$ cat agents/reviewer/agent.toml
+dir = "my-project"
+provider = "codex"
+```
+
 ## What is a bead
 
 A bead is a unit of work with an ID, a title, a status, and a type. We use the
@@ -25,17 +55,17 @@ A bead is a unit of work with an ID, a title, a status, and a type. We use the
 ```shell
 ~/my-city
 $ bd list
-○ mc-0ez ● P2 Mix wet ingredients
-○ mc-265 ● P2 Combine wet and dry
-○ mc-79s ● P2 pancakes
-○ mc-9vb ● P2 Finalize workflow
-○ mc-a4l ● P2 Refactor auth module
-○ mc-b8g ● P2 Mix dry ingredients
-○ mc-d4g ● P2 Sprint 42
-○ mc-io4 ● P2 mayor
-○ mc-k3q ● P2 Serve
-○ mc-nia ● P2 Cook the pancakes
-○ mc-xp7 ● P2 Update API docs
+○ mc-0ez P2 Mix wet ingredients
+○ mc-265 P2 Combine wet and dry
+○ mc-79s P2 pancakes
+○ mc-9vb P2 Finalize workflow
+○ mc-a4l P2 Refactor auth module
+○ mc-b8g P2 Mix dry ingredients
+○ mc-d4g P2 Sprint 42
+○ mc-io4 P2 mayor
+○ mc-k3q P2 Serve
+○ mc-nia P2 Cook the pancakes
+○ mc-xp7 P2 Update API docs
 
 --------------------------------------------------------------------------------
 Total: 11 issues (11 open, 0 in progress)
@@ -136,8 +166,8 @@ $ bd close mc-ykp
 ✓ Closed mc-ykp — Fix the login bug: Closed
 
 $ bd list --status open --flat
-○ mc-a4l [● P2] [feature] - Refactor auth module
-○ mc-xp7 [● P2] [task]    - Update API docs
+○ mc-a4l [P2] [feature] - Refactor auth module
+○ mc-xp7 [P2] [task]    - Update API docs
 ```
 
 Note that the flag is `--status` (`--state` is a different command for state
@@ -154,7 +184,7 @@ what the city is doing right now, query the store:
 ```shell
 ~/my-city
 $ bd list --status in_progress --flat
-◐ mc-io4 [● P2] [session] - mayor
+◐ mc-io4 [P2] [session] - mayor
 ```
 
 Because work lives in the store rather than in memory, agent sessions are
@@ -178,7 +208,7 @@ $ bd label add mc-a4l frontend
 ✓ Added label 'frontend' to mc-a4l
 
 $ bd list --label priority:high --flat
-○ mc-a4l [● P2] [feature] - Refactor auth module
+○ mc-a4l [P2] [feature] - Refactor auth module
 ```
 
 `bd label add` takes a single label per call — apply multiples one at a time.
@@ -220,7 +250,7 @@ $ bd dep mc-a4l --blocks mc-xp7
 ✓ Added dependency: mc-a4l (Refactor auth module) blocks mc-xp7 (Update API docs)
 ```
 
-Now `mc-xp7` stays out of every agent's work query until `mc-a4l` closes —
+Now `mc-xp7` won't appear in any agent's work query until `mc-a4l` is closed —
 the same mechanism behind formula step ordering, where `needs` declarations
 become `blocks` edges.
 
@@ -381,10 +411,11 @@ $ bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=
 ```
 
 `mc-xp7` is blocked by `mc-a4l`, so this query won't return it — blocked work
-is invisible to work queries. Closing `mc-a4l` removes the readiness barrier
-(though `mc-xp7` would also need `gc.routed_to=my-project/worker` to land in
-this queue, which nothing here sets). Routing decides _which_ queue a bead
-appears in; readiness decides _whether_ it appears at all.
+is invisible to work queries. Once `mc-a4l` closes, rerun the same query. The
+readiness barrier is gone, though `mc-xp7` would also need
+`gc.routed_to=my-project/worker` to land in this queue, which nothing here
+sets. Routing decides _which_ queue a bead appears in; readiness decides
+_whether_ it appears at all.
 
 This is the "pull" model: agents check for work instead of having it pushed.
 
@@ -419,11 +450,11 @@ yours too.)
 ```shell
 ~/my-city
 $ bd list --status open --type task --flat
-○ mc-xp7 [● P2] [task] - Update API docs
-○ mc-b8g [● P2] [task] - Mix dry ingredients (blocks: mc-265)
+○ mc-xp7 [P2] [task] - Update API docs
+○ mc-b8g [P2] [task] - Mix dry ingredients (blocks: mc-265)
 
 $ bd show mc-a4l
-○ mc-a4l · Refactor auth module   [● P2 · OPEN]
+○ mc-a4l · Refactor auth module   [P2 · OPEN]
 Owner: dbox · Type: feature
 Created: 2026-04-08 · Updated: 2026-04-08
 
@@ -434,8 +465,8 @@ METADATA
   reviewer: sky
 
 BLOCKS
-  ← ○ mc-xp7: Update API docs ● P2
-  ← ○ mc-d4g: Sprint 42 ● P2
+  ← ○ mc-xp7: Update API docs P2
+  ← ○ mc-d4g: Sprint 42 P2
 
 $ bd close mc-a4l
 ✓ Closed mc-a4l — Refactor auth module: Closed

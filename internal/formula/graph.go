@@ -24,6 +24,7 @@ func ApplyFragmentGraphControls(f *Formula) {
 
 func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 	scopeControlByStep := make(map[string]string)
+	scopeControlByID := make(map[string]*Step)
 	controls := make([]*Step, 0)
 	allSteps := collectGraphSteps(f.Steps)
 
@@ -88,16 +89,18 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 				controlMetadata[key] = value
 			}
 		}
-		controls = append(controls, &Step{
+		control := &Step{
 			ID:       controlID,
 			Title:    "Finalize scope for " + step.Title,
 			Type:     "task",
 			Needs:    []string{step.ID},
 			Metadata: controlMetadata,
-		})
+		}
+		scopeControlByID[controlID] = control
+		controls = append(controls, control)
 	}
 
-	rewriteGraphStepRefs(f.Steps, scopeControlByStep)
+	rewriteGraphStepRefs(f.Steps, scopeControlByStep, scopeControlByID)
 
 	f.Steps = append(f.Steps, controls...)
 
@@ -135,17 +138,28 @@ func needsScopeCheck(step *Step) bool {
 	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
-func rewriteGraphRefs(in []string, replacements map[string]string) []string {
+// rewriteGraphRefs points every reference at the control that finalizes the
+// referenced step, so downstream work waits on scope convergence rather than on
+// the raw member close. referrer is the step that owns the references: a
+// reference from the very node a control closes is left naming the raw step,
+// because a node blocked by its own closer can never converge (ga-a6zy9).
+func rewriteGraphRefs(referrer *Step, in []string, replacements map[string]string, controls map[string]*Step) []string {
 	if len(in) == 0 || len(replacements) == 0 {
 		return in
 	}
 	out := make([]string, len(in))
 	for i, id := range in {
-		if replacement, ok := replacements[id]; ok {
-			out[i] = replacement
+		replacement, ok := replacements[id]
+		if !ok {
+			out[i] = id
 			continue
 		}
-		out[i] = id
+		if control := controls[replacement]; control != nil &&
+			beadmeta.ControlClosesNode(control.Metadata, referrer.ID, referrer.Metadata) {
+			out[i] = id
+			continue
+		}
+		out[i] = replacement
 	}
 	return out
 }
@@ -156,7 +170,9 @@ func graphSinkStepIDs(steps []*Step) []string {
 		return nil
 	}
 	referenced := make(map[string]struct{}, len(allSteps))
+	stepByID := make(map[string]*Step, len(allSteps))
 	for _, step := range allSteps {
+		stepByID[step.ID] = step
 		for _, id := range step.DependsOn {
 			referenced[id] = struct{}{}
 		}
@@ -166,36 +182,80 @@ func graphSinkStepIDs(steps []*Step) []string {
 	}
 
 	sinks := make([]string, 0)
+	sinkSet := make(map[string]struct{}, len(allSteps))
+	appendSink := func(id string) {
+		if _, exists := sinkSet[id]; exists {
+			return
+		}
+		sinkSet[id] = struct{}{}
+		sinks = append(sinks, id)
+	}
 	for _, step := range allSteps {
 		if step == nil {
+			continue
+		}
+		// Teardown-scoped work is post-settlement by contract: its pass
+		// condition may (and for worktree cleanup does) branch on the root
+		// outcome that only workflow-finalize produces. Sinking it here closes
+		// that loop into a settlement deadlock — finalize waits on the
+		// teardown, the teardown waits on the outcome finalize would have
+		// written. Retry/ralph controls minted from a teardown step retain
+		// gc.scope_role=teardown, so one predicate covers the raw step and
+		// every control shape derived from it.
+		if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 			continue
 		}
 		switch step.Metadata[beadmeta.KindMetadataKey] {
 		case "workflow-finalize", "spec":
 			continue
 		case "scope":
+			// A retry-managed scope is a physical attempt, not an
+			// authoritative workflow result. Substitute its logical control as a
+			// mandatory sink so a failed loop cannot be hidden by passing
+			// downstream work, and so iteration 1 cannot remain as a stale failed
+			// blocker after a later attempt passes.
+			control := stepByID[step.Metadata[beadmeta.ControlForMetadataKey]]
+			attemptStepID := step.Metadata[beadmeta.StepIDMetadataKey]
+			if step.Metadata[beadmeta.AttemptMetadataKey] != "" && control != nil &&
+				attemptStepID != "" && attemptStepID == control.Metadata[beadmeta.StepIDMetadataKey] &&
+				(control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry ||
+					control.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph) {
+				// Nested attempt scopes roll up through their enclosing scope. Only
+				// an outermost attempt contributes its logical control directly;
+				// otherwise an inner control from an old outer attempt would become
+				// another stale workflow blocker.
+				scopeRef := step.Metadata[beadmeta.ScopeRefMetadataKey]
+				if scopeRef == "" {
+					appendSink(control.ID)
+					continue
+				}
+				enclosing := stepByID[scopeRef]
+				if enclosing != nil && enclosing.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindScope {
+					continue
+				}
+			}
 			// Scope bodies are terminal latches even when referenced by teardown
 			// steps. Workflow finalization must see their pass/fail outcome.
-			sinks = append(sinks, step.ID)
+			appendSink(step.ID)
 			continue
 		}
 		if _, ok := referenced[step.ID]; ok {
 			continue
 		}
-		sinks = append(sinks, step.ID)
+		appendSink(step.ID)
 	}
 	return sinks
 }
 
-func rewriteGraphStepRefs(steps []*Step, replacements map[string]string) {
+func rewriteGraphStepRefs(steps []*Step, replacements map[string]string, controls map[string]*Step) {
 	for _, step := range steps {
 		if step == nil {
 			continue
 		}
-		step.DependsOn = rewriteGraphRefs(step.DependsOn, replacements)
-		step.Needs = rewriteGraphRefs(step.Needs, replacements)
+		step.DependsOn = rewriteGraphRefs(step, step.DependsOn, replacements, controls)
+		step.Needs = rewriteGraphRefs(step, step.Needs, replacements, controls)
 		if len(step.Children) > 0 {
-			rewriteGraphStepRefs(step.Children, replacements)
+			rewriteGraphStepRefs(step.Children, replacements, controls)
 		}
 	}
 }

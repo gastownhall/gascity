@@ -56,6 +56,38 @@ Two TOML fields, one per scope, describe endpoint ownership:
 - **`explicit`** — The rig pins its own external endpoint. Use for
   cross-city rigs or rigs pointing at a shared Dolt cluster.
 
+`gc.endpoint_origin` describes endpoint ownership, not JSONL retention. To
+keep a city-root `.beads/issues.jsonl` on disk, leave the city origin as
+`managed_city` or `city_canonical` and change the existing
+`export.auto: false` line in that scope's `.beads/config.yaml` to
+`export.auto: true`. Running `bd config set export.auto true` from the scope
+root makes the same change. Gas City preserves that explicit setting and
+skips stale-JSONL cleanup for the scope. Do not append a second
+`export.auto` key instead: bd cannot parse a `config.yaml` with a duplicate
+key and ignores the whole file, and Gas City honors only the first
+occurrence, so the scope stays opted out and the file is still removed. Do
+not use `explicit` at city scope; it is a rig-only endpoint origin and fails
+canonical validation.
+Do not keep the file with bd 1.0.4 (check `bd version`): that release
+re-imports a present `issues.jsonl` on every write, not only into an empty
+database, so it re-applies the retained rows over newer Dolt data and can
+stall for minutes on a large file (`sa-41j3kp`). bd 1.0.5 and later import
+it only into an empty database.
+
+The opt-out buys retention, not freshness. Gas City still forces
+`BD_EXPORT_AUTO=false` on its own `bd` calls — `gc bd`, controllers,
+dispatch, mail — so those writes do not re-export the file, and the retained
+`issues.jsonl` drifts from Dolt with no warning. Refresh it out of band from
+the scope root with `bd export -o .beads/issues.jsonl`, and note that
+`bd export` omits infrastructure beads and memories unless you pass
+`--include-infra`, `--include-memories`, or `--all`. Plain `bd` run in the
+scope, from a shell or an agent session, does not get the
+`BD_EXPORT_AUTO=false` override: it follows `export.auto: true`, so its
+writes can re-export the file too. Use `gc bd` instead if the file should
+change only when you refresh it. Rolling back to a Gas City build from
+before this opt-out existed rewrites `export.auto` back to `false` and reaps
+the file once.
+
 ## What NOT to do
 
 These are the edits mayors try first, all of which self-revert at
@@ -187,6 +219,48 @@ At `gc start`, the Dolt-port normalization pass also emits a WARN
 line on stderr for each rig whose `.beads/dolt-server.port` it is
 rewriting back to the managed port — that is your early warning
 that a prior edit or orphan server made the mirror drift.
+
+### Storage-mode drift: a scope pointed at the wrong database
+
+`.beads/metadata.json` names *which* bead database `bd` opens.
+`dolt_mode=server` reads the managed city's `.beads/dolt`;
+`dolt_mode=embedded` reads the scope's own
+`.beads/embeddeddolt/<dolt_database>`. Nothing copies rows between
+them.
+
+`gc rig add`, `gc start`, `gc supervisor run`, `gc rig set-endpoint`
+and `gc beads city use-managed|use-external` all canonicalize a
+managed scope to `server` mode, because a Dolt directory opened
+in-process cannot be shared by the controller, every agent's `bd`
+and the dashboard at once. On a workspace you had initialized in
+embedded mode, that flip re-points the ledger and leaves the old
+database on disk, unread — and `bd` does not fail, it answers `[]`
+with exit 0. This is not split-store specific: it bites a city with
+exactly one store just as hard.
+
+Three things now tell you:
+
+1. The flip prints the scope, both modes and the exact directory it
+   is about to stop reading, before it happens.
+2. `gc doctor`'s `bd-split-store` check enumerates both databases.
+3. An empty **whole-ledger** read (`gc ready`'s city leg, an
+   unfiltered `List`) from a scope that has not returned a row in
+   that process prints **one notice per `gc` process**, naming the
+   unread database. It is a notice, never a refusal, and it spends
+   no `bd` subprocess of its own — a workspace `bd init` created and
+   never filed a bead into is the same shape on disk, an idle ledger
+   reads the same way, and separating them would mean either opening
+   the database you were told to preserve or asking `bd` a second
+   question on the caller's read deadline. Expect it on any scope
+   that still has two bead databases, including healthy ones; that
+   is the price of a notice that cannot cost a read.
+
+Recovery is `gc doctor`'s: export from a copy of the unread
+database, review with `bd import --dry-run`, import into the active
+one, and keep both directories until reconciled. Editing
+`dolt_mode` back does not hold — the next `gc start` re-canonicalizes
+it. While you reconcile, `GC_BD_ALLOW_UNREAD_STORE_READ=1` silences
+the read-time notice without changing any answer.
 
 ## Recovery recipe — slung beads not reaching agents
 

@@ -413,6 +413,178 @@ func TestApplyExpansions(t *testing.T) {
 	})
 }
 
+// TestApplyExpansionsPreservesOversizedDescriptionFileStubPath pins
+// gastownhall/gascity#4860: an expansion template step whose description_file
+// is too large to inline (> descriptionFileInlineMaxBytes) gets its
+// Description replaced with an external-prompt stub that embeds the resolved
+// on-disk path. That resolved path is computed once, at parse time, against
+// the LITERAL description_file value — including any "{target}" placeholder
+// text the on-disk asset name itself still contains. Expansion then
+// substitutes "{target}" throughout the template's Description text for
+// every other legitimate use of the placeholder, which — before the fix —
+// also corrupted the already-resolved path embedded in the stub, redirecting
+// the agent at a file that was never shipped (ENOENT).
+func TestApplyExpansionsPreservesOversizedDescriptionFileStubPath(t *testing.T) {
+	tmp := t.TempDir()
+	formulasDir := filepath.Join(tmp, "pack", "formulas")
+	assetsDir := filepath.Join(tmp, "pack", "assets")
+	for _, dir := range []string{formulasDir, assetsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// The shipped asset is literally named "{target}.md" (braces included) —
+	// exactly the gastownhall/gascity#4860 reproduction. Content must exceed
+	// descriptionFileInlineMaxBytes so resolveDescriptionFiles emits the
+	// external-prompt stub instead of inlining the content.
+	largeContent := strings.Repeat("large prompt body\n", descriptionFileInlineMaxBytes/16+128)
+	if len(largeContent) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test asset length = %d, want > %d", len(largeContent), descriptionFileInlineMaxBytes)
+	}
+	assetPath := filepath.Join(assetsDir, "{target}.md")
+	if err := os.WriteFile(assetPath, []byte(largeContent), 0o644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	expansionFormula := `{
+		"formula": "review-pass",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"audience": {"default": "operators"}
+		},
+		"template": [
+			{"id": "{target}.review", "title": "Review {target.title}", "description_file": "../assets/{target}.md"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(formulasDir, "review-pass.formula.json"), []byte(expansionFormula), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	parser := NewParser(formulasDir)
+	steps := []*Step{{ID: "contract", Title: "Contract"}}
+	compose := &ComposeRules{
+		Expand: []*ExpandRule{
+			{
+				Target: "contract",
+				With:   "review-pass",
+				Vars:   map[string]string{"audience": "security reviewers"},
+			},
+		},
+	}
+
+	result, err := ApplyExpansions(steps, compose, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 expanded step, got %d", len(result))
+	}
+	if result[0].ID != "contract.review" {
+		t.Fatalf("result[0].ID = %q, want contract.review", result[0].ID)
+	}
+
+	wantDescription := descriptionFileReferenceDescription(
+		"../assets/contract.md",
+		assetPath,
+		len(largeContent),
+		map[string]*VarDef{"audience": {}},
+	)
+	wantDescription = strings.ReplaceAll(wantDescription, "{{audience}}", "security reviewers")
+	if result[0].Description != wantDescription {
+		t.Fatalf("Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", result[0].Description, wantDescription)
+	}
+	if result[0].DescriptionFileResolvedPath != assetPath {
+		t.Fatalf("DescriptionFileResolvedPath = %q, want %q", result[0].DescriptionFileResolvedPath, assetPath)
+	}
+}
+
+func TestExpandStepPreservesProtectedStubThroughTargetDescription(t *testing.T) {
+	resolvedPath := "/tmp/pack/assets/{audience}.md"
+	target := &Step{
+		ID:                          "contract",
+		Title:                       "Contract",
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, nil),
+		DescriptionFileResolvedPath: resolvedPath,
+	}
+
+	first, err := expandStep(target, []*Step{{
+		ID:          "{target}.wrapped",
+		Title:       "Wrap {target.title}",
+		Description: "Wrapper:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "security"})
+	if err != nil {
+		t.Fatalf("first expandStep: %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first expansion produced %d steps, want 1", len(first))
+	}
+	wantWrapped := "Wrapper:\n\n" + descriptionFileReferenceDescription(
+		"../assets/security.md",
+		resolvedPath,
+		5000,
+		nil,
+	)
+	if first[0].Description != wantWrapped {
+		t.Fatalf("first Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", first[0].Description, wantWrapped)
+	}
+	if first[0].DescriptionFileResolvedPath != resolvedPath {
+		t.Fatalf("first DescriptionFileResolvedPath = %q, want %q", first[0].DescriptionFileResolvedPath, resolvedPath)
+	}
+
+	second, err := expandStep(first[0], []*Step{{
+		ID:          "{target}.outer",
+		Title:       "Outer {target.title}",
+		Description: "Outer:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "platform"})
+	if err != nil {
+		t.Fatalf("second expandStep: %v", err)
+	}
+	if len(second) != 1 {
+		t.Fatalf("second expansion produced %d steps, want 1", len(second))
+	}
+	wantNested := "Outer:\n\n" + wantWrapped
+	if second[0].Description != wantNested {
+		t.Fatalf("nested Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", second[0].Description, wantNested)
+	}
+	if second[0].DescriptionFileResolvedPath != resolvedPath {
+		t.Fatalf("nested DescriptionFileResolvedPath = %q, want %q", second[0].DescriptionFileResolvedPath, resolvedPath)
+	}
+}
+
+func TestExpandStepPreservesFormulaVarsThroughTargetDescription(t *testing.T) {
+	resolvedPath := "/tmp/pack/assets/{audience}.md"
+	varDefs := map[string]*VarDef{"audience": {}}
+	target := &Step{
+		ID:                          "contract",
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, varDefs),
+		DescriptionFileResolvedPath: resolvedPath,
+	}
+
+	result, err := expandStep(target, []*Step{{
+		ID:          "{target}.wrapped",
+		Description: "Wrapper:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "security reviewers"})
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expandStep produced %d steps, want 1", len(result))
+	}
+
+	want := "Wrapper:\n\n" + descriptionFileReferenceDescription(
+		"../assets/security reviewers.md",
+		resolvedPath,
+		5000,
+		varDefs,
+	)
+	want = strings.ReplaceAll(want, "{{audience}}", "security reviewers")
+	if result[0].Description != want {
+		t.Fatalf("Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", result[0].Description, want)
+	}
+}
+
 func TestBuildStepMap(t *testing.T) {
 	steps := []*Step{
 		{

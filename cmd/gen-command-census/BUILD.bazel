@@ -1,0 +1,70 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "gen-command-census_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/cmd/gen-command-census",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/commandcensus"],
+)
+
+go_binary(
+    name = "gen-command-census",
+    embed = [":gen-command-census_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "gen-command-census_test",
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:schemas/metrics/example/result.schema.json",
+        "//cmd/gc:metrics_census_gen.go",
+        "//cmd/gc:productmetrics_command_census.json",
+        "//internal/productmetrics:command_ids_gen.go",
+    ],
+    embed = [":gen-command-census_lib"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/commandcensus",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

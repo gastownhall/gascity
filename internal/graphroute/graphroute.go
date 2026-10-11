@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -24,11 +25,6 @@ const (
 	// for control beads whose execution route is a concrete session ID.
 	GraphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 )
-
-// poolWorkflowContinuationGroup is the continuation group value stamped on
-// pool-routed graph.v2 steps so preassignHookContinuationGroup keeps all steps
-// of a molecule on the same pool slot (fixes #2978).
-const poolWorkflowContinuationGroup = "pool-workflow"
 
 // AgentResolver resolves an agent name to a config.Agent.
 type AgentResolver interface {
@@ -44,14 +40,6 @@ type Deps struct {
 	Resolver              AgentResolver
 	CityPath              string
 	DirectSessionResolver DirectSessionResolver
-	// ControlDispatcherRuntimeMissing reports whether the named control-
-	// dispatcher agent's session is currently asleep with reason
-	// runtime-missing. When set and it returns true for a rig-local
-	// dispatcher, ControlDispatcherBinding falls back to the city-level
-	// dispatcher (#3454). Session beads are city-scoped, so the rig-scoped
-	// routing store cannot answer this — the cmd layer injects a city-store-
-	// backed implementation. Nil disables the fallback.
-	ControlDispatcherRuntimeMissing func(qualifiedName string) bool
 }
 
 // GraphRouteBinding captures how a graph.v2 step is routed to an agent.
@@ -64,11 +52,20 @@ type GraphRouteBinding struct {
 	DirectSessionID string
 	RigContext      string
 	MetadataOnly    bool
-	// ControlFallbackFrom records the unhealthy rig-local control-dispatcher
-	// this binding replaced when the rig→city fallback fired (#3454). Empty in
-	// the normal path. ApplyGraphControlRouteBinding stamps it onto control
-	// steps as gc.control_dispatcher_fallback for operator observability.
-	ControlFallbackFrom string
+	// ContinuationGroup is the formula-declared continuation group for a
+	// pool-routed (MetadataOnly) step, captured from the authored recipe
+	// metadata at decoration time. It is the immutable source of the pool
+	// opt-in: ApplyGraphRouteBinding pins the step to a slot only when this is
+	// non-empty, and never consults the step's own (mutable, re-decoratable)
+	// metadata for the decision. Empty means the formula did not opt in, and a
+	// re-decorated step's stale group is cleared rather than preserved.
+	ContinuationGroup string
+	// IndependentSteps marks a one-shot pool step: each claim gets a fresh
+	// session, so a formula-declared continuation group can never be honored
+	// here. ApplyGraphRouteBinding uses this to tell a formula-declared group
+	// (which would silently be lost) apart from the router's own transient
+	// drain bookkeeping (which is always safe to clear and replace).
+	IndependentSteps bool
 }
 
 type graphStepTarget struct {
@@ -138,6 +135,13 @@ func graphBindingRigContext(binding GraphRouteBinding) string {
 	return GraphRouteRigContext(binding.QualifiedName)
 }
 
+func graphBindingHasExecutionContext(binding GraphRouteBinding) bool {
+	return strings.TrimSpace(binding.QualifiedName) != "" ||
+		strings.TrimSpace(binding.SessionName) != "" ||
+		strings.TrimSpace(binding.DirectSessionID) != "" ||
+		strings.TrimSpace(binding.RigContext) != ""
+}
+
 func graphDirectSessionRigContext(target, rigContext string, bead beads.Bead) string {
 	if rigContext = strings.TrimSpace(rigContext); rigContext != "" {
 		return rigContext
@@ -177,8 +181,10 @@ func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]st
 	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata[beadmeta.RunTargetMetadataKey], routeVars))}
 }
 
-// ApplyGraphRouteBinding sets the routing metadata on a recipe step.
-func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
+// ApplyGraphRouteBinding sets the routing metadata on a recipe step. It
+// returns an error if honoring the binding would silently destroy a
+// formula-declared continuation group (see IndependentSteps).
+func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) error {
 	// Clear any prior session back-references so the metadata always matches
 	// the current binding when a step is re-decorated (#2843).
 	delete(step.Metadata, beadmeta.SessionNameMetadataKey)
@@ -190,28 +196,83 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// the transient Assignee is cleared on close. (#2843)
 		step.Metadata[beadmeta.SessionIDMetadataKey] = binding.DirectSessionID
 		step.Assignee = binding.DirectSessionID
-		return
+		return nil
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	if binding.MetadataOnly {
-		// Pool-routed step: stamp continuation group so preassignHookContinuationGroup
-		// pre-assigns all molecule steps to the claiming slot, preventing scatter
-		// across pool slots (fixes #2978).
-		step.Metadata[beadmeta.ContinuationGroupMetadataKey] = poolWorkflowContinuationGroup
-		step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		// Pool-routed step: the pool decides which slot runs it. Whether the
+		// molecule's steps must share one slot is the formula's call, declared as
+		// a continuation group and captured into the binding from the authored
+		// recipe at decoration time; preassignHookContinuationGroup then pins the
+		// siblings to whichever slot claims first (#2978). Stamping a group Go
+		// manufactured would apply that judgment to every pool-routed molecule
+		// whether its formula asked for it or not — a routing decision Go is not
+		// entitled to make.
+		//
+		// The opt-in reads binding.ContinuationGroup (the immutable source),
+		// never the step's own mutable metadata, so a re-decorated step can never
+		// re-affirm a stale group its current binding no longer declares. When the
+		// formula opted in, stamp the group + affinity; otherwise clear the group
+		// and affinity together (the pinned pair, per
+		// beadmeta.SessionAffinityMetadataKeys) so no stale group survives to
+		// mis-vacuum later pool claims.
+		if group := strings.TrimSpace(binding.ContinuationGroup); group != "" {
+			step.Metadata[beadmeta.ContinuationGroupMetadataKey] = group
+			step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		} else if stale := strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey]); binding.IndependentSteps && stale != "" && !strings.HasPrefix(stale, "drain:") {
+			// IndependentSteps means each claim of this pool step gets a fresh
+			// session, so a formula-declared continuation group can never be
+			// honored here. The unconditional clear below would silently
+			// destroy that formula's drain contract with no signal (#5584).
+			// A "drain:"-prefixed value is the router's own transient
+			// bookkeeping (sharedDrainContinuationGroup in
+			// internal/dispatch/drain.go), always safe to clear and replace.
+			return fmt.Errorf("graphroute: step %q is IndependentSteps-routed but formula-declared continuation group %q would be silently dropped", step.ID, stale)
+		} else {
+			for _, key := range beadmeta.SessionAffinityMetadataKeys {
+				delete(step.Metadata, key)
+			}
+		}
 		step.Assignee = ""
-		return
+		return nil
 	}
 	if binding.SessionName != "" {
 		// Durable session back-reference for single-session agents (#2843).
 		// Pool agents resolve MetadataOnly above and bind a concrete session
 		// only when a slot claims the step — out of scope for route-time.
+		//
+		// This value is a PREDICTION, not a fact: callers resolve it through
+		// agentutil.LookupSessionName, which computes agent.SessionNameFor(...)
+		// when no session bead exists yet. With Assignee now left empty below,
+		// nothing corroborates it at route time, so the two keys can disagree
+		// until the step is claimed and a reader that prefers gc.session_name
+		// (runproj.sessionNameFromBead, behind the dashboard run-detail view)
+		// can name a session that does not exist yet. That window is bounded to
+		// pre-claim: hookClaimIdentityPatch overwrites the key with the
+		// claiming session's own identity when the claim carries one.
 		step.Metadata[beadmeta.SessionNameMetadataKey] = binding.SessionName
 	}
-	step.Assignee = binding.SessionName
+	// Config-agent work is routed by alias; a concrete session binds on claim.
+	step.Assignee = ""
+	return nil
 }
 
-// ApplyGraphControlRouteBinding routes control steps to the singleton
+// GraphRouteBindingForAgent derives the config-backed routing behavior for an
+// agent. Pool routes stay metadata-only; a one-shot pool additionally marks
+// each graph step IndependentSteps, because no runtime survives to carry
+// session affinity into the next step. IndependentSteps does not authorize
+// dropping a formula-declared continuation group: ApplyGraphRouteBinding
+// refuses that loudly instead of silently clearing the group.
+func GraphRouteBindingForAgent(agentCfg config.Agent) GraphRouteBinding {
+	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
+	if agentCfg.SupportsInstanceExpansion() {
+		binding.MetadataOnly = true
+		binding.IndependentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
+	}
+	return binding
+}
+
+// ApplyGraphControlRouteBinding routes control steps to the store-scoped
 // control-dispatcher config queue. Direct session assignment is reserved for
 // already-existing concrete session owners, not future on-demand sessions.
 func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
@@ -219,14 +280,9 @@ func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteB
 	// current binding when a control step is re-decorated (#2843).
 	delete(step.Metadata, beadmeta.SessionNameMetadataKey)
 	delete(step.Metadata, beadmeta.SessionIDMetadataKey)
-	// Record (or clear, on re-decoration) the rig→city control-dispatcher
-	// fallback so operators can detect silent rig-local dispatcher decay with
-	// `bd list --has-metadata-key gc.control_dispatcher_fallback` (#3454).
-	if binding.ControlFallbackFrom != "" {
-		step.Metadata[beadmeta.ControlDispatcherFallbackMetadataKey] = binding.ControlFallbackFrom + "->" + binding.QualifiedName
-	} else {
-		delete(step.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
-	}
+	// Clear the retired rig→city fallback marker when an existing recipe is
+	// re-decorated. Route identity now always matches the graph store scope.
+	delete(step.Metadata, beadmeta.ControlDispatcherFallbackMetadataKey)
 	if binding.QualifiedName != "" {
 		step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	} else {
@@ -236,8 +292,9 @@ func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteB
 }
 
 // AssignGraphStepRoute applies routing to a step, optionally diverting
-// control steps to the control dispatcher.
-func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteBinding, controlBinding *GraphRouteBinding) {
+// control steps to the control dispatcher. It returns an error if the
+// execution binding's ApplyGraphRouteBinding call does (see IndependentSteps).
+func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteBinding, controlBinding *GraphRouteBinding) error {
 	if controlBinding != nil {
 		switch {
 		case executionBinding.QualifiedName != "":
@@ -253,11 +310,11 @@ func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteB
 			delete(step.Metadata, GraphExecutionRigContextMetaKey)
 		}
 		ApplyGraphControlRouteBinding(step, *controlBinding)
-		return
+		return nil
 	}
 	delete(step.Metadata, GraphExecutionRouteMetaKey)
 	delete(step.Metadata, GraphExecutionRigContextMetaKey)
-	ApplyGraphRouteBinding(step, executionBinding)
+	return ApplyGraphRouteBinding(step, executionBinding)
 }
 
 // WorkflowExecutionRouteFromMeta extracts the execution route from bead metadata.
@@ -277,41 +334,15 @@ func WorkflowExecutionRoute(bead beads.Bead) string {
 }
 
 // ControlDispatcherBinding resolves the graph routing binding for the control
-// dispatcher agent.
-//
-// When routing is rig-scoped and the resolved rig-local dispatcher is detected
-// unhealthy (asleep with reason runtime-missing, via
-// deps.ControlDispatcherRuntimeMissing), it falls back to the city-level
-// dispatcher resolved with an empty rig context (#3454). A rig-local dispatcher
-// can sit runtime-missing for weeks, silently stranding every molecule's
-// auto-injected workflow-finalize step pinned to its dead session; the
-// city-level dispatcher is the healthy fallback. The fallback binding records
-// the replaced dispatcher in ControlFallbackFrom for observability.
+// dispatcher in the graph's store scope. Runtime health does not change route
+// identity: desired-state reconciliation starts or recovers the configured
+// dispatcher for that scope.
 func ControlDispatcherBinding(store beads.Store, cityName string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
-	binding, err := resolveControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
-	if err != nil {
-		return binding, err
-	}
-	// Only rig-scoped routes can decay to an unhealthy rig-local dispatcher;
-	// the city-level route (empty rig context) is already the fallback target.
-	if rigContext == "" || deps.ControlDispatcherRuntimeMissing == nil {
-		return binding, nil
-	}
-	if !deps.ControlDispatcherRuntimeMissing(binding.QualifiedName) {
-		return binding, nil
-	}
-	cityBinding, cityErr := resolveControlDispatcherBinding(store, cityName, cfg, "", deps)
-	if cityErr != nil || cityBinding.QualifiedName == binding.QualifiedName {
-		// No distinct city-level dispatcher to fall back to: keep the original
-		// binding rather than mis-route (the decay stays localized, not worse).
-		return binding, nil
-	}
-	cityBinding.ControlFallbackFrom = binding.QualifiedName
-	return cityBinding, nil
+	return resolveControlDispatcherBinding(store, cityName, cfg, rigContext, deps)
 }
 
 // resolveControlDispatcherBinding resolves the control-dispatcher binding for a
-// rig context without the health fallback (the raw resolution).
+// graph store scope.
 func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, rigContext string, deps Deps) (GraphRouteBinding, error) {
 	if cfg == nil {
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher route requires config")
@@ -324,21 +355,22 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	// match. Since 9fa6b7fec the dispatcher ships bound (core.control-dispatcher),
 	// so AgentMatchesIdentity rejects the bare-name fallback for it and the
 	// per-rig fleet makes the bare-name scan ambiguous — both break a
-	// Resolver-based lookup. PreferredDeterministicControlDispatcher prefers the
-	// city-level singleton (Dir == "") across every scope, keeping the stamped
-	// route on the one session that actually runs (max_active_sessions=1) and
-	// curing the stranded-control-bead.
-	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
-		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
+	// Resolver-based lookup. ControlDispatcherForScope selects the configured
+	// dispatcher whose scope matches the graph store.
+	if agentCfg, ok := config.ControlDispatcherForScope(cfg, rigContext); ok {
+		return GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg), MetadataOnly: true}, nil
 	}
 	// Fallback for configs without a deterministic dispatcher (e.g. a plain
 	// control-dispatcher agent carrying no convoy-control StartCommand): defer
 	// to the name-based resolver path, preserving the rig-context preference.
 	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, config.ControlDispatcherAgentName, rigContext)
-	if !ok {
-		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
+	if !ok || strings.TrimSpace(agentCfg.Dir) != strings.TrimSpace(rigContext) {
+		if strings.TrimSpace(rigContext) != "" {
+			return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent for rig %q not found", strings.TrimSpace(rigContext))
+		}
+		return GraphRouteBinding{}, fmt.Errorf("city control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
-	return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
+	return GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg), MetadataOnly: true}, nil
 }
 
 // ResolveGraphStepBinding resolves the routing binding for a graph step
@@ -462,13 +494,19 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 		}
 		return GraphRouteBinding{}, fmt.Errorf("step %s: assignee target %q did not resolve to a concrete session; use gc.run_target for config routing", stepID, target.value)
 	}
+	// Imported role packs publish binding-qualified identities such as
+	// gc.run-operator. Prefer that exact formula target; unbound packs — the
+	// common install shape (#5655) — resolve through the gc.<role> fallback
+	// below.
 	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, target.value, rigContext)
+	if !ok {
+		agentCfg, ok = deps.Resolver.ResolveAgent(cfg, formulaRoleTarget(target.value), rigContext)
+	}
 	if !ok {
 		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
-	binding := GraphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
-	if agentCfg.SupportsInstanceExpansion() {
-		binding.MetadataOnly = true
+	binding := GraphRouteBindingForAgent(agentCfg)
+	if binding.MetadataOnly {
 		cache[stepID] = binding
 		return binding, nil
 	}
@@ -479,6 +517,16 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	binding.SessionName = sn
 	cache[stepID] = binding
 	return binding, nil
+}
+
+// formulaRoleTarget translates the documented gc.<role> formula namespace to
+// the rig-scoped role identity imported by gascity/roles. Other targets retain
+// their exact meaning.
+func formulaRoleTarget(target string) string {
+	if role, ok := strings.CutPrefix(target, "gc."); ok && role != "" {
+		return role
+	}
+	return target
 }
 
 // ResolveGraphDirectSessionBinding resolves a direct-session route target to a
@@ -551,8 +599,19 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 	}
 	routedTo := strings.TrimSpace(defaultRoute.QualifiedName)
 	rootSessionName := strings.TrimSpace(defaultRoute.SessionName)
-	routingRigContext := graphBindingRigContext(defaultRoute)
-	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, routingRigContext, deps)
+	executionRigContext := graphBindingRigContext(defaultRoute)
+	controlRigContext := executionRigContext
+	if storeRigContext, scoped := storeref.ScopeRigContext(rootStoreRef); scoped {
+		controlRigContext = storeRigContext
+		// A graph with no default execution binding (for example a no-pool rig
+		// order whose workers all declare gc.run_target) resolves bare targets in
+		// its owning scope. Otherwise the default binding defines the execution
+		// context, which may intentionally differ from graph ownership.
+		if !graphBindingHasExecutionContext(defaultRoute) {
+			executionRigContext = storeRigContext
+		}
+	}
+	controlRoute, err := ControlDispatcherBinding(store, cityName, cfg, controlRigContext, deps)
 	if err != nil {
 		return err
 	}
@@ -614,15 +673,25 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		if IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			continue
 		}
-		binding, err := ResolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolvingSet, routeVars, defaultRoute, routingRigContext, store, cityName, cfg, deps)
+		binding, err := ResolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolvingSet, routeVars, defaultRoute, executionRigContext, store, cityName, cfg, deps)
 		if err != nil {
 			return err
 		}
+		// Capture the formula-declared continuation group from the authored
+		// (freshly-cloned) step metadata so the pool opt-in is sourced immutably
+		// through the binding rather than re-read from metadata a later
+		// decoration may have mutated (the finding [1] re-decoration concern).
+		// binding is a per-step value copy, so this never pollutes the route cache.
+		binding.ContinuationGroup = strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey])
 		if IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
-			AssignGraphStepRoute(step, binding, &controlRoute)
+			if err := AssignGraphStepRoute(step, binding, &controlRoute); err != nil {
+				return err
+			}
 			continue
 		}
-		AssignGraphStepRoute(step, binding, nil)
+		if err := AssignGraphStepRoute(step, binding, nil); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -671,15 +740,19 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		a = &resolved
 	}
 
-	var sessionName string
-	if !a.SupportsInstanceExpansion() {
-		sessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		if sessionName == "" {
+	defaultRoute := GraphRouteBindingForAgent(*a)
+	// routedTo is the caller's already-normalized persisted identity. Preserve
+	// it rather than recomputing in case the caller resolved a compatibility
+	// spelling that agentutil intentionally keeps stable on the wire.
+	defaultRoute.QualifiedName = routedTo
+	if !defaultRoute.MetadataOnly {
+		defaultRoute.SessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		if defaultRoute.SessionName == "" {
 			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
 		}
 	}
 	routeVars := GraphWorkflowRouteVars(recipe, vars)
-	return DecorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, routedTo, sessionName, store, cityName, cfg, deps)
+	return DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, deps)
 }
 
 // stampLegacyRecipeRouting mirrors the graph.v2 path in ApplyGraphRouteBinding:

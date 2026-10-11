@@ -100,6 +100,33 @@ func TestCopyDirForProvider_MissingSrcDir(t *testing.T) {
 	}
 }
 
+func TestCopyDirForProviders_SkipsRuntimeMirrors(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	mustWriteFile(t, filepath.Join(src, "AGENTS.md"), []byte("instructions"), 0o644)
+	mustMkdirAll(t, filepath.Join(src, ".gc", "agents", "mayor", ".codex"))
+	mustWriteFile(t, filepath.Join(src, ".gc", "agents", "mayor", ".codex", "hooks.json"), []byte(`{"hooks":{}}`), 0o644)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "codex", ".codex"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "codex", ".codex", "hooks.json"), []byte(`{"hooks":{"SessionStart":[]}}`), 0o644)
+	mustMkdirAll(t, filepath.Join(src, "per-provider", "codex", ".gc", "worktrees", "polecat", ".codex"))
+	mustWriteFile(t, filepath.Join(src, "per-provider", "codex", ".gc", "worktrees", "polecat", ".codex", "hooks.json"), []byte(`{"hooks":{}}`), 0o644)
+
+	if err := CopyDirForProviders(src, dst, []string{"codex"}, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst, ".gc")); !os.IsNotExist(err) {
+		t.Fatalf("runtime .gc mirror copied into destination, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "AGENTS.md")); err != nil {
+		t.Fatalf("universal file should still be copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("provider hook should still be copied: %v", err)
+	}
+}
+
 func TestCopyDirForProviders_KiroPreservesExistingWorkspaceInstructions(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -94,6 +95,132 @@ path = "../assets/scripts/checks/review-approved.sh"
 	}
 	if result.Outcome != convergence.GatePass {
 		t.Fatalf("Outcome = %q (stderr=%q), want pass", result.Outcome, result.Stderr)
+	}
+}
+
+func TestRunRalphCheckAcceptsMaterializedCheckAfterPackPinUpgrade(t *testing.T) {
+	tmp := t.TempDir()
+	gcHome := filepath.Join(tmp, "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cacheRoot := filepath.Join(gcHome, "cache", "repos")
+	historicalEntry := filepath.Join(cacheRoot, strings.Repeat("a", 64))
+	activeEntry := filepath.Join(cacheRoot, strings.Repeat("b", 64))
+	formulaSource := filepath.Join(historicalEntry, "formulas", "review.toml")
+	checkPath := filepath.Join(historicalEntry, "assets", "scripts", "checks", "unit-fast.sh")
+	cityPath := filepath.Join(tmp, "city")
+	storePath := filepath.Join(tmp, "store")
+	for _, dir := range []string{filepath.Dir(formulaSource), filepath.Dir(checkPath), cityPath, storePath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	formulaBytes := []byte("formula = \"review\"\n")
+	if err := os.WriteFile(formulaSource, formulaBytes, 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	if err := os.WriteFile(checkPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow from previous pack pin",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.FormulaSourceMetadataKey: formulaSource,
+			beadmeta.FormulaHashMetadataKey:   formula.ContentHash(formulaBytes),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	check := beads.Bead{
+		ID:   "check-from-previous-pin",
+		Type: "task",
+		Metadata: map[string]string{
+			beadmeta.CheckPathMetadataKey:    checkPath,
+			beadmeta.CheckTimeoutMetadataKey: "30s",
+			beadmeta.RootBeadIDMetadataKey:   root.ID,
+		},
+	}
+
+	result, err := runRalphCheck(store, check, beads.Bead{ID: "run-from-previous-pin", Type: "task"}, 1, ProcessOptions{
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{filepath.Join(activeEntry, "formulas")},
+	})
+	if err != nil {
+		t.Fatalf("materialized historical check should remain trusted: %v", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("outcome = %q, want %q; stderr=%q", result.Outcome, convergence.GatePass, result.Stderr)
+	}
+}
+
+func TestRalphCheckHistoricalFormulaRootsRejectsUnboundEvidence(t *testing.T) {
+	tmp := t.TempDir()
+	gcHome := filepath.Join(tmp, "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cacheRoot := filepath.Join(gcHome, "cache", "repos")
+	entryA := filepath.Join(cacheRoot, strings.Repeat("a", 64))
+	entryB := filepath.Join(cacheRoot, strings.Repeat("b", 64))
+	formulaSource := filepath.Join(entryA, "formulas", "review.toml")
+	checkA := filepath.Join(entryA, "assets", "scripts", "check.sh")
+	checkB := filepath.Join(entryB, "assets", "scripts", "check.sh")
+	for _, path := range []string{formulaSource, checkA, checkB} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+	}
+	formulaBytes := []byte("formula = \"review\"\n")
+	validHash := formula.ContentHash(formulaBytes)
+	writeFormula := func(path string) string {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, formulaBytes, 0o644); err != nil {
+			t.Fatalf("write formula %s: %v", path, err)
+		}
+		return path
+	}
+	writeFormula(formulaSource)
+
+	// Each guard below runs before os.ReadFile, so every fixture is written to
+	// disk with the real formula bytes: the only thing left that can reject the
+	// case is the guard it is named for.
+	outsideSource := writeFormula(filepath.Join(tmp, "elsewhere", "formulas", "review.toml"))
+	outsideCheck := filepath.Join(tmp, "elsewhere", "assets", "scripts", "check.sh")
+	upperEntry := filepath.Join(cacheRoot, strings.Repeat("A", 64))
+	upperSource := writeFormula(filepath.Join(upperEntry, "formulas", "review.toml"))
+	upperCheck := filepath.Join(upperEntry, "assets", "scripts", "check.sh")
+	shortEntry := filepath.Join(cacheRoot, strings.Repeat("a", 63))
+	shortSource := writeFormula(filepath.Join(shortEntry, "formulas", "review.toml"))
+	shortCheck := filepath.Join(shortEntry, "assets", "scripts", "check.sh")
+
+	tests := []struct {
+		name          string
+		formulaSource string
+		hash          string
+		checkPath     string
+	}{
+		{name: "formula hash mismatch", formulaSource: formulaSource, hash: strings.Repeat("0", 64), checkPath: checkA},
+		{name: "check from different cache entry", formulaSource: formulaSource, hash: validHash, checkPath: checkB},
+		{name: "missing formula hash", formulaSource: formulaSource, checkPath: checkA},
+		{name: "formula source outside repo cache", formulaSource: outsideSource, hash: validHash, checkPath: outsideCheck},
+		{name: "non-canonical entry name (uppercase hex)", formulaSource: upperSource, hash: validHash, checkPath: upperCheck},
+		{name: "non-canonical entry name (63 hex chars)", formulaSource: shortSource, hash: validHash, checkPath: shortCheck},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bead := beads.Bead{Metadata: map[string]string{
+				beadmeta.FormulaSourceMetadataKey: tt.formulaSource,
+				beadmeta.FormulaHashMetadataKey:   tt.hash,
+			}}
+			if roots := ralphCheckHistoricalFormulaRoots(beads.NewMemStore(), bead, tt.checkPath); len(roots) != 0 {
+				t.Fatalf("unbound historical evidence received trusted roots: %v", roots)
+			}
+		})
 	}
 }
 

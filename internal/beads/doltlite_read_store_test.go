@@ -9,10 +9,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/rollout/gate"
+	sqlite "modernc.org/sqlite"
 )
 
 func TestDoltliteReadStoreListsSessionBeads(t *testing.T) {
@@ -109,6 +114,48 @@ func TestDoltliteReadStoreReadyUsesDoltlite(t *testing.T) {
 	}
 	if hasTestBead(rows, "gc-blocked") {
 		t.Fatalf("Ready included blocked bead: %#v", rows)
+	}
+}
+
+// bd's issues table carries close_reason (written by `bd close --reason`); the
+// in-process read path must surface it like BdStore does
+// (gastownhall/gascity#2663). Snapshots without the column read as no reason.
+func TestDoltliteReadStoreGetReadsCloseReason(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	legacy, err := store.Get("gc-ready")
+	if err != nil {
+		t.Fatalf("Get without a close_reason column: %v", err)
+	}
+	if legacy.CloseReason != "" {
+		t.Fatalf("CloseReason without the column = %q, want empty", legacy.CloseReason)
+	}
+
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+	for _, stmt := range []string{
+		`ALTER TABLE issues ADD COLUMN close_reason TEXT`,
+		`UPDATE issues SET status = 'closed', close_reason = 'fixed in commit abc123; tests pass' WHERE id = 'gc-ready'`,
+	} {
+		if _, err := writer.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	got, err := store.Get("gc-ready")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Fatalf("CloseReason = %q, want %q", got.CloseReason, "fixed in commit abc123; tests pass")
+	}
+	open, err := store.Get("gc-parent")
+	if err != nil {
+		t.Fatalf("Get open bead: %v", err)
+	}
+	if open.CloseReason != "" {
+		t.Fatalf("open bead CloseReason = %q, want empty", open.CloseReason)
 	}
 }
 
@@ -468,6 +515,124 @@ func TestDoltliteReadStoreBeforeFiltersRespectCutoff(t *testing.T) {
 	}
 	if got := testBeadIDs(updatedRows); !slices.Equal(got, []string{"gc-native-time-before"}) {
 		t.Fatalf("UpdatedBefore ids = %v, want [gc-native-time-before]; rows=%#v", got, updatedRows)
+	}
+}
+
+// TestDoltliteReadStoreBeforeFiltersToleratesRawTimeBind pins the production
+// write path the cutoff test above deliberately avoids (see its own doc
+// comment and ga-p7ipsu): a writer that binds a raw time.Time instead of
+// pre-formatting with doltliteSQLiteTime. modernc.org/sqlite serializes a
+// bound time.Time via time.Time.String() (e.g.
+// "2026-06-01 07:00:00 +0000 UTC"), which SQLite's julianday() cannot parse.
+// julianday(x) is NULL for such text, and `NULL < julianday(?)` is NULL (not
+// true) in SQL, so the CreatedBefore/UpdatedBefore WHERE predicates silently
+// dropped the row from the result set entirely — before the tolerant Go-side
+// filterDoltliteBeforeTimes/parseTimeString ever got a chance to see it. See
+// ga-n4oyad (proof) and ga-vvgr9n (this fix).
+func TestDoltliteReadStoreBeforeFiltersToleratesRawTimeBind(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	cutoff := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+	for _, issue := range []struct {
+		id        string
+		createdAt time.Time
+		updatedAt time.Time
+	}{
+		{id: "gc-raw-time-before", createdAt: cutoff.Add(-time.Hour), updatedAt: cutoff.Add(-30 * time.Minute)},
+		{id: "gc-raw-time-after", createdAt: cutoff.Add(time.Hour), updatedAt: cutoff.Add(30 * time.Minute)},
+	} {
+		// Bind time.Time values directly (no doltliteSQLiteTime pre-format) so
+		// the driver's own Valuer formats them, exactly as a raw production
+		// writer would.
+		if _, err := writer.Exec(`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/raw-time', '', '', '', '', '{}')`,
+			issue.id, issue.id, issue.createdAt, issue.updatedAt); err != nil {
+			t.Fatalf("insert raw-bound timestamp issue %s: %v", issue.id, err)
+		}
+	}
+
+	createdRows, err := store.List(ListQuery{
+		Assignee:      "rig/raw-time",
+		CreatedBefore: cutoff,
+		Sort:          SortCreatedAsc,
+		SkipLabels:    true,
+	})
+	if err != nil {
+		t.Fatalf("List CreatedBefore: %v", err)
+	}
+	if got := testBeadIDs(createdRows); !slices.Equal(got, []string{"gc-raw-time-before"}) {
+		t.Fatalf("CreatedBefore ids = %v, want [gc-raw-time-before]; rows=%#v", got, createdRows)
+	}
+
+	updatedRows, err := store.List(ListQuery{
+		Assignee:      "rig/raw-time",
+		UpdatedBefore: cutoff,
+		Sort:          SortCreatedAsc,
+		SkipLabels:    true,
+	})
+	if err != nil {
+		t.Fatalf("List UpdatedBefore: %v", err)
+	}
+	if got := testBeadIDs(updatedRows); !slices.Equal(got, []string{"gc-raw-time-before"}) {
+		t.Fatalf("UpdatedBefore ids = %v, want [gc-raw-time-before]; rows=%#v", got, updatedRows)
+	}
+}
+
+// TestDoltliteReadStoreBeforeFilterLimitDoesNotPreemptGoSideFilter pins the
+// bounded-read side of the same fix. Once the WHERE clause admits
+// NULL-julianday rows so filterDoltliteBeforeTimes can re-validate them
+// Go-side, a single-table-set read with both CreatedBefore and a Limit set
+// composes a real SQL ORDER BY ... LIMIT with that widened WHERE in one
+// statement (queryIssueTable) — the same LIMIT-before-Go-filter hazard
+// already solved for SeekAfter in queryIssuesOrderedInTables. A row whose
+// on-disk created_at is unparseable by both julianday() and parseTimeString
+// sorts on its raw (garbage) text in SQL but is treated as the zero time
+// (oldest possible) by the Go-side filter/sort — the two disagree on where it
+// belongs, so a SQL LIMIT taken before the Go re-sort can return the wrong
+// bounded prefix even though the unbounded read is correct. Widening the
+// WHERE clause without also skipping the SQL LIMIT for before-filtered reads
+// would regress exactly this case (see the #3208/#3449 SeekAfter precedent
+// this mirrors).
+func TestDoltliteReadStoreBeforeFilterLimitDoesNotPreemptGoSideFilter(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	cutoff := base.Add(10 * time.Second)
+
+	// gc-bf-garbage's created_at parses under neither julianday() nor
+	// parseTimeString: SQL sorts it by its raw ("not-a-timestamp") text, which
+	// lexically outranks every "2026-..." row in DESC order and underranks
+	// them all in ASC order — the opposite of where the Go-side zero-time
+	// (oldest-possible) treatment places it in both directions.
+	wisps := []testDoltliteIssue{
+		{ID: "gc-bf-real1", Title: "real1", CreatedAt: base.Add(1 * time.Second), Labels: []string{"bf"}, NoHistory: true},
+		{ID: "gc-bf-real2", Title: "real2", CreatedAt: base.Add(2 * time.Second), Labels: []string{"bf"}, NoHistory: true},
+		{ID: "gc-bf-real3", Title: "real3", CreatedAt: base.Add(3 * time.Second), Labels: []string{"bf"}, NoHistory: true},
+		{ID: "gc-bf-garbage", Title: "garbage", RawCreatedAt: "not-a-timestamp", Labels: []string{"bf"}, NoHistory: true},
+	}
+	store := newDoltliteStoreWithRows(t, nil, wisps)
+
+	for _, sort := range []SortOrder{SortCreatedDesc, SortCreatedAsc} {
+		unbounded, err := store.List(ListQuery{Label: "bf", Sort: sort, TierMode: TierWisps, CreatedBefore: cutoff})
+		if err != nil {
+			t.Fatalf("List unbounded (sort=%v): %v", sort, err)
+		}
+		if len(unbounded) != 4 {
+			t.Fatalf("unbounded len = %d, want 4 (ids %v)", len(unbounded), testBeadIDs(unbounded))
+		}
+		for k := 1; k <= 4; k++ {
+			bounded, err := store.List(ListQuery{Label: "bf", Sort: sort, TierMode: TierWisps, CreatedBefore: cutoff, Limit: k})
+			if err != nil {
+				t.Fatalf("List(sort=%v limit=%d): %v", sort, k, err)
+			}
+			got, want := testBeadIDs(bounded), testBeadIDs(unbounded[:k])
+			if !slices.Equal(got, want) {
+				t.Fatalf("bounded prefix (sort=%v limit=%d) = %v, want unbounded prefix %v", sort, k, got, want)
+			}
+		}
 	}
 }
 
@@ -1829,4 +1994,310 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 		t.Fatalf("open writable doltlite db: %v", err)
 	}
 	return writer
+}
+
+// TestDoltliteReadStoreConditionalWriterLoudlyDegrades pins the F2 fix
+// (ga-zj78gu): once BdStore implements ConditionalWriter, the methods promote
+// through DoltliteReadStore's embedded *BdStore and ConditionalWriterFor asserts
+// true — but DoltliteReadStore.Get reads via direct SQL and cannot supply a real
+// revision until bd #4682. So the four CAS methods are shadowed to return the
+// typed unsupported veto rather than false-promote a store whose read path and
+// fenced-write path disagree on the revision source. The interface stays
+// SATISFIED (no hiding wrapper); every verb just degrades loudly.
+func TestDoltliteReadStoreConditionalWriterLoudlyDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	w, ok := ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("DoltliteReadStore must still SATISFY ConditionalWriter (degrade is behavioral, not interface-stripping)")
+	}
+
+	if err := w.UpdateIfMatch("ga-1", 1, UpdateOpts{}); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("UpdateIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.CloseIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CloseIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	if err := w.DeleteIfMatch("ga-1", 1); !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("DeleteIfMatch: got %v, want ErrConditionalWriteUnsupported", err)
+	}
+	ok2, err := w.CompareAndSetMetadataKey("ga-1", "k", "", "v")
+	if ok2 || !IsConditionalWriteUnsupported(err) {
+		t.Fatalf("CompareAndSetMetadataKey: got (%v, %v), want (false, ErrConditionalWriteUnsupported)", ok2, err)
+	}
+
+	// Completeness guard: iterate EVERY method on the ConditionalWriter interface
+	// via reflection and assert each degrades to unsupported. A CAS verb added to
+	// the interface later that is not shadowed here would instead promote from the
+	// embedded *BdStore, run the capability probe against the fatal-on-call
+	// backing runner, and fail loudly — closing the F2 false-promote class for
+	// future verbs, not just today's four.
+	cwType := reflect.TypeOf((*ConditionalWriter)(nil)).Elem()
+	wv := reflect.ValueOf(w)
+	for i := 0; i < cwType.NumMethod(); i++ {
+		name := cwType.Method(i).Name
+		method := wv.MethodByName(name)
+		in := make([]reflect.Value, method.Type().NumIn())
+		for j := range in {
+			in[j] = reflect.Zero(method.Type().In(j))
+		}
+		out := method.Call(in)
+		last, _ := out[len(out)-1].Interface().(error)
+		if !IsConditionalWriteUnsupported(last) {
+			t.Fatalf("ConditionalWriter.%s degraded to %v, want ErrConditionalWriteUnsupported (unshadowed promoted verb?)", name, last)
+		}
+	}
+}
+
+// TestDoltliteReadStoreResolveConditionalWriterDegrades pins the seam half of
+// F2: even when the embedded BdStore's capability probe would report capable,
+// DoltliteReadStore's prober shadow keeps ResolveConditionalWriter on the
+// degrade/refuse path — its SQL read path carries no bead revision, so a
+// promoted "capable" verdict would false-promote a store whose reads and
+// fenced writes disagree on the revision source. The fatal-on-call backing
+// runner doubles as the teeth: if the shadow ever disappears, the promoted
+// probe runs four subprocesses through it and the test dies loudly.
+func TestDoltliteReadStoreResolveConditionalWriterDegrades(t *testing.T) {
+	store := newDoltliteStoreWithIssues(t, []testDoltliteIssue{
+		{ID: "ga-1", Title: "target", Status: "open", IssueType: "task"},
+	})
+
+	store.stampConditionalWritesMode(gate.Auto, false)
+	w, diag, err := ResolveConditionalWriter(store)
+	if w != nil || err != nil {
+		t.Fatalf("auto over doltlite = (%v, _, %v), want (nil, diag, nil)", w, err)
+	}
+	if diag == nil || diag.PreflightGate != "conditional_writes" {
+		t.Fatalf("diag = %+v, want the conditional_writes degrade diagnostic", diag)
+	}
+	if !strings.Contains(diag.PreflightReason, "revision") {
+		t.Fatalf("PreflightReason = %q, want the no-revision F2 reason", diag.PreflightReason)
+	}
+
+	store.stampConditionalWritesMode(gate.Require, false)
+	w, diag, err = ResolveConditionalWriter(store)
+	if w != nil || diag == nil || !IsConditionalWritesRequired(err) {
+		t.Fatalf("require over doltlite = (%v, %v, %v), want (nil, diag, typed refusal)", w, diag, err)
+	}
+}
+
+// TestDoltliteReindexStore is the behavioral proof for ga-7hei: the reindex
+// mechanism must execute a real SQLite REINDEX against the physical
+// .beads/doltlite/<db>.db file (the property `bd sql 'REINDEX'` could not
+// satisfy, since it speaks Dolt/MySQL). After the rebuild the store stays a
+// valid SQLite database whose secondary index returns correct results.
+func TestDoltliteReindexStore(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT)`,
+		`CREATE INDEX idx_issues_status ON issues(status)`,
+		`INSERT INTO issues (id, status) VALUES ('a','open'),('b','open'),('c','closed')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	check, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer check.Close() //nolint:errcheck // test cleanup
+
+	var integrity string
+	if err := check.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check = %q, want ok", integrity)
+	}
+
+	var openCount int
+	if err := check.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'open'").Scan(&openCount); err != nil {
+		t.Fatalf("indexed count: %v", err)
+	}
+	if openCount != 2 {
+		t.Fatalf("open issues via index = %d, want 2", openCount)
+	}
+}
+
+// reindexStaleCollSeq gives each stale-index fixture a unique collation name.
+// modernc.org/sqlite registers collations globally for the whole process, so a
+// reused name would let a prior run's closure (and its flipped ordering) leak
+// into the next, making the fixture non-deterministic under -count>1.
+var reindexStaleCollSeq atomic.Int64
+
+// TestDoltliteReindexStoreHealsStaleIndex is the regression proof ga-7hei
+// actually needs: it fails unless ReindexDoltliteStore executes a real SQLite
+// REINDEX. It builds a genuinely stale secondary index — the exact condition
+// REINDEX exists to repair, per SQLite's docs: an index built under one
+// collation definition goes stale when that definition changes. We register a
+// collation whose ordering flips after the index is populated, so the persisted
+// index is ordered per the old definition while SQLite now compares per the new
+// one. `PRAGMA integrity_check` then reports the index as corrupt, and only a
+// real REINDEX rebuilds it. Had ReindexDoltliteStore opened the database and
+// skipped db.Exec("REINDEX"), the corruption would survive and the final
+// assertion would fail — the gap the previous healthy-fixture test could not
+// catch.
+func TestDoltliteReindexStoreHealsStaleIndex(t *testing.T) {
+	collName := fmt.Sprintf("gasstalecoll%d", reindexStaleCollSeq.Add(1))
+	var reversed atomic.Bool
+	if err := sqlite.RegisterCollationUtf8(collName, func(a, b string) int {
+		c := strings.Compare(a, b)
+		if reversed.Load() {
+			return -c
+		}
+		return c
+	}); err != nil {
+		t.Fatalf("register collation: %v", err)
+	}
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir doltlite dir: %v", err)
+	}
+	meta := []byte(`{"backend":"doltlite","database":"doltlite","dolt_database":"hq"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	dbPath := filepath.Join(beadsDir, "doltlite", "hq.db")
+
+	// Build the index while the collation sorts ascending.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rwc&_busy_timeout=10000")
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE issues (id TEXT PRIMARY KEY, status TEXT COLLATE ` + collName + `)`,
+		`CREATE INDEX idx_issues_status ON issues(status COLLATE ` + collName + `)`,
+		`INSERT INTO issues (id, status) VALUES ('a','alpha'),('b','bravo'),('c','charlie'),('d','delta'),('e','echo')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			_ = db.Close()
+			t.Fatalf("seed fixture: %v\nstmt: %s", err, stmt)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture db: %v", err)
+	}
+
+	// Change the collation's definition. The persisted index is now ordered per
+	// the old ascending definition, but SQLite compares per the new one.
+	reversed.Store(true)
+
+	integrityCheck := func(tag string) string {
+		c, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_busy_timeout=10000")
+		if err != nil {
+			t.Fatalf("%s open: %v", tag, err)
+		}
+		defer c.Close() //nolint:errcheck // test cleanup
+		var result string
+		if err := c.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+			t.Fatalf("%s integrity_check: %v", tag, err)
+		}
+		return result
+	}
+
+	// Precondition: the fixture is genuinely stale. Without this guard, a future
+	// change that stops producing staleness would let the post-reindex "ok"
+	// assertion pass trivially, silently regressing this back to the toothless
+	// healthy-store check it strengthens.
+	if before := integrityCheck("before"); before == "ok" {
+		t.Fatalf("precondition failed: expected a stale index before reindex, got integrity_check=ok")
+	}
+
+	if err := ReindexDoltliteStore(dir); err != nil {
+		t.Fatalf("ReindexDoltliteStore: %v", err)
+	}
+
+	if after := integrityCheck("after"); after != "ok" {
+		t.Fatalf("integrity_check after reindex = %q, want ok (REINDEX must rebuild the stale index)", after)
+	}
+}
+
+// TestDoltliteReindexStoreRejectsNonDoltlite proves the reindex path refuses a
+// store that metadata.json does not identify as DoltLite, rather than silently
+// operating on the wrong backend.
+func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	meta := []byte(`{"backend":"dolt","database":"ga"}`)
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), meta, 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	if err := ReindexDoltliteStore(dir); err == nil {
+		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
+	}
+}
+
+// TestDoltliteDependencySnapshotCompletenessIsGuarded pins the verdict
+// dependencySnapshotForCache hands the cache. It was previously unguarded:
+// flipping its completeness bool to false left the whole suite green while
+// silently costing every DoltLite scope its cached dependency and readiness
+// reads — every DepList("…","down") would delegate to the backing store again,
+// which for this fixture is a bd runner that must never be called.
+//
+// The bool is a claim about the SNAPSHOT: DepListBatch reads both dependency
+// tables in one pass, so the map it returns is the whole down-edge set for the
+// ids asked about. The assertions below are that claim, not its restatement —
+// the cache latches depsComplete from it, and the cached edges must equal the
+// store's own.
+func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	deps, complete, err := store.dependencySnapshotForCache([]string{"gc-child"})
+	if err != nil {
+		t.Fatalf("dependencySnapshotForCache: %v", err)
+	}
+	if !complete {
+		t.Fatal("DoltLite reported an incomplete dependency snapshot; DepListBatch reads every down edge of the ids it is given")
+	}
+	if len(deps["gc-child"]) != 1 || deps["gc-child"][0].DependsOnID != "gc-parent" {
+		t.Fatalf("snapshot deps = %#v, want gc-child -> gc-parent", deps["gc-child"])
+	}
+
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	cache.mu.RUnlock()
+	if !depsComplete {
+		t.Fatal("cache depsComplete = false over a DoltLite snapshot that carries every down edge: cached dep and readiness reads would delegate for the life of the process")
+	}
+	cached, err := cache.DepList("gc-child", "down")
+	if err != nil {
+		t.Fatalf("cached DepList: %v", err)
+	}
+	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
+		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
+	}
 }

@@ -537,6 +537,16 @@ id = "probe"
 title = "Probe the endpoint"
 ```
 
+```shell
+~/my-city
+$ gc formula show poll-until
+Formula: poll-until
+
+Steps (2):
+  ├── poll-until.poll.iter1.probe: Probe the endpoint
+  └── poll-until.workflow-finalize: Finalize workflow [needs: poll-until.poll.iter1.probe]
+```
+
 The caveat: nothing re-runs the body yet. Cooking validates the condition, but no
 component in the current release — v1 or v2 — reads it back at runtime, so an
 `until` loop runs exactly one iteration. Treat it as declared intent; use Check
@@ -593,6 +603,10 @@ recording the original instructions, a first iteration for the agent, and a
 control step keeping the original `implement` ID. When an iteration closes, Gas
 City runs `scripts/verify.sh`; exit 0 means done, non-zero spawns another
 iteration — up to `max_attempts` total. If all attempts fail, the step fails.
+One nonzero exit is special: 75 says the script could not reach the
+infrastructure it needed to decide, so Gas City re-runs the check without
+spending an attempt — see [Check](/reference/specs/formula-spec-v2#31-check)
+in the spec.
 
 ### Retry
 

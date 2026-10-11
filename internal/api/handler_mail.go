@@ -74,7 +74,7 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	if recipient == "human" {
 		return recipient, nil
 	}
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config()))
 		if err != nil {
@@ -116,7 +116,7 @@ func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, reci
 	if recipient == "human" {
 		return []string{"human"}
 	}
-	store := s.state.CityBeadStore()
+	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
 			if resolved == recipient {
@@ -215,6 +215,14 @@ type apiResolvedMailTarget struct {
 	recipients []string
 }
 
+// WI-6 residual: this resolver stays on raw store.List + the bead-form mailbox
+// accessors (MailboxAddressesIncludingRuntimeName / MailboxAddress). Its per-
+// identity read is a METADATA-filtered ListQuery (configured_named_identity ==
+// identity), which the session front door's ListAll(opts) does not model — ListAll
+// carries only IncludeClosed/Sort/Live/Limit, not a metadata predicate. Converting
+// it needs an Info-taking mailbox twin fed by a metadata-filtered store list (the
+// HasOpenSessionNamed precedent), deferred to the WI-2 mail residual; until then the
+// codec stays confined to the bead-form accessors here.
 func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (apiResolvedMailTarget, bool, error) {
 	identifier = apiNormalizeSessionTarget(identifier)
 	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {

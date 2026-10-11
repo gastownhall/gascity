@@ -17,30 +17,106 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/credentialprovider"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/spf13/cobra"
 )
 
 const (
 	defaultRegistryPublishURL     = "https://registry.gascity.com"
 	registryGitHubActionsAudience = "gascity-registry"
+	registryCredentialProviderEnv = "GC_CREDENTIAL_PROVIDER"
+	registryCredentialAudience    = "registry"
+	registryPublishScope          = "registry:publish"
 )
 
-var registryPublishHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var (
+	registryPublishHTTPClient     = &http.Client{Timeout: 30 * time.Second}
+	registryCredentialCache       = credentialprovider.NewCache()
+	errRegistryCredentialRedirect = errors.New("registry credential requests do not follow redirects")
+)
+
+type registryCredentialSource func(context.Context, bool) (string, error)
+
+var registryNewCredentialSource = func(argv []string, request credentialprovider.Request) (registryCredentialSource, error) {
+	provider, err := credentialprovider.New(argv)
+	if err != nil {
+		return nil, err
+	}
+	request.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+	return func(ctx context.Context, forceRefresh bool) (string, error) {
+		mintRequest := request
+		mintRequest.RequiredScopes = append([]string(nil), request.RequiredScopes...)
+		mintRequest.ForceRefresh = forceRefresh
+		credential, err := registryCredentialCache.Mint(ctx, provider, mintRequest)
+		if err != nil {
+			return "", err
+		}
+		return credential.AccessToken, nil
+	}, nil
+}
+
+func registryCredentialProviderArgv() ([]string, error) {
+	raw, configured := os.LookupEnv(registryCredentialProviderEnv)
+	return parseRegistryCredentialProviderArgv(raw, configured)
+}
+
+func parseRegistryCredentialProviderArgv(raw string, configured bool) ([]string, error) {
+	if !configured {
+		return []string{"gasworks", "credential-provider"}, nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("%s must be a non-empty JSON argv array", registryCredentialProviderEnv)
+	}
+	var argv []string
+	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON argv array: %w", registryCredentialProviderEnv, err)
+	}
+	if _, err := credentialprovider.New(argv); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", registryCredentialProviderEnv, err)
+	}
+	return append([]string(nil), argv...), nil
+}
+
+func registryGasworksCredentialOriginAllowed(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Path != "" ||
+		u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, "registry.gascity.com") ||
+		strings.EqualFold(u.Host, "registry.gascity.com:443")
+}
+
+func newRegistryGasworksCredentialSource(baseURL string) (registryCredentialSource, error) {
+	if !registryGasworksCredentialOriginAllowed(baseURL) {
+		return nil, fmt.Errorf("gasworks credentials are sent only to %s; configure a native registry credential for any other registry", defaultRegistryPublishURL)
+	}
+	argv, err := registryCredentialProviderArgv()
+	if err != nil {
+		return nil, err
+	}
+	return registryNewCredentialSource(argv, credentialprovider.Request{
+		Audience:       registryCredentialAudience,
+		RequiredScopes: []string{registryPublishScope},
+	})
+}
 
 type registryPublishOptions struct {
-	RegistryURL   string
-	Name          string
-	Version       string
-	Ref           string
-	Description   string
-	Token         string
-	SessionCookie string
-	CSRFToken     string
-	DryRun        bool
-	Validate      bool
-	DevAuth       bool
-	DevAuthHandle string
+	RegistryURL       string
+	Name              string
+	AllowUnscopedName bool
+	Version           string
+	Ref               string
+	Description       string
+	Token             string
+	SessionCookie     string
+	CSRFToken         string
+	DryRun            bool
+	Validate          bool
+	DevAuth           bool
+	DevAuthHandle     string
 }
 
 func newRegistryPublishCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -55,7 +131,20 @@ func newRegistryPublishCmd(stdout, stderr io.Writer) *cobra.Command {
 
 The command requires a clean Git checkout whose current HEAD matches its
 configured upstream branch, then submits the GitHub repository, commit, pack
-path, pack name, and version to the registry API.`,
+path, pack name, and version to the registry API.
+
+Registry pack names are scoped as <github-owner>/<pack>, where <github-owner>
+is the lowercased GitHub owner of the source repository. [pack].name must
+already carry that scoped name: the registry compares it byte-for-byte with the
+requested name, and reserves unscoped names for packs it already holds a claim
+for. --allow-unscoped-name submits such a legacy unscoped name anyway.
+
+--dev-auth (localhost only) replaces all other credentials. Otherwise,
+authentication precedence is --token, GC_REGISTRY_TOKEN, a complete session
+cookie and CSRF-token pair from flags or the environment, a stored native
+Registry token, GitHub Actions OIDC, then the existing Gasworks login for the
+canonical hosted Registry. Run "gasworks login" once before using the provider,
+or use "gc pack registry login" to create a separate native Registry token.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if doRegistryPublish(cmd.Context(), args[0], opts, stdout, stderr) != 0 {
@@ -65,7 +154,8 @@ path, pack name, and version to the registry API.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.RegistryURL, "registry-url", "", "registry app base URL; defaults to GC_REGISTRY_URL, the stored login default, then "+defaultRegistryPublishURL)
-	cmd.Flags().StringVar(&opts.Name, "name", "", "registry pack name; defaults to [pack].name")
+	cmd.Flags().StringVar(&opts.Name, "name", "", "registry pack name; must equal [pack].name (the registry rejects a mismatch)")
+	cmd.Flags().BoolVar(&opts.AllowUnscopedName, "allow-unscoped-name", false, "submit an unscoped (bare) pack name; the registry accepts these only for names it already holds a claim for")
 	cmd.Flags().StringVar(&opts.Version, "version", "", "release version; defaults to [pack].version")
 	cmd.Flags().StringVar(&opts.Ref, "ref", "", "release ref label; defaults to the upstream branch name")
 	cmd.Flags().StringVar(&opts.Description, "description", "", "release description; defaults to [pack].description")
@@ -122,6 +212,13 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 		return 1
 	}
 
+	// Warn before the dry-run early return: a dry run is exactly where a
+	// publisher checks what --allow-unscoped-name is about to do, and the flag
+	// only holds if the registry already holds a claim for the bare name.
+	if opts.AllowUnscopedName && !strings.Contains(request.RequestedName, "/") {
+		fmt.Fprintf(stderr, "gc pack registry publish: warning: submitting unscoped name %q; the registry accepts it only when it already holds a claim for that name\n", request.RequestedName) //nolint:errcheck
+	}
+
 	if opts.DryRun {
 		writeRegistryPublishDryRun(stdout, baseURL, request)
 		return 0
@@ -129,6 +226,7 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
+	var providerSource registryCredentialSource
 	if opts.DevAuth {
 		var err error
 		auth, err = registryPublishDevAuth(ctx, registryPublishHTTPClient, baseURL, opts.DevAuthHandle)
@@ -151,11 +249,28 @@ func doRegistryPublish(ctx context.Context, packRoot string, opts registryPublis
 		auth.Token = publishToken
 	}
 	if !auth.hasCredentials() {
-		fmt.Fprintln(stderr, "gc pack registry publish: authentication required; run `gc pack registry login`, set GC_REGISTRY_TOKEN, pass --token, set GC_REGISTRY_SESSION and GC_REGISTRY_CSRF_TOKEN, or use --dev-auth against a local registry") //nolint:errcheck
+		providerSource, err = newRegistryGasworksCredentialSource(baseURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: configuring credential provider: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		token, err := providerSource(ctx, false)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack registry publish: minting credential: %v; run `gasworks login` or `gc pack registry login`\n", err) //nolint:errcheck
+			return 1
+		}
+		auth.Token = token
+	}
+	if !auth.hasCredentials() {
+		fmt.Fprintln(stderr, "gc pack registry publish: authentication required; run `gc pack registry login`, set GC_REGISTRY_TOKEN, pass --token, or run `gasworks login`") //nolint:errcheck
 		return 1
 	}
 
-	submitted, err := submitRegistryPublishRequest(ctx, registryPublishHTTPClient, baseURL, request, auth, opts.Validate)
+	submitClient := registryPublishHTTPClient
+	if providerSource != nil {
+		submitClient = registryHTTPClientWithCredentialRefresh(submitClient, providerSource)
+	}
+	submitted, err := submitRegistryPublishRequest(ctx, submitClient, baseURL, request, auth, opts.Validate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry publish: %v\n", err) //nolint:errcheck
 		return 1
@@ -204,9 +319,7 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("resolving pack root: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(absPackRoot); evalErr == nil {
-		absPackRoot = resolved
-	}
+	absPackRoot = normalizePathForCompare(absPackRoot)
 	manifest, err := readRegistryPackManifest(absPackRoot)
 	if err != nil {
 		return registryPublishRequest{}, err
@@ -218,9 +331,7 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("pack root must be inside a Git repository: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(repoRoot); evalErr == nil {
-		repoRoot = resolved
-	}
+	repoRoot = normalizePathForCompare(repoRoot)
 	status, err := gitOutput(ctx, repoRoot, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return registryPublishRequest{}, fmt.Errorf("checking Git status: %w", err)
@@ -250,7 +361,10 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 	}
 	name := strings.TrimSpace(registryFirstNonEmpty(opts.Name, manifest.Pack.Name))
 	if name == "" {
-		return registryPublishRequest{}, errors.New("pack name is required; set [pack].name or pass --name")
+		return registryPublishRequest{}, errors.New("pack name is required; set [pack].name in pack.toml")
+	}
+	if err := validateRegistryPublishName(name, manifest.Pack.Name, repoRef.RepoURL, opts.AllowUnscopedName); err != nil {
+		return registryPublishRequest{}, err
 	}
 	ref := repoRef.Ref
 	description := strings.TrimSpace(registryFirstNonEmpty(opts.Description, manifest.Pack.Description))
@@ -263,6 +377,73 @@ func buildRegistryPublishRequest(ctx context.Context, packRoot string, opts regi
 		RequestedRef:         ref,
 		RequestedDescription: description,
 	}, nil
+}
+
+// validateRegistryPublishName refuses locally what the registry refuses
+// remotely, so a doomed publish never burns a request slot or parks a dead row
+// in the review queue. It is the local twin of packNamePolicyViolation in the
+// registry's server/publish.ts, which enforces the same two namespace rules
+// first at validation and again at approve: unscoped names are reserved, and a
+// scoped name's scope must equal the lowercased GitHub owner of the source
+// repository. Only the reserved rule gets an escape hatch here, because the
+// registry does accept an unscoped name it already holds a claim for and a
+// local preflight cannot see the claim table; the scope rule has no
+// server-side override, so it has none here either.
+//
+// The checks are ordered so the first error a publisher sees leads to the one
+// correct fix, and each message is shaped by which half of the pair is wrong: a
+// bare --name against an already correctly scoped pack.toml prescribes fixing
+// the flag, every other mismatch prescribes the pack.toml edit. A pack.toml
+// declaring "mathcity" published as "tdupu/mathcity" reports the mismatch and
+// prescribes the pack.toml edit; dropping the scope to satisfy that message
+// instead reports the reserved name and prescribes the same edit. Both roads
+// end at [pack].name carrying the scoped name.
+func validateRegistryPublishName(name, manifestName, repoURL string, allowUnscoped bool) error {
+	if err := packregistry.ValidatePackName(name); err != nil {
+		return fmt.Errorf("%w; registry names are lowercase [a-z0-9-] segments in <github-owner>/<pack> form", err)
+	}
+	owner, err := registryGitHubRepoOwner(repoURL)
+	if err != nil {
+		return err
+	}
+	ownerLower := strings.ToLower(owner)
+	if manifestName == "" {
+		// --name can no longer stand in for a missing [pack].name: the registry
+		// rejects a nameless pack.toml outright, before it compares anything, so
+		// accepting the flag here would only build a request doomed on arrival.
+		// The suggestion is always rescoped to the repository owner rather than
+		// echoing --name back, because a foreign scope repeated verbatim names a
+		// pack.toml edit the very next run's scope check refuses.
+		bare := name
+		if _, rest, scoped := strings.Cut(name, "/"); scoped {
+			bare = rest
+		}
+		return fmt.Errorf("pack.toml does not declare [pack].name; the registry rejects such publishes, so set [pack].name = %q and push before publishing", ownerLower+"/"+bare)
+	}
+	if name != manifestName {
+		// A bare --name against an already correctly scoped pack.toml means the
+		// flag is the stale half, typically a CI workflow still passing the
+		// pre-scope name. Prescribing the pack.toml edit there would tell the
+		// publisher to drop the scope, and the next run would refuse the result as
+		// a reserved unscoped name.
+		manifestScope, _, manifestScoped := strings.Cut(manifestName, "/")
+		manifestIsPublishable := manifestScoped && manifestScope == ownerLower && packregistry.ValidatePackName(manifestName) == nil
+		if !strings.Contains(name, "/") && manifestIsPublishable {
+			return fmt.Errorf("--name %q does not match pack.toml [pack].name %q; the registry compares them byte-for-byte, and pack.toml already carries the correctly scoped name, so drop --name or pass --name %q", name, manifestName, manifestName)
+		}
+		return fmt.Errorf("--name %q does not match pack.toml [pack].name %q; the registry compares them byte-for-byte, so set [pack].name = %q and push before publishing", name, manifestName, name)
+	}
+	scope, rest, scoped := strings.Cut(name, "/")
+	if !scoped {
+		if allowUnscoped {
+			return nil
+		}
+		return fmt.Errorf("unscoped pack name %q is reserved by the registry; set [pack].name = %q and push before publishing, or pass --allow-unscoped-name if the registry already holds a claim for %q", name, ownerLower+"/"+name, name)
+	}
+	if scope != ownerLower {
+		return fmt.Errorf("pack name scope %q does not match the source repository owner %q; set [pack].name = %q and push before publishing", scope, owner, ownerLower+"/"+rest)
+	}
+	return nil
 }
 
 // registryPublishRepoRef carries the GitHub repository URL and release ref
@@ -357,9 +538,9 @@ func registryGitHubActionsRepoRef(commit string, opts registryPublishOptions) (r
 }
 
 // readRegistryPackManifest loads pack.toml from packRoot. It does not require
-// [pack].name: buildRegistryPublishRequest applies the --name fallback first
-// and reports a missing name only when neither the manifest nor the flag
-// supplies one, so the advertised --name override actually takes effect.
+// [pack].name; buildRegistryPublishRequest reports that, because the registry
+// rejects a pack.toml declaring no name at all and the resulting error can then
+// name the exact [pack].name edit that fixes the publish.
 func readRegistryPackManifest(packRoot string) (registryPackManifest, error) {
 	packToml := filepath.Join(packRoot, "pack.toml")
 	data, err := os.ReadFile(packToml)
@@ -441,6 +622,21 @@ func normalizeGitHubOwnerRepo(path string) (string, error) {
 	return "https://github.com/" + path, nil
 }
 
+// registryGitHubRepoOwner cuts the owner login out of a publish request's
+// repository URL. Every such URL passes through normalizeGitHubOwnerRepo above,
+// on the upstream-remote path and the GitHub Actions fallback path alike, so
+// the https://github.com/<owner>/<repo> shape is guaranteed here. The error
+// exists so a future change to that normalization surfaces as a refused publish
+// rather than as a silently skipped namespace check.
+func registryGitHubRepoOwner(repoURL string) (string, error) {
+	if path, ok := strings.CutPrefix(strings.TrimSpace(repoURL), "https://github.com/"); ok {
+		if owner, _, cut := strings.Cut(path, "/"); cut && owner != "" {
+			return owner, nil
+		}
+	}
+	return "", fmt.Errorf("cannot derive the GitHub owner from repository URL %q", repoURL)
+}
+
 func registryPublishPackPath(repoRoot, packRoot string) (string, error) {
 	rel, err := filepath.Rel(repoRoot, packRoot)
 	if err != nil {
@@ -501,6 +697,82 @@ type registryPublishAuth struct {
 	Token         string
 	SessionCookie string
 	CSRFToken     string
+}
+
+func registryHTTPClientWithCredentialRefresh(client *http.Client, refresh registryCredentialSource) *http.Client {
+	copyClient := *client
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errRegistryCredentialRedirect
+	}
+	base := copyClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	copyClient.Transport = &registryProviderReauthRoundTripper{base: base, refresh: refresh}
+	return &copyClient
+}
+
+type registryProviderReauthRoundTripper struct {
+	base    http.RoundTripper
+	refresh registryCredentialSource
+}
+
+func (rt *registryProviderReauthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || rt.refresh == nil {
+		return resp, err
+	}
+	if !isRegistryRetrySafeMethod(req.Method) ||
+		!registryHasBearerAuthorization(req.Header.Get("Authorization")) ||
+		(req.Body != nil && req.Body != http.NoBody && req.GetBody == nil) {
+		return resp, nil
+	}
+
+	token, err := rt.refresh(req.Context(), true)
+	if err != nil {
+		_ = resp.Body.Close()
+		if ctxErr := req.Context().Err(); ctxErr != nil {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", ctxErr)
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.Canceled)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("refreshing registry credential after 401: %w", context.DeadlineExceeded)
+		}
+		return nil, errors.New("refreshing registry credential after 401: credential refresh failed")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		_ = resp.Body.Close()
+		return nil, errors.New("refreshing registry credential after 401: credential provider returned an empty token")
+	}
+
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		retry.Body, err = req.GetBody()
+		if err != nil {
+			_ = resp.Body.Close()
+			return nil, errors.New("replaying registry request after credential refresh: request body recreation failed")
+		}
+	}
+	retry.Header.Set("Authorization", "Bearer "+token)
+	_ = resp.Body.Close()
+	return rt.base.RoundTrip(retry)
+}
+
+func registryHasBearerAuthorization(value string) bool {
+	fields := strings.Fields(value)
+	return len(fields) == 2 && strings.EqualFold(fields[0], "Bearer") && fields[1] != ""
+}
+
+func isRegistryRetrySafeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a registryPublishAuth) hasCredentials() bool {
@@ -761,6 +1033,10 @@ func writeRegistryPublishSubmitted(stdout io.Writer, baseURL string, result regi
 	} else if result.ValidationError != "" {
 		fmt.Fprintf(stdout, "Message: %s\n", result.ValidationError) //nolint:errcheck
 	}
+	// Pin the effective publish base URL: the requests command resolves its
+	// registry independently (flag/env/stored default/hosted default), so an
+	// unqualified handoff can query a different Registry than the publish used.
+	fmt.Fprintf(stdout, "Next: gc pack registry requests --registry-url %s %s\n", baseURL, result.ID) //nolint:errcheck
 }
 
 // registryPublishValidationRejectedStatuses lists publish-request statuses that

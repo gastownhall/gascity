@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -63,11 +64,31 @@ type cityRegistry struct {
 	initStatus           map[string]cityInitProgress
 	initFailures         map[string]*initFailRecord
 	panicHistory         map[string]*panicRecord
-	pendingRequestIDs    map[string]string    // city path → request_id for async correlation
-	recentlyUnregistered map[string]time.Time // city path → unregister time (grace period for event delivery)
-	supervisorRecorder   events.Recorder      // supervisor-level event recorder for city lifecycle events
+	pendingRequestIDs    map[string]string                   // city path → request_id for async correlation
+	recentlyUnregistered map[string]recentlyUnregisteredCity // city path → stable name and unregister time
+	supervisorRecorder   events.Recorder                     // supervisor-level event recorder for city lifecycle events
 
 	gen uint64 // monotonic generation counter
+
+	// changed is closed and replaced whenever a snapshot rebuild changes the
+	// city membership (see cityMembership); CityChanges hands it out.
+	changed    atomic.Pointer[chan struct{}]
+	membership map[string]cityMembership // by path; co-protected by citiesMu
+}
+
+// cityMembership is the part of a cityView that decides which event providers
+// the supervisor-scope stream merges. Rebuilds that change only progress or
+// status text leave it unchanged and do not wake CityChanges waiters.
+type cityMembership struct {
+	name       string
+	started    bool
+	tombstoned bool
+	hasState   bool
+}
+
+type recentlyUnregisteredCity struct {
+	name           string
+	unregisteredAt time.Time
 }
 
 // newCityRegistry creates a registry initialized with an empty snapshot.
@@ -78,7 +99,7 @@ func newCityRegistry() *cityRegistry {
 		initFailures:         make(map[string]*initFailRecord),
 		panicHistory:         make(map[string]*panicRecord),
 		pendingRequestIDs:    make(map[string]string),
-		recentlyUnregistered: make(map[string]time.Time),
+		recentlyUnregistered: make(map[string]recentlyUnregisteredCity),
 	}
 	// Initialize with empty snapshot to prevent nil-dereference panic
 	// if an API request arrives before the first reconciliation tick.
@@ -89,7 +110,16 @@ func newCityRegistry() *cityRegistry {
 		gen:     0,
 		builtAt: time.Now(),
 	})
+	changed := make(chan struct{})
+	r.changed.Store(&changed)
 	return r
+}
+
+// CityChanges implements api.CityChangeNotifier. The returned channel is
+// closed the next time a city is added, starts, stops, is tombstoned, or is
+// removed. Lock-free.
+func (r *cityRegistry) CityChanges() <-chan struct{} {
+	return *r.changed.Load()
 }
 
 // StorePendingRequestID stores a request_id for async correlation.
@@ -155,7 +185,11 @@ func (r *cityRegistry) SupervisorEventRecorder() events.Recorder {
 func (r *cityRegistry) MarkRecentlyUnregistered(cityPath string) {
 	r.citiesMu.Lock()
 	defer r.citiesMu.Unlock()
-	r.recentlyUnregistered[cityPath] = time.Now()
+	name := filepath.Base(cityPath)
+	if v, ok := r.snap.Load().byPath[cityPath]; ok && v.Name != "" {
+		name = v.Name
+	}
+	r.recentlyUnregistered[cityPath] = recentlyUnregisteredCity{name: name, unregisteredAt: time.Now()}
 }
 
 const recentlyUnregisteredGrace = 2 * time.Minute
@@ -275,15 +309,27 @@ func (r *cityRegistry) Snapshot() *citySnapshot {
 // simply skipped.
 func (r *cityRegistry) TransientCityEventProviders() map[string]events.Provider {
 	snap := r.snap.Load()
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, registryErr := reg.List()
+	registeredNamesByPath := make(map[string]string, len(entries))
+	if registryErr == nil {
+		for _, e := range entries {
+			registeredNamesByPath[pathutil.NormalizePathForCompare(e.Path)] = e.EffectiveName()
+		}
+	}
+
 	// Collect non-Running cities known to the runtime registry.
 	paths := make(map[string]string, len(snap.all))
 	for _, v := range snap.all {
 		if v == nil || v.Started {
 			continue
 		}
-		name := v.Name
-		if name == "" {
-			name = filepath.Base(v.Path)
+		name, registered := registeredNamesByPath[pathutil.NormalizePathForCompare(v.Path)]
+		if !registered {
+			name = v.Name
+			if name == "" || snap.byName[name] != v {
+				continue
+			}
 		}
 		paths[name] = v.Path
 	}
@@ -297,8 +343,7 @@ func (r *cityRegistry) TransientCityEventProviders() map[string]events.Provider 
 			running[name] = struct{}{}
 		}
 	}
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if entries, err := reg.List(); err == nil {
+	if registryErr == nil {
 		for _, e := range entries {
 			name := e.EffectiveName()
 			if _, already := running[name]; already {
@@ -315,12 +360,15 @@ func (r *cityRegistry) TransientCityEventProviders() map[string]events.Provider 
 	// observe completion events after the city leaves the registry.
 	r.citiesMu.Lock()
 	now := time.Now()
-	for path, ts := range r.recentlyUnregistered {
-		if now.Sub(ts) > recentlyUnregisteredGrace {
+	for path, city := range r.recentlyUnregistered {
+		if now.Sub(city.unregisteredAt) > recentlyUnregisteredGrace {
 			delete(r.recentlyUnregistered, path)
 			continue
 		}
-		name := filepath.Base(path)
+		name := city.name
+		if name == "" {
+			name = filepath.Base(path)
+		}
 		if _, already := running[name]; already {
 			continue
 		}
@@ -350,7 +398,7 @@ type transientCityEventProvider struct {
 }
 
 func (p transientCityEventProvider) Record(e events.Event) {
-	recorder, err := events.NewFileRecorder(p.path, io.Discard)
+	recorder, err := newSecondaryFileEventsRecorder(p.path, io.Discard)
 	if err != nil {
 		return
 	}
@@ -367,16 +415,7 @@ func (p transientCityEventProvider) LatestSeq() (uint64, error) {
 }
 
 func (p transientCityEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
-	recorder, err := events.NewFileRecorder(p.path, io.Discard)
-	if err != nil {
-		return nil, err
-	}
-	watcher, err := recorder.Watch(ctx, afterSeq)
-	recorder.Close() //nolint:errcheck // watcher only needs the path
-	if err != nil {
-		return nil, err
-	}
-	return watcher, nil
+	return events.NewReadOnlyFileProvider(p.path, io.Discard).Watch(ctx, afterSeq)
 }
 
 func (transientCityEventProvider) Close() error {
@@ -515,6 +554,28 @@ func (r *cityRegistry) rebuildSnapshotLocked() {
 	}
 
 	r.snap.Store(snap)
+	r.signalMembershipChangeLocked(snap)
+}
+
+// signalMembershipChangeLocked wakes CityChanges waiters when snap's city
+// membership differs from the previous snapshot's.
+// PRECONDITION: caller holds citiesMu.
+func (r *cityRegistry) signalMembershipChangeLocked(snap *citySnapshot) {
+	membership := make(map[string]cityMembership, len(snap.all))
+	for _, v := range snap.all {
+		membership[v.Path] = cityMembership{
+			name:       v.Name,
+			started:    v.Started,
+			tombstoned: v.Tombstoned,
+			hasState:   v.cs != nil,
+		}
+	}
+	if maps.Equal(membership, r.membership) {
+		return
+	}
+	r.membership = membership
+	next := make(chan struct{})
+	close(*r.changed.Swap(&next))
 }
 
 // toCityView deep-copies a managedCity into an immutable cityView.
@@ -523,7 +584,7 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 	// SAFETY: cs is a pointer to controllerState, which has its own internal
 	// RWMutex protecting all field access. API handlers that receive this pointer
 	// call methods like Config(), SessionProvider(), etc. which acquire cs.mu.RLock().
-	// The Poke() method only does a non-blocking channel send — no managedCity access.
+	// The Enqueue() method only does non-blocking channel sends — no managedCity access.
 	var cs api.State
 	if mc.cr != nil {
 		cs = mc.cr.cs

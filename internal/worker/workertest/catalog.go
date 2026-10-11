@@ -25,6 +25,9 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInteractionLifecycleHistory         RequirementCode = "WC-INT-006"
 	RequirementToolEventNormalization              RequirementCode = "WC-TOOL-001"
 	RequirementToolEventOpenTail                   RequirementCode = "WC-TOOL-002"
+	RequirementStructuredToolResult                RequirementCode = "WC-STRUCT-001"
+	RequirementStructuredNoNativeLeak              RequirementCode = "WC-STRUCT-002"
+	RequirementStructuredEditEvidence              RequirementCode = "WC-STRUCT-003"
 	RequirementRealTransportProof                  RequirementCode = "WC-TRANSPORT-001"
 	RequirementStartupCommandMaterialization       RequirementCode = "WC-START-001"
 	RequirementStartupRuntimeConfigMaterialization RequirementCode = "WC-START-002"
@@ -101,6 +104,31 @@ func TelemetryHandleCatalog() []Requirement {
 			Code:        RequirementInvocationUsageRecording,
 			Group:       "telemetry",
 			Description: "A prompt operation on a transcript-backed SessionHandle records gc.agent.tokens.*; a runtime-only RuntimeHandle is permanently excluded (ga-tkvb31).",
+		},
+	}
+}
+
+// StructuredCatalog returns the structured-transcript conformance requirements.
+// These prove that a profile's provider-native tool calls normalize into the
+// provider-neutral typed structured carriers (StructuredToolInput /
+// StructuredToolResult) without leaking provider-native shapes and without
+// fabricating edit evidence the provider did not report.
+func StructuredCatalog() []Requirement {
+	return []Requirement{
+		{
+			Code:        RequirementStructuredToolResult,
+			Group:       "structured",
+			Description: "Provider-native tool results normalize into typed StructuredToolResult carriers in worker history.",
+		},
+		{
+			Code:        RequirementStructuredNoNativeLeak,
+			Group:       "structured",
+			Description: "The typed structured carriers expose no provider-native keys; provider-native shape stays in the preserved raw frame, not the neutral structured data.",
+		},
+		{
+			Code:        RequirementStructuredEditEvidence,
+			Group:       "structured",
+			Description: "An edit result carries a patch only when the provider result supplied patch evidence; it is never fabricated from tool input.",
 		},
 	}
 }

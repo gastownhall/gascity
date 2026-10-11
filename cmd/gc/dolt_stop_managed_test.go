@@ -4,10 +4,73 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+func TestWaitForManagedDoltProcessExit(t *testing.T) {
+	const pid = 4242
+	tests := []struct {
+		name         string
+		timeout      time.Duration
+		aliveThrough int
+		wantCalls    int
+		wantElapsed  time.Duration
+	}{
+		{name: "already dead", timeout: 45 * time.Millisecond, aliveThrough: 0, wantCalls: 1},
+		{name: "exits after two polls", timeout: time.Second, aliveThrough: 2, wantCalls: 3, wantElapsed: 40 * time.Millisecond},
+		{name: "never exits uses exact remainder", timeout: 45 * time.Millisecond, aliveThrough: -1, wantCalls: 4, wantElapsed: 45 * time.Millisecond},
+		{name: "nonpositive bound probes once", timeout: 0, aliveThrough: -1, wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				started := time.Now()
+				waitForManagedDoltProcessExit(pid, tt.timeout, func(gotPID int) bool {
+					if gotPID != pid {
+						t.Fatalf("alive pid = %d, want %d", gotPID, pid)
+					}
+					calls++
+					return tt.aliveThrough < 0 || calls <= tt.aliveThrough
+				})
+
+				if calls != tt.wantCalls {
+					t.Errorf("alive calls = %d, want %d", calls, tt.wantCalls)
+				}
+				if elapsed := time.Since(started); elapsed != tt.wantElapsed {
+					t.Errorf("elapsed = %v, want %v", elapsed, tt.wantElapsed)
+				}
+			})
+		})
+	}
+}
+
+func TestClearManagedDoltRuntimeReportsPartialMutation(t *testing.T) {
+	city := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(city)
+	if err != nil {
+		t.Fatalf("resolve layout: %v", err)
+	}
+	// A nonempty directory at the PID-file path makes cleanup fail after the
+	// atomic runtime-state rewrite has committed.
+	if err := os.MkdirAll(layout.PIDFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.PIDFile, "keep"), []byte("evidence"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mutated, err := clearManagedDoltRuntimeWithMutation(layout, "3307")
+	if err == nil || !mutated {
+		t.Fatalf("clear runtime = mutated %t, err %v; want partial mutation and error", mutated, err)
+	}
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil || state.Running || state.PID != 0 {
+		t.Fatalf("runtime state was not committed before cleanup error: state=%+v err=%v", state, err)
+	}
+}
 
 func TestManagedDoltStopPollInterval(t *testing.T) {
 	cases := []struct {

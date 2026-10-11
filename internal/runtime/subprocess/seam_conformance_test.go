@@ -4,33 +4,42 @@ package subprocess
 
 import (
 	"fmt"
-	"path/filepath"
+	"os"
 	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
-// TestSubprocessSeamConformance runs the FULL legacy Provider conformance suite
-// against the subprocess provider reconstructed from its seams via
-// runtime.NewProviderFromSeams. This is the early-cut-over validation: it proves
-// the de-conflated seams are sufficient to back the entire Provider contract for
-// subprocess, exercising the otherwise-unwired seam code through the same
-// contract real callers depend on.
+// TestSubprocessSeamConformance runs the full Provider conformance suite
+// against the production seam-backed subprocess constructor.
 func TestSubprocessSeamConformance(t *testing.T) {
-	raw := NewProviderWithDir(filepath.Join(shortTempDir(t), "seam-pids"))
-	rt, tp := raw.Seams()
-	p := runtime.NewProviderFromSeams(rt, tp)
 	var counter int64
 
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		id := atomic.AddInt64(&counter, 1)
-		name := fmt.Sprintf("gc-subproc-seam-%d", id)
-		t.Cleanup(func() { _ = p.Stop(name) })
-		return p, runtime.Config{
+		return NewSeamBackedWithDir(testutil.ShortTempDir(t, "gc-subproc-seam-")), runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),
-		}, name
+		}, fmt.Sprintf("gc-subproc-seam-%d", atomic.AddInt64(&counter, 1))
+	})
+}
+
+// TestSubprocessDefaultDirSeamConformance runs the same full Provider
+// conformance suite against the constructor cmd/gc's "subprocess" registration
+// calls when a city path is absent: NewSeamBacked, which keeps socket and meta
+// files in the shared default temporary directory rather than an injected one.
+// That directory is process-shared by design, so session names carry the PID —
+// the suite only asserts membership of its own names, and PID-scoped names keep
+// concurrent runs on one machine from colliding there.
+func TestSubprocessDefaultDirSeamConformance(t *testing.T) {
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(), runtime.Config{
+			Command: "sleep 300",
+			WorkDir: t.TempDir(),
+		}, fmt.Sprintf("gc-subproc-default-%d-%d", os.Getpid(), atomic.AddInt64(&counter, 1))
 	})
 }

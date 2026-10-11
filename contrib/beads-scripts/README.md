@@ -62,9 +62,9 @@ from the controller's laptop.
 **Dependencies:** `kubectl`, `jq`, `bash`
 
 **Container requirements:** `bd`, `jq`, `bash`, `git` (same image as agent pods).
-The image must support running as non-root UID 1000 (the pod uses restricted
-Pod Security Standards with `runAsUser: 1000`). Ensure `/workspace` is writable
-by UID 1000 or does not require pre-existing ownership.
+The image must support running as non-root UID 1001 (the pod uses restricted
+Pod Security Standards with `runAsUser: 1001`). Ensure `/workspace` is writable
+by UID 1001 or does not require pre-existing ownership.
 
 **Usage:**
 

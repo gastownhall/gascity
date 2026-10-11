@@ -15,6 +15,8 @@ const baseApi: SupervisorApi = {
   health: vi.fn(),
   cityHealth: vi.fn(),
   cityStatus: vi.fn(),
+  cityUsage: vi.fn(),
+  runCensus: vi.fn(),
   listCities: vi.fn(),
   listAgents: vi.fn(),
   listRigs: vi.fn(),
@@ -24,8 +26,6 @@ const baseApi: SupervisorApi = {
   createBead: vi.fn(),
   updateBead: vi.fn(),
   closeBead: vi.fn(),
-  nudgeAgent: vi.fn(),
-  agentPrime: vi.fn(),
   sling: vi.fn(),
   formulaFeed: vi.fn(),
   listMail: vi.fn(),
@@ -73,6 +73,91 @@ describe('supervisor bead reads', () => {
     expect(result.items.map((item) => item.id)).toEqual(['rc-decision', 'td-task']);
     expect(result.total).toBe(2);
     expect(result.upstream_total).toBe(4);
+  });
+
+  it('uses an explicit city instead of re-reading the active city', async () => {
+    const listBeads = vi.fn(async () => ({ items: [], total: 0 }));
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    await listSupervisorBeads({ city: 'captured-city' });
+
+    expect(listBeads).toHaveBeenCalledWith('captured-city', { limit: 1000 });
+  });
+
+  // gp-6xd F1: the windowed list is newest-created-first, so long-running
+  // in-progress beads age out of it — exactly the beads the operator most
+  // needs. A dedicated status=in_progress leg fetches that set whole and
+  // merges into the window.
+  it('merges the dedicated in-progress leg into the window, deduplicating by id', async () => {
+    const listBeads = vi.fn(async (_city: string, query: { status?: string }) =>
+      query.status === 'in_progress'
+        ? {
+            items: [
+              bead({ id: 'in-window', issue_type: 'task', status: 'in_progress' }),
+              bead({ id: 'past-window', issue_type: 'task', status: 'in_progress' }),
+            ],
+            total: 2,
+          }
+        : {
+            items: [
+              bead({ id: 'recent-open', issue_type: 'task' }),
+              bead({ id: 'in-window', issue_type: 'task', status: 'in_progress' }),
+            ],
+            total: 3000,
+          },
+    );
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    const result = await listSupervisorBeads();
+
+    expect(listBeads).toHaveBeenCalledWith('test-city', { limit: 1000, status: 'in_progress' });
+    expect(result.items.map((item) => item.id)).toEqual([
+      'recent-open',
+      'in-window',
+      'past-window',
+    ]);
+    expect(result.upstream_total).toBe(3000);
+  });
+
+  // The truncation notice compares upstream_fetched against upstream_total.
+  // Counting the MERGED array would let past-window beads recovered by the
+  // in-progress leg pad the count up to (or past) upstream_total and silence
+  // the notice exactly when the window really did drop beads.
+  it('reports upstream_fetched from the window leg alone, so a merge cannot mask truncation', async () => {
+    const listBeads = vi.fn(async (_city: string, query: { status?: string; limit?: number }) =>
+      query.status === 'in_progress'
+        ? {
+            items: [bead({ id: 'past-window-a', issue_type: 'task', status: 'in_progress' })],
+            total: 1,
+          }
+        : {
+            items: [bead({ id: 'in-window', issue_type: 'task' })],
+            // upstream_total sits just above what the window returned: the
+            // window IS truncated.
+            total: 2,
+          },
+    );
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    const result = await listSupervisorBeads({ limit: 1 });
+
+    // The merge recovered a second bead, but the window still fetched only one.
+    expect(result.items).toHaveLength(2);
+    expect(result.upstream_total).toBe(2);
+    expect(result.upstream_fetched).toBe(1);
+    expect(result.upstream_fetched).toBeLessThan(result.upstream_total ?? 0);
+  });
+
+  it('degrades to the window alone when the in-progress leg fails', async () => {
+    const listBeads = vi.fn(async (_city: string, query: { status?: string }) => {
+      if (query.status === 'in_progress') throw new Error('leg down');
+      return { items: [bead({ id: 'recent-open', issue_type: 'task' })], total: 1 };
+    });
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    const result = await listSupervisorBeads();
+
+    expect(result.items.map((item) => item.id)).toEqual(['recent-open']);
   });
 
   // gascity-dashboard-sg9o: a "needs you" decision alert can deep-link to a

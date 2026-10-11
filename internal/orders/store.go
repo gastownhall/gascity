@@ -25,9 +25,9 @@ import (
 // CloseRun, RecentRuns) emit byte-identical bead writes to the raw ops they
 // replace and are wired into order_dispatch.go / cmd_order.go. The cooldown
 // clock (last-run) and event-cursor READS the dispatch gate uses go through the
-// runtime helpers (LastRunFuncForStore/CursorFuncForStore and their
-// *AcrossStores forms), which the in-memory tracking index batches per store —
-// see cmd/gc/order_dispatch.go.
+// Store's mixed orders+graph reads (LastRun / Cursor / HasOpenWork, and the
+// LastRunAcross / CursorAcross federation helpers), which the in-memory tracking
+// index batches per store — see cmd/gc/order_dispatch.go and store_reads.go.
 
 // Order-class label constants. These MUST stay in sync with the canonical
 // declarations in cmd/gc/order_dispatch.go and the private mirrors in
@@ -145,6 +145,11 @@ type OrderRun struct {
 	// CreatedAt is the COOLDOWN CLOCK: the dispatcher reads the most recent
 	// run's CreatedAt to decide whether the cooldown has elapsed.
 	CreatedAt time.Time
+	// UpdatedAt is the last-modified time of the tracking bead, or zero for
+	// legacy beads that never recorded one. The closed-tracking retention prune
+	// uses it (falling back to CreatedAt) as the reference time that orders the
+	// recent-history floor — see order_dispatch.go orderTrackingClosedReferenceTime.
+	UpdatedAt time.Time
 	// Open reports whether the tracking bead is still open. An open run is the
 	// in-flight single-flight marker that suppresses repeat dispatch.
 	Open bool
@@ -177,17 +182,95 @@ type RunOpts struct {
 
 // Store is the order-class domain wrapper. It holds the strongly-typed
 // beads.OrdersStore by value and confines the Title/label codec.
+//
+// It optionally carries a graph-class leg. The order-run:<scoped> and
+// order:<scoped>+seq:<N> labels the dispatcher stamps ride BOTH order-tracking
+// beads (orders class) AND the wisp/molecule roots created by instantiation
+// (graph class). The single-flight and cooldown/cursor reads therefore span two
+// classes, so the mixed reads (LastRun, Cursor, HasOpenWork) union order-run
+// evidence across the orders leg and the graph leg. On a single-store city the
+// two legs wrap the same underlying store and the union deduplicates to a single
+// read, so the verdict is byte-identical to the pre-split behavior; under a
+// graph-store split they are distinct physical stores and the union is what
+// keeps the reads correct (never rebase them onto a single class store — that is
+// the single-store-assumption bug the graph-store-split audit root-caused).
 type Store struct {
 	store beads.OrdersStore
+	graph beads.GraphStore
 }
 
 // NewStore wraps a strongly-typed orders-class store as the order front door.
+// The mixed orders+graph reads (LastRun/Cursor/HasOpenWork) fall back to the
+// orders leg alone; on a single-store city that leg's TierBoth reads already see
+// the colocated wisp roots, so this is byte-identical to the pre-split behavior.
+// Use NewStoreWithGraph where the graph store is separately resolvable so the
+// reads stay correct under a graph-store split.
 func NewStore(store beads.OrdersStore) *Store {
 	return &Store{store: store}
 }
 
+// NewStoreWithGraph wraps an orders-class store together with the graph-class
+// store that owns its wisp/molecule roots, enabling the mixed orders+graph reads
+// to union order-run evidence across both classes.
+func NewStoreWithGraph(store beads.OrdersStore, graph beads.GraphStore) *Store {
+	return &Store{store: store, graph: graph}
+}
+
+// mixedLegStores returns the distinct underlying stores the mixed orders+graph
+// reads must union: the orders leg always, plus the graph leg when it is present
+// and backed by a DIFFERENT underlying store. Deduplicating on the underlying
+// store keeps the single-store city (where both legs wrap one store) at a single
+// read — byte-identical to the pre-split behavior — while a real graph-store
+// split contributes a second, distinct read.
+func (s *Store) mixedLegStores() []beads.Store {
+	var stores []beads.Store
+	if s.store.Store != nil {
+		stores = append(stores, s.store.Store)
+	}
+	if s.graph.Store != nil && s.graph.Store != s.store.Store {
+		stores = append(stores, s.graph.Store)
+	}
+	return stores
+}
+
 // trackingTitle returns the canonical tracking-bead title for a scoped order.
 func trackingTitle(scoped string) string { return labelOrderTitlePrefix + scoped }
+
+// RunLabel returns the canonical label shared by order tracking records and
+// graph roots for scoped.
+func RunLabel(scoped string) string { return labelOrderRunPrefix + scoped }
+
+// ScopedFromRunLabel returns the scoped order name a run label names, and
+// reports whether label is a run label at all.
+//
+// It is RunLabel read backwards, and it exists so a caller that indexes a whole
+// store's order-run evidence in one read — rather than one label-filtered query
+// per order — parses the label with the function that wrote it. The prefix is
+// otherwise spelled as a literal at a dozen call sites, and an index that
+// disagreed with the writer about where the name starts would gate on nothing.
+func ScopedFromRunLabel(label string) (string, bool) {
+	if !strings.HasPrefix(label, labelOrderRunPrefix) {
+		return "", false
+	}
+	scoped := strings.TrimPrefix(label, labelOrderRunPrefix)
+	if scoped == "" {
+		return "", false
+	}
+	return scoped, true
+}
+
+// IsTrackingBead reports whether b is an order tracking record.
+func IsTrackingBead(b beads.Bead) bool { return beadLabelsContain(b.Labels, labelOrderTracking) }
+
+// MaxEventCursor returns the largest event cursor encoded by the supplied
+// order-run bead labels.
+func MaxEventCursor(items []beads.Bead) EventCursor {
+	labels := make([][]string, 0, len(items))
+	for _, item := range items {
+		labels = append(labels, item.Labels)
+	}
+	return EventCursor(MaxSeqFromLabels(labels))
+}
 
 // baseLabels returns the order-run + order-tracking labels every tracking bead
 // carries, plus any outcome labels.
@@ -258,6 +341,10 @@ func (s *Store) CloseRun(runID, reason string) error {
 	return nil
 }
 
+// DeleteRun removes one tracking record. Retention owns the selection policy;
+// this method only confines the persistence operation to the orders front door.
+func (s *Store) DeleteRun(runID string) error { return s.store.Delete(runID) }
+
 // CreateRunClosed creates a tracking bead, optionally stamps an event cursor and
 // outcome, then closes it — the cooldown-advance-only path used by manual
 // `gc order run`. The bead's CreatedAt advances the cooldown clock, and it is
@@ -298,17 +385,30 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 // `gc order history` read (cmd_order.go): it confines the order-run-label List
 // and the bead->OrderRun decode. It reads through the raw store with TierMode
 // TierBoth (unioning wisp + issue tiers), byte-identical to the `gc order
-// history` loop.
+// history` loop. A non-positive limit reads every retained run.
+//
+// The limit is pushed to the backing (AllowBackingCreatedLimit): this read
+// projects a newest-first listing, so the bound is over created_at — the very
+// column the sort key uses — and a bounded backing read returns the same prefix
+// the client-side cut would, up to which of two runs sharing a `created_at`
+// lands on the last row. Fetching the full retained corpus and trimming
+// afterwards is what made `gc order history` cost 22s on a city with 11k+
+// order-run rows (ga-klv). At the limit boundary the backing breaks created_at
+// ties by id ASC rather than the canonical id DESC, so which of two runs sharing
+// a timestamp lands on the last row can differ; for a history listing that is
+// cosmetic, unlike the Cursor read (store_reads.go), whose max-seq reduction is
+// over a different column and therefore must NOT opt in.
 func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
 	beadsList, err := s.store.List(beads.ListQuery{
-		Label:         labelOrderRunPrefix + scoped,
-		Limit:         limit,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
+		Label:                    labelOrderRunPrefix + scoped,
+		Limit:                    limit,
+		IncludeClosed:            true,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
 	})
 	if err != nil {
 		return decodeRuns(scoped, beadsList), err
@@ -320,19 +420,27 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // decoded into OrderRun values. It is the typed face of the /v0/orders/feed read
 // it replaces: it confines the order-tracking List and the tracking-bead decode
 // the feed previously performed inline. Beads with no order-run label (which
-// RunFromTrackingBead rejects) are skipped. The query is byte-identical to the
-// feed's prior raw scan — order-tracking label, created-desc, both tiers, and no
-// IncludeClosed so only in-flight/open tracking beads surface. Decoded rows and
-// any list error are returned together (the RecentRuns pattern) so callers keep
-// the feed's err-branch semantics.
-func (s *Store) ListTracking() ([]OrderRun, error) {
+// RunFromTrackingBead rejects) are skipped. Decoded rows and any list error are
+// returned together (the RecentRuns pattern) so callers keep the feed's
+// err-branch semantics.
+//
+// limit is pushed to the backing (AllowBackingCreatedLimit) rather than
+// applied client-side, matching RecentRuns's ga-klv fix: slicing after an
+// unbounded fetch still pays the full scan cost on a city with a large
+// retained tracking-bead corpus. IncludeClosed is always true -- unlike
+// LatestOpenRun's deliberate open-only narrowing, the feed lists completed
+// runs alongside in-flight ones. A non-positive limit means unlimited.
+func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
 	if s.store.Store == nil {
 		return nil, nil
 	}
 	list, err := s.store.List(beads.ListQuery{
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
+		Label:                    labelOrderTracking,
+		Limit:                    limit,
+		IncludeClosed:            true,
+		Sort:                     beads.SortCreatedDesc,
+		TierMode:                 beads.TierBoth,
+		AllowBackingCreatedLimit: true,
 	})
 	runs := make([]OrderRun, 0, len(list))
 	for _, b := range list {
@@ -395,9 +503,63 @@ func decodeRun(scoped string, b beads.Bead) OrderRun {
 		Scoped:    scoped,
 		Outcome:   outcomeFromLabels(b.Labels),
 		CreatedAt: b.CreatedAt,
+		UpdatedAt: b.UpdatedAt,
 		Open:      b.Status != "closed",
 		Cursor:    EventCursor(MaxSeqFromLabels([][]string{b.Labels})),
 	}
+}
+
+// NameFromOrderRunLabel resolves the scoped order name from a bead's
+// order-run:<scoped> label ONLY. Paths that select beads for destructive action
+// (force-close wisp-root matching) must use this rather than NameFromTrackingBead
+// so a bead can never be selected on its title alone. It is the orders-class
+// codec that absorbs order_dispatch.go's orderNameFromOrderRunLabel.
+func NameFromOrderRunLabel(b beads.Bead) (string, bool) {
+	for _, label := range b.Labels {
+		if name, ok := strings.CutPrefix(label, labelOrderRunPrefix); ok && name != "" {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// NameFromTrackingBead resolves the scoped order name from the order-run:<scoped>
+// label, falling back to the legacy order:<scoped> title prefix used by old
+// tracking beads. The title fallback is for tracking-bead selection, cooldown
+// history folding, and retention bucketing only; force-close root matching uses
+// NameFromOrderRunLabel. It absorbs order_dispatch.go's orderNameFromTrackingBead.
+func NameFromTrackingBead(b beads.Bead) (string, bool) {
+	if name, ok := NameFromOrderRunLabel(b); ok {
+		return name, true
+	}
+	if name, ok := strings.CutPrefix(b.Title, labelOrderTitlePrefix); ok && name != "" {
+		return name, true
+	}
+	return "", false
+}
+
+// decodeTrackingRun projects a tracking bead onto an OrderRun using the
+// tracking-bead name resolution (order-run label with the legacy order:<title>
+// fallback), matching the dispatcher's cooldown/sweep index folding. ok is false
+// when the bead is neither order-run-labeled nor order:-titled.
+func decodeTrackingRun(b beads.Bead) (OrderRun, bool) {
+	name, ok := NameFromTrackingBead(b)
+	if !ok {
+		return OrderRun{}, false
+	}
+	return decodeRun(name, b), true
+}
+
+// decodeTrackingRuns decodes a list of tracking beads, skipping any bead with no
+// resolvable order name (the same skip the dispatcher's index fold performs).
+func decodeTrackingRuns(list []beads.Bead) []OrderRun {
+	out := make([]OrderRun, 0, len(list))
+	for _, b := range list {
+		if run, ok := decodeTrackingRun(b); ok {
+			out = append(out, run)
+		}
+	}
+	return out
 }
 
 func decodeRuns(scoped string, list []beads.Bead) []OrderRun {

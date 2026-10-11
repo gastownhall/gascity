@@ -14,17 +14,49 @@ runtime-selection setting that picks tmux, k8s, ssh, or exec.
 Install the `herdr` binary and make sure it is on `PATH`:
 
 ```bash
-herdr --version   # the provider is verified against herdr 0.7.1+
+herdr --version   # 0.7.1 is the recorded live validation; read the version note below
 ```
 
 The backend is registered as a builtin runtime name (`herdr`) — no pack or
 `[runtimes.*]` declaration is needed. If the binary is missing, sessions
 selected onto herdr fail to start; install it before flipping the selector.
 
+**Pin a herdr version in any shared environment**, and check herdr's own release
+list rather than trusting a version named here. The adapter talks to herdr's CLI,
+and minor herdr releases have changed that surface twice: 0.7.4 and 0.7.5 altered
+commands the original adapter depended on, and 0.8.0 renamed the code herdr
+returns for a pane with no named agent. That second one cost a fallback:
+when the agent-prompt call fails on a pane with no registered agent, the adapter
+pastes the text instead, and under the renamed code it stopped recognising that
+case, so the original failure was returned to the caller and the paste never
+happened. Nudge delivery surfaced an error rather than going quiet, but nothing
+in the build or the default test suite went red, so the regression had to be
+noticed in the field.
+
+The adapter reads 0.8's spelling now. One gap is known and tracked: 0.8.0 made
+herdr's agent registry detection-based, so the live journey that drives herdr's
+session-event stream waives itself when the installed herdr reports 0.8 or later
+rather than asserting against a registry it no longer matches
+([#5808](https://github.com/gastownhall/gascity/issues/5808)). That waiver reads
+the version, not the registry: a herdr whose version cannot be read or parsed
+runs the journey, and on 0.8 its registry assertions then fail. The other
+real-herdr journeys (provider lifecycle, pane binding, activity, and the runtime
+conformance suite) do run on 0.8; the kind-launch journey needs an installed
+`claude` binary as well and skips without one. 0.7.1 remains the version the
+recorded end-to-end validation ran against.
+
+That is the reason to pin. The tests that drive a real herdr binary are opt-in
+(`make test-herdr-live`); the default suite runs against a fake, so a change on
+herdr's side cannot fail the build. After a herdr upgrade, run
+`make test-herdr-live` and then put a session through a full work cycle before
+trusting it.
+
 ## Enabling herdr
 
 `herdr` is selected with the same runtime selector used for every other
-backend, at one of three scopes.
+backend. That selector is city-wide (`[session] provider`) or, for a one-off
+run, process-wide (`GC_SESSION`); herdr cannot be selected for individual
+agents.
 
 ### City default
 
@@ -35,29 +67,37 @@ Set the session provider in `city.toml`:
 provider = "herdr"
 ```
 
-Every agent the city starts then runs under herdr, except agents pinned to
-another backend by a patch (see below).
+Every agent the city starts runs under herdr, except agents on the ACP transport
+(whether pinned `session = "acp"` or because their provider defaults to ACP),
+which route to the separate ACP backend instead (see below).
 
 ### Per-agent / per-rig
 
-Override the backend for a single agent — or every agent in a rig — with an
-agent patch. The override field is `session`:
+herdr cannot be selected for individual agents. The runtime backend is chosen
+city-wide by `[session] provider` (above) or process-wide by `GC_SESSION`
+(below); no patch puts an agent onto herdr when the city default is something
+else.
 
-```toml
-# one agent by name
-[[patches.agent]]
-name = "dog-1"
-session = "herdr"
+The per-agent patch field is `session`, but it selects a **transport**, not a
+backend. It accepts only `acp`, `tmux`, or omission (`IsValidSessionTransport`
+in `internal/config/provider.go`), so `session = "herdr"` never selects the
+herdr runtime. Config validation flags it as a warning:
 
-# every agent in a rig (match by the rig's working dir)
-[[patches.agent]]
-dir = "webapp"
-session = "herdr"
+```text
+agent "dog-1": session "herdr" is not a valid session transport (use "acp", "tmux", or omit)
 ```
 
-A per-agent `session` override wins over the `[session]` city default, so you
-can run the whole city on herdr while pinning specific agents to tmux (or the
-reverse — keep tmux as the default and pilot herdr on one agent).
+Under a herdr city, the transport router (`internal/runtime/auto`) sends only
+ACP-registered sessions to the separate ACP backend and routes everything else
+to the city's base provider, which is herdr. Two consequences follow:
+
+- `session = "acp"` (or a provider that defaults to ACP) moves that agent off
+  herdr, onto the ACP backend. It is the one per-agent lever that changes which
+  backend an agent runs on.
+- `session = "tmux"` does not keep an agent on tmux. The herdr provider does not
+  implement the transport-capability check, so the pin is neither honored nor
+  rejected; the agent falls back to the base provider and runs on herdr. To put
+  an agent on tmux, the whole city (or process) must default to tmux.
 
 ### Environment (one-off)
 
@@ -73,27 +113,35 @@ way it selects `exec:<script>` or any other backend.
 
 ## Piloting safely
 
-herdr is opt-in precisely so you can roll it out gradually. Recommended path:
+herdr is opt-in, and the backend is a whole-city choice, so you pilot it by
+scoping which city runs on herdr, not by pinning individual agents. Recommended
+path:
 
-1. **Keep the mayor on tmux first.** Don't run the orchestrator on an
-   experimental backend. If you flip the city default to herdr, pin the mayor
-   back to tmux with a patch:
+1. **Try it per-process on a scratch city.** Select herdr with the environment
+   variable on a throwaway city, so nothing is committed and your real city is
+   untouched:
+
+   ```bash
+   GC_SESSION=herdr gc start <scratch-city>
+   ```
+
+   Every agent in that process runs under herdr, except agents on the ACP
+   transport (whether pinned `session = "acp"` or because their provider
+   defaults to ACP), which still route to the separate ACP backend. Watch it
+   through a normal work cycle.
+
+2. **Promote to the scratch city's default.** Once the per-process trial looks
+   good, set the default in that city's `city.toml` and run it end to end:
 
    ```toml
    [session]
    provider = "herdr"
-
-   [[patches.agent]]
-   name = "mayor"
-   session = "tmux"
    ```
 
-2. **Start with one low-stakes agent** — a dog, or a single rig's witness —
-   by giving just that agent a `session = "herdr"` patch while the city default
-   stays tmux. Watch it through a normal work cycle before widening.
-
-3. **Widen** to a rig (`dir = "<rig>"`), then to the city default, once the
-   pilot agents are stable.
+3. **Widen** to your real city by flipping its `[session] provider` to
+   `"herdr"`, once the scratch city has been stable across several work cycles.
+   The switch is city-wide with no way to move agents over one at a time, so
+   keep any city you are not ready to migrate on the tmux default.
 
 ## Applying and verifying
 
@@ -104,6 +152,18 @@ herdr is opt-in precisely so you can roll it out gradually. Recommended path:
   `provider` value, plus any agent `session` overrides).
 - Once agents are on herdr, their workspaces and tabs are visible through
   herdr's own UI (`herdr` lists the per-rig/town workspaces and per-agent tabs).
+
+## What is not wired yet
+
+**The controller does not consume herdr's session-event stream.** herdr pushes
+session events and the provider implements the stream
+(`runtime.SessionEventProvider`), but the only consumer today is the provider's
+own activity reporting. The reconciler discovers session state on its periodic
+pass, so a session that goes away is noticed on the next pass rather than when the
+event arrives. That costs latency rather than correctness, because each pass reads
+live state rather than trusting an event. The delay is bounded by the reconcile
+interval only while the controller keeps up: ticks run one at a time, so a busy
+controller stretches it. That is the thing to watch during a pilot.
 
 ## Layout
 

@@ -17,6 +17,55 @@ func TestMemStore(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseReasonAfterReopenTests(t, factory)
+	beadstest.RunFenceConformance(t, factory)
+}
+
+func TestMemStoreCreateUsesSerializableTimestamp(t *testing.T) {
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{Title: "serializable timestamp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.CreatedAt != created.CreatedAt.Round(0) {
+		t.Fatalf("CreatedAt retained a process-local monotonic clock: %v", created.CreatedAt)
+	}
+}
+
+// TestMemStoreReadyParityConformance runs the cache ready-parity suite under
+// its ledgered waiver (ga-gmf8r): MemStore has no ready projection and no
+// canonical ready order yet.
+func TestMemStoreReadyParityConformance(t *testing.T) {
+	beadstest.RunReadyParityConformanceWithOptions(t, "MemStore", beadstest.ReadyParityHarness{
+		Open:   func(*testing.T) beads.Store { return beads.NewMemStore() },
+		Rescan: (*beads.CachingStore).ReconcileForTest,
+	}, beadstest.ReadyParityOptions{SkipCachedReadyParity: true})
+}
+
+func TestMemStoreConditionalWriterConformance(t *testing.T) {
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "MemStore",
+		func(_ *testing.T) beads.Store { return beads.NewMemStore() },
+		beadstest.ConditionalWriterOptions{
+			RowBackedMutationFlavors: true,
+			RestrictedUpdateFields:   true,
+			LabelsGuarded:            true,
+			SuppliesCurrent:          true,
+			OpenDisabled: func(_ *testing.T) beads.Store {
+				s := beads.NewMemStore()
+				s.DisableConditionalWrites = true
+				return s
+			},
+		},
+	)
+}
+
+// TestAtomicCloseMemStoreAtomicCloserConformance pins the opt-in in-memory
+// atomic-close store to the shared AtomicConditionalCloser contract, the same
+// table FileStore and SQLiteStore run.
+func TestAtomicCloseMemStoreAtomicCloserConformance(t *testing.T) {
+	beadstest.RunAtomicConditionalCloserConformance(t, "AtomicCloseMemStore",
+		func(_ *testing.T) beads.Store { return beads.NewAtomicCloseMemStore() })
 }
 
 func TestMemStoreSetMetadata(t *testing.T) {
@@ -65,6 +114,9 @@ func TestMemStoreReleaseIfCurrent(t *testing.T) {
 	if got.Status != "in_progress" || got.Assignee != "worker-1" {
 		t.Fatalf("wrong-assignee release mutated bead: %+v", got)
 	}
+	if got.ClaimFence != 0 {
+		t.Errorf("no-op release bumped ClaimFence to %d, want 0", got.ClaimFence)
+	}
 
 	released, err = s.ReleaseIfCurrent(b.ID, "worker-1")
 	if err != nil {
@@ -79,6 +131,9 @@ func TestMemStoreReleaseIfCurrent(t *testing.T) {
 	}
 	if got.Status != "open" || got.Assignee != "" {
 		t.Fatalf("released bead = %+v, want open and unassigned", got)
+	}
+	if got.ClaimFence != 1 {
+		t.Errorf("ReleaseIfCurrent did not bump ClaimFence: got %d, want 1 (release is an ownership transition)", got.ClaimFence)
 	}
 }
 

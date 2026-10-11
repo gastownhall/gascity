@@ -677,3 +677,61 @@ base = "builtin:claude"
 	}
 	t.Fatal("ada explicit root city-pack agent not loaded")
 }
+
+// TestAgentDiscovery_UnreadableAgentTomlFailsLoud is the regression lock for the
+// silent-degradation path: an agents/<name>/agent.toml that exists but cannot be
+// read (permissions, I/O error) used to be skipped as if it were absent, and the
+// agent was then discovered with none of its configuration — no start_command, no
+// provider pin — launching a default interactive model session under the agent's
+// name instead of the configured command. Absence stays legal (agent.toml is
+// optional); an unreadable file must fail the pack scan exactly like a decode
+// error does.
+//
+// The unreadable file is a directory named agent.toml: reading a directory fails
+// with EISDIR for every user, so the test does not depend on permission bits
+// being honored for the invoking user (root ignores them).
+func TestAgentDiscovery_UnreadableAgentTomlFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// agent.toml "exists" as a directory: ReadFile fails with EISDIR, not
+	// ErrNotExist — the exact class the scan must not swallow.
+	if err := os.Mkdir(filepath.Join(agentDir, "agent.toml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := DiscoverPackAgents(fsys.OSFS{}, dir, "pk", nil)
+	if err == nil {
+		t.Fatalf("DiscoverPackAgents = %v agents, nil error; want an error naming agents/mayor/agent.toml (unreadable agent.toml must fail the scan, not silently degrade the agent)", agents)
+	}
+	if !strings.Contains(err.Error(), filepath.Join("agents", "mayor", "agent.toml")) {
+		t.Fatalf("error %q does not name the unreadable agent.toml", err)
+	}
+}
+
+// TestAgentDiscovery_AbsentAgentTomlStillConventions locks the legitimate half of
+// the same branch: agent.toml is optional, and its absence must keep producing a
+// convention-discovered agent (prompt/overlay wiring) with no error.
+func TestAgentDiscovery_AbsentAgentTomlStillConventions(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("You are a worker."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := DiscoverPackAgents(fsys.OSFS{}, dir, "pk", nil)
+	if err != nil {
+		t.Fatalf("DiscoverPackAgents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "worker" {
+		t.Fatalf("agents = %+v, want exactly the convention-discovered worker", agents)
+	}
+}

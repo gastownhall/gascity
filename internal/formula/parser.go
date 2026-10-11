@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // Formula file extensions. Canonical TOML is preferred, infixed TOML remains
@@ -206,10 +207,7 @@ func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, 
 }
 
 func descriptionFileBaseDir(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Dir(resolved)
-	}
-	return filepath.Dir(path)
+	return filepath.Dir(pathutil.NormalizePathForCompare(path))
 }
 
 // Parse parses a formula from JSON bytes.
@@ -819,8 +817,14 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 			} else {
 				if len(data) > descriptionFileInlineMaxBytes {
 					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
+					// Record the resolved path out-of-band so a later
+					// substitution pass over Description (expansion
+					// templates, loop bodies) can recognize this stub and
+					// leave its embedded path untouched (gastownhall/gascity#4860).
+					step.DescriptionFileResolvedPath = path
 				} else {
 					step.Description = string(data)
+					step.DescriptionFileResolvedPath = ""
 				}
 				step.DescriptionFile = "" // consumed; don't serialize
 			}

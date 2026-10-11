@@ -68,16 +68,16 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 		return nil, err
 	}
 
-	pp := pageParams{Limit: 50}
+	limit := defaultPaginationLimit
 	if input.Limit > 0 {
-		pp.Limit = input.Limit
-		if pp.Limit > maxPaginationLimit {
-			pp.Limit = maxPaginationLimit
+		limit = input.Limit
+		if limit > maxPaginationLimit {
+			limit = maxPaginationLimit
 		}
 	}
-	if input.Cursor != "" {
-		pp.Offset = decodeCursor(input.Cursor)
-		pp.IsPaging = true
+	seek, err := keysetSeek(input.Cursor)
+	if err != nil {
+		return nil, err
 	}
 
 	stores := s.state.BeadStores()
@@ -87,7 +87,10 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	for _, rigName := range rigNames {
 		store := stores[rigName]
 		pa.attempt()
-		list, err := store.List(beads.ListQuery{Type: "convoy"})
+		// Explicit sort: with SortDefault the CachingStore returns
+		// map-iteration order, and keyset paging needs one deterministic
+		// total order (#3208 — the same fix the bead list carries).
+		list, err := store.List(beads.ListQuery{Type: "convoy", Sort: beads.SortCreatedDesc})
 		if err != nil {
 			pa.record("rig "+rigName, err)
 			continue
@@ -102,27 +105,18 @@ func (s *Server) humaHandleConvoyList(ctx context.Context, input *ConvoyListInpu
 	if convoys == nil {
 		convoys = []beads.Bead{}
 	}
+	// The cross-rig concatenation is not globally ordered; impose the one
+	// (created_at DESC, id DESC) total order keyset pages cut against.
+	beadKey := func(b beads.Bead) keysetKey { return keysetKey{CreatedAt: b.CreatedAt, ID: b.ID} }
+	sortKeysetDesc(convoys, beadKey)
 
 	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
-	if !pp.IsPaging {
-		total := len(convoys)
-		if pp.Limit < len(convoys) {
-			convoys = convoys[:pp.Limit]
-		}
-		return &ListOutput[beads.Bead]{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body: ListBody[beads.Bead]{
-				Items:         convoys,
-				Total:         total,
-				Partial:       pa.partial(),
-				PartialErrors: pa.messages(),
-			},
-		}, nil
-	}
-
-	page, total, nextCursor := paginate(convoys, pp)
+	// A truncated response always carries next_cursor — cursor-less requests
+	// previously truncated silently, making the remainder unfetchable (the
+	// #3208 defect class the bead list already fixed).
+	page, total, hasMore := resolveKeysetPage(convoys, beadKey, seek, limit)
+	nextCursor := mintKeysetNextCursor(page, beadKey, hasMore)
 	if page == nil {
 		page = []beads.Bead{}
 	}
@@ -211,38 +205,48 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 // humaHandleConvoyCreate is the Huma-typed handler for POST /v0/convoys.
 // Title required via struct tag on ConvoyCreateInput.
 func (s *Server) humaHandleConvoyCreate(_ context.Context, input *ConvoyCreateInput) (*IndexOutput[beads.Bead], error) {
-	store := s.findStore(input.Body.Rig)
-	if store == nil {
-		return nil, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
-	}
-
-	// Pre-validate all items exist before creating the convoy.
-	for _, itemID := range input.Body.Items {
-		if _, err := store.Get(itemID); err != nil {
-			return nil, storeError(err)
-		}
-	}
-
-	convoy, err := store.Create(beads.Bead{
-		Title: input.Body.Title,
-		Type:  "convoy",
-	})
-	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
-	}
-
-	// Link child items to convoy one at a time. On first failure, roll
-	// back previously-created tracks deps and THEN delete the new convoy.
-	applied := make([]string, 0, len(input.Body.Items))
-	for _, itemID := range input.Body.Items {
-		if err := convoycore.TrackItem(store, convoy.ID, itemID); err != nil {
-			rollbackConvoyTracks(store, convoy.ID, applied, "convoy.create")
-			if delErr := store.Delete(convoy.ID); delErr != nil {
-				log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", convoy.ID, delErr)
+	// Idempotency: create at most once per Idempotency-Key. Item validation,
+	// the convoy bead create, and the link loop (with its rollback) all live in
+	// the closure so a failed create releases the reservation for retry.
+	convoy, err := withIdempotency(s.idem, "/v0/convoys", input.IdempotencyKey, input.Body,
+		func() (beads.Bead, error) {
+			store := s.findStore(input.Body.Rig)
+			if store == nil {
+				return beads.Bead{}, apierr.InvalidRequest.Msg("rig is required when multiple rigs are configured")
 			}
-			return nil, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
-		}
-		applied = append(applied, itemID)
+
+			// Pre-validate all items exist before creating the convoy.
+			for _, itemID := range input.Body.Items {
+				if _, err := store.Get(itemID); err != nil {
+					return beads.Bead{}, storeError(err)
+				}
+			}
+
+			created, err := store.Create(beads.Bead{
+				Title: input.Body.Title,
+				Type:  "convoy",
+			})
+			if err != nil {
+				return beads.Bead{}, apierr.Internal.Msg(err.Error())
+			}
+
+			// Link child items to convoy one at a time. On first failure, roll
+			// back previously-created tracks deps and THEN delete the new convoy.
+			applied := make([]string, 0, len(input.Body.Items))
+			for _, itemID := range input.Body.Items {
+				if err := convoycore.TrackItem(store, created.ID, itemID); err != nil {
+					rollbackConvoyTracks(store, created.ID, applied, "convoy.create")
+					if delErr := store.Delete(created.ID); delErr != nil {
+						log.Printf("gc api: convoy create rollback: delete %s after link failure: %v", created.ID, delErr)
+					}
+					return beads.Bead{}, apierr.Internal.Msg("failed to link item " + itemID + ": " + err.Error())
+				}
+				applied = append(applied, itemID)
+			}
+			return created, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
 	return &IndexOutput[beads.Bead]{
@@ -514,19 +518,25 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			continue
 		}
 
-		var ids []string
+		// open is the subset the close may stamp: the tree is listed with
+		// IncludeClosed, and a store that batches the close without reading each
+		// status first writes the skip onto every id it is handed, rewriting the
+		// outcome of a step that already finished.
+		var open []string
 		seen := make(map[string]struct{}, 4)
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
+		addBead := func(b beads.Bead) {
+			if b.ID == "" {
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := seen[b.ID]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			seen[b.ID] = struct{}{}
+			if b.Status != "closed" {
+				open = append(open, b.ID)
+			}
 		}
 		addRoot := func(root beads.Bead) {
 			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
@@ -537,7 +547,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			}
 			rootSeen[root.ID] = struct{}{}
 			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
+			addBead(root)
 		}
 		if root, err := info.store.Get(workflowID); err == nil {
 			addRoot(root)
@@ -562,14 +572,17 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 				continue
 			}
 			for _, b := range all {
-				addID(b.ID)
+				addBead(b)
 			}
 		}
-		if len(ids) == 0 {
+		if len(seen) == 0 {
 			continue
 		}
 		found = true
-		info.store.CloseAll(ids, map[string]string{ //nolint:errcheck
+		if len(open) == 0 {
+			continue
+		}
+		info.store.CloseAll(open, map[string]string{ //nolint:errcheck
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
@@ -654,19 +667,27 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			continue
 		}
 
-		var ids []string
+		// ids is the whole tree, which Phase 2 deletes. open is the subset Phase
+		// 1 may stamp: the tree is listed with IncludeClosed, and a store that
+		// batches the close without reading each status first writes the skip
+		// onto every id it is handed, rewriting the outcome of a step that
+		// already finished.
+		var ids, open []string
 		seen := make(map[string]struct{}, 4)
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
+		addBead := func(b beads.Bead) {
+			if b.ID == "" {
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := seen[b.ID]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			seen[b.ID] = struct{}{}
+			ids = append(ids, b.ID)
+			if b.Status != "closed" {
+				open = append(open, b.ID)
+			}
 		}
 		addRoot := func(root beads.Bead) {
 			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
@@ -677,7 +698,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			}
 			rootSeen[root.ID] = struct{}{}
 			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
+			addBead(root)
 		}
 		if root, err := info.store.Get(workflowID); err == nil {
 			addRoot(root)
@@ -707,7 +728,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 				continue
 			}
 			for _, b := range all {
-				addID(b.ID)
+				addBead(b)
 			}
 		}
 		if len(ids) == 0 {
@@ -716,13 +737,15 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		found = true
 
 		// Phase 1: Batch close all open beads.
-		n, closeErr := info.store.CloseAll(ids, map[string]string{
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-		})
-		closed += n
-		if closeErr != nil {
-			pa.record("store "+info.scopeRef+" close", closeErr)
+		if len(open) > 0 {
+			n, closeErr := info.store.CloseAll(open, map[string]string{
+				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+			})
+			closed += n
+			if closeErr != nil {
+				pa.record("store "+info.scopeRef+" close", closeErr)
+			}
 		}
 
 		// Phase 2: Delete if requested.

@@ -9,10 +9,12 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type groupService struct {
 	store      beads.Store
+	sessions   session.AddressDirectory
 	locks      *bindingLockPool
 	transcript groupTranscriptSync
 }
@@ -25,11 +27,15 @@ type groupTranscriptSync interface {
 // NewGroupService creates a GroupService backed by the given bead store.
 func NewGroupService(store beads.Store) GroupService {
 	locks := sharedBindingLockPool(store)
-	return newGroupService(store, locks, newTranscriptService(store, locks))
+	return newGroupServiceWithSessionDirectory(store, session.NewStore(beads.SessionStore{Store: store}), locks, newTranscriptService(store, locks))
 }
 
 func newGroupService(store beads.Store, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
-	return &groupService{store: store, locks: locks, transcript: transcript}
+	return newGroupServiceWithSessionDirectory(store, session.NewStore(beads.SessionStore{Store: store}), locks, transcript)
+}
+
+func newGroupServiceWithSessionDirectory(store beads.Store, sessions session.AddressDirectory, locks *bindingLockPool, transcript groupTranscriptSync) GroupService {
+	return &groupService{store: store, sessions: sessions, locks: locks, transcript: transcript}
 }
 
 func groupTranscriptCaller() Caller {
@@ -146,9 +152,13 @@ func (s *groupService) UpsertParticipant(ctx context.Context, caller Caller, inp
 	if err := authorizeMutation(caller, group.RootConversation); err != nil {
 		return ConversationGroupParticipant{}, err
 	}
-	// Capture the stable session name so the participant survives respawn.
-	// Best-effort: empty when the selector resolves to no session bead.
-	sessionName := sessionNameForSelector(s.store, sessionID)
+	// Capture the stable session name so the participant survives respawn. An
+	// absent session intentionally retains legacy pure-ID behavior, but an
+	// indeterminate directory failure must stop before any Messaging mutation.
+	sessionName, err := sessionNameForSelector(s.sessions, sessionID)
+	if err != nil {
+		return ConversationGroupParticipant{}, newSafeOperationError("resolve participant session address", err)
+	}
 	title := groupID + "/" + handle
 	fields := encodeMetadataFields(input.Metadata, map[string]string{
 		"schema_version": strconv.Itoa(schemaVersion),
@@ -356,7 +366,9 @@ func (s *groupService) ResolveInbound(ctx context.Context, event ExternalInbound
 	}
 	byHandle := make(map[string]ConversationGroupParticipant, len(participants))
 	for _, participant := range participants {
-		overlayLiveParticipantSessionID(s.store, &participant)
+		if err := overlayLiveParticipantSessionID(s.sessions, &participant); err != nil {
+			return nil, newSafeOperationError("resolve inbound participant live session", err)
+		}
 		byHandle[participant.Handle] = participant
 	}
 	if explicit := normalizeHandle(event.ExplicitTarget); explicit != "" {
@@ -419,7 +431,9 @@ func (s *groupService) ResolveOutbound(ctx context.Context, ref ConversationRef,
 		return nil, err
 	}
 	for _, participant := range participants {
-		overlayLiveParticipantSessionID(s.store, &participant)
+		if err := overlayLiveParticipantSessionID(s.sessions, &participant); err != nil {
+			return nil, newSafeOperationError("resolve outbound participant live session", err)
+		}
 		if participant.SessionID == sessionID {
 			return &GroupOutboundDecision{
 				Match:       GroupRouteParticipantMatch,
@@ -780,8 +794,8 @@ func decodeParticipantBead(b beads.Bead) (ConversationGroupParticipant, error) {
 // current live bead when the stored session_id has gone stale across a
 // respawn. It mutates only the in-memory copy — persistent healing is
 // ReassignSessionParticipants' job (runs on session handover).
-func overlayLiveParticipantSessionID(store beads.Store, participant *ConversationGroupParticipant) {
-	overlayLiveSessionID(store, participant.SessionName, participant.SessionID, &participant.SessionID)
+func overlayLiveParticipantSessionID(sessions session.AddressDirectory, participant *ConversationGroupParticipant) error {
+	return overlayLiveSessionID(sessions, participant.SessionName, participant.SessionID, &participant.SessionID)
 }
 
 // participantSessionLabels returns the label set for a participant given its

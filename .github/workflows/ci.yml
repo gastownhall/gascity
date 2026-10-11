@@ -16,6 +16,13 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
+  # queue"): Check and CI / required must report on every queue entry's
+  # merge-group commit. The concurrency group below keys a merge group on
+  # its own queue ref and never cancels it; `changes` diffs the entry
+  # against merge_group.base_sha.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -27,7 +34,7 @@ concurrency:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -35,6 +42,7 @@ jobs:
       runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
       runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_windows: ${{ steps.policy.outputs.runner_windows }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select runner backend
@@ -46,7 +54,7 @@ jobs:
         run: |
           python3 .github/workflows/scripts/runner_policy.py
 
-  # Detect which paths changed to gate conditional jobs.
+  # Detect which paths changed to gate the path-scoped jobs below.
   changes:
     name: Detect changes
     needs: runner-policy
@@ -58,39 +66,38 @@ jobs:
       # asymmetry where a subtle change in shared code skips the jobs it could
       # break. Downstream consumers read these outputs unchanged.
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
-      docker: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.shared == 'true' }}
-      k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
-      worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
-      worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
-      cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
-      integration: ${{ steps.filter.outputs.integration == 'true' || steps.filter.outputs.shared == 'true' }}
-      openclaw_bridge: ${{ steps.filter.outputs.openclaw_bridge }}
+      credential_provider: ${{ steps.filter.outputs.credential_provider == 'true' || steps.filter.outputs.shared == 'true' }}
       # Raw cross-cutting signal and per-run coverage classification (metric).
       shared: ${{ steps.filter.outputs.shared }}
       suite_mode: ${{ steps.coverage.outputs.suite_mode }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # merge_group: the entry's own changes, merge_group.base_sha (main or
+      # the entry ahead) to head_sha, as a PR's are its diff from its base.
+      # Empty on every other event, which keeps the action's defaults.
+      #
+      # token: '' detects a pull request's changes with git (merge base with
+      # the PR base branch) instead of the REST pulls/files API. The default
+      # github.token shares the repository's hourly installation rate limit
+      # with every other workflow run; when that is spent the API call 403s
+      # and this job, and with it Check and CI / required, fails on a PR that
+      # changed nothing wrong. Other events never used the token.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
+          token: ''
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             mail:
               - 'internal/mail/**'
               - 'contrib/mail-scripts/**'
-            docker:
-              - 'internal/session/**'
-              - 'scripts/gc-session-docker'
-              - 'scripts/test-docker-session'
-              - 'contrib/session-scripts/**'
-            k8s:
-              - 'internal/session/**'
-              - 'contrib/session-scripts/gc-session-k8s*'
-              - 'test/integration/session_k8s_test.go'
             beads:
               - 'go.mod'
               - 'internal/beads/**'
+              - 'test/acceptance/beads_cli_contract_test.go'
               - 'deps.env'
               - '.github/scripts/install-bd-archive.sh'
               - 'cmd/gc/init_provider_readiness.go'
@@ -100,63 +107,29 @@ jobs:
               - 'internal/config/compose.go'
               - 'cmd/gc/embed_builtin_packs.go'
               - 'scripts/update-bundled-gastown-pack'
-            worker:
+            credential_provider:
               - 'go.mod'
               - 'go.sum'
-              - '.github/workflows/**'
-              - 'Makefile'
-              - 'internal/worker/**'
-              - 'internal/sessionlog/**'
-              - 'internal/runtime/**'
-              - 'internal/config/**'
-              - 'cmd/gc/template_resolve*.go'
-              - 'cmd/gc/session_*'
-              - 'test/**worker**'
-            worker_phase2:
-              - 'go.mod'
-              - 'go.sum'
-              - '.github/workflows/**'
-              - 'Makefile'
-              - 'internal/worker/**'
-              - 'internal/sessionlog/**'
-              - 'internal/runtime/**'
-              - 'internal/config/**'
-              - 'cmd/gc/**'
-            cmd_gc_process:
-              - 'go.mod'
-              - 'go.sum'
-              - '.github/workflows/**'
-              - 'Makefile'
-              - 'cmd/gc/**'
-              - 'internal/**'
-              - 'examples/gastown/**'
-            integration:
-              - 'go.mod'
-              - 'go.sum'
-              - '.github/workflows/**'
-              - 'Makefile'
-              - '**/*.go'
-              - 'scripts/test-integration-shard'
-              - 'scripts/test-go-test-shard'
-              - 'scripts/go-test-observable'
-              - 'examples/gastown/**'
-            openclaw_bridge:
-              - 'contrib/openclaw-bridge/**'
-              - '.github/workflows/**'
+              - 'internal/credentialprovider/**'
+              - 'internal/testenv/**'
+              - 'internal/testutil/**'
             # Cross-cutting core paths. A change here is folded into every
             # gated output above, forcing a full union run. Beads is the
             # universal persistence substrate, events the universal observation
             # substrate, config the universal activation mechanism; build,
             # dependency, and CI workflow/composite-action files affect every
-            # job. The setup-gascity-ubuntu composite action and the installer
-            # scripts it invokes are shared by nearly every job, so a change to
-            # them must re-run all path-gated suites.
+            # job. The setup-gascity-ubuntu and go-mod-download composite
+            # actions and the scripts they invoke are shared by nearly every
+            # job, so a change to them must re-run all path-gated suites.
             shared:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
               - '.github/workflows/**'
               - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/actions/go-mod-download/**'
+              - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/scripts/install-bd-archive.sh'
               - '.github/scripts/install-claude-native.sh'
@@ -169,202 +142,22 @@ jobs:
           SHARED_FILTER_RESULT: ${{ steps.filter.outputs.shared }}
         run: python3 .github/workflows/scripts/ci_suite_coverage.py classify "$SHARED_FILTER_RESULT"
 
-  preflight-static:
-    name: Preflight / static checks
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Install tools
-        run: make install-tools
-      - name: go.mod replace guard
-        run: make check-gomod-replace
-      - name: Native dependency surface guard
-        run: make check-native-dependency-surface
-      - name: Event-export isolation guard
-        run: make check-eventexport-isolation
-      - name: Open-core boundary guard
-        run: make check-core-boundary
-      - name: Native DoltLite beads tests
-        run: make test-native-doltlite-beads
-      - name: Get golangci-lint + Go toolchain versions for cache key
-        id: glint-version
-        run: |
-          version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          # staticcheck (bundled in golangci-lint) caches type/CFG facts whose
-          # validity depends on the Go toolchain it was built with. Keying the
-          # cache on GOVERSION prevents a cache populated under one Go toolchain
-          # from being replayed under another, which produced a stale-fact
-          # SA5011 false-positive flood on main (ga-v7x9vk).
-          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-      - name: Restore golangci-lint cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .cache/golangci-lint
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-
-      - name: Lint
-        env:
-          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
-      - name: Format
-        run: make fmt-check
-      - name: Vet
-        run: make vet
-      - name: Docs
-        run: make check-docs
+  # Every build and test of this tree runs under Bazel on rbe-west, gated by
+  # bazel.yml's required checks "bazel test (side-by-side)" and "BUILD files
+  # in sync" (unit lane: //..., nogo lint/vet, gofmt, generated-artifact
+  # drift incl. the OpenAPI breaking-change gate, policy guards, dashboard,
+  # //:goreleaser_check_test; acceptance lane: Tier A incl. the beads
+  # topology rows; integration-packages and integration-smoke lanes;
+  # bazel-nightly.yml: the full //test/integration suite and `bazel
+  # coverage` to Codecov). This workflow keeps only what Bazel cannot run:
+  #   - credential-provider-windows: rbe-west has no Windows workers, so the
+  #     Windows process-tree tests run on a Blacksmith Windows runner;
+  #   - pack-gate, mcp-mail, contract-radar-bd-head: live probes of upstream
+  #     services (the gascity-packs registry, mcp_agent_mail, beads main
+  #     HEAD), not tests of this tree.
+  # Check and CI / required keep their names for branch protection and the
+  # main ruleset; both fan in exactly those gating jobs.
 
-  # Coverage reporting only matters on the main branch — codecov regression
-  # info doesn't need to gate every PR, and the full ./... unit suite is
-  # already covered by integration-shards, cmd-gc-process, and acceptance A.
-  # Split into two parallel push-only jobs to take the serial cmd/gc loop off
-  # the critical path (ga-29jlpr); Codecov merges uploads server-side.
-  preflight-unit-cover-noncmdgc:
-    name: Preflight / unit cover (noncmdgc)
-    needs:
-      - runner-policy
-    if: github.event_name == 'push'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Install tools
-        run: make install-tools
-      - name: Unit cover (non-cmd/gc)
-        run: make test-cover-noncmdgc
-      - name: Upload coverage to Codecov
-        if: hashFiles('coverage.noncmdgc.txt') != ''
-        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
-        with:
-          files: coverage.noncmdgc.txt
-          flags: unit-cover-noncmdgc
-          token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
-
-  preflight-unit-cover-cmdgc:
-    name: Preflight / unit cover (cmd/gc ${{ matrix.shard }} of 6)
-    needs:
-      - runner-policy
-    if: github.event_name == 'push'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Install tools
-        run: make install-tools
-      - name: Unit cover (cmd/gc shard ${{ matrix.shard }} of 6)
-        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=6
-      - name: Upload coverage to Codecov
-        if: hashFiles(format('coverage.cmdgc.{0}.txt', matrix.shard)) != ''
-        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
-        with:
-          files: coverage.cmdgc.${{ matrix.shard }}.txt
-          flags: unit-cover-cmdgc
-          token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
-
-  preflight-acceptance:
-    name: Preflight / acceptance A
-    needs:
-      - runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Acceptance tests (Tier A)
-        run: make test-acceptance
-
-  # Cross-version contract gate: the "current" cell of the bd matrix. The
-  # "prev" cell is preflight-acceptance above (bd v1.0.4, the min-supported
-  # release). This cell builds bd from gastownhall/beads source at
-  # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
-  # and runs the same live acceptance suite, so a bd change that breaks gc's
-  # decoder/classifier surface against the newer bd is caught before merge.
-  # Path-gated on the beads filter; tolerated as a skip by the Check gate.
-  contract-acceptance-current:
-    name: Contract / acceptance A (bd current)
-    needs:
-      - runner-policy
-      - changes
-    if: ${{ needs.changes.outputs.beads == 'true' }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.1.7"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: "" # build bd from source below instead of installing a release
-          install-claude-cli: "true"
-      - name: Resolve bd current pin
-        id: bd
-        run: |
-          set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
-            exit 1
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "ver=$ver" >> "$GITHUB_OUTPUT"
-      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
-        run: |
-          set -euo pipefail
-          src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
-          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
-          mkdir -p "${HOME}/.local/bin"
-          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
-          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
-      - name: Verify bd on PATH
-        run: bd version
-      - name: Acceptance tests (Tier A, bd current)
-        run: make test-acceptance
-
-  # NON-REQUIRED HEADxHEAD radar: builds bd from beads MAIN HEAD (live, not the
-  # pinned BD_CURRENT_REF) and runs gc-HEAD's real bd calls (the acceptance
-  # suite) against it — early warning when bd's bleeding edge diverges from what
-  # gc expects, before the next deliberate pin bump. Deliberately NOT wired into
-  # ci-required: a bd-main break must never block a gascity merge (that is the
-  # cross-HEAD deadlock the pinned cells avoid). A red here is an advisory signal
-  # to stage a coordinated change, not a gate. Path-gated on the beads filter.
   contract-radar-bd-head:
     name: Contract radar (gc HEAD x bd main HEAD)
     needs:
@@ -372,15 +165,13 @@ jobs:
       - changes
     if: ${{ needs.changes.outputs.beads == 'true' }}
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    env:
-      DOLT_VERSION: "2.1.7"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: "" # build bd from source below
-          install-claude-cli: "true"
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Build bd from beads main HEAD
         run: |
           set -euo pipefail
@@ -391,712 +182,45 @@ jobs:
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
       - name: Verify bd on PATH
         run: bd version
-      - name: Acceptance tests (Tier A, bd main HEAD)
-        run: make test-acceptance
+      - name: bd CLI contract (main HEAD)
+        run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (main HEAD)
+        run: make test-bd-cli-contract-home-isolation
 
-  preflight-generated:
-    name: Preflight / generated artifacts
+  credential-provider-windows:
+    name: Credential provider / Windows process tree
     needs:
       - runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
-      # spec->client drift check can never silently skip in CI.
-      GC_REQUIRE_OAPI_CODEGEN: "1"
+      - changes
+    if: needs.changes.outputs.credential_provider == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_windows }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Dashboard bundle drift check
-        run: make dashboard-ci
-      - name: OpenAPI spec + client drift check
-        run: make spec-ci
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Test credential-provider unit contract
+        run: go test -count=1 ./internal/credentialprovider
+      - name: Test Windows Job Object descendant cleanup
+        run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
-  # Historical fan-in name and the branch-protection-enforced required status.
-  # Branch protection requires `Check`, so the cross-version contract matrix
-  # must gate here: the `prev` cell is preflight-acceptance above, and the
-  # path-gated `current` cell (contract-acceptance-current) is folded in below.
-  # During the Blacksmith proof, branch protection can move to `CI / required`;
-  # this job keeps the old name meaningful either way.
-  check:
-    name: Check
-    needs:
-      - runner-policy
-      # `changes` is a hard dependency (kept out of allow_skipped) so a
-      # filter-job flake fails Check directly instead of silently skipping
-      # the path-gated contract-acceptance-current cell. Mirrors ci-required.
-      - changes
-      - preflight-static
-      - preflight-acceptance
-      - preflight-generated
-      - contract-acceptance-current
-    if: ${{ always() }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    env:
-      NEEDS_JSON: ${{ toJSON(needs) }}
-    steps:
-      - name: Summarize preflight result
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          # contract-acceptance-current is path-gated on the beads filter: it
-          # skips on PRs that touch no beads/contract path, which is the
-          # expected pass case. Every other dependency runs unconditionally.
-          allow_skipped = {"contract-acceptance-current"}
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          failures = {}
-          for job, meta in sorted(needs.items()):
-              result = meta.get("result", "unknown")
-              if result == "success":
-                  continue
-              if result == "skipped" and job in allow_skipped:
-                  continue
-              failures[job] = result
-          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
-          with open(summary_path, "a", encoding="utf-8") as handle:
-              handle.write("## CI Preflight\n\n")
-              handle.write("| Job | Result |\n| --- | --- |\n")
-              for job, meta in sorted(needs.items()):
-                  handle.write(f"| {job} | {meta.get('result', 'unknown')} |\n")
-          if failures:
-              for job, result in failures.items():
-                  print(f"{job}: {result}", file=sys.stderr)
-              sys.exit(1)
-          PY
-
-  release-config:
-    name: Release config
-    needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Check GoReleaser configuration
-        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
-        with:
-          version: "~> v2"
-          args: check
-
-  cmd-gc-process:
-    name: cmd/gc process / shard ${{ matrix.shard }} of 12
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.cmd_gc_process == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Run cmd/gc process shard
-        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
-
-  integration-shards:
-    name: Integration / ${{ matrix.shard_name }}
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.integration == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard_name: packages-core-1-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-1-of-4
-          - shard_name: packages-core-2-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-2-of-4
-          - shard_name: packages-core-3-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-3-of-4
-          - shard_name: packages-core-4-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-4-of-4
-          - shard_name: packages-cmd-gc-1-of-6
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-1-of-6
-          - shard_name: packages-cmd-gc-2-of-6
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-2-of-6
-          - shard_name: packages-cmd-gc-3-of-6
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-3-of-6
-          - shard_name: packages-cmd-gc-4-of-6
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-4-of-6
-          - shard_name: packages-cmd-gc-5-of-6
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-5-of-6
-          - shard_name: packages-cmd-gc-6-of-6
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-6-of-6
-          - shard_name: packages-runtime-tmux-1-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-1-of-6
-          - shard_name: packages-runtime-tmux-2-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-2-of-6
-          - shard_name: packages-runtime-tmux-3-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-3-of-6
-          - shard_name: packages-runtime-tmux-4-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-4-of-6
-          - shard_name: packages-runtime-tmux-5-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-5-of-6
-          - shard_name: packages-runtime-tmux-6-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
-          - shard_name: bdstore
-            timeout_minutes: 15
-            command: make test-integration-bdstore
-          - shard_name: rest-smoke-1-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-1-of-2
-          - shard_name: rest-smoke-2-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-2-of-2
-          - shard_name: rest-full-1-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-1-of-16
-          - shard_name: rest-full-2-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-2-of-16
-          - shard_name: rest-full-3-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-3-of-16
-          - shard_name: rest-full-4-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-4-of-16
-          - shard_name: rest-full-5-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-5-of-16
-          - shard_name: rest-full-6-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-6-of-16
-          - shard_name: rest-full-7-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-7-of-16
-          - shard_name: rest-full-8-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-8-of-16
-          - shard_name: rest-full-9-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-9-of-16
-          - shard_name: rest-full-10-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-10-of-16
-          - shard_name: rest-full-11-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-11-of-16
-          - shard_name: rest-full-12-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-12-of-16
-          - shard_name: rest-full-13-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-13-of-16
-          - shard_name: rest-full-14-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-14-of-16
-          - shard_name: rest-full-15-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-15-of-16
-          - shard_name: rest-full-16-of-16
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-full-16-of-16
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Run integration shard
-        run: ${{ matrix.command }}
-
-  worker-core-claude:
-    name: Worker core (Claude)
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.worker == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      PROFILE: claude/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-claude-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore transcript/continuation conformance
-        id: worker_core_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core PROFILE="$PROFILE"
-      - name: Ensure WorkerCore reports
-        if: ${{ always() && steps.worker_core_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core"
-      - name: WorkerCore report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-claude-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-core-codex:
-    name: Worker core (Codex)
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.worker == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      PROFILE: codex/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-codex-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore transcript/continuation conformance
-        id: worker_core_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core PROFILE="$PROFILE"
-      - name: Ensure WorkerCore reports
-        if: ${{ always() && steps.worker_core_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core"
-      - name: WorkerCore report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-codex-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-core-gemini:
-    name: Worker core (Gemini)
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.worker == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      PROFILE: gemini/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-gemini-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore transcript/continuation conformance
-        id: worker_core_tests
-        run: GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core PROFILE="$PROFILE"
-      - name: Ensure WorkerCore reports
-        if: ${{ always() && steps.worker_core_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core"
-      - name: WorkerCore report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-gemini-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-core-summary:
-    name: Worker core summary
-    needs:
-      - runner-policy
-      - changes
-      - worker-core-claude
-      - worker-core-codex
-      - worker-core-gemini
-    if: ${{ always() }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    env:
-      WORKER_ROLLUP_DIR: /tmp/worker-core-summary-reports
-      WORKER_ROLLUP_JSON: /tmp/worker-core-summary-reports/worker-core-summary.json
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Prepare worker rollup dir
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        run: mkdir -p "$WORKER_ROLLUP_DIR"
-      - name: Download WorkerCore Claude reports
-        id: download_worker_core_claude
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-core-claude-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/claude
-      - name: Download WorkerCore Codex reports
-        id: download_worker_core_codex
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-core-codex-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/codex
-      - name: Download WorkerCore Gemini reports
-        id: download_worker_core_gemini
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-core-gemini-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/gemini
-      - name: WorkerCore rollup summary
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        env:
-          CLAUDE_DOWNLOAD: ${{ steps.download_worker_core_claude.outcome }}
-          CODEX_DOWNLOAD: ${{ steps.download_worker_core_codex.outcome }}
-          GEMINI_DOWNLOAD: ${{ steps.download_worker_core_gemini.outcome }}
-        run: |
-          python3 .github/workflows/scripts/worker_report_rollup.py \
-            "$WORKER_ROLLUP_DIR" \
-            --title "Worker core summary" \
-            --require-reports \
-            --expected-profile "claude/tmux-cli=$CLAUDE_DOWNLOAD" \
-            --expected-profile "codex/tmux-cli=$CODEX_DOWNLOAD" \
-            --expected-profile "gemini/tmux-cli=$GEMINI_DOWNLOAD" \
-            --output "$WORKER_ROLLUP_JSON"
-      - name: Upload WorkerCore rollup
-        if: ${{ always() && needs.changes.outputs.worker == 'true' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-summary-reports
-          path: ${{ env.WORKER_ROLLUP_JSON }}
-          if-no-files-found: error
-      - name: Assert worker-core profile matrix passed
-        run: |
-          CHANGES_RESULT='${{ needs.changes.result }}'
-          CHANGED='${{ needs.changes.outputs.worker }}'
-          CLAUDE_RESULT='${{ needs['worker-core-claude'].result }}'
-          CODEX_RESULT='${{ needs['worker-core-codex'].result }}'
-          GEMINI_RESULT='${{ needs['worker-core-gemini'].result }}'
-          CLAUDE_DOWNLOAD='${{ steps.download_worker_core_claude.outcome }}'
-          CODEX_DOWNLOAD='${{ steps.download_worker_core_codex.outcome }}'
-          GEMINI_DOWNLOAD='${{ steps.download_worker_core_gemini.outcome }}'
-          if [ -f "$WORKER_ROLLUP_JSON" ]; then
-            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
-          else
-            ROLLUP_STATUS='missing'
-          fi
-          printf 'changes-result=%s\n' "$CHANGES_RESULT"
-          printf 'worker-changes=%s\n' "$CHANGED"
-          printf 'worker-core-claude=%s\n' "$CLAUDE_RESULT"
-          printf 'worker-core-codex=%s\n' "$CODEX_RESULT"
-          printf 'worker-core-gemini=%s\n' "$GEMINI_RESULT"
-          printf 'download-worker-core-claude=%s\n' "$CLAUDE_DOWNLOAD"
-          printf 'download-worker-core-codex=%s\n' "$CODEX_DOWNLOAD"
-          printf 'download-worker-core-gemini=%s\n' "$GEMINI_DOWNLOAD"
-          printf 'worker-core-rollup=%s\n' "$ROLLUP_STATUS"
-          if [ "$CHANGES_RESULT" != "success" ]; then
-            echo "changes job did not complete successfully" >&2
-            exit 1
-          fi
-          if [ "$CHANGED" != "true" ]; then
-            echo "No worker changes detected; passing summary without fan-in."
-            exit 0
-          fi
-          if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
-            echo "worker-core summary is missing one or more expected profile artifacts" >&2
-            exit 1
-          fi
-          if [ "$ROLLUP_STATUS" != "pass" ]; then
-            echo "worker-core rollup reported a non-pass status" >&2
-            exit 1
-          fi
-          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
-            echo "worker-core matrix failed" >&2
-            exit 1
-          fi
-
-  worker-core-phase2-claude:
-    name: Worker core phase 2 (Claude)
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.worker_phase2 == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      PROFILE: claude/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-phase2-claude-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore phase-2 conformance
-        id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
-      - name: Ensure WorkerCore phase-2 reports
-        if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
-      - name: WorkerCore phase-2 report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore phase-2 reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-phase2-claude-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-core-phase2-codex:
-    name: Worker core phase 2 (Codex)
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.worker_phase2 == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      PROFILE: codex/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-phase2-codex-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore phase-2 conformance
-        id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
-      - name: Ensure WorkerCore phase-2 reports
-        if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
-      - name: WorkerCore phase-2 report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore phase-2 reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-phase2-codex-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-core-phase2-gemini:
-    name: Worker core phase 2 (Gemini)
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.worker_phase2 == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      PROFILE: gemini/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-core-phase2-gemini-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: WorkerCore phase-2 conformance
-        id: worker_core_phase2_tests
-        run: |
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2 PROFILE="$PROFILE"
-          GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-real-transport PROFILE="$PROFILE"
-      - name: Ensure WorkerCore phase-2 reports
-        if: ${{ always() && steps.worker_core_phase2_tests.outcome != 'success' }}
-        run: python3 .github/workflows/scripts/worker_report_stub.py "$WORKER_REPORT_DIR" "worker-core-phase2"
-      - name: WorkerCore phase-2 report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerCore phase-2 reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-phase2-gemini-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-core-phase2-summary:
-    name: Worker core phase 2 summary
-    needs:
-      - runner-policy
-      - changes
-      - worker-core-phase2-claude
-      - worker-core-phase2-codex
-      - worker-core-phase2-gemini
-    if: ${{ always() }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    env:
-      WORKER_ROLLUP_DIR: /tmp/worker-core-phase2-summary-reports
-      WORKER_ROLLUP_JSON: /tmp/worker-core-phase2-summary-reports/worker-core-phase2-summary.json
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Prepare worker rollup dir
-        if: ${{ needs.changes.outputs.worker_phase2 == 'true' }}
-        run: mkdir -p "$WORKER_ROLLUP_DIR"
-      - name: Download WorkerCore phase-2 Claude reports
-        id: download_worker_core_phase2_claude
-        if: ${{ needs.changes.outputs.worker_phase2 == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-core-phase2-claude-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/claude
-      - name: Download WorkerCore phase-2 Codex reports
-        id: download_worker_core_phase2_codex
-        if: ${{ needs.changes.outputs.worker_phase2 == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-core-phase2-codex-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/codex
-      - name: Download WorkerCore phase-2 Gemini reports
-        id: download_worker_core_phase2_gemini
-        if: ${{ needs.changes.outputs.worker_phase2 == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-core-phase2-gemini-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/gemini
-      - name: WorkerCore phase-2 rollup summary
-        if: ${{ needs.changes.outputs.worker_phase2 == 'true' }}
-        env:
-          CLAUDE_DOWNLOAD: ${{ steps.download_worker_core_phase2_claude.outcome }}
-          CODEX_DOWNLOAD: ${{ steps.download_worker_core_phase2_codex.outcome }}
-          GEMINI_DOWNLOAD: ${{ steps.download_worker_core_phase2_gemini.outcome }}
-        run: |
-          python3 .github/workflows/scripts/worker_report_rollup.py \
-            "$WORKER_ROLLUP_DIR" \
-            --title "Worker core phase 2 summary" \
-            --require-reports \
-            --expected-profile "claude/tmux-cli=$CLAUDE_DOWNLOAD" \
-            --expected-profile "codex/tmux-cli=$CODEX_DOWNLOAD" \
-            --expected-profile "gemini/tmux-cli=$GEMINI_DOWNLOAD" \
-            --output "$WORKER_ROLLUP_JSON"
-      - name: Upload WorkerCore phase-2 rollup
-        if: ${{ always() && needs.changes.outputs.worker_phase2 == 'true' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-core-phase2-summary-reports
-          path: ${{ env.WORKER_ROLLUP_JSON }}
-          if-no-files-found: error
-      - name: Assert worker-core phase-2 matrix passed
-        run: |
-          CHANGES_RESULT='${{ needs.changes.result }}'
-          CHANGED='${{ needs.changes.outputs.worker_phase2 }}'
-          CLAUDE_RESULT='${{ needs['worker-core-phase2-claude'].result }}'
-          CODEX_RESULT='${{ needs['worker-core-phase2-codex'].result }}'
-          GEMINI_RESULT='${{ needs['worker-core-phase2-gemini'].result }}'
-          CLAUDE_DOWNLOAD='${{ steps.download_worker_core_phase2_claude.outcome }}'
-          CODEX_DOWNLOAD='${{ steps.download_worker_core_phase2_codex.outcome }}'
-          GEMINI_DOWNLOAD='${{ steps.download_worker_core_phase2_gemini.outcome }}'
-          if [ -f "$WORKER_ROLLUP_JSON" ]; then
-            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
-          else
-            ROLLUP_STATUS='missing'
-          fi
-          printf 'changes-result=%s\n' "$CHANGES_RESULT"
-          printf 'worker-phase2-changes=%s\n' "$CHANGED"
-          printf 'worker-core-phase2-claude=%s\n' "$CLAUDE_RESULT"
-          printf 'worker-core-phase2-codex=%s\n' "$CODEX_RESULT"
-          printf 'worker-core-phase2-gemini=%s\n' "$GEMINI_RESULT"
-          printf 'download-worker-core-phase2-claude=%s\n' "$CLAUDE_DOWNLOAD"
-          printf 'download-worker-core-phase2-codex=%s\n' "$CODEX_DOWNLOAD"
-          printf 'download-worker-core-phase2-gemini=%s\n' "$GEMINI_DOWNLOAD"
-          printf 'worker-core-phase2-rollup=%s\n' "$ROLLUP_STATUS"
-          if [ "$CHANGES_RESULT" != "success" ]; then
-            echo "changes job did not complete successfully" >&2
-            exit 1
-          fi
-          if [ "$CHANGED" != "true" ]; then
-            echo "No phase-2 worker changes detected; passing summary without fan-in."
-            exit 0
-          fi
-          if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
-            echo "worker-core phase-2 summary is missing one or more expected profile artifacts" >&2
-            exit 1
-          fi
-          if [ "$ROLLUP_STATUS" != "pass" ]; then
-            echo "worker-core phase-2 rollup reported a non-pass status" >&2
-            exit 1
-          fi
-          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
-            echo "worker-core phase-2 matrix failed" >&2
-            exit 1
-          fi
-
-  # Runs when pack-related files change — full gastown integration suite.
+  # Runs distinct live/provenance checks when pack-related files change.
   pack-gate:
     name: Pack compatibility gate
     needs:
       - runner-policy
       - changes
-      - check
     if: needs.changes.outputs.packs == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Pack compatibility tests
-        run: make test-acceptance
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       # The gastown pack ships via the gascity-packs Go module, so a routine
       # go.mod bump can silently desync the embedded pack bytes from the
       # provenance pins in internal/config/public_packs.go and the
@@ -1129,65 +253,6 @@ jobs:
           done
         env:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
-
-  # Dashboard SPA typecheck + tests + build. Runs on every push/PR
-  # so TS drift against the spec (e.g. a query param tightening from
-  # string to boolean) fails CI instead of shipping as a silent
-  # runtime bug. Vite's build transpiles TS to JS and does not fail
-  # on type errors; `tsc --noEmit` via `npm run typecheck` is the
-  # load-bearing discipline step.
-  dashboard:
-    name: Dashboard SPA
-    needs:
-      - runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Install SPA dependencies
-        run: npm ci --silent
-        working-directory: internal/api/dashboardspa/web
-      - name: Typecheck (tsc --noEmit)
-        run: npm run typecheck
-        working-directory: internal/api/dashboardspa/web
-      - name: Typecheck test files (tsc -p tsconfig.test.json)
-        run: npm run --workspace gas-city-dashboard-frontend typecheck:test
-        working-directory: internal/api/dashboardspa/web
-      - name: Vitest
-        run: npm run --workspace gas-city-dashboard-frontend test
-        working-directory: internal/api/dashboardspa/web
-      - name: Build
-        run: npm run build --silent
-        working-directory: internal/api/dashboardspa/web
-
-  # openclaw-bridge Node test suite. The bridge ships its own npm tests
-  # (inbound at-least-once redelivery + gc client wire shapes); without this
-  # gate, regressions under contrib/openclaw-bridge/** could merge because the
-  # only other npm job runs in internal/api/dashboardspa/web. Path-gated, so non-bridge
-  # PRs skip it (and ci-required allows the skip).
-  openclaw-bridge:
-    name: openclaw-bridge Node tests
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.openclaw_bridge == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Install and test
-        run: npm ci --no-audit --no-fund && npm test
-        working-directory: contrib/openclaw-bridge
 
   # Runs when mail-related source paths change.
   mcp-mail:
@@ -1204,6 +269,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
@@ -1218,110 +285,33 @@ jobs:
       - name: MCP mail conformance test
         run: make test-mcp-mail
 
-  # Runs when session/Docker-related source paths change.
-  docker-session:
-    name: Docker session
+  # The main ruleset's required "Check". It fans in the same gating jobs as
+  # CI / required (the Bazel lanes gate through bazel.yml's own required
+  # checks).
+  check:
+    name: Check
     needs:
       - runner-policy
+      # `changes` is a hard dependency so a filter-job flake fails Check
+      # directly.
       - changes
-    if: needs.changes.outputs.docker == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Install tools
-        run: make install-tools
-
-      - name: Docker session tests
-        run: make test-docker
-
-  # Runs when session/K8s-related source paths change.
-  # Requires K8s CI infrastructure — no-op until secrets are configured.
-  k8s-session:
-    name: K8s session
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.k8s == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: K8s session tests
-        if: env.GC_K8S_AVAILABLE == 'true'
-        env:
-          GC_K8S_AVAILABLE: ${{ secrets.GC_K8S_AVAILABLE }}
-        run: make test-k8s
-
-  ci-preflight:
-    name: CI / preflight
-    needs:
-      - runner-policy
-      - check
-      - release-config
-      - dashboard
+      - credential-provider-windows
+      - pack-gate
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
     steps:
-      - name: Summarize preflight gates
+      - name: Summarize check gates
         run: |
           python3 - <<'PY'
           import json
           import os
           import sys
 
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          failed = {
-              job: meta.get("result", "unknown")
-              for job, meta in sorted(needs.items())
-              if meta.get("result") != "success"
-          }
-          if failed:
-              for job, result in failed.items():
-                  print(f"{job}: {result}", file=sys.stderr)
-              sys.exit(1)
-          PY
-
-  ci-integration:
-    name: CI / integration
-    needs:
-      - runner-policy
-      - integration-shards
-    if: ${{ always() }}
-    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
-    env:
-      NEEDS_JSON: ${{ toJSON(needs) }}
-    steps:
-      - name: Summarize integration gates
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          # integration-shards is gated on path filters; a "skipped" result
-          # means the change didn't touch any Go code or shard scripts, which
-          # is the expected pass case for docs-only PRs.
-          allow_skipped = {"integration-shards"}
+          # credential-provider-windows and pack-gate are path-gated: a
+          # skipped result means the change does not touch their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):
@@ -1331,26 +321,30 @@ jobs:
               if result == "skipped" and job in allow_skipped:
                   continue
               failed[job] = result
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("## Check\n\n")
+              handle.write("| Job | Result |\n| --- | --- |\n")
+              for job, meta in sorted(needs.items()):
+                  handle.write(f"| {job} | {meta.get('result', 'unknown')} |\n")
+
           if failed:
               for job, result in failed.items():
                   print(f"{job}: {result}", file=sys.stderr)
               sys.exit(1)
           PY
 
+  # Branch protection's (and the hotfix/release ruleset's) required
+  # "CI / required".
   ci-required:
     name: CI / required
     needs:
       - runner-policy
       - changes
-      - ci-preflight
-      - ci-integration
-      - cmd-gc-process
-      - worker-core-summary
-      - worker-core-phase2-summary
+      - check
+      - credential-provider-windows
       - pack-gate
-      - docker-session
-      - k8s-session
-      - openclaw-bridge
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -1363,14 +357,10 @@ jobs:
           import os
           import sys
 
+          # credential-provider-windows and pack-gate are path-gated: a
+          # skipped result means the change does not touch their paths.
+          allow_skipped = {"credential-provider-windows", "pack-gate"}
           needs = json.loads(os.environ["NEEDS_JSON"])
-          allow_skipped = {
-              "cmd-gc-process",
-              "pack-gate",
-              "docker-session",
-              "k8s-session",
-              "openclaw-bridge",
-          }
           failed = {}
           for job, meta in sorted(needs.items()):
               result = meta.get("result", "unknown")

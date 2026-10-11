@@ -8,8 +8,10 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -56,6 +58,8 @@ type Options struct {
 	// DeferAssignees creates assignable beads without an assignee and stores
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
+
+	nativeStepTopologyPrepared bool
 }
 
 const (
@@ -101,6 +105,8 @@ type FragmentOptions struct {
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, the existing workflow root's priority is inherited.
 	PriorityOverride *int
+
+	nativeStepTopologyPrepared bool
 }
 
 // ExternalDep binds a fragment step to an already-existing bead.
@@ -132,21 +138,70 @@ type FragmentResult struct {
 	Created   int
 }
 
+// StoreChooser picks the store a compiled recipe's molecule belongs in.
+//
+// It exists because the destination is a property of the COMPILED recipe, not
+// of the call site: on a city that has relocated its coordination classes, a
+// recipe whose root classifies as infrastructure belongs in the binding and one
+// that classifies as work belongs in the work store, and nothing before compile
+// can tell which. A caller with one store for every recipe passes a chooser that
+// ignores its argument.
+//
+// A chooser is a pure classification of the recipe. It must not mutate the
+// recipe, take locks, or do I/O — CookChoosingStore calls it once, between
+// validation and the first bead write, with no way to undo either side.
+type StoreChooser func(recipe *formula.Recipe) beads.Store
+
 // Cook compiles a formula by name and instantiates it as a molecule.
 // This is the convenience wrapper that most callers should use.
 func Cook(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
+	// Refused here rather than left to the chooser's nil check, so a Cook caller
+	// reads an error about the argument it passed instead of one naming a store
+	// chooser it never wrote.
+	if store == nil {
+		return nil, fmt.Errorf("cooking formula %q: nil store", formulaName)
+	}
+	result, _, err := CookChoosingStore(ctx, formulaName, searchPaths, opts, func(*formula.Recipe) beads.Store { return store })
+	return result, err
+}
+
+// CookChoosingStore is Cook for a caller that cannot name the store until the
+// recipe is compiled. It compiles, validates runtime vars, calls choose exactly
+// once, and instantiates into what choose returned — which it also returns, so a
+// caller that stamps metadata on the new root writes to the store that holds it
+// rather than to one that has never seen it. The store is nil when err is not,
+// and a nil chooser or a nil choice is an error before anything is written.
+//
+// The three capabilities this deliberately does NOT have, because each would
+// require reordering the steps above: deriving Options from the compiled recipe
+// (an idempotency key computed off the recipe), holding a lock past the return,
+// and decorating the recipe through the chosen store. One live call site needs
+// all three — the graph.v2 arm of `gc formula cook` — and it writes the sequence
+// out rather than calling this.
+func CookChoosingStore(ctx context.Context, formulaName string, searchPaths []string, opts Options, choose StoreChooser) (*Result, beads.Store, error) {
+	if choose == nil {
+		return nil, nil, errors.New("CookChoosingStore requires a StoreChooser")
+	}
 	compileVars := opts.Vars
 	if compileVars == nil {
 		compileVars = map[string]string{}
 	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
-		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+		return nil, nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}
 	if err := ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return Instantiate(ctx, store, recipe, opts)
+	store := choose(recipe)
+	if store == nil {
+		return nil, nil, fmt.Errorf("choosing the store for formula %q: store chooser returned nil", formulaName)
+	}
+	result, err := Instantiate(ctx, store, recipe, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, store, nil
 }
 
 // CookOn compiles a formula and attaches it to an existing bead.
@@ -238,10 +293,33 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("attach bead %s: %w", attachBeadID, err)
 	}
 
-	rootBeadID := parentBead.Metadata[beadmeta.RootBeadIDMetadataKey]
-	if rootBeadID == "" {
-		rootBeadID = attachBeadID
+	// Resolve the sub-DAG's workflow root through the canonical run chain
+	// (workflow_id -> molecule_id -> gc.root_bead_id -> the parent's own id),
+	// not gc.root_bead_id alone. A wisp/source bead grafted mid-workflow carries
+	// the true top root in workflow_id/molecule_id (written by sling) but no
+	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
+	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
+	// onto the attempt container, scope-check, and every child. Downstream
+	// reconciliation then enumerated siblings via
+	// beads.DirectMembers(<wrong root>) and burned ralph attempts
+	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
+	// with no run chain still self-roots via its own id (ResolveRunID's
+	// selfID fallback).
+	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+
+	// A resolved run-chain root may point at a molecule that has since fully
+	// closed (e.g. re-attaching a content bead to a fresh formula after its
+	// prior review round-trip closed cleanly) -- a dead pointer, not a live
+	// upstream workflow to honor. Only a still-open chain root is trusted;
+	// anything else (closed, or no longer resolvable) falls back to self-root,
+	// exactly like the no-chain case (ga-yov1rr). A live chain
+	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	if rootBeadID != attachBeadID {
+		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+			rootBeadID = attachBeadID
+		}
 	}
+
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.
@@ -257,6 +335,13 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 
 	// Epoch fencing: verify no concurrent processor has advanced the control bead.
 	// Only checked for new attaches (not duplicates, which return above).
+	//
+	// CONTRACT: the idempotency check above MUST keep running before this
+	// fence. The authoritative fence is CAS-LAST (after Instantiate+DepAdd),
+	// and its ambiguity tolerance — an ambiguous fence error leaves the
+	// sub-DAG live because the retry converges through findExistingAttach —
+	// is void if anyone reorders the idempotency check behind the fence.
+	var fenceWriter beads.ConditionalWriter
 	if opts.ExpectedEpoch > 0 {
 		currentEpoch := 0
 		if raw := parentBead.Metadata[beadmeta.ControlEpochMetadataKey]; raw != "" {
@@ -265,6 +350,15 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		if currentEpoch != opts.ExpectedEpoch {
 			return nil, ErrEpochConflict
 		}
+		// Resolve the conditional writer BEFORE any side effects: a
+		// require-mode refusal on an incapable store must fail closed with
+		// zero created beads and an unburned epoch, not neutralize a
+		// just-materialized sub-DAG on every attempt.
+		w, _, err := beads.ResolveConditionalWriter(store)
+		if err != nil {
+			return nil, fmt.Errorf("epoch fence on %s: %w", attachBeadID, err)
+		}
+		fenceWriter = w
 	}
 	if err := ValidateRecipeRuntimeVars(recipe, Options{Title: opts.Title, Vars: opts.Vars}); err != nil {
 		return nil, fmt.Errorf("validate runtime vars: %w", err)
@@ -289,11 +383,29 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		recipe.Steps[0].Metadata[beadmeta.IdempotencyKeyMetadataKey] = opts.IdempotencyKey
 	}
 
+	// Under an active fence writer, the sub-DAG is created SPECULATIVELY:
+	// every bead deferred (non-runnable, assignee and routing withheld) and
+	// the root marked fence-pending. Racing candidates therefore cannot be
+	// claimed or run before winner selection — the fence, not creation order,
+	// decides which candidate activates. The legacy path (no conditional
+	// writer) keeps today's create-active behavior byte-identical.
+	fencedDeferred := opts.ExpectedEpoch > 0 && fenceWriter != nil
+	if fencedDeferred && len(recipe.Steps) > 0 {
+		if recipe.Steps[0].Metadata == nil {
+			recipe.Steps[0].Metadata = make(map[string]string)
+		}
+		recipe.Steps[0].Metadata[beadmeta.AttachFencePendingMetadataKey] = "true"
+	}
+
+	recipe = recipeWithNativeStepDependencies(recipe)
+	preserveAttachedNativeStepTopology(parentBead, recipe)
 	result, err := Instantiate(ctx, store, recipe, Options{
-		Title:            opts.Title,
-		Vars:             opts.Vars,
-		PriorityOverride: clonePriority(parentBead.Priority),
-		PreserveRootType: true,
+		Title:                      opts.Title,
+		Vars:                       opts.Vars,
+		PriorityOverride:           clonePriority(parentBead.Priority),
+		PreserveRootType:           true,
+		DeferAssignees:             fencedDeferred,
+		nativeStepTopologyPrepared: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -304,11 +416,19 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		return nil, fmt.Errorf("dep %s -> %s: %w", attachBeadID, result.RootID, err)
 	}
 
-	// Increment epoch after successful attach.
+	// Increment epoch after successful attach — the authoritative fence.
 	if opts.ExpectedEpoch > 0 {
-		nextEpoch := strconv.Itoa(opts.ExpectedEpoch + 1)
-		if err := store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, nextEpoch); err != nil {
-			return nil, fmt.Errorf("incrementing epoch on %s: %w", attachBeadID, err)
+		if err := advanceAttachEpochFence(store, fenceWriter, attachBeadID, opts.ExpectedEpoch, result); err != nil {
+			return nil, err
+		}
+		if fencedDeferred {
+			// Fence committed: this candidate is the winner. Activate it. On
+			// a partial activation failure the epoch has already advanced, so
+			// the retry converges through findExistingAttach, which finishes
+			// activating a fence-committed pending candidate idempotently.
+			if err := activateAttachCandidate(store, result.RootID, result.IDMapping); err != nil {
+				return nil, fmt.Errorf("activating fenced attach %s (fence committed; retry finishes activation): %w", result.RootID, err)
+			}
 		}
 	}
 
@@ -318,6 +438,45 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		Created:        result.Created,
 		IDMapping:      result.IDMapping,
 	}, nil
+}
+
+// Attach fence-pending marker states. A candidate settles exactly once:
+// the marker moves one-way from "true" (pending, unclaimed) to either
+// "activating" (claimed by an activator; step activation is idempotent and
+// finishable by any processor) or "failed" (claimed by a neutralizer), and
+// "activating" completes to "" (live). Every transition is a CAS on the
+// marker, so activation and neutralization can never both win the same
+// candidate — the race a plain SetMetadata leaves open (a recovery racer
+// activates a candidate while its fence-losing owner neutralizes it).
+const (
+	attachFencePendingUnclaimed  = "true"
+	attachFencePendingActivating = "activating"
+	attachFencePendingFailed     = "failed"
+)
+
+// claimAttachCandidate moves rootID's fence-pending marker from → to via
+// metadata CAS. It returns (true, nil) when this caller won the claim,
+// (false, nil) on a clean loss (someone else settled the candidate), and an
+// error only on transport/ambiguous failures. Stores without a conditional
+// writer never create pending markers (fencedDeferred requires the fence
+// writer), so a missing writer here means a mixed-fleet artifact; the
+// fallback is the legacy racy read-check-set, which is no worse than the
+// pre-claim behavior.
+func claimAttachCandidate(store beads.Store, rootID, from, to string) (bool, error) {
+	if writer, ok := beads.ConditionalWriterFor(store); ok {
+		return writer.CompareAndSetMetadataKey(rootID, beadmeta.AttachFencePendingMetadataKey, from, to)
+	}
+	b, err := store.Get(rootID)
+	if err != nil {
+		return false, err
+	}
+	if b.Metadata[beadmeta.AttachFencePendingMetadataKey] != from {
+		return false, nil
+	}
+	if err := store.SetMetadata(rootID, beadmeta.AttachFencePendingMetadataKey, to); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
@@ -333,6 +492,14 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 	if err != nil {
 		return nil, err
 	}
+	// A failed root only surfaces as an error when NO live root shares the
+	// key. Pre-fence, one key meant at most one sub-DAG (crash-partials);
+	// with the CAS-last epoch fence, a fence LOSER's neutralized sub-DAG
+	// legitimately coexists with the winner's live one under the same key,
+	// and convergence depends on the retry finding the winner.
+	failedRootID := ""
+	var pending []beads.Bead
+	var activating []beads.Bead
 	for _, b := range all {
 		if b.Metadata[beadmeta.IdempotencyKeyMetadataKey] != key {
 			continue
@@ -340,41 +507,125 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 		if b.Metadata[beadmeta.RootBeadIDMetadataKey] != rootBeadID {
 			continue
 		}
-		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
-			return nil, fmt.Errorf("existing attach root %s for idempotency key %q is marked molecule_failed", b.ID, key)
+		if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" ||
+			b.Metadata[beadmeta.AttachFencePendingMetadataKey] == attachFencePendingFailed {
+			if failedRootID == "" {
+				failedRootID = b.ID
+			}
+			continue
 		}
-		// Found existing sub-DAG root. Ensure dep is wired.
-		deps, err := store.DepList(attachBeadID, "down")
+		switch b.Metadata[beadmeta.AttachFencePendingMetadataKey] {
+		case attachFencePendingUnclaimed:
+			// A pre-fence speculative candidate (deferred, never activated).
+			// It must not be adopted as the duplicate while a live activated
+			// root can exist; collect it for deterministic recovery below.
+			pending = append(pending, b)
+			continue
+		case attachFencePendingActivating:
+			// Claimed by an activator that has not completed (a crash between
+			// claim and marker-clear, or a live co-activator). The claim is
+			// the settlement: this candidate IS the survivor; activation is
+			// idempotent and finishable by any processor.
+			activating = append(activating, b)
+			continue
+		}
+		return adoptExistingAttach(store, recipe, rootBeadID, attachBeadID, expectedEpoch, b)
+	}
+	if len(activating) > 0 {
+		// A claimed-but-incomplete activation outranks every unclaimed
+		// candidate: finishing it is convergent, while picking a different
+		// winner would race the claim holder. (Two candidates can never both
+		// hold an activation claim — the claim is a one-way CAS from the
+		// unclaimed state, and recovery neutralizes the rest before claiming
+		// its own pick.)
+		sort.Slice(activating, func(i, j int) bool { return activating[i].ID < activating[j].ID })
+		survivor := activating[0]
+		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, survivor)
 		if err != nil {
 			return nil, err
 		}
-		depExists := false
-		for _, d := range deps {
-			if d.DependsOnID == b.ID && d.Type == "blocks" {
-				depExists = true
-				break
+		if err := activateAttachCandidate(store, survivor.ID, idMapping); err != nil {
+			return nil, fmt.Errorf("finishing claimed attach candidate %s: %w", survivor.ID, err)
+		}
+		return adoptExistingAttach(store, recipe, rootBeadID, attachBeadID, expectedEpoch, survivor)
+	}
+	if len(pending) > 0 {
+		// Only unclaimed pending candidates survive under this key: the fence
+		// committed (or is unresolved) but no candidate was activated — an
+		// ambiguous fence error, or a crash between fence and activation. The
+		// epoch value cannot identify the winner (expected+1 is
+		// non-identifying), so recovery is DETERMINISTIC instead: every
+		// processor picks the lexicographically smallest candidate. The
+		// non-winners are claimed-and-neutralized FIRST, then the winner is
+		// claimed for activation; any lost claim means a racing processor
+		// settled that candidate concurrently (a fence loser neutralizing its
+		// own sub-DAG, or another recovery), so recovery surfaces the
+		// convergent conflict and the retry re-lists the settled state.
+		sort.Slice(pending, func(i, j int) bool { return pending[i].ID < pending[j].ID })
+		winner := pending[0]
+		for _, loser := range pending[1:] {
+			won, claimErr := claimAttachCandidate(store, loser.ID, attachFencePendingUnclaimed, attachFencePendingFailed)
+			if claimErr != nil {
+				return nil, fmt.Errorf("claiming stale attach candidate %s: %w", loser.ID, claimErr)
+			}
+			if !won {
+				return nil, fmt.Errorf("attach recovery lost the claim on %s (settled concurrently): %w", loser.ID, ErrEpochConflict)
+			}
+			if err := markFailedReporting(store, []string{loser.ID}); err != nil {
+				return nil, fmt.Errorf("neutralizing stale attach candidate %s: %w", loser.ID, err)
+			}
+			if err := store.DepRemove(attachBeadID, loser.ID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+				return nil, fmt.Errorf("detaching stale attach candidate %s: %w", loser.ID, err)
 			}
 		}
-		if !depExists {
-			if err := store.DepAdd(attachBeadID, b.ID, "blocks"); err != nil {
-				return nil, err
-			}
-		}
-		if err := advanceAttachEpochIfNeeded(store, attachBeadID, expectedEpoch); err != nil {
-			return nil, err
-		}
-		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, b)
+		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, winner)
 		if err != nil {
 			return nil, err
 		}
-		return &AttachResult{
-			RootID:         b.ID,
-			WorkflowRootID: rootBeadID,
-			IDMapping:      idMapping,
-			Duplicate:      true,
-		}, nil
+		if err := activateAttachCandidate(store, winner.ID, idMapping); err != nil {
+			return nil, fmt.Errorf("activating recovered attach candidate %s: %w", winner.ID, err)
+		}
+		return adoptExistingAttach(store, recipe, rootBeadID, attachBeadID, expectedEpoch, winner)
+	}
+	if failedRootID != "" {
+		return nil, fmt.Errorf("existing attach root %s for idempotency key %q is marked molecule_failed", failedRootID, key)
 	}
 	return nil, nil
+}
+
+// adoptExistingAttach returns an existing sub-DAG root as the idempotent
+// duplicate: it re-wires the blocking edge when missing, advances the epoch
+// for the recovered duplicate when still needed, and rebuilds the ID mapping.
+func adoptExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID string, expectedEpoch int, b beads.Bead) (*AttachResult, error) {
+	deps, err := store.DepList(attachBeadID, "down")
+	if err != nil {
+		return nil, err
+	}
+	depExists := false
+	for _, d := range deps {
+		if d.DependsOnID == b.ID && d.Type == "blocks" {
+			depExists = true
+			break
+		}
+	}
+	if !depExists {
+		if err := store.DepAdd(attachBeadID, b.ID, "blocks"); err != nil {
+			return nil, err
+		}
+	}
+	if err := advanceAttachEpochIfNeeded(store, attachBeadID, expectedEpoch); err != nil {
+		return nil, err
+	}
+	idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, b)
+	if err != nil {
+		return nil, err
+	}
+	return &AttachResult{
+		RootID:         b.ID,
+		WorkflowRootID: rootBeadID,
+		IDMapping:      idMapping,
+		Duplicate:      true,
+	}, nil
 }
 
 func advanceAttachEpochIfNeeded(store beads.Store, attachBeadID string, expectedEpoch int) error {
@@ -390,7 +641,115 @@ func advanceAttachEpochIfNeeded(store beads.Store, attachBeadID string, expected
 		return nil
 	}
 	nextEpoch := expectedEpoch + 1
-	return store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(nextEpoch))
+	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
+	if resolveErr != nil {
+		return fmt.Errorf("advancing epoch on %s: %w", attachBeadID, resolveErr)
+	}
+	if writer == nil {
+		return store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, strconv.Itoa(nextEpoch))
+	}
+	ok, casErr := writer.CompareAndSetMetadataKey(attachBeadID, beadmeta.ControlEpochMetadataKey,
+		strconv.Itoa(expectedEpoch), strconv.Itoa(nextEpoch))
+	if ok {
+		return nil
+	}
+	if casErr == nil || beads.IsPreconditionFailed(casErr) {
+		// Losing this advance is benign by construction: another processor
+		// advanced the epoch for the same recovered duplicate first. Re-read
+		// to distinguish that from a spurious conflict on a still-stale epoch,
+		// and bound the re-issue to ONE fresh attempt — a conflict that keeps
+		// recurring with a stale epoch is cross-key revision interference and
+		// surfaces as transient (the attach retries next tick).
+		refreshed, getErr := store.Get(attachBeadID)
+		if getErr != nil {
+			return getErr
+		}
+		if current, _ := strconv.Atoi(strings.TrimSpace(refreshed.Metadata[beadmeta.ControlEpochMetadataKey])); current != expectedEpoch {
+			return nil
+		}
+		ok2, casErr2 := writer.CompareAndSetMetadataKey(attachBeadID, beadmeta.ControlEpochMetadataKey,
+			strconv.Itoa(expectedEpoch), strconv.Itoa(nextEpoch))
+		if ok2 {
+			return nil
+		}
+		if casErr2 == nil || beads.IsPreconditionFailed(casErr2) {
+			// Either another processor advanced it (benign) or interference
+			// persists; both resolve on the next level-triggered pass.
+			return nil
+		}
+		return casErr2
+	}
+	return casErr
+}
+
+// advanceAttachEpochFence advances gc.control_epoch after the sub-DAG and its
+// blocking edge exist. The fence is deliberately CAS-LAST: fencing first
+// would burn the epoch on a crash between the fence and Instantiate, leaving
+// no idempotency record for the retry to converge on and permanently skewing
+// the attempt numbering the epoch encodes. CAS-last means both racers may
+// fully materialize sub-DAGs before one loses, so the loser neutralizes what
+// it just created — only Attach knows the IDs — and feeds the EXISTING
+// partial-attach recovery: the molecule_failed mark makes the orphan root
+// discoverable (and skippable by findExistingAttach), the blocking-edge
+// removal keeps the attach bead off an orphan no processor will run, and the
+// returned ErrEpochConflict lets the dispatch layer classify the attempt
+// hard-failed. The next level-triggered pass re-enters and converges on the
+// winner's sub-DAG through the idempotency check, which runs BEFORE the fence
+// by documented contract.
+//
+// On an AMBIGUOUS fence error the write may have committed and this racer may
+// BE the winner: the epoch value is non-identifying (expected+1 is
+// indistinguishable from a competitor's increment), so the sub-DAG is left
+// live and the error surfaces as transient — tolerable only because the
+// retry's idempotency check runs first.
+func advanceAttachEpochFence(store beads.Store, writer beads.ConditionalWriter, attachBeadID string, expectedEpoch int, result *Result) error {
+	nextEpoch := strconv.Itoa(expectedEpoch + 1)
+	if writer == nil {
+		if err := store.SetMetadata(attachBeadID, beadmeta.ControlEpochMetadataKey, nextEpoch); err != nil {
+			return fmt.Errorf("incrementing epoch on %s: %w", attachBeadID, err)
+		}
+		return nil
+	}
+	ok, casErr := writer.CompareAndSetMetadataKey(attachBeadID, beadmeta.ControlEpochMetadataKey,
+		strconv.Itoa(expectedEpoch), nextEpoch)
+	if ok {
+		return nil
+	}
+	if casErr != nil && !beads.IsPreconditionFailed(casErr) {
+		return fmt.Errorf("incrementing epoch on %s: %w", attachBeadID, casErr)
+	}
+	// Genuine fence loss: a concurrent processor advanced the epoch after our
+	// early check. Neutralize the losing sub-DAG. Neutralization errors are
+	// PROPAGATED (still wrapped as the convergent epoch conflict): a
+	// silently-unmarked candidate could be chosen by idempotency recovery.
+	// The candidate stays deferred (never activated), so even when marking
+	// fails it is inert — not runnable — until a later pass neutralizes it or
+	// recovery deterministically resolves the survivors.
+	// Claim the candidate before neutralizing: idempotency recovery on a
+	// racing processor may have deterministically picked THIS candidate and
+	// activated it. A lost claim means the sub-DAG is live (or being
+	// activated) under someone else's adoption — neutralizing it now would
+	// kill a root another caller was just handed. Skip and converge: the
+	// retry adopts the live root through findExistingAttach.
+	if won, claimErr := claimAttachCandidate(store, result.RootID, attachFencePendingUnclaimed, attachFencePendingFailed); claimErr != nil {
+		return fmt.Errorf("epoch conflict on %s (claiming losing sub-DAG %s for neutralization failed: %w): %w",
+			attachBeadID, result.RootID, claimErr, ErrEpochConflict)
+	} else if !won {
+		return ErrEpochConflict
+	}
+	createdIDs := make([]string, 0, len(result.IDMapping))
+	for _, id := range result.IDMapping {
+		createdIDs = append(createdIDs, id)
+	}
+	if markErr := markFailedReporting(store, createdIDs); markErr != nil {
+		return fmt.Errorf("epoch conflict on %s (neutralizing losing sub-DAG %s failed: %w): %w",
+			attachBeadID, result.RootID, markErr, ErrEpochConflict)
+	}
+	if depErr := store.DepRemove(attachBeadID, result.RootID); depErr != nil && !errors.Is(depErr, beads.ErrNotFound) {
+		return fmt.Errorf("epoch conflict on %s (detaching losing sub-DAG %s failed: %w): %w",
+			attachBeadID, result.RootID, depErr, ErrEpochConflict)
+	}
+	return ErrEpochConflict
 }
 
 func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {
@@ -471,6 +830,10 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	}
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
+	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = recipeWithNativeStepDependencies(recipe)
+		opts.nativeStepTopologyPrepared = true
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
@@ -581,6 +944,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.IdempotencyKey != "" {
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			if graphWorkflow && !recipe.RootOnly {
+				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
+			}
 			stampFormulaVars(vars, &b)
 		} else {
 			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
@@ -654,6 +1020,11 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				markFailed(store, createdIDs)
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
 			markFailed(store, createdIDs)
@@ -773,6 +1144,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
+	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
+		return nil, err
+	}
+	opts.nativeStepTopologyPrepared = true
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	if priorityOverride == nil {
 		root, err := store.Get(opts.RootID)
@@ -881,6 +1257,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				markFailed(store, createdIDs)
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
 			markFailed(store, createdIDs)
@@ -1022,7 +1403,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	b := beads.Bead{
 		Title:       formula.Substitute(step.Title, vars),
-		Description: formula.Substitute(step.Description, vars),
+		Description: substituteStepDescription(step, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      substituteLabels(step.Labels, vars),
@@ -1041,6 +1422,22 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func substituteStepDescription(step formula.RecipeStep, vars map[string]string) string {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		return formula.Substitute(step.Description, vars)
+	}
+
+	// A source-spec description is serialized JSON. Runtime values must be
+	// escaped for their JSON string context before placeholder substitution;
+	// otherwise newlines, quotes, or backslashes corrupt the retry snapshot.
+	escaped := make(map[string]string, len(vars))
+	for name, value := range vars {
+		encoded, _ := json.Marshal(value) // strings are always JSON-marshalable
+		escaped[name] = string(encoded[1 : len(encoded)-1])
+	}
+	return formula.Substitute(step.Description, escaped)
 }
 
 func preserveExecutableRootType(step formula.RecipeStep) bool {
@@ -1288,6 +1685,77 @@ func unresolvedTitleValidationErrorsWithVars(recipe *formula.Recipe, opts Option
 	return errs
 }
 
+// activateAttachCandidate promotes a fence-committed speculative sub-DAG to
+// runnable: every created bead's deferred type/assignee/routing is restored
+// and the root's fence-pending marker cleared (marker last, so a crash
+// mid-activation leaves a pending root that recovery re-activates
+// idempotently — activation updates are no-ops once applied).
+func activateAttachCandidate(store beads.Store, rootID string, idMapping map[string]string) error {
+	// Claim the candidate before touching any step: only the claim winner
+	// (or a co-activator finishing an idempotent activation) may proceed. A
+	// candidate settled as "failed" was neutralized — activating it now
+	// would resurrect a sub-DAG some other processor already killed.
+	if won, err := claimAttachCandidate(store, rootID, attachFencePendingUnclaimed, attachFencePendingActivating); err != nil {
+		return fmt.Errorf("claiming attach candidate %s for activation: %w", rootID, err)
+	} else if !won {
+		b, err := store.Get(rootID)
+		if err != nil {
+			return fmt.Errorf("re-reading contested attach candidate %s: %w", rootID, err)
+		}
+		switch b.Metadata[beadmeta.AttachFencePendingMetadataKey] {
+		case "":
+			return nil // already fully activated
+		case attachFencePendingActivating:
+			// A co-activator is mid-flight; activation is idempotent, so
+			// finish it here too — whoever completes last clears the marker.
+		default:
+			return fmt.Errorf("attach candidate %s was neutralized before activation: %w", rootID, ErrEpochConflict)
+		}
+	}
+	ids := make([]string, 0, len(idMapping))
+	for _, id := range idMapping {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := activateFencedGraphWorkflowBead(store, id); err != nil {
+			return fmt.Errorf("activating %s: %w", id, err)
+		}
+	}
+	if won, err := claimAttachCandidate(store, rootID, attachFencePendingActivating, ""); err != nil {
+		return fmt.Errorf("clearing fence-pending marker on %s: %w", rootID, err)
+	} else if !won {
+		b, err := store.Get(rootID)
+		if err != nil {
+			return fmt.Errorf("re-reading attach candidate %s after activation: %w", rootID, err)
+		}
+		if b.Metadata[beadmeta.AttachFencePendingMetadataKey] != "" {
+			return fmt.Errorf("attach candidate %s marker moved to %q during activation: %w",
+				rootID, b.Metadata[beadmeta.AttachFencePendingMetadataKey], ErrEpochConflict)
+		}
+	}
+	return nil
+}
+
+// markFailedReporting is markFailed with the first metadata-write error
+// surfaced instead of swallowed: the fence loser path must know when its
+// candidate was NOT neutralized, because an unmarked candidate could
+// otherwise be selected by idempotency recovery.
+func markFailedReporting(store beads.Store, ids []string) error {
+	var firstErr error
+	for _, id := range ids {
+		if err := store.SetMetadataBatch(id, map[string]string{
+			beadmeta.MoleculeFailedMetadataKey: "true",
+			InstantiatingMetadataKey:           "",
+		}); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("marking %s molecule_failed: %w", id, err)
+		}
+	}
+	return firstErr
+}
+
 // markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
 // Best-effort: errors are silently ignored since we're already in an
 // error path.
@@ -1314,18 +1782,20 @@ func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
 				return trimmed, true
 			}
 		case "retry-run":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		case "retry-eval":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		}
 
 		// v2 patterns: attempt/iteration suffix stripping.
-		// v2 beads keep their original kind but have gc.attempt set.
-		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+attempt); ok {
+		// v2 beads keep their original kind but have gc.attempt set. A retry
+		// attempt's ".attempt.<n>" suffix names its retry counter, which inside
+		// a ralph body differs from gc.attempt (the iteration).
+		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 			return trimmed, true
 		}
 		if trimmed, ok := trimAttemptSuffix(step.ID, ".iteration."+attempt); ok {

@@ -12,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates is the
@@ -102,9 +104,9 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 
 		// Tick 1: alive + agent-sourced drain-ack -> mark stop-pending and queue
 		// the async provider stop.
-		reconcileSessionBeads(
-			context.Background(), []beads.Bead{loser}, ds.State, map[string]bool{"repo/worker": true},
-			cfg, sp, store, dops, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
+		reconcileSessionBeadsAtPath(
+			context.Background(), t.TempDir(), []beads.Bead{loser}, ds.State, map[string]bool{"repo/worker": true},
+			cfg, sp, store, dops, nil, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
 			nil, clk, events.Discard, 0, 0, io.Discard, io.Discard,
 		)
 		waitForProviderStopped(t, sp, loserName)
@@ -116,9 +118,9 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 
 		// Tick 2: runtime is gone -> finalize the stop-pending session to a
 		// terminal drained state (pool-managed + no work -> close the bead).
-		reconcileSessionBeads(
-			context.Background(), []beads.Bead{reloaded}, ds.State, map[string]bool{"repo/worker": true},
-			cfg, sp, store, dops, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
+		reconcileSessionBeadsAtPath(
+			context.Background(), t.TempDir(), []beads.Bead{reloaded}, ds.State, map[string]bool{"repo/worker": true},
+			cfg, sp, store, dops, nil, nil, nil, dt, ds.PoolDesiredCounts, false, nil, "trace-town",
 			nil, clk, events.Discard, 0, 0, io.Discard, io.Discard,
 		)
 
@@ -135,8 +137,8 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 		if got.Metadata["state"] != "drained" {
 			t.Fatalf("loser state = %q, want drained", got.Metadata["state"])
 		}
-		if poolSessionIsLive(got) {
-			t.Fatalf("drained loser still reports poolSessionIsLive=true; it would over-count supply: metadata=%v", got.Metadata)
+		if poolSessionIsLiveInfo(sessiontest.SeedBead(t, got)) {
+			t.Fatalf("drained loser still reports poolSessionIsLiveInfo=true; it would over-count supply: metadata=%v", got.Metadata)
 		}
 	})
 
@@ -217,8 +219,8 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 				if err != nil {
 					t.Fatalf("create phantom pool session: %v", err)
 				}
-				if live := poolSessionIsLive(phantom); live != tc.wantStillLive {
-					t.Fatalf("poolSessionIsLive(%s phantom) = %v, want %v", tc.name, live, tc.wantStillLive)
+				if live := poolSessionIsLiveInfo(sessiontest.SeedBead(t, phantom)); live != tc.wantStillLive {
+					t.Fatalf("poolSessionIsLiveInfo(%s phantom) = %v, want %v", tc.name, live, tc.wantStillLive)
 				}
 
 				// Still-ready routed bead delivered cross-store to the city store
@@ -252,6 +254,157 @@ func TestReconcileSessionBeads_DrainAckNoWorkFreesSlotAndReallocates(t *testing.
 			})
 		}
 	})
+}
+
+// TestReusablePoolSessionInfo_DrainAckStopPendingNotReusable is the regression
+// guard for the drain-ack + min_sessions=1 replacement bug.
+//
+// A pool session in state=draining (set by drain-ack-stop-pending) must NOT be
+// returned as reusable. Without this exclusion, the min-floor fires (draining
+// doesn't consume demand via poolSessionConsumesNewDemandInfo), but
+// selectOrPlanPoolSessionBead maps the draining bead as the desired slot via
+// reusablePoolSessionInfos, so no replacement session is started until the
+// draining bead is eventually closed — requiring another reload or several more
+// patrol ticks.
+func TestReusablePoolSessionInfo_DrainAckStopPendingNotReusable(t *testing.T) {
+	t.Parallel()
+
+	drainingInfo := session.Info{
+		ID:                  "session-draining",
+		Template:            "repo/worker",
+		SessionNameMetadata: "worker-1",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       string(session.StateDraining),
+	}
+
+	bp := &agentBuildParams{}
+	cfgAgent := &config.Agent{Name: "worker", Dir: "repo"}
+
+	if got := reusablePoolSessionInfo(bp, cfgAgent, "repo/worker", drainingInfo, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(state=%q) = true; "+
+			"a drain-ack-stop-pending session must not be reusable as the desired slot "+
+			"(fixes min_sessions=1 replacement stall, #drain-ack-min1-bug)",
+			drainingInfo.MetadataState)
+	}
+}
+
+// TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable is the
+// regression guard for the recurring one-shot pool-name-holder outage
+// (EDGE-RECEIPT-asleep-holder): a one_shot pool session that finishes its
+// bounded unit of work exits, and the generic heal path lands it in
+// state=asleep with a freeable reason (idle, idle-timeout, ...) — not a
+// crash, not a deliberate hold. Nothing in the reconciler closes that bead
+// (the "reconciler closes orphaned asleep beads" comment on the caller is
+// aspirational, not implemented), so it sits open forever holding the
+// identity's runtime session_name. Because this function excluded EVERY
+// asleep session from reuse, selectOrPlanPoolSessionBead fell through to a
+// fresh create, which collided with the very name this bead still holds:
+// derivePoolSessionName -> errPoolSessionNameUnavailable, and buildDesiredState
+// refuses to mint ("pool session name unavailable ... session name already
+// exists") on every tick until an operator runs `gc session close` by hand.
+//
+// A one_shot pool's own freeable-asleep exit must be reusable so the ordinary
+// wake path (the same one that already handles this fine for other pool
+// states, per the "Woke session" / outcome=success log lines) retires the
+// exit and remints the identity — matching the reuse this function already
+// grants a closed/swept slot with the pool markers intact.
+func TestReusablePoolSessionInfo_OneShotAsleepFreeableIsReusable(t *testing.T) {
+	t.Parallel()
+
+	bp := &agentBuildParams{}
+	cfgAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad", Lifecycle: config.AgentLifecycleOneShot}
+	template := "fable-nomad/claude-sonnet-one-shot"
+
+	asleepFreeable := session.Info{
+		ID:                  "session-asleep-freeable",
+		Template:            template,
+		SessionNameMetadata: "fable-nomad--claude-sonnet-one-shot-1-pool",
+		PoolManaged:         true,
+		PoolSlot:            "1",
+		MetadataState:       "asleep",
+		SleepReason:         "idle",
+	}
+	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepFreeable, nil); !got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=idle) = false; "+
+			"want true — a freeable-asleep one_shot exit must be reusable or it blocks its own "+
+			"identity name forever (session %s)", asleepFreeable.ID)
+	}
+
+	// Control: a deliberately held asleep one_shot session (e.g. quarantine)
+	// must stay excluded — freeable-only, not asleep-blanket.
+	asleepHeld := asleepFreeable
+	asleepHeld.ID = "session-asleep-quarantine"
+	asleepHeld.SleepReason = "quarantine"
+	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepHeld, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=quarantine) = true; " +
+			"want false — a deliberately held sleep must still block reuse")
+	}
+
+	// Control: a persistent (non-one_shot) pool keeps today's behavior — an
+	// asleep session is never reused, even when freeable, so a genuine crash
+	// gets a fresh identity instead of resuming a possibly-corrupt conversation.
+	persistentAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad"}
+	if got := reusablePoolSessionInfo(bp, persistentAgent, template, asleepFreeable, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(persistent, asleep, sleep_reason=idle) = true; " +
+			"want false — the freeable-asleep reuse carve-out is scoped to lifecycle=one_shot")
+	}
+}
+
+// TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReusable
+// is the regression guard for the wake-reuse-orphans-work outage: a one_shot
+// pool session lands asleep with a freeable reason (idle, ...) per the
+// carve-out above, but the identity still has an open/in-progress assigned
+// work bead attached from before the exit (the step never finished). The
+// ordinary wake path (reusablePoolSessionInfo -> true) "reuses" the identity
+// without giving the step a real execution turn: the reconciler logs
+// `session lifecycle: op=start ... outcome=success`, then the reused session
+// drains and lands `orphaned` ~45-55s later with no work done, and the step
+// stays in_progress pinned to the now-dead name — retry control never
+// re-attempts it because the step still looks claimed.
+//
+// A one_shot exit that still holds assigned work is not a clean exit: it must
+// fall through to fresh-identity creation (the pre-6f1ee854b behavior for
+// this case) instead of being reused. This mirrors the assigned-work
+// visibility the caller already provides via bp.assignedWorkBeads (the same
+// slice sessionBeadHasAssignedWorkInfo checks a few lines below the asleep
+// carve-out), not a bypass around it.
+func TestReusablePoolSessionInfo_OneShotAsleepFreeableWithOpenAssignedWorkNotReusable(t *testing.T) {
+	t.Parallel()
+
+	cfgAgent := &config.Agent{Name: "claude-sonnet-one-shot", Dir: "fable-nomad", Lifecycle: config.AgentLifecycleOneShot}
+	template := "fable-nomad/claude-sonnet-one-shot"
+
+	asleepFreeableWithWork := session.Info{
+		ID:                  "session-asleep-freeable-with-work",
+		Template:            template,
+		SessionNameMetadata: "fable-nomad--claude-sonnet-one-shot-2-pool",
+		Alias:               "fable-nomad/claude-sonnet-one-shot-2",
+		PoolManaged:         true,
+		PoolSlot:            "2",
+		MetadataState:       "asleep",
+		SleepReason:         "idle",
+	}
+
+	bp := &agentBuildParams{
+		assignedWorkBeads: []beads.Bead{
+			{
+				// Claimed work is assigned under the session's actor identity
+				// (Alias — GC_ALIAS/BEADS_ACTOR, per session.AssigneeIdentifier),
+				// not necessarily the raw runtime SessionNameMetadata.
+				ID:       "work-in-progress",
+				Status:   "in_progress",
+				Assignee: asleepFreeableWithWork.Alias,
+			},
+		},
+	}
+
+	if got := reusablePoolSessionInfo(bp, cfgAgent, template, asleepFreeableWithWork, nil); got {
+		t.Fatalf("reusablePoolSessionInfo(one_shot, asleep, sleep_reason=idle, open assigned work) = true; "+
+			"want false — an asleep one_shot exit that still holds in-progress assigned work must fall "+
+			"through to fresh-identity creation, not be wake-reused (session %s)",
+			asleepFreeableWithWork.ID)
+	}
 }
 
 func createRoutedReadyBeadForReplacement(t *testing.T, store beads.Store, template, title string) beads.Bead {

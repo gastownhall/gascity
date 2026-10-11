@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -15,37 +16,33 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // Compile-time check.
 var _ runtime.Provider = (*Provider)(nil)
 
-func TestTmuxConformance(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-
+// tmuxConformanceConfig builds the isolated-socket configuration used by
+// TestTmuxConformance. The conformance fixture is a generic long-running
+// command, not an agent TUI with an observable idle prompt, so it keeps a
+// short real Nudge timeout to cover the wait/fallback branch without
+// consuming the production 30-second budget.
+func tmuxConformanceConfig() Config {
 	cfg := DefaultConfig()
 	cfg.SocketName = testSocketName
-	p := NewProviderWithConfig(cfg)
+	cfg.NudgeIdleTimeout = 250 * time.Millisecond
+	return cfg
+}
+
+func TestTmuxConformance(t *testing.T) {
 	var counter int64
 
-	runtimetest.RunProviderTestsWithOptions(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		id := atomic.AddInt64(&counter, 1)
-		name := fmt.Sprintf("gc-test-conform-%d", id)
-		// Safety cleanup for orphan prevention.
-		t.Cleanup(func() { _ = p.Stop(name) })
-		return p, runtime.Config{
+	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBackedWithConfig(tmuxConformanceConfig()), runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),
-		}, name
-	}, runtimetest.Options{
-		SkipStartError: func(err error) (string, bool) {
-			if errors.Is(err, ErrServerDegraded) {
-				return fmt.Sprintf("tmux test socket degraded before Start could run: %v", err), true
-			}
-			return "", false
-		},
+		}, fmt.Sprintf("gc-test-conform-%d", atomic.AddInt64(&counter, 1))
 	})
 }
 
@@ -121,6 +118,208 @@ func TestProvider_StartWithEnv(t *testing.T) {
 	}
 	if val != "hello" {
 		t.Fatalf("GC_TEST: got %q, want %q", val, "hello")
+	}
+}
+
+func TestProviderStopUnattendedSessionRealNamedTmuxBoundary(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("script executable not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gctest-certify-unattended-%d-%d", os.Getpid(), time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	name := "certify-unattended"
+	const token = "certification-token"
+	socketPath := namedSocketPath(cfg.SocketName)
+	defaultPath := namedSocketPath("default")
+	defaultBefore, defaultBeforeErr := os.Lstat(defaultPath)
+	serverStopped := false
+	t.Cleanup(func() {
+		if !serverStopped {
+			if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+				t.Errorf("tear down exact named tmux server: %v", err)
+			}
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove exact named tmux socket: %v", err)
+		}
+	})
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: "sleep 300",
+		Env:     map[string]string{"GC_INSTANCE_TOKEN": token},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	stubbornReady := fmt.Sprintf("gc-cert-stubborn-ready-%d", time.Now().UnixNano())
+	stubbornCommand := "trap '' HUP TERM; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(stubbornReady) + "; while :; do sleep 1; done"
+	secondPane, err := p.tm.run("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "="+name, "exec sh -c "+shellquote.Quote(stubbornCommand))
+	if err != nil {
+		t.Fatalf("create second-window pane: %v", err)
+	}
+	if !wellFormedTmuxID(secondPane, '%') {
+		t.Fatalf("second-window pane ID = %q, want %%<digits>", secondPane)
+	}
+
+	waitSignal := func(signal, description string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		defer cancel()
+		if _, err := p.tm.runCtx(ctx, "wait-for", signal); err != nil {
+			t.Fatalf("wait for %s: %v", description, err)
+		}
+	}
+	waitSignal(stubbornReady, "stubborn second-pane process startup")
+	secondPanePID, err := p.tm.GetPanePID(secondPane)
+	if err != nil {
+		t.Fatalf("read stubborn second-pane process PID: %v", err)
+	}
+	if !processAlive(secondPanePID) {
+		t.Fatalf("stubborn second-pane process %s is not alive before certified stop", secondPanePID)
+	}
+	// A second provider instance owns the real hidden PTY. It is therefore
+	// untracked by p, exactly like a human client from the certifier's point of
+	// view; p must observe it without closing or detaching it.
+	other := NewProviderWithConfig(cfg)
+	if err := other.tm.ensureHiddenAttachedClient(name); err != nil {
+		t.Fatalf("attach real PTY through second provider: %v", err)
+	}
+	defer other.tm.CloseHiddenAttachClient(name)
+	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "attached clients") {
+		t.Fatalf("attached real PTY stop = %v, want attached-client park", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || !has {
+		t.Fatalf("attached stop killed target: has=%v err=%v", has, err)
+	}
+	if !other.tm.IsSessionAttached(name) {
+		t.Fatal("bound stop detached the PTY tracked only by the second provider")
+	}
+
+	detachedSignal := fmt.Sprintf("gc-cert-detached-%d", time.Now().UnixNano())
+	if _, err := p.tm.run("set-hook", "-t", name, "client-detached", "wait-for -S "+detachedSignal); err != nil {
+		t.Fatalf("arm client-detached signal: %v", err)
+	}
+	other.tm.CloseHiddenAttachClient(name)
+	waitSignal(detachedSignal, "real PTY detachment")
+
+	if _, err := p.tm.run("copy-mode", "-t", secondPane); err != nil {
+		t.Fatalf("enter copy mode on second-window pane: %v", err)
+	}
+	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "copy-mode panes") {
+		t.Fatalf("second-window copy-mode stop = %v, want copy-mode park", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || !has {
+		t.Fatalf("copy-mode stop killed target: has=%v err=%v", has, err)
+	}
+	if _, err := p.tm.run("send-keys", "-t", secondPane, "-X", "cancel"); err != nil {
+		t.Fatalf("clear second-window copy mode: %v", err)
+	}
+	observer := "certify-unattended-observer"
+	if _, err := p.tm.run("new-session", "-d", "-s", observer, "sleep 300"); err != nil {
+		t.Fatalf("create observer session: %v", err)
+	}
+	if _, err := p.tm.run("link-window", "-s", "="+name+":^", "-t", "="+observer); err != nil {
+		t.Fatalf("link target window into observer session: %v", err)
+	}
+	if err := other.tm.ensureHiddenAttachedClient(observer); err != nil {
+		t.Fatalf("attach observer PTY: %v", err)
+	}
+	if err := p.StopUnattendedSession(name, token); err == nil || !strings.Contains(err.Error(), "linked windows") {
+		t.Fatalf("linked-window stop = %v, want linked-window park", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || !has {
+		t.Fatalf("linked-window stop killed target: has=%v err=%v", has, err)
+	}
+	other.tm.CloseHiddenAttachClient(observer)
+	if err := p.tm.KillSession(observer); err != nil {
+		t.Fatalf("remove observer session: %v", err)
+	}
+	if err := p.StopUnattendedSession(name, token); err != nil {
+		t.Fatalf("stable detached stop: %v", err)
+	}
+	if has, err := p.tm.HasSession(name); err != nil || has {
+		t.Fatalf("certified stop left session present: has=%v err=%v", has, err)
+	}
+	if processAlive(secondPanePID) {
+		t.Fatalf("certified stop left stubborn second-pane process %s alive", secondPanePID)
+	}
+
+	if err := p.TeardownServer(); err != nil {
+		t.Fatalf("tear down exact named tmux server: %v", err)
+	}
+	serverStopped = true
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove exact named tmux socket: %v", err)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("named tmux socket still exists after exact cleanup: %v", err)
+	}
+	defaultAfter, defaultAfterErr := os.Lstat(defaultPath)
+	switch {
+	case errors.Is(defaultBeforeErr, os.ErrNotExist):
+		if !errors.Is(defaultAfterErr, os.ErrNotExist) {
+			t.Fatalf("default tmux socket was created: %v", defaultAfterErr)
+		}
+	case defaultBeforeErr != nil:
+		t.Fatalf("inspect default tmux socket before proof: %v", defaultBeforeErr)
+	case defaultAfterErr != nil:
+		t.Fatalf("default tmux socket changed during proof: %v", defaultAfterErr)
+	case !os.SameFile(defaultBefore, defaultAfter):
+		t.Fatal("default tmux socket identity changed during named-socket proof")
+	}
+}
+
+func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	cfg := DefaultConfig()
+	cfg.SocketName = fmt.Sprintf("gc-test-color-%d", time.Now().UnixNano())
+	p := NewProviderWithConfig(cfg)
+	t.Cleanup(func() { _ = p.TeardownServer() })
+	name := "gc-test-adapter-color-env"
+
+	outPath := filepath.Join(t.TempDir(), "env.txt")
+	tmpPath := outPath + ".tmp"
+	ready := "gc-test-color-ready"
+	script := "env > " + shellquote.Quote(tmpPath) + "; mv " + shellquote.Quote(tmpPath) + " " + shellquote.Quote(outPath) + "; tmux -L " + shellquote.Quote(cfg.SocketName) + " wait-for -S " + shellquote.Quote(ready) + "; sleep 300"
+	commandPath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatalf("writing Claude fixture: %v", err)
+	}
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command:      shellquote.Quote(commandPath),
+		ProviderName: "claude",
+		Env: map[string]string{
+			"CI":       "1",
+			"NO_COLOR": "1",
+			"CIRCLECI": "true",
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := p.Tmux().runCtx(readyCtx, "wait-for", ready); err != nil {
+		t.Fatalf("waiting for pane environment signal: %v", err)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading pane environment after readiness signal: %v", err)
+	}
+	env := string(data)
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "CI=") || strings.HasPrefix(line, "NO_COLOR=") {
+			t.Fatalf("interactive pane inherited color-killing environment:\n%s", env)
+		}
+	}
+	if !strings.Contains(env, "CIRCLECI=true") {
+		t.Fatalf("unrelated CI-vendor environment was removed:\n%s", env)
 	}
 }
 
@@ -323,4 +522,125 @@ func TestProvider_StartCanceledCleansUpSession(t *testing.T) {
 	}
 	_ = p.Stop(name)
 	t.Fatal("session should be cleaned up after canceled start")
+}
+
+// TestProvider_RelaunchWithholdsControllerTokenFromRespawnedPane is the respawn
+// twin of the create-path pane-child test, and it covers the failure class that
+// test structurally cannot see: a pane is started more than once, and only the
+// FIRST start goes through NewSessionWithCommandAndEnv. Relaunch reaches the
+// agent via respawn-pane, which takes no env argument, so the create path's
+// `env -u` command prefix does not apply to it — the respawned agent inherits
+// the tmux server's global environment, which still holds the controller's real
+// token.
+//
+// Relaunch is deliberately driven WITHOUT Env here, matching the documented
+// contract that env is provision-half and not re-passed: the withholding has to
+// survive in the session environment on its own.
+func TestProvider_RelaunchWithholdsControllerTokenFromRespawnedPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	// A socket unique to this test, so the tmux server it starts forks from THIS
+	// process and its global environment carries the token — that server env is
+	// the thing respawn-pane hands to the new process.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("rp")
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-token-pin"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf(`sh -c 'printf %%s "%s=[${%s-ABSENT}]" > %s; sleep 300'`, tag, tokenVar, marker)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: agentCmd("created"),
+		WorkDir: workDir,
+		Env:     map[string]string{tokenVar: ""},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "created=[ABSENT]")
+
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("respawned"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "respawned=[ABSENT]")
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("respawned pane received the controller token: %s", got)
+	}
+}
+
+// The warm-box upgrade path. A box provisioned by a gc whose create path built
+// only the one-shot `env -u` prefix carries no session-env marker, and a warm
+// box is explicitly long-lived — without re-assertion at relaunch it would hand
+// the respawned agent the real token for the rest of its life. The session here
+// is created the old way on purpose: prefix, no marker.
+func TestProvider_RelaunchRepinsControllerTokenInPreexistingWarmBox(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("rr")
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-token-repin"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf(`sh -c 'printf %%s "%s=[${%s-ABSENT}]" > %s; sleep 300'`, tag, tokenVar, marker)
+	}
+
+	// Provision the way the pre-fix create path did: the withholding exists only
+	// as a command prefix, never in the session environment.
+	if err := p.Tmux().NewSessionWithCommand(name, workDir, "env -u "+tokenVar+" "+agentCmd("created")); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
+	}
+	waitForMarker(t, marker, "created=[ABSENT]")
+	if _, err := p.Tmux().GetEnvironment(name, tokenVar); err == nil {
+		t.Fatal("session env already carries a marker; this fixture must model a pre-fix warm box")
+	}
+
+	// Relaunch carries the pin in cfg.Env, as the reconciler does.
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("respawned"),
+		WorkDir: workDir,
+		Env:     map[string]string{tokenVar: ""},
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "respawned=[ABSENT]")
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("respawned pane in a pre-fix warm box received the controller token: %s", got)
+	}
 }

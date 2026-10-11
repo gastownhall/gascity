@@ -62,6 +62,7 @@ func TestAgentFieldSync(t *testing.T) {
 	// remove-only modifier that has no Agent equivalent.
 	patchOnly := map[string]bool{
 		"Agent":                   true, // targeting key on AgentOverride
+		"Rig":                     true, // targeting key on AgentPatch, replaces Dir
 		"EnvRemove":               true, // remove modifier, no Agent field
 		"PreStartAppend":          true, // append modifier, no Agent field
 		"SessionSetupAppend":      true, // append modifier, no Agent field
@@ -164,9 +165,11 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	patch := AgentPatch{
 		Dir:                     "target-dir",
+		Rig:                     "target-rig",
 		Name:                    "target-name",
 		WorkDir:                 strVal(".gc/agents/worker"),
 		TmuxAlias:               strVal("worker--{{.Rig}}"),
@@ -179,6 +182,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		ContextAdvisory:         contextAdvisory,
 		Upstream:                strVal("bedrock"),
 		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
@@ -187,7 +191,9 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		IdleTimeout:             strVal("15m"),
 		MaxSessionAge:           strVal("5h"),
 		MaxSessionAgeJitter:     strVal("15m"),
+		AssignedWorkDeferLimit:  intVal(3),
 		SleepAfterIdle:          strVal("30s"),
+		AutoReclaimStaleClaims:  &trueVal,
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		InjectAssignedSkills:    &trueVal,
@@ -235,7 +241,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	// Fields on AgentPatch that target the agent (Dir/Name are targeting keys,
 	// not applied to the agent). EnvRemove removes keys. *Append modifiers
 	// append to the base list set by the non-Append field.
-	targeting := map[string]bool{"Dir": true, "Name": true}
+	targeting := map[string]bool{"Dir": true, "Name": true, "Rig": true}
 	modifiers := map[string]bool{
 		"EnvRemove":               true,
 		"PreStartAppend":          true,
@@ -318,6 +324,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	override := AgentOverride{
 		Agent:                   "target",
@@ -334,6 +341,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		ContextAdvisory:         contextAdvisory,
 		Upstream:                strVal("bedrock"),
 		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
@@ -342,7 +350,9 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		IdleTimeout:             strVal("15m"),
 		MaxSessionAge:           strVal("5h"),
 		MaxSessionAgeJitter:     strVal("15m"),
+		AssignedWorkDeferLimit:  intVal(3),
 		SleepAfterIdle:          strVal("30s"),
+		AutoReclaimStaleClaims:  &trueVal,
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		InjectAssignedSkills:    &trueVal,
@@ -562,7 +572,7 @@ func TestAgentCloneIsDeep(t *testing.T) {
 			m := reflect.MakeMapWithSize(f.Type(), 1)
 			m.SetMapIndex(reflect.New(f.Type().Key()).Elem(), reflect.New(f.Type().Elem()).Elem())
 			f.Set(m)
-		case reflect.Ptr:
+		case reflect.Pointer:
 			f.Set(reflect.New(f.Type().Elem()))
 		}
 	}
@@ -578,7 +588,7 @@ func TestAgentCloneIsDeep(t *testing.T) {
 		name := tp.Field(i).Name
 		cf := cv.Field(i)
 		switch f.Kind() {
-		case reflect.Slice, reflect.Map, reflect.Ptr:
+		case reflect.Slice, reflect.Map, reflect.Pointer:
 			if cf.IsNil() {
 				t.Errorf("Agent.Clone left reference field %q nil — add a deep copy in Clone()", name)
 				continue

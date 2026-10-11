@@ -116,7 +116,7 @@ func TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot(t *testing
 // (session_reconciler.go ~1706): healStateWithRollback projects a live
 // start-pending session to state=awake and mirrors that batch, and this tick folds
 // it onto the snapshot via write-returns-Info so the post-heal
-// pendingCreateSessionStillLeased guard (which reads MetadataState off infoPostHeal)
+// pendingCreateSessionStillLeasedInfo guard (which reads MetadataState off infoPostHeal)
 // sees the healed state.
 //
 // This site became load-bearing in this same commit: the downstream zombie refresh
@@ -127,7 +127,7 @@ func TestReconcileSessionBeads_ZombieTerminalErrorReflectedOnSnapshot(t *testing
 // Scenario: an undesired (not in desiredState), non-named session bead with
 // state=start-pending and a LIVE runtime. The heal rewrites state->awake; with the
 // fold working, infoPostHeal is awake (not "start requested"), the
-// pendingCreateSessionStillLeased guard is false, and the reconciler drains the live
+// pendingCreateSessionStillLeasedInfo guard is false, and the reconciler drains the live
 // orphan (a drain-tracker entry). With the fold stale, infoPostHeal keeps
 // start-pending, the guard treats the bead as a live pending-create, and it is kept
 // open with NO drain — the assertion below catches that.
@@ -150,12 +150,12 @@ func TestReconcileSessionBeads_HealStateReflectedOnSnapshot(t *testing.T) {
 	env.reconcileAtPath(t.TempDir(), []beads.Bead{companion})
 
 	// Read-after-write: the heal's state=awake batch folded onto the snapshot, so
-	// the pendingCreateSessionStillLeased guard sees awake (not start-requested) and
+	// the pendingCreateSessionStillLeasedInfo guard sees awake (not start-requested) and
 	// the undesired live orphan is drained (drain-tracker entry). If the heal fold
 	// regresses (stale snapshot), the guard sees start-pending, treats the bead as a
 	// live pending-create, and keeps it open — no drain.
 	if env.dt.get(companion.ID) == nil {
-		t.Fatalf("orphan companion was not drained; the heal's state=awake must fold onto the snapshot so the pendingCreateSessionStillLeased guard does not keep a live start-pending orphan open — the heal fold did not reach infoPostHeal (stale snapshot at the heal refresh). stdout=%q", env.stdout.String())
+		t.Fatalf("orphan companion was not drained; the heal's state=awake must fold onto the snapshot so the pendingCreateSessionStillLeasedInfo guard does not keep a live start-pending orphan open — the heal fold did not reach infoPostHeal (stale snapshot at the heal refresh). stdout=%q", env.stdout.String())
 	}
 }
 

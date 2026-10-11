@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -70,6 +72,252 @@ func newFakeDrainOps() *fakeDrainOps {
 		acked:            make(map[string]bool),
 		restartRequested: make(map[string]bool),
 		driftRestart:     make(map[string]bool),
+	}
+}
+
+func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
+	const socket = "bright-lights"
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`)
+	t.Setenv("FAKE_TMUX_ARGS", argsFile)
+
+	sp, err := newSessionProviderForCityByName(
+		nil,
+		"tmux",
+		config.SessionConfig{Socket: socket},
+		"city",
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
+	}
+	if err := newDrainOps(sp).clearRestartRequested("worker"); err != nil {
+		t.Fatalf("clearRestartRequested: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read fake tmux args: %v", err)
+	}
+	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n"
+	if string(got) != want {
+		t.Fatalf("tmux args = %q, want %q", got, want)
+	}
+}
+
+func TestE2b2ProviderConstructionFailuresReturnThroughRun(t *testing.T) {
+	if cityPath, sessionID, markerPath, ok := e2b2ProviderFailureHelperArgs(os.Args); ok {
+		runE2b2ProviderFailureHelper(t, cityPath, sessionID, markerPath)
+		return
+	}
+
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	markerPath := filepath.Join(t.TempDir(), "returned-through-run")
+	cmd := exec.Command(
+		os.Args[0],
+		"-test.run=^TestE2b2ProviderConstructionFailuresReturnThroughRun$",
+		"--",
+		"e2b2-provider-failure-helper",
+		cityPath,
+		sessionID,
+		markerPath,
+	)
+	cmd.Dir = cityPath
+	cmd.Env = e2b2ProviderFailureChildEnv(
+		"GC_BEADS=file",
+		"GC_BEADS_SCOPE_ROOT=",
+		"GC_CITY="+cityPath,
+		"GC_CITY_PATH="+cityPath,
+		"GC_CEILING_DIRECTORIES="+filepath.Dir(cityPath),
+		"GC_HOME="+filepath.Join(filepath.Dir(cityPath), "gc-home"),
+		"GC_SESSION=broken",
+		"GC_ALIAS=worker",
+		"GC_AGENT=worker",
+		"GC_SESSION_ID="+sessionID,
+		"GC_SESSION_NAME=test-city--frontend--worker",
+		"GC_TMUX_SESSION=test-city--frontend--worker",
+	)
+	var processStdout, processStderr bytes.Buffer
+	cmd.Stdout = &processStdout
+	cmd.Stderr = &processStderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("provider failure helper did not return through run: %v; stdout=%q stderr=%q", err, processStdout.String(), processStderr.String())
+	}
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("run-return marker missing: %v", err)
+	}
+	if got, want := string(marker), "returned\n"; got != want {
+		t.Fatalf("run-return marker = %q, want %q", got, want)
+	}
+}
+
+func e2b2ProviderFailureHelperArgs(args []string) (string, string, string, bool) {
+	for index, arg := range args {
+		if arg == "--" && index+5 == len(args) && args[index+1] == "e2b2-provider-failure-helper" {
+			return args[index+2], args[index+3], args[index+4], true
+		}
+	}
+	return "", "", "", false
+}
+
+func e2b2ProviderFailureChildEnv(extra ...string) []string {
+	base := sanitizedBaseEnv(extra...)
+	env := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "OTEL_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "OTEL_SDK_DISABLED=true")
+}
+
+func writeE2b2ProviderFailureCity(t *testing.T) (string, string) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig path: %v", err)
+	}
+	cityTOML := `[workspace]
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeCatalogFile(t, cityPath, ".gc/site.toml", fmt.Sprintf(`workspace_name = "test-city"
+
+[[rig]]
+name = "frontend"
+path = %q
+`, rigPath))
+	writeBuiltinImportsFixture(t, cityPath, "core")
+	writeCatalogFile(t, cityPath, "agents/worker/agent.toml", "dir = \"frontend\"\n")
+
+	store, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "runtime provider failure target",
+		Type:   sessionBeadType,
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"agent_name":   "frontend/worker",
+			"template":     "frontend/worker",
+			"session_name": "test-city--frontend--worker",
+			"state":        "awake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return cityPath, created.ID
+}
+
+func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath string) {
+	t.Helper()
+	defer func() {
+		if err := os.WriteFile(markerPath, []byte("returned\n"), 0o600); err != nil {
+			t.Errorf("write run-return marker: %v", err)
+		}
+	}()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(cityPath))
+	t.Setenv("GC_SESSION", "broken")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_SESSION_NAME", "test-city--frontend--worker")
+	t.Setenv("GC_TMUX_SESSION", "test-city--frontend--worker")
+
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	defer func() { buildSessionProviderByName = oldBuild }()
+
+	const constructionFailure = "constructing session provider: injected provider failure"
+	tests := []struct {
+		name             string
+		args             []string
+		wantCommand      string
+		wantJSONCode     string
+		wantJSONMessage  string
+		wantJSONDiagCode string
+	}{
+		{name: "runtime drain text", args: []string{"--city", cityPath, "runtime", "drain", sessionID}, wantCommand: "gc runtime drain"},
+		{name: "runtime drain json", args: []string{"--city", cityPath, "runtime", "drain", sessionID, "--json"}, wantCommand: "gc runtime drain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime undrain text", args: []string{"--city", cityPath, "runtime", "undrain", sessionID}, wantCommand: "gc runtime undrain"},
+		{name: "runtime undrain json", args: []string{"--city", cityPath, "runtime", "undrain", sessionID, "--json"}, wantCommand: "gc runtime undrain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check explicit text", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID}, wantCommand: "gc runtime drain-check"},
+		{name: "runtime drain-check explicit json", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID, "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check context text", args: []string{"--city", cityPath, "runtime", "drain-check"}, wantCommand: "gc runtime drain-check"},
+		{name: "runtime drain-check context json", args: []string{"--city", cityPath, "runtime", "drain-check", "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-ack explicit text", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID}, wantCommand: "gc runtime drain-ack"},
+		{name: "runtime drain-ack explicit json", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID, "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-ack context text", args: []string{"--city", cityPath, "runtime", "drain-ack"}, wantCommand: "gc runtime drain-ack"},
+		{name: "runtime drain-ack context json", args: []string{"--city", cityPath, "runtime", "drain-ack", "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart"},
+		{name: "rig status text", args: []string{"--city", cityPath, "rig", "status", "frontend"}, wantCommand: "gc rig status"},
+		{name: "rig status json", args: []string{"--city", cityPath, "rig", "status", "frontend", "--json"}, wantCommand: "gc rig status", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "city status text", args: []string{"--city", cityPath, "status"}, wantCommand: "gc status"},
+		{name: "city status json flag", args: []string{"--city", cityPath, "status", "--json"}, wantCommand: "gc status", wantJSONCode: "session_provider_failed", wantJSONMessage: "gc status: " + constructionFailure, wantJSONDiagCode: "session_provider_failed"},
+		{name: "city status json format", args: []string{"--city", cityPath, "status", "--format=json"}, wantCommand: "gc status", wantJSONCode: "session_provider_failed", wantJSONMessage: "gc status: " + constructionFailure, wantJSONDiagCode: "session_provider_failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr); code != 1 {
+				t.Fatalf("run(%v) = %d, want 1; stdout=%q stderr=%q", tc.args, code, stdout.String(), stderr.String())
+			}
+
+			wantMessage := tc.wantCommand + ": " + constructionFailure
+			if tc.wantJSONCode == "" {
+				if got := stdout.String(); got != "" {
+					t.Fatalf("stdout = %q, want empty", got)
+				}
+				if got, want := stderr.String(), wantMessage+"\n"; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				return
+			}
+
+			var output cliJSONErrorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+				t.Fatalf("stdout is not a structured JSON failure: %v; stdout=%q", err, stdout.String())
+			}
+			if output.OK || output.Error.Code != tc.wantJSONCode || output.Error.ExitCode != 1 || output.Error.Message != tc.wantJSONMessage {
+				t.Fatalf("JSON failure = %#v, want code=%q message=%q exit_code=1", output, tc.wantJSONCode, tc.wantJSONMessage)
+			}
+			if tc.wantJSONDiagCode == "" {
+				if got, want := stderr.String(), wantMessage+"\n"; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				return
+			}
+			var diagnostic cliJSONDiagnostic
+			if err := json.Unmarshal(stderr.Bytes(), &diagnostic); err != nil {
+				t.Fatalf("stderr is not a structured JSON diagnostic: %v; stderr=%q", err, stderr.String())
+			}
+			if diagnostic.Code != tc.wantJSONDiagCode || diagnostic.Message != tc.wantJSONMessage || diagnostic.ExitCode != 1 {
+				t.Fatalf("JSON diagnostic = %#v, want code=%q message=%q exit_code=1", diagnostic, tc.wantJSONDiagCode, tc.wantJSONMessage)
+			}
+		})
 	}
 }
 
@@ -443,13 +691,14 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeDrainAck(t *testing.T) {
+	testCity := t.TempDir()
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -462,10 +711,11 @@ func TestDoRuntimeDrainAck(t *testing.T) {
 }
 
 func TestDoRuntimeDrainAckError(t *testing.T) {
+	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -474,14 +724,25 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	}
 }
 
+func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) {
+	err := joinDrainAckMutationErrors(
+		fmt.Errorf("setting metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+		fmt.Errorf("removing metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+	)
+	if err != nil {
+		t.Fatalf("joinDrainAckMutationErrors(...) = %v, want nil for missing session bead", err)
+	}
+}
+
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
+	testCity := t.TempDir()
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, testCity, "worker", "worker", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -499,11 +760,13 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	var gotCityPath string
+	var gotKey reconcilekey.Key
 	calls := 0
 	old := drainAckPokeController
-	drainAckPokeController = func(cityPath string) error {
+	drainAckPokeController = func(cityPath string, key reconcilekey.Key) error {
 		calls++
 		gotCityPath = cityPath
+		gotKey = key
 		return nil
 	}
 	t.Cleanup(func() { drainAckPokeController = old })
@@ -512,7 +775,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "gc-42", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -522,6 +785,9 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	if gotCityPath != "/city/path" {
 		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
 	}
+	if want := reconcilekey.SessionRef("gc-42", "session-name"); gotKey != want {
+		t.Errorf("poke key = %v, want %v", gotKey, want)
+	}
 	if !dops.acked["session-name"] {
 		t.Error("drain ack flag not set")
 	}
@@ -530,7 +796,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	calls := 0
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error {
+	drainAckPokeController = func(string, reconcilekey.Key) error {
 		calls++
 		return nil
 	}
@@ -539,7 +805,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -550,12 +816,12 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 
 func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return errors.New("dial failed") }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return errors.New("dial failed") }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}
@@ -693,6 +959,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	want := []string{
 		"GC_DRAIN_ACK",
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",
@@ -719,7 +986,14 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	if !slices.Equal(sp.removeKeys, wantRemove) {
 		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
 	}
+	// The stamp lands BEFORE the source, so the source is never admissible ahead
+	// of its own binding: drainReminderAckPin admits an acknowledgement on the
+	// source alone and reads the stamp in a separate round-trip, so written the
+	// other way round it would pair this ack's fresh source with the previous
+	// occupant's stamp and mint "proven stale" about an ack microseconds old.
+	// GC_DRAIN_ACK still lands last, which is what the effect boundary gates on.
 	wantSet := []string{
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckSourceKey,
 		"GC_DRAIN_ACK",
 	}
@@ -733,11 +1007,11 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeRequestRestartError(t *testing.T) {
+	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		time.Millisecond, time.Second, &stdout, &stderr)
+	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", testCity, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -746,87 +1020,35 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	}
 }
 
-func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
-	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
-
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		10*time.Millisecond, 5*time.Second, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("unexpected stderr: %q", stderr.String())
-	}
-	if got := stdout.String(); !strings.Contains(got, "Waiting up to 5s") {
-		t.Errorf("stdout = %q, want bounded wait banner", got)
-	}
-	if dops.restartRequested["worker"] {
-		t.Error("restart flag should be cleared by the simulated reconciler")
-	}
-}
-
-func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
-	dops := newFakeDrainOps()
-
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1 on timeout", code)
-	}
-	if got := stderr.String(); !strings.Contains(got, "controller did not act within") {
-		t.Errorf("stderr = %q, want timeout diagnostic", got)
-	}
-	if !strings.Contains(stderr.String(), "gc dashboard") {
-		t.Errorf("stderr = %q, want gc dashboard hint", stderr.String())
-	}
-}
-
-func TestDoRuntimeRequestRestartTimeoutReportsLastPollError(t *testing.T) {
-	dops := newFakeDrainOps()
-	dops.restartReadErr = errors.New("metadata read failed")
-
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1 on timeout", code)
-	}
-	if got := stderr.String(); !strings.Contains(got, "last poll error: metadata read failed") {
-		t.Errorf("stderr = %q, want last poll error", got)
-	}
-}
-
-func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
-	dops := newFakeDrainOps()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
-
-	done := make(chan int, 1)
-	go func() {
-		done <- doRuntimeRequestRestart(ctx, dops, nil, events.Discard, "worker", "worker",
-			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
-	}()
-
-	time.Sleep(30 * time.Millisecond)
-	cancel()
-
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0 on context cancel", code)
-		}
-		// Flag must remain set so the controller can still act on its next tick.
-		if !dops.restartRequested["worker"] {
-			t.Error("restart flag should remain set after context cancel")
-		}
-		if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
-			t.Errorf("stderr = %q, want pending restart warning", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+// TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart covers Fix 1 for
+// the gc runtime request-restart path: a pinned session (pin_awake ==
+// "true") is kill-protected by the reconciler unless an explicit controller
+// reset is persisted, so persistRestart is mandatory rather than best-effort
+// when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
+func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
+	testCity := t.TempDir()
+	for _, tc := range []struct {
+		name           string
+		persistRestart func() error
+	}{
+		{name: "nil persistRestart"},
+		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dops := newFakeDrainOps()
+			rec := events.NewFake()
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", testCity, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
+			}
+			if got := stdout.String(); strings.Contains(got, "Restart requested") {
+				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", got)
+			}
+			if len(rec.Events) != 0 {
+				t.Fatalf("got %d events, want 0 (must not record SessionDraining without a real restart request); events=%v", len(rec.Events), rec.Events)
+			}
+		})
 	}
 }
 
@@ -892,78 +1114,6 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not in session context") {
 		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
-	}
-}
-
-func TestRuntimeRequestRestartNamedOnDemandReturnsWithoutBlocking(t *testing.T) {
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_ALIAS", "mayor")
-	t.Setenv("GC_SESSION_NAME", "mayor")
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	b, err := store.Create(beads.Bead{
-		Type:   sessionBeadType,
-		Labels: []string{"gc:session"},
-	})
-	if err != nil {
-		t.Fatalf("seeding session bead: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "session_name", "mayor"); err != nil {
-		t.Fatalf("set session_name: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "configured_named_session", "true"); err != nil {
-		t.Fatalf("set configured_named_session: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "configured_named_mode", "on_demand"); err != nil {
-		t.Fatalf("set configured_named_mode: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "restart_requested", "true"); err != nil {
-		t.Fatalf("set restart_requested: %v", err)
-	}
-	if err := store.SetMetadata(b.ID, "continuation_reset_pending", "true"); err != nil {
-		t.Fatalf("set continuation_reset_pending: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	done := make(chan int, 1)
-	go func() {
-		done <- cmdRuntimeRequestRestart(&stdout, &stderr)
-	}()
-
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("cmdRuntimeRequestRestart blocked for named on-demand session")
-	}
-	if !strings.Contains(stdout.String(), "Restart skipped for named session") {
-		t.Fatalf("stdout = %q, want restart skipped confirmation", stdout.String())
-	}
-	freshStore, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	refreshed, err := freshStore.Get(b.ID)
-	if err != nil {
-		t.Fatalf("fetching seeded bead: %v", err)
-	}
-	if refreshed.Metadata["restart_requested"] != "" {
-		t.Fatalf("restart_requested = %q, want cleared", refreshed.Metadata["restart_requested"])
-	}
-	if refreshed.Metadata["continuation_reset_pending"] != "" {
-		t.Fatalf("continuation_reset_pending = %q, want cleared", refreshed.Metadata["continuation_reset_pending"])
 	}
 }
 
@@ -1137,8 +1287,16 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 
 func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
+
+	// drain-ack now reads the city store to release any in_progress claim the
+	// session is still holding, so this bare temp city needs the same store
+	// guards its siblings in this file use — otherwise the read provisions a
+	// managed Dolt server the test never tears down.
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {

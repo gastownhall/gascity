@@ -9,16 +9,16 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 
-	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
-	// in the events registry. The api package never references pgauth's types
-	// directly (the payload bytes flow through events.Event.Payload as JSON),
-	// so the import exists solely to fire the registration before the registry-
-	// coverage tests run.
-	_ "github.com/gastownhall/gascity/internal/pgauth"
-
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
 	_ "github.com/gastownhall/gascity/internal/emergency"
+
+	// Blank import: storebinding's init() registers one payload for the four
+	// storage.binding.* outcomes. The api package never names the type — the
+	// payload travels as JSON through events.Event.Payload — so the import
+	// exists solely to fire the registration before the registry-coverage
+	// tests run.
+	_ "github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
@@ -48,6 +48,7 @@ const (
 	RequestOperationSessionCreate  = "session.create"
 	RequestOperationSessionMessage = "session.message"
 	RequestOperationSessionSubmit  = "session.submit"
+	RequestOperationRigCreate      = "rig.create"
 )
 
 // --- Typed async request result payloads ---
@@ -87,8 +88,11 @@ func (SessionCreateSucceededPayload) IsEventPayload() {}
 
 // SessionMessageSucceededPayload is emitted on request.result.session.message.
 type SessionMessageSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the message."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the message."`
+	Queued             bool   `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.
@@ -96,14 +100,45 @@ func (SessionMessageSucceededPayload) IsEventPayload() {}
 
 // SessionSubmitSucceededPayload is emitted on request.result.session.submit.
 type SessionSubmitSucceededPayload struct {
-	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	SessionID string `json:"session_id" doc:"Session ID that received the submission."`
-	Queued    bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
-	Intent    string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	RequestID          string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	SessionID          string `json:"session_id" doc:"Session ID that received the submission."`
+	Queued             bool   `json:"queued" doc:"Whether the message was queued for later delivery."`
+	Intent             string `json:"intent" doc:"Resolved submit intent (default, follow_up, interrupt_now)."`
+	WillStart          *bool  `json:"will_start,omitempty" doc:"Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now."`
+	WillNotStartReason string `json:"will_not_start_reason,omitempty" doc:"Why the controller will not start the session for a queued message, with the remedy."`
 }
 
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
 func (SessionSubmitSucceededPayload) IsEventPayload() {}
+
+// RigCreateSucceededPayload is emitted on request.result.rig.create — the
+// terminal success of a server-side async rig add (POST /v0/city/{n}/rigs with
+// a git_url). It carries the correlation id plus the resolved rig identity a
+// watcher needs to confirm the provision without a follow-up GET.
+type RigCreateSucceededPayload struct {
+	RequestID     string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Rig           string `json:"rig" doc:"Rig name that was provisioned."`
+	Prefix        string `json:"prefix" doc:"Resolved session-name prefix."`
+	DefaultBranch string `json:"default_branch" doc:"Resolved mainline branch."`
+}
+
+// IsEventPayload marks RigCreateSucceededPayload as an events.Payload variant.
+func (RigCreateSucceededPayload) IsEventPayload() {}
+
+// RigProvisionProgressPayload is emitted on rig.provision.progress, one per
+// provisioning step. RequestID lets watchers filter a single async rig-add on
+// the shared city stream. Step/Detail/Warn are a 1:1 projection of
+// rig.ProvisionStep.
+type RigProvisionProgressPayload struct {
+	RequestID string `json:"request_id,omitempty" doc:"Correlation ID from the 202 response (empty on sync 201 provisions)."`
+	Rig       string `json:"rig" doc:"Rig name being provisioned."`
+	Step      string `json:"step" doc:"Provisioning step that completed (clone, beads-init, packs, config, routes, …)."`
+	Detail    string `json:"detail,omitempty" doc:"Human-readable step detail."`
+	Warn      bool   `json:"warn,omitempty" doc:"True when the step reports a warn-and-continue condition."`
+}
+
+// IsEventPayload marks RigProvisionProgressPayload as an events.Payload variant.
+func (RigProvisionProgressPayload) IsEventPayload() {}
 
 // WebhookReceivedPayload is the webhook.received event body — emitted on every
 // accepted, authentic delivery (dispatched, deduped, or no-match). It doubles as
@@ -163,7 +198,7 @@ func (ProjectIdentityStampedPayload) IsEventPayload() {}
 // operation that fails. The operation enum identifies which operation.
 type RequestFailedPayload struct {
 	RequestID    string `json:"request_id" doc:"Correlation ID from the 202 response."`
-	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit" doc:"Which operation failed."`
+	Operation    string `json:"operation" enum:"city.create,city.unregister,session.create,session.message,session.submit,rig.create" doc:"Which operation failed."`
 	ErrorCode    string `json:"error_code" doc:"Machine-readable error code."`
 	ErrorMessage string `json:"error_message" doc:"Human-readable error description."`
 }
@@ -209,6 +244,7 @@ type SupervisorRequestPayload struct {
 	Host            string `json:"host,omitempty" doc:"Canonical Host header without port."`
 	OriginAllowed   bool   `json:"origin_allowed" doc:"Whether the Origin header, if present, matched CORS policy."`
 	Phase           string `json:"phase" enum:"start,complete" doc:"Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only."`
+	RequestID       string `json:"request_id,omitempty" doc:"The server-minted X-GC-Request-Id echoed to the client, so a client can correlate a failed request with this audit record and the api: log line."`
 }
 
 // IsEventPayload marks SupervisorRequestPayload as an events.Payload variant.
@@ -505,6 +541,41 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// SessionPoolSlotRetiredAtDrainDeadlinePayload carries the machine-readable
+// context for a session.pool_slot_retired_at_drain_deadline event: a
+// pool-managed seat that entered drain, never finalized its drain-ack, and was
+// force-retired once the drain outlived the retire deadline.
+//
+// DrainAt and DrainAgeSeconds are the load-bearing fields. The bound retires
+// the symptom, not the cause, so the age distribution across emissions is how
+// operators tell "a handful of seats occasionally miss an ack" from "the
+// drain-ack path is failing wholesale and this bound is absorbing it".
+type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
+	SessionID       string `json:"session_id" doc:"Canonical session bead ID for the retired pool seat."`
+	SessionName     string `json:"session_name,omitempty" doc:"Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it."`
+	Template        string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	DrainAt         string `json:"drain_at,omitempty" doc:"RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs."`
+	DrainAgeSeconds int64  `json:"drain_age_seconds" doc:"Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline."`
+}
+
+// IsEventPayload marks SessionPoolSlotRetiredAtDrainDeadlinePayload as an
+// events.Payload variant.
+func (SessionPoolSlotRetiredAtDrainDeadlinePayload) IsEventPayload() {}
+
+// SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON builds the JSON wire form
+// for attachment to an events.Event.Payload field. SessionName, Template, and
+// DrainAt are emitted only when non-empty.
+func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, template, drainAt string, drainAge time.Duration) json.RawMessage {
+	b, _ := json.Marshal(SessionPoolSlotRetiredAtDrainDeadlinePayload{
+		SessionID:       sessionID,
+		SessionName:     sessionName,
+		Template:        template,
+		DrainAt:         drainAt,
+		DrainAgeSeconds: int64(drainAge / time.Second),
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -568,6 +639,80 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// Reasons carried by SessionPendingClearedPayload.Reason.
+const (
+	// PendingClearedResolved: the session is still probed but no longer
+	// reports an interaction — it was answered (POST .../respond or at the
+	// terminal) or withdrawn by the session itself.
+	PendingClearedResolved = "resolved"
+	// PendingClearedReplaced: the session now reports a different request_id.
+	// A session.pending for the new interaction follows immediately.
+	PendingClearedReplaced = "replaced"
+	// PendingClearedSessionGone: the session left the probed set (closed,
+	// asleep, suspended, or otherwise no longer active).
+	PendingClearedSessionGone = "session_gone"
+)
+
+// SessionPendingPayload is the typed payload for session.pending: a session
+// gained a pending interaction. It carries the full interaction, the same
+// shape GET /v0/city/{cityName}/session/{id}/pending returns, so a client can
+// show the prompt and answer it with POST .../session/{id}/respond (passing
+// request_id) without another read.
+type SessionPendingPayload struct {
+	SessionID string            `json:"session_id" doc:"Session bead ID awaiting a decision."`
+	Template  string            `json:"template,omitempty" doc:"Session template, when known."`
+	Alias     string            `json:"alias,omitempty" doc:"Session alias, when set."`
+	RequestID string            `json:"request_id" doc:"Pending interaction request ID. Pass it to POST .../session/{id}/respond."`
+	Kind      string            `json:"kind" doc:"Interaction kind (e.g. approval)."`
+	Prompt    string            `json:"prompt,omitempty" doc:"Human-readable prompt."`
+	Options   []string          `json:"options,omitempty" doc:"Answer options as the session shows them."`
+	Metadata  map[string]string `json:"metadata,omitempty" doc:"Provider metadata (e.g. tool_name, source)."`
+}
+
+// IsEventPayload marks SessionPendingPayload as an events.Payload variant.
+func (SessionPendingPayload) IsEventPayload() {}
+
+// SessionPendingClearedPayload is the typed payload for
+// session.pending_cleared: the interaction a previous session.pending
+// announced is gone. SessionID and RequestID match that session.pending.
+type SessionPendingClearedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID from the matching session.pending."`
+	RequestID string `json:"request_id" doc:"Request ID from the matching session.pending."`
+	Kind      string `json:"kind" doc:"Interaction kind from the matching session.pending."`
+	Reason    string `json:"reason" enum:"resolved,replaced,session_gone" doc:"Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active)."`
+}
+
+// IsEventPayload marks SessionPendingClearedPayload as an events.Payload variant.
+func (SessionPendingClearedPayload) IsEventPayload() {}
+
+// SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
+// durable explicit wake request refused before the session reached a live
+// runtime (held, quarantined, or asleep past its idle-sleep window).
+type SessionWakeRefusedPayload struct {
+	SessionID   string `json:"session_id" doc:"Session bead ID."`
+	SessionName string `json:"session_name,omitempty" doc:"Session display name, if known."`
+	Template    string `json:"template,omitempty" doc:"Resolved session template."`
+	Reason      string `json:"reason" doc:"Refusal reason: held, quarantined, or idle-sleep."`
+	WakeRequest string `json:"wake_request" doc:"The wake_request metadata value that triggered this check (explicit)."`
+	Attempts    int    `json:"attempts" doc:"wake_attempts recorded after this refusal."`
+}
+
+// IsEventPayload marks SessionWakeRefusedPayload as an events.Payload variant.
+func (SessionWakeRefusedPayload) IsEventPayload() {}
+
+// SessionWakeRefusedPayloadJSON builds the session.wake_refused payload.
+func SessionWakeRefusedPayloadJSON(sessionID, sessionName, template, reason, wakeRequest string, attempts int) json.RawMessage {
+	b, _ := json.Marshal(SessionWakeRefusedPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Reason:      reason,
+		WakeRequest: wakeRequest,
+		Attempts:    attempts,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -602,11 +747,17 @@ func init() {
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
+	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
+	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
+	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
@@ -622,6 +773,8 @@ func init() {
 	events.RegisterPayload(events.RequestResultSessionCreate, SessionCreateSucceededPayload{})
 	events.RegisterPayload(events.RequestResultSessionMessage, SessionMessageSucceededPayload{})
 	events.RegisterPayload(events.RequestResultSessionSubmit, SessionSubmitSucceededPayload{})
+	events.RegisterPayload(events.RequestResultRigCreate, RigCreateSucceededPayload{})
+	events.RegisterPayload(events.RigProvisionProgress, RigProvisionProgressPayload{})
 	events.RegisterPayload(events.RequestFailed, RequestFailedPayload{})
 
 	// Non-terminal city lifecycle events (diagnostics only).

@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -155,13 +156,32 @@ func (m *StoreMaintenanceLoop) runSnapshot(ctx context.Context) (string, error) 
 	ts := m.clock().UTC().Format(snapshotTimestampFormat)
 	successPath := filepath.Join(successDir, ts)
 	if err := os.Rename(currentDir, successPath); err != nil {
-		return "", &MaintenanceError{Stage: "backup", Err: fmt.Errorf("rotate current → %s: %w", successPath, err)}
+		// successPath's leaf is this run's own timestamp, and os.Rename reports
+		// an *os.LinkError that renders both paths, so wrapping it verbatim puts
+		// the clock into the failure text twice over. The alert fingerprint is
+		// the stage plus that text, so a rotation that keeps failing would read
+		// as a new condition every cycle and mail the operator every cycle.
+		// Name the destination directory, which does not move, and keep the
+		// errno so errors.Is still reaches it.
+		return "", &MaintenanceError{Stage: "backup", Err: fmt.Errorf("rotate current → %s: %w", successDir, renameCause(err))}
 	}
 
 	m.pruneSnapshotsLog(successDir, snapshotRetainSuccess)
 	m.pruneSnapshotsLog(failedDir, snapshotRetainFailed)
 
 	return successPath, nil
+}
+
+// renameCause reduces an os.Rename failure to the cause underneath it, dropping
+// the *os.LinkError wrapper whose message repeats both paths. The returned error
+// still satisfies errors.Is against the syscall errno; anything that is not a
+// *os.LinkError comes back unchanged.
+func renameCause(err error) error {
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return linkErr.Err
+	}
+	return err
 }
 
 // recordFailedSnapshot rotates current/ (if present) to

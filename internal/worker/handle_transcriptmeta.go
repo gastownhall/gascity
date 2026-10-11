@@ -3,9 +3,67 @@ package worker
 import (
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/transcriptmeta"
 )
+
+const (
+	transcriptSessionMetaRetryDelay    = time.Second
+	transcriptSessionMetaRetryAttempts = 3
+)
+
+// recordTranscriptSessionMetaAfterTurn writes the sidecar after successful
+// delivery. A Codex rollout can appear just after tmux receives that delivery,
+// so the export-enabled supervisor retries a bounded number of initial misses.
+// One-shot CLI processes leave transcriptmeta disabled and do no retry work.
+func (h *SessionHandle) recordTranscriptSessionMetaAfterTurn() {
+	if !transcriptmeta.Enabled() {
+		return
+	}
+	if h.writeTranscriptSessionMeta() {
+		return
+	}
+	h.scheduleTranscriptSessionMetaRetry()
+}
+
+func (h *SessionHandle) scheduleTranscriptSessionMetaRetry() {
+	id := h.currentSessionID()
+	if id == "" || !transcriptmeta.Enabled() {
+		return
+	}
+
+	h.sidecarMu.Lock()
+	if h.sidecarRetryID != id {
+		h.sidecarRetryID = id
+		h.sidecarRetryAttempts = 0
+		h.sidecarRetryScheduled = false
+	}
+	if h.sidecarRetryScheduled || h.sidecarRetryAttempts >= transcriptSessionMetaRetryAttempts {
+		h.sidecarMu.Unlock()
+		return
+	}
+	h.sidecarRetryScheduled = true
+	h.sidecarRetryAttempts++
+	schedule := h.sidecarRetrySchedule
+	h.sidecarMu.Unlock()
+
+	if schedule == nil {
+		schedule = func(delay time.Duration, retry func()) { time.AfterFunc(delay, retry) }
+	}
+	schedule(transcriptSessionMetaRetryDelay, func() {
+		h.sidecarMu.Lock()
+		if h.sidecarRetryID == id {
+			h.sidecarRetryScheduled = false
+		}
+		h.sidecarMu.Unlock()
+
+		if h.currentSessionID() != id || !transcriptmeta.Enabled() || h.writeTranscriptSessionMeta() {
+			return
+		}
+		h.scheduleTranscriptSessionMetaRetry()
+	})
+}
 
 // writeTranscriptSessionMeta records the worker's gc session id in a sidecar
 // next to its provider transcript, so an out-of-band reader that sees only the
@@ -22,13 +80,13 @@ import (
 // filename suffix). It is skipped for gemini/opencode/mimocode, which have no
 // 1:1 by-id lookup, so only the ambiguous workdir/mtime fallback would be
 // available — and that could mis-attribute one session's transcript to another.
-func (h *SessionHandle) writeTranscriptSessionMeta() {
+func (h *SessionHandle) writeTranscriptSessionMeta() bool {
 	if !transcriptmeta.Enabled() {
-		return
+		return true
 	}
 	id := h.currentSessionID()
 	if id == "" {
-		return
+		return true
 	}
 	// Fast path: once the sidecar is confirmed current for this session id, skip
 	// the keyed-path resolve (a bead read plus transcript discovery, including
@@ -38,7 +96,7 @@ func (h *SessionHandle) writeTranscriptSessionMeta() {
 	done := h.sidecarDoneID == id
 	h.sidecarMu.Unlock()
 	if done {
-		return
+		return true
 	}
 
 	path, err := h.manager.KeyedTranscriptPath(id, h.adapter.SearchPaths)
@@ -48,10 +106,10 @@ func (h *SessionHandle) writeTranscriptSessionMeta() {
 		// mirroring the write-error path below; leave the guard unset so a later
 		// call retries.
 		slog.Debug("transcript session sidecar resolve failed", "session", id, "err", err)
-		return
+		return false
 	}
 	if strings.TrimSpace(path) == "" {
-		return // no keyed path yet (key not persisted, or a workdir-only provider)
+		return false // no keyed path yet (key not persisted, or a workdir-only provider)
 	}
 
 	// id is the session bead id (currentSessionID == session.Info.ID), the same
@@ -62,12 +120,13 @@ func (h *SessionHandle) writeTranscriptSessionMeta() {
 		// A real write failure (e.g. read-only/full fs); best-effort, never
 		// fatal to the turn. Leave the guard unset so a later call retries.
 		slog.Debug("transcript session sidecar write failed", "session", id, "err", err)
-		return
+		return false
 	}
 	if !ok {
-		return // transcript not on disk yet — retry on a later turn
+		return false // transcript not on disk yet — retry on a later turn
 	}
 	h.sidecarMu.Lock()
 	h.sidecarDoneID = id
 	h.sidecarMu.Unlock()
+	return true
 }

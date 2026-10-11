@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const defaultTouchDebounce = 30 * time.Second
@@ -42,6 +43,7 @@ type bindingMembershipEnsurer interface {
 
 type bindingService struct {
 	store         beads.Store
+	sessions      session.AddressDirectory
 	delivery      bindingCleaner
 	transcript    bindingMembershipEnsurer
 	touchDebounce time.Duration
@@ -61,8 +63,13 @@ func WithBindingTouchDebounce(d time.Duration) BindingServiceOption {
 }
 
 func newBindingService(store beads.Store, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
+	return newBindingServiceWithSessionDirectory(store, session.NewStore(beads.SessionStore{Store: store}), delivery, transcript, locks, opts...)
+}
+
+func newBindingServiceWithSessionDirectory(store beads.Store, sessions session.AddressDirectory, delivery bindingCleaner, transcript bindingMembershipEnsurer, locks *bindingLockPool, opts ...BindingServiceOption) BindingService {
 	svc := &bindingService{
 		store:         store,
+		sessions:      sessions,
 		touchDebounce: defaultTouchDebounce,
 		locks:         locks,
 	}
@@ -111,11 +118,16 @@ func (s *bindingService) Bind(ctx context.Context, caller Caller, input BindInpu
 		return SessionBindingRecord{}, fmt.Errorf("%w: session_id and agent_name are mutually exclusive", ErrInvalidInput)
 	}
 	// Capture the target's stable session name so the binding survives respawn.
-	// Best-effort: empty when the selector resolves to no session bead.
+	// An absent session intentionally retains legacy pure-ID behavior, but an
+	// indeterminate directory failure must stop before any Messaging mutation.
+	sessionName, err := sessionNameForSelector(s.sessions, sessionID)
+	if err != nil {
+		return SessionBindingRecord{}, newSafeOperationError("resolve binding session address", err)
+	}
 	target := bindTarget{
 		sessionID:   sessionID,
 		agentName:   agentName,
-		sessionName: sessionNameForSelector(s.store, sessionID),
+		sessionName: sessionName,
 	}
 	now := zeroNow(input.Now)
 
@@ -375,7 +387,9 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 	if err != nil || record == nil {
 		return record, err
 	}
-	overlayLiveSession(s.store, record)
+	if err := overlayLiveSession(s.sessions, record); err != nil {
+		return nil, newSafeOperationError("resolve binding live session", err)
+	}
 	return record, nil
 }
 
@@ -389,8 +403,8 @@ func (s *bindingService) ResolveByConversation(ctx context.Context, ref Conversa
 // interval. The reaper's persistent write is still needed to update the
 // labelBindingSessionPrefix label (indexed on the volatile ID) and keep
 // label-based lookups correct across ticks.
-func overlayLiveSession(store beads.Store, record *SessionBindingRecord) {
-	overlayLiveSessionID(store, record.SessionName, record.SessionID, &record.SessionID)
+func overlayLiveSession(sessions session.AddressDirectory, record *SessionBindingRecord) error {
+	return overlayLiveSessionID(sessions, record.SessionName, record.SessionID, &record.SessionID)
 }
 
 func (s *bindingService) ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error) {
@@ -704,7 +718,7 @@ func ReassignSessionBindings(ctx context.Context, store beads.Store, oldSessionI
 // newReassignmentTranscript constructs the transcript syncer used by
 // ReassignSessionParticipants. It is a package-level var so tests can substitute
 // a flaky transcript and exercise retry idempotence after a membership-migration
-// failure (mirrors resolveLiveSessionID and timeNow).
+// failure (mirrors resolveLiveSession and timeNow).
 var newReassignmentTranscript = func(store beads.Store, locks *bindingLockPool) groupTranscriptSync {
 	return newTranscriptService(store, locks)
 }

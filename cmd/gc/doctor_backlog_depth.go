@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
 
 // backlogDepthCheck reports the city store's claimable backlog depth by
@@ -62,7 +63,7 @@ func isControlPlaneBacklogBead(b beads.Bead) bool {
 // nudge-mail-reaper notification predicate: the nudge:/mail: title prefix, the
 // gc:nudge label, and the mail bead type.
 func isNotificationBacklogBead(b beads.Bead) bool {
-	if b.Type == "message" || hasLabel(b.Labels, nudgeBeadLabel) {
+	if beadmail.IsMessageBead(b) || hasLabel(b.Labels, nudgeBeadLabel) {
 		return true
 	}
 	title := strings.TrimSpace(b.Title)

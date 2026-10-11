@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -41,6 +42,31 @@ var (
 
 const runSessionsFetchTimeout = 10 * time.Second
 
+// maxRetiredSessionLookups caps the retired ids one run-detail build considers
+// (cache hits included), and so the by-id session reads it may issue. A run's
+// retired seats are resolved individually (one loopback point read per distinct
+// closed session id it references, cached per id), never by listing the city's
+// closed sessions; a typical run carries well under twenty links, and the cap
+// keeps a pathological fan-out from turning one detail poll into hundreds of
+// reads. Links past the cap keep their correct bare-id link.
+const maxRetiredSessionLookups = 64
+
+// retiredSessionsBuildBudget bounds the wall time one run-detail build spends
+// issuing by-id reads. The reads are sequential and each is bounded only by the
+// client timeout, so without a budget a slow-but-answering supervisor could hold
+// one build — and the SSE loop that runs it on every city event — for
+// maxRetiredSessionLookups timeouts. Once the budget has elapsed the remaining
+// ids keep their bare link for that build; the next build resumes from the
+// cache, so enrichment converges one budget at a time. A build overruns the
+// budget by at most one read's timeout.
+const retiredSessionsBuildBudget = 5 * time.Second
+
+// retiredSessionCacheCap bounds the manager-wide retired-session cache. It holds
+// the closed seats of the runs operators are actively viewing; a small LRU covers
+// that working set while an unbounded map would pin every closed session ever
+// linked.
+const retiredSessionCacheCap = 1024
+
 // ── Tailer manager ────────────────────────────────────────────────────────
 
 type runTailerManager struct {
@@ -52,6 +78,21 @@ type runTailerManager struct {
 	// (single-flight + TTL). See enrichment_cache.go for the contract.
 	sessionsCache *singleFlightCache[string, cachedSessions]
 	formulaCache  *singleFlightCache[formulaCacheKey, cachedFormulaDetail]
+	// retiredSessions caches the by-id reads a run's retired seats need
+	// (fetchRetiredSession): one bounded LRU across cities, each value carrying
+	// its own hit/miss deadline. See enrichment_cache.go for the value contract.
+	retiredSessions *lruSingleFlight[retiredSessionKey, cachedRetiredSession]
+	// retiredClock stamps and checks those deadlines. time.Now in production;
+	// a test injects a controllable clock to cross a TTL without sleeping.
+	retiredClock func() time.Time
+
+	// sessionsTTL is the sessionsCacheTTL package var captured at construction.
+	// The sessions compute closure can run on the tailer loop's DETACHED prime
+	// goroutine (which Stop deliberately does not join), so reading the mutable
+	// package var there races with a test shortening it; the immutable capture
+	// keeps that read race-free while tests keep the set-var-then-construct
+	// convention.
+	sessionsTTL time.Duration
 
 	mu      sync.Mutex
 	cities  map[string]*cityRunTailer
@@ -62,11 +103,14 @@ type runTailerManager struct {
 
 func newRunTailerManager(deps Deps) *runTailerManager {
 	return &runTailerManager{
-		deps:          deps,
-		httpc:         &http.Client{Timeout: runSessionsFetchTimeout, Transport: deps.SelfReadTransport},
-		cities:        make(map[string]*cityRunTailer),
-		sessionsCache: newSingleFlightCache[string, cachedSessions](),
-		formulaCache:  newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
+		deps:            deps,
+		httpc:           &http.Client{Timeout: runSessionsFetchTimeout, Transport: deps.SelfReadTransport},
+		cities:          make(map[string]*cityRunTailer),
+		sessionsCache:   newSingleFlightCache[string, cachedSessions](),
+		formulaCache:    newSingleFlightCache[formulaCacheKey, cachedFormulaDetail](),
+		retiredSessions: newLRUSingleFlight[retiredSessionKey, cachedRetiredSession](retiredSessionCacheCap),
+		retiredClock:    time.Now,
+		sessionsTTL:     sessionsCacheTTL,
 	}
 }
 
@@ -78,6 +122,28 @@ func (m *runTailerManager) enable(ctx context.Context, wg *sync.WaitGroup) {
 	m.ctx = ctx
 	m.wg = wg
 	m.enabled = true
+	for _, t := range m.cities {
+		m.startLocked(t)
+	}
+}
+
+// startLocked launches a tailer exactly once. The caller must hold m.mu; the
+// context and waitgroup are captured before the goroutine starts so a
+// pre-Start demand and a first post-Start demand share the same lifecycle.
+func (m *runTailerManager) startLocked(t *cityRunTailer) {
+	if !m.enabled || m.ctx == nil || m.wg == nil || t.started {
+		return
+	}
+	t.started = true
+	ctx, cancel := context.WithCancel(m.ctx)
+	t.cancel = cancel
+	wg := m.wg
+	wg.Add(1)
+	go func(tailer *cityRunTailer) {
+		defer wg.Done()
+		defer close(tailer.doneCh)
+		tailer.loop(ctx, wg)
+	}(t)
 }
 
 // ensure returns the tailer for a city, starting its background fold loop on
@@ -86,18 +152,28 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t, ok := m.cities[name]
+	if ok && t.eventsPath != eventsPath {
+		// A city name may be unregistered and later registered at another root.
+		// The fold cursor, projector, and all per-run memos are path-bound, so
+		// mutating eventsPath in place would mix two logs. Cancel the old loop and
+		// atomically replace the map entry with a completely fresh tailer.
+		if t.cancel != nil {
+			t.cancel()
+		}
+		m.sessionsCache.discard(name)
+		m.formulaCache.discardMatching(func(key formulaCacheKey) bool {
+			return key.name == name
+		})
+		m.retiredSessions.forgetMatching(func(key retiredSessionKey) bool {
+			return key.name == name
+		})
+		ok = false
+	}
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
-	if m.enabled && m.ctx != nil && !t.started {
-		t.started = true
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			t.loop(m.ctx, m.wg)
-		}()
-	}
+	m.startLocked(t)
 	return t
 }
 
@@ -110,6 +186,8 @@ type cityRunTailer struct {
 
 	started bool
 	readyCh chan struct{} // closed once the cold replay attempt completes
+	doneCh  chan struct{} // closed after the path-bound loop exits
+	cancel  context.CancelFunc
 
 	// snapshotCache caches the folded run snapshot (and the formula target
 	// derived from it) per fold generation so a same-generation repeat request
@@ -119,12 +197,27 @@ type cityRunTailer struct {
 	snapshotCache *runSnapshotCache
 	detailMemo    *runDetailMemo
 
+	// unknownRuns grants a truly-unknown runId (a run slung but not yet folded
+	// into this projection) a warming-grace window on point-read endpoints
+	// before the terminal 404. See rundetail_grace.go.
+	unknownRuns *unknownRunGrace
+
 	mu      sync.RWMutex
 	summary runproj.RunSummary
+	census  runproj.CanonicalRunStatusCounts
 	marks   map[string]runproj.LaneProgressMark
 	beads   []beads.Bead
 	lastSeq uint64
-	ready   bool
+	// decodeMisses is published with beads and lastSeq so every warm consumer
+	// observes one coherent projection generation.
+	decodeMisses int
+	// coldReplayIncomplete is sticky for this path-bound tailer's lifetime: a
+	// failed full replay cannot be repaired by reading only the active cursor.
+	// incrementalReadIncomplete is recoverable because its cursor is preserved;
+	// one complete successful poll proves that failed interval was replayed.
+	coldReplayIncomplete      bool
+	incrementalReadIncomplete bool
+	ready                     bool
 
 	// subMu guards the per-run detail-stream subscriber registry. It is a distinct
 	// lock from mu so a stream broadcast never contends with the hot fold-publish
@@ -145,6 +238,11 @@ type tailState struct {
 	// loggedDecodeMisses is the projector's cumulative bead.* decode-miss count
 	// already surfaced to the log, so logDecodeMisses only warns on the delta.
 	loggedDecodeMisses int
+	// Failure latches are loop-owned and suppress one-second log floods. Each is
+	// cleared only after the corresponding read succeeds, so a later recurrence
+	// is logged as a new transition.
+	catchUpReadFailed bool
+	tailReadFailed    bool
 }
 
 // captureTailCursor snapshots the active log's byte size and identity from a
@@ -168,6 +266,12 @@ func captureTailCursor(path string) *tailState {
 // loop cold-replays the event log, publishes the bead-derived summary, then
 // tails newly appended events and republishes on each change. All folding and
 // summary-building happens on loop-owned locals; only the publish takes the lock.
+// readRunColdLoad is indirected so a test can hold the cold replay in flight and
+// prove RunProjection serves a non-blocking warming snapshot.
+var readRunColdLoad = func(proj *runproj.Projector, path string) error {
+	return proj.ColdLoad(path)
+}
+
 func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 	proj := runproj.NewProjector()
 
@@ -180,7 +284,10 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 	// captureTailCursor reads the size and identity from one stat so a rotation
 	// cannot pair the old file's offset with the fresh file's identity.
 	st := captureTailCursor(t.eventsPath)
-	loadErr := proj.ColdLoad(t.eventsPath)
+	loadErr := readRunColdLoad(proj, t.eventsPath)
+	if loadErr != nil {
+		log.Printf("run-tailer: city %q cold replay failed: %v", t.name, loadErr)
+	}
 	st.marks = t.build(proj, nil, loadErr)
 	t.logDecodeMisses(proj, st)
 	close(t.readyCh)
@@ -258,6 +365,10 @@ func (t *cityRunTailer) logDecodeMisses(proj *runproj.Projector, st *tailState) 
 // events. Production always uses events.ReadFilteredWithInFlight.
 var readRotationCatchUp = events.ReadFilteredWithInFlight
 
+// readTailEvents is the active-log incremental read, indirected so a test can
+// prove a transient failure preserves the cursor and marks the snapshot partial.
+var readTailEvents = events.ReadFrom
+
 // foldNext performs one tail poll: it folds newly appended events into the
 // projector and republishes when a bead snapshot changed. It handles active-log
 // rotation by file identity: when the recorder renames the active file to an
@@ -270,6 +381,15 @@ var readRotationCatchUp = events.ReadFilteredWithInFlight
 // drops the overlap the catch-up already folded.
 func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 	info, statErr := os.Stat(t.eventsPath)
+	if statErr != nil && st.activeInfo != nil {
+		// Once an active file has existed, an unavailable path can be the
+		// rename/recreate seam of a rotation. ReadFrom intentionally treats
+		// ENOENT as an empty read for fresh cities, but doing that here would
+		// falsely clear a prior tail failure before the path and cursor are
+		// verifiably readable again.
+		t.markIncrementalReadFailure(&st.tailReadFailed, "active-log stat", statErr)
+		return
+	}
 	rotated := statErr == nil && st.activeInfo != nil && !os.SameFile(st.activeInfo, info)
 	if rotated {
 		// ReadFilteredWithInFlight walks the sibling .gz archives (skipping any
@@ -290,10 +410,16 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		// poll see no rotation (SameFile) and lose that window until restart.
 		catchUp, err := readRotationCatchUp(t.eventsPath, events.Filter{AfterSeq: proj.LastSeq()})
 		if err != nil {
+			t.markIncrementalReadFailure(&st.catchUpReadFailed, "rotation catch-up", err)
 			return
 		}
-		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 && proj.Apply(fresh) {
-			st.marks = t.build(proj, st.marks, nil)
+		st.catchUpReadFailed = false
+		if fresh := eventsAfter(catchUp, proj.LastSeq()); len(fresh) > 0 {
+			decodeMisses := proj.DecodeMisses()
+			changed := proj.Apply(fresh)
+			if changed || proj.DecodeMisses() > decodeMisses {
+				st.marks = t.build(proj, st.marks, nil)
+			}
 		}
 		st.activeInfo = info
 		st.offset = 0
@@ -311,19 +437,37 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		}
 	}
 
-	evts, newOffset, err := events.ReadFrom(t.eventsPath, st.offset)
+	evts, newOffset, err := readTailEvents(t.eventsPath, st.offset)
 	if err != nil {
+		t.markIncrementalReadFailure(&st.tailReadFailed, "active-log tail", err)
 		return
 	}
+	if statErr == nil {
+		verifiedInfo, verifyErr := os.Stat(t.eventsPath)
+		if verifyErr != nil {
+			t.markIncrementalReadFailure(&st.tailReadFailed, "active-log verification", verifyErr)
+			return
+		}
+		if !os.SameFile(info, verifiedInfo) {
+			t.markIncrementalReadFailure(&st.tailReadFailed, "active-log verification", errors.New("active log identity changed during read"))
+			return
+		}
+		st.activeInfo = verifiedInfo
+	}
+	st.tailReadFailed = false
 	st.offset = newOffset
 	fresh := eventsAfter(evts, proj.LastSeq())
 	if len(fresh) == 0 {
+		t.clearIncrementalReadFailure(st)
 		return
 	}
 	sessionChanged := containsSessionEvent(fresh)
-	if proj.Apply(fresh) {
+	decodeMisses := proj.DecodeMisses()
+	changed := proj.Apply(fresh)
+	if changed || proj.DecodeMisses() > decodeMisses {
 		st.marks = t.build(proj, st.marks, nil)
 	}
+	t.clearIncrementalReadFailure(st)
 	if sessionChanged {
 		// Session lifecycle events don't change the bead fold (proj.Apply ignores
 		// them), so build() — and its subscriber notify — may not have fired. But
@@ -399,12 +543,8 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	// a fresh first-seen-ordered slice of the immutable-after-decode bead values,
 	// so the published snapshot is safe to read concurrently.
 	beadSlice := runproj.FilterRunBeads(proj.Beads())
-	summary := runproj.BuildRunSummary(beadSlice)
-	if loadErr != nil {
-		// A read failure must surface as a partial snapshot, not a silently empty
-		// "no runs" view.
-		summary.LanesPartial = true
-	}
+	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(beadSlice)
+	census := runproj.CountCanonicalRunStatuses(beadSlice, censusLanes)
 
 	inFlight := make([]runproj.RunLane, 0, len(summary.Lanes)+len(summary.BlockedLanes))
 	inFlight = append(inFlight, summary.Lanes...)
@@ -417,7 +557,13 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	lastSeq := proj.LastSeq()
 
 	t.mu.Lock()
+	if loadErr != nil {
+		t.coldReplayIncomplete = true
+	}
+	t.decodeMisses = proj.DecodeMisses()
+	summary.LanesPartial = t.projectionIncompleteLocked()
 	t.summary = summary
+	t.census = census
 	t.marks = marks
 	t.beads = beadSlice
 	t.lastSeq = lastSeq
@@ -432,6 +578,48 @@ func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runp
 	// frame per real change.
 	t.notifySubscribers()
 	return marks
+}
+
+// markIncrementalReadFailure publishes a retryable incomplete state and logs
+// only the healthy-to-failed transition for this read phase. The cursor is not
+// advanced, so a later successful poll can prove the interval complete again.
+func (t *cityRunTailer) markIncrementalReadFailure(failed *bool, phase string, err error) {
+	if !*failed {
+		log.Printf("run-tailer: city %q %s failed: %v", t.name, phase, err)
+		*failed = true
+	}
+	t.mu.Lock()
+	changed := !t.incrementalReadIncomplete
+	t.incrementalReadIncomplete = true
+	t.summary.LanesPartial = true
+	t.mu.Unlock()
+	if changed {
+		t.notifySubscribers()
+	}
+}
+
+// clearIncrementalReadFailure clears only recoverable read incompleteness after
+// a whole poll succeeds. Sticky cold-replay failure and decode misses continue
+// to keep the projection partial.
+func (t *cityRunTailer) clearIncrementalReadFailure(st *tailState) {
+	if st.catchUpReadFailed || st.tailReadFailed {
+		return
+	}
+	t.mu.Lock()
+	if !t.incrementalReadIncomplete {
+		t.mu.Unlock()
+		return
+	}
+	t.incrementalReadIncomplete = false
+	t.summary.LanesPartial = t.projectionIncompleteLocked()
+	t.mu.Unlock()
+	t.notifySubscribers()
+}
+
+// projectionIncompleteLocked reports all reasons the published projection
+// cannot prove complete coverage. The caller holds t.mu.
+func (t *cityRunTailer) projectionIncompleteLocked() bool {
+	return t.coldReplayIncomplete || t.incrementalReadIncomplete || t.decodeMisses > 0
 }
 
 // runDetailSnapshotVersion is the synthesized run-snapshot shape version the
@@ -495,11 +683,19 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 		}
 		snapshotFoldCount.Add(1)
 		name, target, scopeKind, scopeRef, ok := runproj.FormulaTargetFromSnapshot(snap)
-		return runSnapshotCacheValue{snap: snap, name: name, target: target, scopeKind: scopeKind, scopeRef: scopeRef, targetOK: ok}, nil
+		return runSnapshotCacheValue{
+			snap: snap, name: name, target: target, scopeKind: scopeKind, scopeRef: scopeRef, targetOK: ok,
+			sessionIDs: runproj.SessionIDsForSnapshot(snap),
+		}, nil
 	})
 	if err != nil {
 		return runDetailMemoValue{}, ready, err
 	}
+
+	// The fold resolved this run's root, so the run is KNOWN to the projection:
+	// drop any unknown-run grace marker so a runId that becomes known never
+	// lingers in the first-seen map (rundetail_grace.go).
+	t.unknownRuns.forget(runID)
 
 	// Resolve the request-time sessions enrichment and its cache version. The
 	// version (0 when unavailable) is part of the memo key so a sessions refresh —
@@ -507,6 +703,16 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 	sessions, sessionsVersion, sessionsAvailable := t.mgr.fetchSessionsVersioned(ctx, t.name)
 	if !sessionsAvailable {
 		sessions = nil
+	}
+	// The open-only listing above never carries a CLOSED session, so a finished
+	// run's retired seats would render as bare ids. Resolve those individually by
+	// durable id — bounded by the run's own links, cached per id — instead of
+	// ever listing the city's closed sessions (thousands in a mature store).
+	// Without a usable listing there is no way to tell which links are retired,
+	// so the by-id reads are skipped rather than issued blindly.
+	var retired []runproj.DashboardSession
+	if sessionsAvailable {
+		retired = t.mgr.fetchRetiredSessions(ctx, t.name, snapValue.sessionIDs, sessions)
 	}
 
 	// Layer the supervisor's compiled formula detail at request time (like
@@ -541,9 +747,10 @@ func (t *cityRunTailer) detail(ctx context.Context, runID string) (runDetailMemo
 		sessionsVersion: sessionsVersion,
 		formulaVersion:  formulaVersion,
 		formulaFailure:  formulaDetailFailure,
+		retiredSessions: retiredSessionsKey(retired),
 	}
 	value, err := t.detailMemo.getOrBuild(key, func() (runDetailMemoValue, error) {
-		d, buildErr := runproj.BuildRunDetailFromSnapshot(snapValue.snap, sessions, formulaDetail, formulaDetailFailure)
+		d, buildErr := runproj.BuildRunDetailFromSnapshot(snapValue.snap, runproj.RunSessions{Live: sessions, Retired: retired}, formulaDetail, formulaDetailFailure)
 		if buildErr != nil {
 			return runDetailMemoValue{}, buildErr
 		}
@@ -606,7 +813,10 @@ func (m *runTailerManager) fetchSessionsVersioned(ctx context.Context, name stri
 		}
 		// A successful sessions read is a positive last-good: serve it stale on a
 		// later failed refetch rather than blanking the health card.
-		return cachedSessions{items: items}, sessionsCacheTTL, true, true
+		// m.sessionsTTL (not the sessionsCacheTTL var): this closure can run on
+		// the detached prime goroutine, so it must read the construction-time
+		// capture, never the test-mutable package var.
+		return cachedSessions{items: items}, m.sessionsTTL, true, true
 	})
 	if !ok {
 		return nil, 0, false
@@ -623,33 +833,222 @@ func (m *runTailerManager) fetchSessionsUpstream(ctx context.Context, name strin
 	if base == "" {
 		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v0/city/"+name+"/sessions", nil)
+	// This enrichment wants every session. Walk the keyset pages until the
+	// server stops minting next_cursor and merge them, so a fleet larger than
+	// one server-cap page is fully covered instead of silently truncated at the
+	// first page. Each page requests the 1000-row server cap.
+	var all []runproj.DashboardSession
+	cursor := ""
+	for {
+		u := base + "/v0/city/" + name + "/sessions?limit=1000"
+		if cursor != "" {
+			u += "&cursor=" + url.QueryEscape(cursor)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, false
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := m.httpc.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close() //nolint:errcheck
+			return nil, false
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		resp.Body.Close() //nolint:errcheck
+		if err != nil {
+			return nil, false
+		}
+		var env struct {
+			Items      []runproj.DashboardSession `json:"items"`
+			NextCursor string                     `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(body, &env); err != nil {
+			return nil, false
+		}
+		all = append(all, env.Items...)
+		// Stop at the last page. The equal-cursor guard is a safety net against
+		// a server that fails to advance the cursor, so the walk can never spin
+		// forever on a degenerate response.
+		if env.NextCursor == "" || env.NextCursor == cursor {
+			break
+		}
+		cursor = env.NextCursor
+	}
+	if all == nil {
+		all = []runproj.DashboardSession{}
+	}
+	return all, true
+}
+
+// fetchRetiredSessions resolves the run's session ids the open listing does not
+// carry — its retired seats — one by-id point read each, in id order, capped at
+// maxRetiredSessionLookups ids and retiredSessionsBuildBudget of wall time. Ids
+// present in the listing are never read (the listing is authoritative for a live
+// seat); ids the supervisor does not know are simply absent from the result,
+// leaving the step its correct bare-id link. The result is bounded by the run's
+// link count and independent of how many closed sessions the city holds.
+// detail() consumes this.
+func (m *runTailerManager) fetchRetiredSessions(ctx context.Context, name string, ids []string, live []runproj.DashboardSession) []runproj.DashboardSession {
+	if len(ids) == 0 {
+		return nil
+	}
+	liveIDs := make(map[string]struct{}, len(live))
+	for i := range live {
+		liveIDs[live[i].ID] = struct{}{}
+	}
+	deadline := m.retiredClock().Add(retiredSessionsBuildBudget)
+	var retired []runproj.DashboardSession
+	considered := 0
+	for _, id := range ids {
+		if _, isLive := liveIDs[id]; isLive {
+			continue
+		}
+		if considered == maxRetiredSessionLookups || !m.retiredClock().Before(deadline) {
+			break
+		}
+		considered++
+		if session, found := m.fetchRetiredSession(ctx, name, id); found {
+			retired = append(retired, session)
+		}
+	}
+	return retired
+}
+
+// retiredSessionsKey is the memo-key projection of a retired-session resolution:
+// the resolved ids joined in order. See runDetailMemoKey.retiredSessions. Only
+// the SET is keyed, not the sessions' display fields: a closed session is
+// terminal, so a by-id re-read after the hit TTL that somehow differs (a repaired
+// bead) is picked up by the memo only when the listing version next bumps —
+// which every session event does — an accepted staleness for a terminal record.
+func retiredSessionsKey(retired []runproj.DashboardSession) string {
+	if len(retired) == 0 {
+		return ""
+	}
+	ids := make([]string, len(retired))
+	for i := range retired {
+		ids[i] = retired[i].ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// fetchRetiredSession returns one session resolved by durable id, served from the
+// retired-session cache. A hit is served for retiredSessionCacheTTL and a miss
+// (found=false — a 404, a failed read, anything but a hit) for the backed-off
+// retiredMissTTL of its consecutive-miss count; an expired entry is forgotten and
+// re-read. Every outcome is cached, so no failure mode re-issues the read per
+// render. Concurrent readers of the same id collapse onto one upstream read.
+func (m *runTailerManager) fetchRetiredSession(ctx context.Context, name, id string) (runproj.DashboardSession, bool) {
+	key := retiredSessionKey{name: name, id: id}
+	// Two passes at most: the first may return an entry whose own deadline has
+	// passed; forgetting it makes the second pass rebuild, and a fresh build can
+	// never be expired already (its deadline is in the future by construction).
+	// The expired entry's miss count carries into the rebuild so a persistent
+	// miss keeps backing off instead of restarting at the first-miss TTL.
+	priorMisses := 0
+	for range 2 {
+		entry, err := m.retiredSessions.getOrBuild(key, func() (cachedRetiredSession, error) {
+			return m.fetchRetiredSessionUpstream(ctx, name, id, priorMisses), nil
+		})
+		if err != nil {
+			return runproj.DashboardSession{}, false
+		}
+		if m.retiredClock().Before(entry.expires) {
+			return entry.session, entry.found
+		}
+		priorMisses = entry.misses
+		m.retiredSessions.forget(key)
+	}
+	return runproj.DashboardSession{}, false
+}
+
+// retiredMissTTL is how long the n-th consecutive by-id miss for one id is served
+// before a re-read: retiredSessionMissTTL for the first, doubling per further
+// miss, capped at retiredSessionCacheTTL. An id that never resolves (a pruned
+// session, a stale stamp, a slot label the assignee fallback mistook for an id)
+// thus costs a handful of point reads in its first minute and one per hit TTL
+// after, while an id whose bead is merely late is still re-read promptly.
+func retiredMissTTL(consecutiveMisses int) time.Duration {
+	ttl := retiredSessionMissTTL
+	for i := 1; i < consecutiveMisses && ttl < retiredSessionCacheTTL; i++ {
+		ttl *= 2
+	}
+	return min(ttl, retiredSessionCacheTTL)
+}
+
+// fetchRetiredSessionUpstream reads GET {base}/v0/city/{name}/session/{id}
+// ?exact_id=true over loopback — the supervisor's exact-id point read, which
+// finds closed session beads and answers a miss with 404 after one store.Get,
+// never through the name ladder whose closed-inclusive steps scan every closed
+// session bead — and projects the response into the dashboard session shape.
+// The result is always a cacheable entry: a hit for retiredSessionCacheTTL; a
+// 404, any other status, a transport or decode failure, or a 200 for a different
+// id (belt and braces against a resolver change) all as a miss for the backed-off
+// miss TTL, so the SSE loop's per-event rebuild can never turn one failing read
+// into a retry per render. Non-404 failures are logged; a 404 is the expected
+// answer for a pruned or not-yet-landed session and is not. The read runs
+// detached from the electing caller's cancellation, like the sessions listing,
+// so a disconnecting poll cannot fail the shared read for joiners.
+func (m *runTailerManager) fetchRetiredSessionUpstream(ctx context.Context, name, id string, priorMisses int) cachedRetiredSession {
+	session, err := m.readSessionByExactID(ctx, name, id)
+	now := m.retiredClock()
 	if err != nil {
-		return nil, false
+		if !errors.Is(err, errRetiredSessionNotFound) {
+			log.Printf("run-tailer: city %q session %q by-id read failed: %v", name, id, err)
+		}
+		misses := priorMisses + 1
+		return cachedRetiredSession{misses: misses, expires: now.Add(retiredMissTTL(misses))}
+	}
+	return cachedRetiredSession{session: session, found: true, expires: now.Add(retiredSessionCacheTTL)}
+}
+
+// errRetiredSessionNotFound is readSessionByExactID's answer for an id the
+// supervisor does not hold: the one miss that is expected rather than a failure.
+var errRetiredSessionNotFound = errors.New("session not found")
+
+// readSessionByExactID performs the exact-id session read for
+// fetchRetiredSessionUpstream and returns the session, errRetiredSessionNotFound
+// for a 404 (or a 200 naming a different id), or the failure.
+func (m *runTailerManager) readSessionByExactID(ctx context.Context, name, id string) (runproj.DashboardSession, error) {
+	base := strings.TrimRight(m.deps.SupervisorBaseURL, "/")
+	if base == "" {
+		return runproj.DashboardSession{}, errors.New("no supervisor base url")
+	}
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), singleFlightComputeTimeout)
+	defer cancel()
+	u := base + "/v0/city/" + name + "/session/" + url.PathEscape(id) + "?exact_id=true"
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, u, nil)
+	if err != nil {
+		return runproj.DashboardSession{}, fmt.Errorf("building session read: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := m.httpc.Do(req)
 	if err != nil {
-		return nil, false
+		return runproj.DashboardSession{}, fmt.Errorf("reading session: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return runproj.DashboardSession{}, errRetiredSessionNotFound
+	default:
+		return runproj.DashboardSession{}, fmt.Errorf("reading session: status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, false
+		return runproj.DashboardSession{}, fmt.Errorf("reading session body: %w", err)
 	}
-	var env struct {
-		Items []runproj.DashboardSession `json:"items"`
+	var session runproj.DashboardSession
+	if err := json.Unmarshal(body, &session); err != nil {
+		return runproj.DashboardSession{}, fmt.Errorf("decoding session: %w", err)
 	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, false
+	if session.ID != id {
+		return runproj.DashboardSession{}, errRetiredSessionNotFound
 	}
-	if env.Items == nil {
-		env.Items = []runproj.DashboardSession{}
-	}
-	return env.Items, true
+	return session, nil
 }
 
 // formulaNodeRef decodes the ordering-relevant id of a compiled-formula preview
@@ -824,30 +1223,10 @@ func (p *Plane) registerRunDetail() {
 			writeError(w, http.StatusNotFound, "unknown city")
 			return
 		}
-		value, ready, err := t.detail(r.Context(), r.PathValue("runId"))
+		runID := r.PathValue("runId")
+		value, ready, err := t.detail(r.Context(), runID)
 		if err != nil {
-			var unsupported *runproj.UnsupportedRunError
-			if errors.As(err, &unsupported) {
-				writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
-					Error:  unsupported.Message,
-					Reason: string(unsupported.Reason),
-				})
-				return
-			}
-			// The run root is absent from the warm projection. While the cold replay
-			// is still in flight the fold may be incomplete, so report warming
-			// rather than a hard 404 for a run that may yet appear. This 503 is a
-			// retry signal, not a terminal error: the SPA loader
-			// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) already
-			// retries any 5xx — including this warming 503 — with bounded backoff
-			// before surfacing it, so the client re-polls until the replay finishes
-			// (covered by runDetail.test.ts "retries while the projection is
-			// warming").
-			if !ready {
-				writeError(w, http.StatusServiceUnavailable, "run view is warming")
-				return
-			}
-			writeError(w, http.StatusNotFound, "unknown run")
+			t.writeRunDetailReadError(w, runID, err, ready)
 			return
 		}
 		// Serve the memoized marshaled bytes verbatim — the memo already produced
@@ -858,10 +1237,82 @@ func (p *Plane) registerRunDetail() {
 	})
 }
 
-// cityRunTailer resolves the city to its run tailer, returning false for an
-// unknown city (so the handler can 404). Starting the fold loop is lazy.
+// runDetailReasonUnknownRun is the runDetailErrorBody reason carried by the
+// graced unknown-run 503, so clients can tell "the server is holding a grace
+// window for a run it has never seen" apart from the cold-replay warming 503
+// (a plain {error} body with no reason and no Retry-After).
+const runDetailReasonUnknownRun = "unknown_run"
+
+// unknownRunRetryAfter is the graced 503's Retry-After header value (seconds):
+// the poll cadence the server suggests while it holds an unknown run's grace
+// window open.
+const unknownRunRetryAfter = "5"
+
+// writeRunDetailReadError maps a failed detail() read to the HTTP response —
+// shared by the JSON GET and the SSE stream precheck so both endpoints answer
+// identically: 422 for an unsupported (v1/wisp) run, 503 while the projection
+// is still warming or while a truly-unknown run is inside its warming-grace
+// window (the graced variant carries Retry-After and reason unknown_run), 404
+// otherwise.
+func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID string, err error, ready bool) {
+	var unsupported *runproj.UnsupportedRunError
+	if errors.As(err, &unsupported) {
+		// A definitive answer: the run root EXISTS in the projection but has no
+		// run-detail view. Checked BEFORE the grace window below — not_run_view
+		// must stay a 422, never a warming 503.
+		writeJSON(w, http.StatusUnprocessableEntity, runDetailErrorBody{
+			Error:  unsupported.Message,
+			Reason: string(unsupported.Reason),
+		})
+		return
+	}
+	// The run root is absent from the warm projection. While the cold replay
+	// is still in flight the fold may be incomplete, so report warming rather
+	// than a hard 404 for a run that may yet appear. Checked BEFORE the grace
+	// window below: a warming-phase request must not start (or consume) an
+	// unknown run's grace clock — the window is measured from the first
+	// POST-warm request (TestRunDetailWarmingDoesNotStartGraceClock). This
+	// plain 503 is a retry signal for the short replay, and the SPA loader
+	// (supervisor/runDetail.ts loadSupervisorFormulaRunDetail) retries 5xx
+	// within its own bounded backoff budget before surfacing it (covered by
+	// runDetail.test.ts "retries while the projection is warming").
+	if !ready {
+		writeError(w, http.StatusServiceUnavailable, "run view is warming")
+		return
+	}
+	// The projection is warm but has never seen this run. A run slung from the
+	// CLI stays invisible here until the controller's cache-reconcile emits
+	// its bead events (30-120s), and the SPA treats a 404 as terminal — so a
+	// truly-unknown run gets a retryable warming 503 for a grace window
+	// measured from its first request (rundetail_grace.go). The contract is
+	// server-held: the server holds the warming answer for the whole window,
+	// Retry-After tells clients how often to poll, and the SPA's run-detail
+	// loader polls within its own budget (being extended in a sibling change).
+	// The reason unknown_run makes this graced answer distinguishable from the
+	// cold-replay warming 503 above. Once the window expires the plain 404
+	// below is restored. Only the not-found case is graced: every other
+	// failure keeps its existing mapping.
+	if errors.Is(err, runproj.ErrRunNotFound) && t.unknownRuns.inGrace(runID) {
+		w.Header().Set("Retry-After", unknownRunRetryAfter)
+		writeJSON(w, http.StatusServiceUnavailable, runDetailErrorBody{
+			Error:  "run view is warming",
+			Reason: runDetailReasonUnknownRun,
+		})
+		return
+	}
+	writeError(w, http.StatusNotFound, "unknown run")
+}
+
+// cityRunTailer resolves the exact registered city name to its run tailer,
+// returning false for an unknown city. The resolver is authoritative and
+// returns the path directly, so registry-valid dots and underscores are safe
+// here; the deep-link grammar (ValidCityName) now mirrors the registry, so
+// both paths agree. Starting the fold loop is lazy.
 func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
-	path, ok := p.resolveCityPath(name)
+	if name == "" || p.deps.Resolver == nil {
+		return nil, false
+	}
+	path, ok := p.deps.Resolver.CityPath(name)
 	if !ok {
 		return nil, false
 	}
@@ -869,37 +1320,7 @@ func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
 }
 
 // cityEventsPath is the single source of truth for a city's append-only event
-// log path, so the lazy per-request start and the eager Start-time warm-up
-// (eagerWarmTailers) fold the exact same file.
+// log path.
 func cityEventsPath(cityRoot string) string {
 	return filepath.Join(cityRoot, ".gc", "events.jsonl")
-}
-
-// eagerWarmTailers starts the run-view fold for every currently-registered city
-// so the cold replay of .gc/events.jsonl happens at startup — in each tailer's
-// own background goroutine — instead of on the operator's first click. It is
-// non-blocking: ensure spawns the fold goroutine and returns immediately, so
-// Start never waits on any city's cold load. A nil resolver or an empty city
-// set is a no-op, and cities registered after Start keep the lazy start on
-// their first request.
-//
-// Cost scales with TOTAL registered cities, not active ones: warm-up starts one
-// cold-replay goroutine per city at Start and keeps every city's folded bead
-// slice resident for the plane's lifetime, so boot CPU/disk (JSON decode + .gz
-// archive walks) and baseline memory grow with the registry. Because ColdLoad is
-// context-blind (internal/runproj/projector.go), a Stop landing in the boot
-// window also waits on the slowest in-flight replay. This is deliberate for the
-// current few-city deployments; scaling to a large fleet would want a bounded
-// warm-up pool and/or a ctx-aware ColdLoad so Start-time work and shutdown stay
-// bounded.
-func (p *Plane) eagerWarmTailers() {
-	if p.deps.Resolver == nil {
-		return
-	}
-	for _, c := range p.deps.Resolver.Cities() {
-		if !validCityName(c.Name) || c.Path == "" {
-			continue
-		}
-		p.runTailers.ensure(c.Name, cityEventsPath(c.Path))
-	}
 }

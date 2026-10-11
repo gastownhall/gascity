@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -31,48 +30,7 @@ func cliGraphrouteDeps(cityPath string) graphroute.Deps {
 		CityPath:              cityPath,
 		Resolver:              cliAgentResolver{},
 		DirectSessionResolver: cliDirectSessionResolver,
-		ControlDispatcherRuntimeMissing: func(qualifiedName string) bool {
-			return controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName)
-		},
 	}
-}
-
-// controlDispatcherSessionRuntimeMissing reports whether the control-dispatcher
-// agent's session is asleep with reason runtime-missing. Session beads are
-// city-scoped, so it reads the city store directly (the rig-scoped routing
-// store cannot see them). It powers the rig→city control-dispatcher fallback
-// (#3454); any lookup failure returns false so routing falls back to the normal
-// rig-local binding rather than mis-routing on a transient store error.
-func controlDispatcherSessionRuntimeMissing(cityPath, qualifiedName string) bool {
-	if cityPath == "" || strings.TrimSpace(qualifiedName) == "" {
-		return false
-	}
-	// Only consult the city store for a real, initialized city. Mirrors the
-	// pool-nudge guard in doSling: a bare working dir (no city.toml) has no
-	// session beads to read, and opening a store there would needlessly
-	// spin up a managed Dolt backend on the routing hot path.
-	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
-		return false
-	}
-	store, err := openCityStoreAt(cityPath)
-	if err != nil || store == nil {
-		return false
-	}
-	// Session beads are session-class; thread the city store into the consumer
-	// as a typed beads.SessionStore so the class stays statically visible. The
-	// lazy open above is retained deliberately: it is the load-bearing guard that
-	// avoids spinning up a managed Dolt backend on a bare working dir, and there
-	// is no controllerState here to source a pre-opened session store from.
-	return sessionRuntimeMissingInStore(beads.SessionStore{Store: store}, qualifiedName)
-}
-
-// sessionRuntimeMissingInStore reports whether any open session bead for the
-// agent (selected by its agent:<qualified> label) projects the runtime-missing
-// lifecycle reason in the given session store. The projection lives in
-// internal/session so the API sling path can share it without importing package
-// main; it takes the unwrapped beads.Store.
-func sessionRuntimeMissingInStore(store beads.SessionStore, qualifiedName string) bool {
-	return sessionpkg.RuntimeMissingInStore(store.Store, qualifiedName)
 }
 
 // applyGraphRouting delegates to graphroute.ApplyGraphRouting with CLI
@@ -85,7 +43,7 @@ var (
 	workflowServeList               = nextWorkflowServeBeads
 	controlDispatcherServe          = runControlDispatcherInStore
 	workflowServeOpenEventsProvider = func(stderr io.Writer) (events.Provider, error) {
-		ep, code := openCityEventsProvider(stderr, "gc convoy control --serve")
+		ep, code := openCityEventsReader(stderr, "gc convoy control --serve")
 		if ep == nil {
 			return nil, fmt.Errorf("opening events provider (exit %d)", code)
 		}
@@ -360,9 +318,16 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
 	// on every iteration. #793.
-	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryForBeads(cfg.Beads), stderr)
+	workQuery := expandAgentCommandTemplate(cityPath, cityName, &agentCfg, cfg.Rigs, "work_query", agentCfg.EffectiveWorkQueryFor(cityQueryTopology(cityPath, cfg)), stderr)
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
+	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) {
+		if err := validateDispatchSessionProviderConfig(cfg, cityPath); err != nil {
+			workflowTracef("serve start-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck // the returned error is the outcome
+			return err
+		}
 	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
@@ -471,9 +436,16 @@ type workflowServeDrainResult struct {
 func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
+	emits := newExecutionEmitDeferral(cityPath, storePath, stderr)
+	defer emits.flush()
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		queue, err := workflowServeList(serveQuery, storePath, workEnv)
+		if err == nil {
+			// Project every processed root whose controls have stopped
+			// arriving; a root with a control in this queue waits for it.
+			emits.flushSettled(queue)
+		}
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			// Surface a killed/timed-out control work query on the event
@@ -509,9 +481,23 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
+			callsBefore, started := snapshotControlBdCalls(), time.Now()
+			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
+					// Same rule as the transient arm below: a pending bead
+					// repeating its previous refusal verbatim is still retried
+					// every sweep, but it must not count as activity. Pending
+					// waits on config/state drift a human heals, so it can last
+					// days — and a bead that resets idleSweeps on every one of
+					// them holds the whole serve loop at its 1s floor for the
+					// duration, re-running a full dispatch (config load, store
+					// open, outcome read, source-chain preflight) five times per
+					// idle-cap interval to re-learn the same answer.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve pending-quiet bead=%s kind=%s", beadID, kind)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve pending bead=%s kind=%s", beadID, kind)
 					continue
@@ -519,13 +505,25 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
 				if dispatch.IsTransientControllerError(err) {
 					pendingCount++
+					// A quiet retry is a verbatim repeat of the failure this
+					// bead already reported. It still gets retried on every
+					// sweep, but it must not count as pending: pendingAny
+					// resets idleSweeps, and a permanently-stuck bead that
+					// resets the backoff every sweep holds the whole loop at
+					// its 1s floor forever. Two such beads consumed 95% of one
+					// city's control dispatches.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve transient-error-quiet bead=%s kind=%s err=%v", beadID, kind, err)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
-			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
+			calls := snapshotControlBdCalls().since(callsBefore)
+			workflowTracef("serve processed bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 			result.processedAny = true
 			processedThisCycle = true
 		}
@@ -652,9 +650,25 @@ func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur ti
 	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
 }
 
+// workflowServeSelfActor names this process in the event log, and says whether
+// that name is usable as an identity.
+//
+// The serve loop's own control-bead writes append bead.* events now that a
+// relocated class store emits (class_store_emit.go), and waking on those buys
+// an extra heavy ready re-scan and a controller poke per dispatch burst.
+// eventActor's terminal fallback is "human", which every foreign CLI writer
+// shares, so filtering on it would suppress legitimate wakes: an identity is
+// usable only when it is neither empty nor that fallback. It is a variable so a
+// test can pin both arms.
+var workflowServeSelfActor = func() (string, bool) {
+	actor := eventActor()
+	return actor, actor != "" && actor != "human"
+}
+
 func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
+	selfActor, selfUsable := workflowServeSelfActor()
 
 	for {
 		select {
@@ -663,6 +677,16 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 				return false, res.err
 			}
 			if workflowEventRelevant(res.evt) {
+				if selfUsable && res.evt.Actor == selfActor {
+					// Our own emission. drainWorkflowServeWork already loops
+					// until no control bead is processed, so nothing
+					// discoverable from this loop's own writes can be missed by
+					// ignoring them — while a foreign bead.* event (the worker
+					// close this emission exists to make visible) still wakes
+					// the loop immediately.
+					workflowTracef("serve ignore-self-event type=%s subject=%s", res.evt.Type, res.evt.Subject)
+					continue
+				}
 				if idleSweeps >= 0 {
 					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
 				} else {
@@ -768,6 +792,19 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 	return workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{}, controlSessionNames...)
 }
 
+// controlReadyRoutedDemandArgs renders the flag set routed_ready()'s
+// route-scoped, unassigned bd-ready calls carry: unassigned, no epics, and no
+// bead parked on a dispatch hold (ga-x9kptu / ga-5736js).
+//
+// It renders from config.PoolDemandServeRules — the same value the worker's
+// generated Tier-3 query and the controller's demand predicate are built from —
+// so this probe cannot come to serve a different set than the one the pool
+// counts and the workers claim. assignee_ready() (Tier 1/2) must stay
+// hold-transparent by design and must never call this.
+func controlReadyRoutedDemandArgs() string {
+	return config.PoolDemandServeRulesForQuery().ShellArgs()
+}
+
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
@@ -807,8 +844,8 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route" --unassigned --exclude-type=epic --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
@@ -919,6 +956,9 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
+	if queue, handled, err := tryControlReadyScan(workQuery, dir, env); handled {
+		return queue, err
+	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
 	if err != nil {
 		return nil, err
@@ -945,14 +985,23 @@ func dispatchWakeFile(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", "dispatch-wake")
 }
 
-// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
-// Best-effort: if the write fails the dispatch cycle continues normally;
-// workers fall back to their standard poll interval.
+// writeDispatchWakeFile creates the dispatch-wake sentinel file if needed and
+// sets its mtime to now, so every wake is observable to a worker comparing
+// mtimes (opening an existing file does not change its mtime).
+// Best-effort: if the write fails the dispatch cycle continues normally and
+// workers fall back to their standard poll interval; the failure is traced.
 func writeDispatchWakeFile(cityPath string) {
 	path := dispatchWakeFile(cityPath)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		workflowTracef("dispatch-wake create path=%s err=%v", path, err)
 		return
 	}
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		workflowTracef("dispatch-wake close path=%s err=%v", path, err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		workflowTracef("dispatch-wake touch path=%s err=%v", path, err)
+	}
 }

@@ -181,12 +181,12 @@ func TestCityStatusSnapshotWarnsOnHighRatio(t *testing.T) {
 	// via storeHealthFromInputs directly instead.
 	rows := 221
 	const bytes = int64(11_200_000_000)
-	h := storeHealthFromInputs(cityPath, bytes, rows, time.Time{}, "")
+	h := storeHealthFromInputs(cityPath, bytes, rows, true, time.Time{}, "")
 	if !h.Warning {
 		t.Fatalf("Warning = false, want true for %d bytes / %d rows", bytes, rows)
 	}
 	// Sanity: below-threshold case.
-	h = storeHealthFromInputs(cityPath, 50_000_000, rows, time.Time{}, "")
+	h = storeHealthFromInputs(cityPath, 50_000_000, rows, true, time.Time{}, "")
 	if h.Warning {
 		t.Fatalf("Warning = true, want false for 50 MB / %d rows", rows)
 	}

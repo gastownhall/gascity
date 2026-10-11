@@ -93,13 +93,18 @@ func withLogging(next http.Handler, audit requestAuditConfig) http.Handler {
 		if source == "" {
 			source = "memory"
 		}
-		log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
+		reqID := rw.Header().Get("X-GC-Request-Id")
+		if reqID != "" {
+			log.Printf("api: %s %s %d %s [%s] req_id=%s", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source, reqID)
+		} else {
+			log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
+		}
 		telemetry.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, rw.status, durMs, source)
-		recordSupervisorRequest(audit, r, rw.status, dur, supervisorRequestPhaseComplete)
+		recordSupervisorRequest(audit, r, rw.status, dur, supervisorRequestPhaseComplete, reqID)
 	})
 }
 
-func recordSupervisorRequest(audit requestAuditConfig, r *http.Request, status int, dur time.Duration, phase string) {
+func recordSupervisorRequest(audit requestAuditConfig, r *http.Request, status int, dur time.Duration, phase, requestID string) {
 	if audit.recorder == nil {
 		return
 	}
@@ -113,6 +118,7 @@ func recordSupervisorRequest(audit requestAuditConfig, r *http.Request, status i
 		Host:            sanitizeAuditString(canonicalHostName(r.Host), 128),
 		OriginAllowed:   originAllowed(r.Header.Get("Origin"), audit.allowedOrigins),
 		Phase:           sanitizeAuditString(phase, 16),
+		RequestID:       sanitizeAuditString(requestID, 64),
 	})
 }
 
@@ -165,7 +171,7 @@ func withHostAllowing(allowAny bool, extra []string, audit requestAuditConfig, n
 			return
 		}
 		if isSupervisorEventsStreamRequest(r) {
-			recordSupervisorRequest(audit, r, 0, 0, supervisorRequestPhaseStart)
+			recordSupervisorRequest(audit, r, 0, 0, supervisorRequestPhaseStart, w.Header().Get("X-GC-Request-Id"))
 		}
 		next.ServeHTTP(w, r)
 	})

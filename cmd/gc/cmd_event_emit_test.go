@@ -185,6 +185,7 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	}
 
 	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
 	var stderr bytes.Buffer
 	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
 	if stderr.Len() != 0 {
@@ -193,17 +194,15 @@ func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	if !json.Valid([]byte(payload)) {
 		t.Fatalf("payload is not valid JSON: %q", payload)
 	}
-	var decoded struct {
-		Bead beads.Bead `json:"bead"`
+	decoded, ok := beads.DecodeBeadEventPayload(json.RawMessage(payload))
+	if !ok {
+		t.Fatalf("payload is not a raw canonical bead snapshot: %s", payload)
 	}
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		t.Fatalf("Unmarshal(payload): %v", err)
+	if decoded.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.ID, created.ID)
 	}
-	if decoded.Bead.ID != created.ID {
-		t.Fatalf("payload bead ID = %q, want %q", decoded.Bead.ID, created.ID)
-	}
-	if decoded.Bead.Title != "hook-created task" {
-		t.Fatalf("payload bead title = %q, want hook-created task", decoded.Bead.Title)
+	if decoded.Title != "hook-created task" {
+		t.Fatalf("payload bead title = %q, want hook-created task", decoded.Title)
 	}
 }
 
@@ -258,17 +257,15 @@ prefix = "fe"
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want none", stderr.String())
 	}
-	var decoded struct {
-		Bead beads.Bead `json:"bead"`
+	decoded, ok := beads.DecodeBeadEventPayload(json.RawMessage(payload))
+	if !ok {
+		t.Fatalf("payload is not a raw canonical bead snapshot: %s", payload)
 	}
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-		t.Fatalf("Unmarshal(payload): %v", err)
+	if decoded.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.ID, created.ID)
 	}
-	if decoded.Bead.ID != created.ID {
-		t.Fatalf("payload bead ID = %q, want %q", decoded.Bead.ID, created.ID)
-	}
-	if decoded.Bead.Title != "rig hook-created task" {
-		t.Fatalf("payload bead title = %q, want rig hook-created task", decoded.Bead.Title)
+	if decoded.Title != "rig hook-created task" {
+		t.Fatalf("payload bead title = %q, want rig hook-created task", decoded.Title)
 	}
 }
 
@@ -289,6 +286,7 @@ func TestEventEmitViaCLI(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_SESSION", "fake")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -368,5 +366,50 @@ func TestEventEmitMissingType(t *testing.T) {
 	code := run([]string{"event", "emit"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("gc event emit = %d, want 1 (missing type arg)", code)
+	}
+}
+
+func TestEventBeadPayloadScopeRoot(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "BEADS_DIR absolute resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads"},
+			want: "/city/root",
+		},
+		{
+			// filepath.Dir on a trailing-slash path does not strip the final
+			// element the way a shell's dirname would, so an unclean BEADS_DIR
+			// must not silently resolve to itself instead of its parent.
+			name: "BEADS_DIR absolute with a trailing slash still resolves to its parent",
+			env:  map[string]string{"BEADS_DIR": "/city/root/.beads/"},
+			want: "/city/root",
+		},
+		{
+			name: "GC_RIG_ROOT used when BEADS_DIR is unset",
+			env:  map[string]string{"GC_RIG_ROOT": "/rig/root"},
+			want: "/rig/root",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"BEADS_DIR", "GC_RIG_ROOT"} {
+				t.Setenv(k, "")
+				_ = os.Unsetenv(k)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			got, err := eventBeadPayloadScopeRoot()
+			if err != nil {
+				t.Fatalf("eventBeadPayloadScopeRoot() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("eventBeadPayloadScopeRoot() with env %v = %q, want %q", tc.env, got, tc.want)
+			}
+		})
 	}
 }

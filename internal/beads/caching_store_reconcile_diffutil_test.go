@@ -20,6 +20,13 @@ func diffEndStates(want, got mergeEndState) string {
 	diffU64Map(&b, "beadSeq", want.beadSeq, got.beadSeq)
 	diffTimeMap(&b, "localBeadAt", want.localBeadAt, got.localBeadAt)
 	diffU64Map(&b, "deletedSeq", want.deletedSeq, got.deletedSeq)
+	diffU64Map(&b, "writeSeq", want.writeSeq, got.writeSeq)
+	diffStructSet(&b, "writeAtIDs", want.writeAtIDs, got.writeAtIDs)
+	diffStructSet(&b, "readyLost", want.readyLost, got.readyLost)
+	diffStructSet(&b, "retainedIDs", want.retainedIDs, got.retainedIDs)
+	if want.fenceFloor != got.fenceFloor {
+		fmt.Fprintf(&b, "  fenceFloor: want=%v got=%v\n", want.fenceFloor, got.fenceFloor)
+	}
 	if want.depsComplete != got.depsComplete {
 		fmt.Fprintf(&b, "  depsComplete: want=%v got=%v\n", want.depsComplete, got.depsComplete)
 	}
@@ -37,6 +44,9 @@ func diffEndStates(want, got mergeEndState) string {
 	}
 	if want.syncFailures != got.syncFailures {
 		fmt.Fprintf(&b, "  syncFailures: want=%v got=%v\n", want.syncFailures, got.syncFailures)
+	}
+	if want.circuitTripped != got.circuitTripped {
+		fmt.Fprintf(&b, "  circuitTripped: want=%v got=%v\n", want.circuitTripped, got.circuitTripped)
 	}
 	if want.statsAdds != got.statsAdds {
 		fmt.Fprintf(&b, "  stats.Adds: want=%v got=%v\n", want.statsAdds, got.statsAdds)

@@ -19,10 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apicontract"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/pb33f/libopenapi"
-	openapivalidator "github.com/pb33f/libopenapi-validator"
 )
 
 // TestGCLiveContract_BeadsAndEvents covers real-world app API usage directly
@@ -49,7 +48,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	writeSupervisorConfig(t, gcHome, port)
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := append(integrationEnvFor(gcHome, runtimeDir, true), "GC_SESSION=subprocess")
+	env := append(integrationEnvFor(t, gcHome, runtimeDir, true), "GC_SESSION=subprocess")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -125,7 +124,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
-	liveContractJSON[struct {
+	createdRig := liveContractJSON[struct {
 		Status string `json:"status"`
 		Rig    string `json:"rig"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/rigs", map[string]string{
@@ -133,7 +132,13 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		"path":   rigDir,
 		"prefix": "rw" + strconv.FormatInt(time.Now().UnixNano(), 36),
 	}, http.StatusCreated)
-	waitForLiveContractRig(t, baseURL, validator, cityBase, rigName, rigDir, 30*time.Second)
+	if createdRig.Status != "created" || createdRig.Rig != rigName {
+		t.Fatalf("rig create response = %+v, want created rig %q", createdRig, rigName)
+	}
+	createdRigDetail := liveContractJSON[contractRig](t, baseURL, validator, http.MethodGet, cityBase+"/rig/"+url.PathEscape(rigName), nil, http.StatusOK)
+	if createdRigDetail.Name != rigName || createdRigDetail.Path != rigDir {
+		t.Fatalf("rig detail after create = %+v, want name=%q path=%q", createdRigDetail, rigName, rigDir)
+	}
 
 	liveContractJSON[struct {
 		Status   string `json:"status"`
@@ -144,7 +149,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		"args":        []string{agentScript("stuck-agent.sh")},
 		"prompt_mode": "none",
 	}, http.StatusCreated)
-	liveContractJSON[struct {
+	createdAgent := liveContractJSON[struct {
 		Status string `json:"status"`
 		Agent  string `json:"agent"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/agents", map[string]string{
@@ -152,7 +157,16 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		"provider": "contract-agent",
 	}, http.StatusCreated)
 	targetAgent := "worker"
-	waitForLiveContractAgent(t, baseURL, validator, cityBase, targetAgent, 30*time.Second)
+	if createdAgent.Status != "created" || createdAgent.Agent != targetAgent {
+		t.Fatalf("agent create response = %+v, want created agent %q", createdAgent, targetAgent)
+	}
+	createdAgentDetail := liveContractJSON[struct {
+		Name     string `json:"name"`
+		Provider string `json:"provider"`
+	}](t, baseURL, validator, http.MethodGet, cityBase+"/agent/"+url.PathEscape(targetAgent), nil, http.StatusOK)
+	if createdAgentDetail.Name != targetAgent || createdAgentDetail.Provider != "contract-agent" {
+		t.Fatalf("agent detail after create = %+v, want name=%q provider=contract-agent", createdAgentDetail, targetAgent)
+	}
 
 	publicProviders := liveContractJSON[struct {
 		Items []struct {
@@ -213,7 +227,6 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		t.Fatalf("decode idempotent bead: %v", err)
 	}
 
-	waitForLiveContractAgent(t, baseURL, validator, cityBase, targetAgent, 30*time.Second)
 	liveContractJSON[struct {
 		Status string `json:"status"`
 		Target string `json:"target"`
@@ -529,7 +542,7 @@ description = "Read and complete {{issue}}."
 		Name      string `json:"name"`
 		Path      string `json:"path"`
 	}](t, baseURL, validator, "/v0/events", unregister.RequestID, "request.result.city.unregister", 120*time.Second, unregister.EventCursor)
-	waitForCityAbsent(t, baseURL, validator, cityName, 45*time.Second)
+	assertLiveContractCityAbsent(t, baseURL, validator, cityName)
 }
 
 type contractEventList struct {
@@ -620,11 +633,6 @@ type liveContractReadProbe struct {
 	skipReason   string
 }
 
-type contractRigList struct {
-	Items []contractRig `json:"items"`
-	Total int           `json:"total"`
-}
-
 type contractRig struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -650,7 +658,7 @@ func liveContractConfigHasAgent(agents []contractConfigAgent, name, dir string) 
 	return false
 }
 
-func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent, rigName, label string) string {
+func createLiveContractAgentSession(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, targetAgent, rigName, label string) string {
 	t.Helper()
 	create := liveContractJSON[struct {
 		RequestID   string `json:"request_id"`
@@ -703,36 +711,28 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	return result.Session.ID
 }
 
-func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName string) {
+func closeLiveContractRigSessions(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, rigName string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		sessions := liveContractSessionListEventually(t, baseURL, v, cityBase+"/sessions?limit=100", deadline)
+	path := cityBase + "/sessions?limit=100"
+	sessions := liveContractJSON[liveContractSessionListResponse](t, baseURL, v, http.MethodGet, path, nil, http.StatusOK)
+	for _, sess := range sessions.Items {
+		if !liveContractRigSessionNeedsClose(sess, rigName) {
+			continue
+		}
+		liveContractJSON[struct {
+			Status string `json:"status"`
+		}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(sess.ID)+"/close?delete=true", nil, http.StatusOK)
+	}
 
-		remaining := 0
-		for _, sess := range sessions.Items {
-			if sess.ID == "" || sess.State == "closed" {
-				continue
-			}
-			if sess.Rig != rigName && !strings.HasPrefix(sess.Template, rigName+"/") {
-				continue
-			}
-			if sess.Template == config.ControlDispatcherAgentName ||
-				strings.HasSuffix(sess.Template, "/"+config.ControlDispatcherAgentName) {
-				continue
-			}
-			remaining++
-			liveContractJSON[struct {
-				Status string `json:"status"`
-			}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(sess.ID)+"/close?delete=true", nil, http.StatusOK)
+	sessions = liveContractJSON[liveContractSessionListResponse](t, baseURL, v, http.MethodGet, path, nil, http.StatusOK)
+	var remaining []string
+	for _, sess := range sessions.Items {
+		if liveContractRigSessionNeedsClose(sess, rigName) {
+			remaining = append(remaining, sess.ID)
 		}
-		if remaining == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out closing %d live contract rig session(s)", remaining)
-		}
-		time.Sleep(500 * time.Millisecond)
+	}
+	if len(remaining) > 0 {
+		t.Fatalf("rig sessions remained live after synchronous close: %v", remaining)
 	}
 }
 
@@ -747,53 +747,18 @@ type liveContractSessionListItem struct {
 	State    string `json:"state"`
 }
 
-func liveContractSessionListEventually(t *testing.T, baseURL string, v openapivalidator.Validator, path string, deadline time.Time) liveContractSessionListResponse {
-	t.Helper()
-	var lastStatus int
-	var lastBody string
-	var lastErr error
-	for {
-		req, err := liveContractHTTPRequest(baseURL, http.MethodGet, path, nil)
-		if err != nil {
-			t.Fatalf("GET %s build request: %v", path, err)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			lastErr = err
-		} else {
-			raw, readErr := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if readErr != nil {
-				t.Fatalf("GET %s read response: %v", path, readErr)
-			}
-			lastErr = nil
-			lastStatus = resp.StatusCode
-			lastBody = string(raw)
-			if resp.StatusCode == http.StatusOK {
-				if v != nil {
-					validateLiveContractResponse(t, v, req, resp, raw)
-				}
-				var out liveContractSessionListResponse
-				if err := json.Unmarshal(raw, &out); err != nil {
-					t.Fatalf("GET %s decode response: %v\nbody: %s", path, err, string(raw))
-				}
-				return out
-			}
-			if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(lastBody, "cache_not_live:") {
-				t.Fatalf("GET %s status = %d, want 200; body: %s", path, resp.StatusCode, string(raw))
-			}
-		}
-		if time.Now().After(deadline) {
-			if lastErr != nil {
-				t.Fatalf("GET %s: %v", path, lastErr)
-			}
-			t.Fatalf("GET %s status = %d, want 200; body: %s", path, lastStatus, lastBody)
-		}
-		time.Sleep(500 * time.Millisecond)
+func liveContractRigSessionNeedsClose(sess liveContractSessionListItem, rigName string) bool {
+	if sess.ID == "" || sess.State == "closed" {
+		return false
 	}
+	if sess.Rig != rigName && !strings.HasPrefix(sess.Template, rigName+"/") {
+		return false
+	}
+	return sess.Template != config.ControlDispatcherAgentName &&
+		!strings.HasSuffix(sess.Template, "/"+config.ControlDispatcherAgentName)
 }
 
-func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent, rigName, runID string) {
+func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, targetAgent, rigName, runID string) {
 	t.Helper()
 	id := createLiveContractAgentSession(t, baseURL, v, cityBase, targetAgent, rigName, "lifecycle-"+runID)
 	sessionPath := cityBase + "/session/" + url.PathEscape(id)
@@ -827,7 +792,13 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, v, http.MethodPost, sessionPath+"/suspend", nil, http.StatusOK)
-	waitForLiveContractSessionState(t, baseURL, v, sessionPath, "suspended", 30*time.Second)
+	suspended := liveContractJSON[struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+	if suspended.ID != id || suspended.State != "suspended" {
+		t.Fatalf("session after synchronous suspend = %+v, want id=%q state=suspended", suspended, id)
+	}
 
 	wake := liveContractJSON[struct {
 		ID string `json:"id"`
@@ -864,6 +835,11 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	if transcript.ID != id || transcript.Format != "raw" {
 		t.Fatalf("raw transcript = %+v, want id=%q format=raw", transcript, id)
 	}
+	// /wake starts the session in the background and /messages completes
+	// before the session row is confirmed live, so the raw stream (404 "has
+	// no live output" for a stopped session with no transcript, by contract)
+	// is asserted once the session reads live, not on the next request.
+	waitLiveContractSessionLive(t, baseURL, v, sessionPath, 30*time.Second)
 	assertLiveContractStreamOpens(t, baseURL, sessionPath+"/stream?format=raw")
 
 	agents := liveContractJSON[struct {
@@ -905,47 +881,7 @@ func exerciseLiveContractSessionLifecycle(t *testing.T, baseURL string, v openap
 	}](t, baseURL, v, http.MethodPost, cityBase+"/session/"+url.PathEscape(killID)+"/close?delete=true", nil, http.StatusOK)
 }
 
-func waitForLiveContractSessionState(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath, want string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		session := liveContractJSON[struct {
-			State string `json:"state"`
-		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
-		if session.State == want {
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s state at %s", want, sessionPath)
-}
-
-func waitForLiveContractSessionCommandable(t *testing.T, baseURL string, v openapivalidator.Validator, sessionPath string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastState string
-	for time.Now().Before(deadline) {
-		session := liveContractJSON[struct {
-			State string `json:"state"`
-		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
-		lastState = session.State
-		switch session.State {
-		case "creating":
-			time.Sleep(250 * time.Millisecond)
-			continue
-		case "crashed", "closed":
-			t.Fatalf("session at %s reached state %q before command lifecycle checks", sessionPath, session.State)
-		default:
-			if session.State != "" {
-				return
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for session at %s to leave creating state; last state=%q", sessionPath, lastState)
-}
-
-func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, formulaName, targetAgent, rigName, rootBeadID, runID string) {
+func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, formulaName, targetAgent, rigName, rootBeadID, runID string) {
 	t.Helper()
 	formulas := liveContractJSON[struct {
 		Items []struct {
@@ -1008,7 +944,7 @@ func exerciseLiveContractFormulasAndWorkflows(t *testing.T, baseURL string, v op
 	}](t, baseURL, v, http.MethodDelete, cityBase+"/convoy/"+url.PathEscape(convoy.ID), nil, http.StatusOK)
 }
 
-func exerciseLiveContractOrders(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName, rootBeadID, runID string) {
+func exerciseLiveContractOrders(t *testing.T, baseURL string, v *apicontract.Spec, cityBase, rigName, rootBeadID, runID string) {
 	t.Helper()
 	scopedName := "real-world-app-contract-" + runID + ":rig:" + rigName
 	orderRun := liveContractJSON[beads.Bead](t, baseURL, v, http.MethodPost, cityBase+"/beads", map[string]any{
@@ -1063,20 +999,16 @@ func formulaListContains(items []struct {
 	return false
 }
 
-func liveContractValidator(t *testing.T, specBytes []byte) openapivalidator.Validator {
+func liveContractValidator(t *testing.T, specBytes []byte) *apicontract.Spec {
 	t.Helper()
-	doc, err := libopenapi.NewDocument(specBytes)
+	spec, err := apicontract.Load(specBytes)
 	if err != nil {
-		t.Fatalf("build OpenAPI document: %v", err)
+		t.Fatalf("load OpenAPI spec: %v", err)
 	}
-	v, errs := openapivalidator.NewValidator(doc)
-	if len(errs) > 0 {
-		t.Fatalf("construct OpenAPI validator: %v", errs)
-	}
-	return v
+	return spec
 }
 
-func liveContractJSON[T any](t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatus int) T {
+func liveContractJSON[T any](t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, wantStatus int) T {
 	t.Helper()
 	raw := liveContractRequest(t, baseURL, v, method, path, body, wantStatus)
 	var out T
@@ -1086,29 +1018,14 @@ func liveContractJSON[T any](t *testing.T, baseURL string, v openapivalidator.Va
 	return out
 }
 
-func liveContractRequest(t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatus int) []byte {
+func liveContractRequest(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, wantStatus int) []byte {
 	t.Helper()
 	return liveContractRequestWithHeaders(t, baseURL, v, method, path, body, wantStatus, nil)
 }
 
-func liveContractRequestWithHeaders(t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatus int, headers map[string]string) []byte {
+func liveContractRequestWithHeaders(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, wantStatus int, headers map[string]string) []byte {
 	t.Helper()
-	req, err := liveContractHTTPRequest(baseURL, method, path, body)
-	if err != nil {
-		t.Fatalf("%s %s build request: %v", method, path, err)
-	}
-	for name, value := range headers {
-		req.Header.Set(name, value)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("%s %s read response: %v", method, path, err)
-	}
+	req, resp, raw := liveContractDo(t, baseURL, v, method, path, body, headers, func(status int) bool { return status == wantStatus })
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("%s %s status = %d, want %d; body: %s", method, path, resp.StatusCode, wantStatus, string(raw))
 	}
@@ -1118,21 +1035,71 @@ func liveContractRequestWithHeaders(t *testing.T, baseURL string, v openapivalid
 	return raw
 }
 
-func liveContractRequestOneOf(t *testing.T, baseURL string, v openapivalidator.Validator, method, path string, body any, wantStatuses []int) []byte {
+// liveContractStoreConflictBudget bounds how long one request keeps being
+// re-issued while the API answers with a declared store_conflict 503.
+const liveContractStoreConflictBudget = 30 * time.Second
+
+// liveContractDo sends one request and returns the response the caller should
+// judge. A declared store_conflict 503 that wanted does not accept is
+// re-issued until liveContractStoreConflictBudget runs out: the supervisor's
+// controller (reconciler, usage sweep) writes the same session rows this test
+// mutates, and under host load a write can lose every one of the store's
+// bounded retries to it. The API reports that as a retryable 503 rather than
+// a failure (#5457), so a real client re-issues the request, and so does this
+// one. The server has already backed off between its own store attempts, so
+// the re-issue does not wait. Each re-issued 503 must still match the OpenAPI
+// document.
+func liveContractDo(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, headers map[string]string, wanted func(int) bool) (*http.Request, *http.Response, []byte) {
 	t.Helper()
-	req, err := liveContractHTTPRequest(baseURL, method, path, body)
-	if err != nil {
-		t.Fatalf("%s %s build request: %v", method, path, err)
+	deadline := time.Now().Add(liveContractStoreConflictBudget)
+	for {
+		req, err := liveContractHTTPRequest(baseURL, method, path, body)
+		if err != nil {
+			t.Fatalf("%s %s build request: %v", method, path, err)
+		}
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s %s read response: %v", method, path, err)
+		}
+		if wanted(resp.StatusCode) || !liveContractStoreConflict(resp.StatusCode, raw) || time.Now().After(deadline) {
+			return req, resp, raw
+		}
+		if v != nil {
+			validateLiveContractResponse(t, v, req, resp, raw)
+		}
+		t.Logf("%s %s: re-issuing after declared store_conflict 503; body: %s", method, path, string(raw))
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
+}
+
+// liveContractStoreConflict reports whether a response is the API's declared,
+// retryable store_conflict 503: a store write that lost a serialization race
+// on every bounded retry and never committed. Any other response, including a
+// 503 for another cause, is final.
+func liveContractStoreConflict(status int, raw []byte) bool {
+	if status != http.StatusServiceUnavailable {
+		return false
 	}
-	defer resp.Body.Close() //nolint:errcheck
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("%s %s read response: %v", method, path, err)
+	var problem struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
 	}
+	if err := json.Unmarshal(raw, &problem); err != nil {
+		return false
+	}
+	return problem.Code == "store-unavailable" && strings.HasPrefix(problem.Detail, "store_conflict: ")
+}
+
+func liveContractRequestOneOf(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, wantStatuses []int) []byte {
+	t.Helper()
+	req, resp, raw := liveContractDo(t, baseURL, v, method, path, body, nil, func(status int) bool { return intListContains(wantStatuses, status) })
 	if !intListContains(wantStatuses, resp.StatusCode) {
 		t.Fatalf("%s %s status = %d, want one of %v; body: %s", method, path, resp.StatusCode, wantStatuses, string(raw))
 	}
@@ -1176,68 +1143,63 @@ func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Requ
 
 func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	var lastStatus int
-	var lastBody string
-	var lastContentType string
-	var lastErr error
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
-		if err != nil {
-			cancel()
-			t.Fatalf("build stream request %s: %v", path, err)
-		}
-		req.Header.Set("Accept", "text/event-stream")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			cancel()
-			lastErr = err
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		lastErr = nil
-		lastStatus = resp.StatusCode
-		lastContentType = resp.Header.Get("Content-Type")
-		if resp.StatusCode == http.StatusOK {
-			_ = resp.Body.Close()
-			cancel()
-			if !strings.Contains(lastContentType, "text/event-stream") {
-				t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, lastContentType)
-			}
-			return
-		}
-		raw, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		cancel()
-		lastBody = string(raw)
-		time.Sleep(250 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		t.Fatalf("build stream request %s: %v", path, err)
 	}
-	if lastErr != nil {
-		t.Fatalf("GET %s stream: %v", path, lastErr)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s stream: %v", path, err)
 	}
-	t.Fatalf("GET %s stream status = %d, want 200; body: %s", path, lastStatus, lastBody)
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		t.Fatalf("GET %s stream status = %d, want 200; body: %s", path, resp.StatusCode, string(raw))
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, contentType)
+	}
 }
 
-func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, req *http.Request, resp *http.Response, raw []byte) {
+// waitLiveContractSessionLive polls a session until its state is one whose
+// runtime has live output (active or awake), failing with the states seen.
+// The stream endpoint derives "live" from the same state. A wait that was
+// needed is logged with the state sequence, so a CI run that hit the window
+// records which transition lagged.
+func waitLiveContractSessionLive(t *testing.T, baseURL string, v *apicontract.Spec, sessionPath string, timeout time.Duration) {
 	t.Helper()
-	resp.Body = io.NopCloser(bytes.NewReader(raw))
-	ok, valErrs := v.ValidateHttpResponse(req, resp)
-	_ = resp.Body.Close()
-	if ok {
-		return
-	}
-	var details strings.Builder
-	for _, ve := range valErrs {
-		fmt.Fprintf(&details, "%s - %s\n", ve.Message, ve.Reason)
-		for _, se := range ve.SchemaValidationErrors {
-			fmt.Fprintf(&details, "  %s at %s\n", se.Reason, se.FieldPath)
+	start := time.Now()
+	var seen []string
+	live := pollUntil(timeout, 200*time.Millisecond, func() bool {
+		detail := liveContractJSON[struct {
+			State string `json:"state"`
+		}](t, baseURL, v, http.MethodGet, sessionPath, nil, http.StatusOK)
+		if len(seen) == 0 || seen[len(seen)-1] != detail.State {
+			seen = append(seen, detail.State)
 		}
+		return detail.State == "active" || detail.State == "awake"
+	})
+	if !live {
+		t.Fatalf("session %s not live after %s (states %v); its raw stream would answer 404 \"has no live output\"", sessionPath, timeout, seen)
 	}
-	t.Fatalf("%s %s response does not match OpenAPI schema:\n%sbody: %s", req.Method, req.URL.Path, details.String(), string(raw))
+	if len(seen) > 1 {
+		t.Logf("session %s became live after %s (states %v)", sessionPath, time.Since(start).Round(time.Millisecond), seen)
+	}
 }
 
-func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v openapivalidator.Validator, path, requestID, successType string, timeout time.Duration, eventCursor string) T {
+func validateLiveContractResponse(t *testing.T, v *apicontract.Spec, req *http.Request, resp *http.Response, raw []byte) {
+	t.Helper()
+	err := v.ValidateResponse(req, resp, raw)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForLiveContractRequestID[T any](t *testing.T, baseURL string, v *apicontract.Spec, path, requestID, successType string, timeout time.Duration, eventCursor string) T {
 	t.Helper()
 	env := waitForLiveContractRequestEvent(t, baseURL, path, requestID, successType, timeout, eventCursor)
 	var payload T
@@ -1346,14 +1308,14 @@ func waitForLiveContractRequestEvent(t *testing.T, baseURL, path, requestID, suc
 					ErrorMessage string `json:"error_message"`
 				}
 				_ = json.Unmarshal(event.Payload, &payload)
-				t.Fatalf("request.failed for request_id=%s: %s: %s", requestID, payload.ErrorCode, payload.ErrorMessage)
+				t.Fatalf("request.failed for request_id=%s from cursor=%q: %s: %s", requestID, cursor, payload.ErrorCode, payload.ErrorMessage)
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		t.Fatalf("scan SSE %s: %v", streamPath, err)
 	}
-	t.Fatalf("timed out waiting for %s for request_id=%s from %s after observing %d SSE data frames; recent=%v", successType, requestID, streamPath, observed, recent)
+	t.Fatalf("timed out waiting for %s for request_id=%s from %s cursor=%q after observing %d SSE data frames; recent=%v", successType, requestID, streamPath, cursor, observed, recent)
 	return contractEvent{}
 }
 
@@ -1367,31 +1329,7 @@ func liveContractEventPayloadRequestID(raw json.RawMessage) string {
 	return payload.RequestID
 }
 
-func waitForLiveContractEvent(t *testing.T, baseURL string, v openapivalidator.Validator, path, subject, eventType string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		events, err := liveContractEventList(baseURL, v, path)
-		if err != nil {
-			lastErr = err
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		for _, event := range events.Items {
-			if event.Subject == subject && event.Type == eventType {
-				return
-			}
-			if event.Subject == subject && strings.HasSuffix(event.Type, "_failed") {
-				t.Fatalf("event %s for %s failed: %s", event.Type, subject, string(event.Payload))
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s for %s from %s; last error: %v", eventType, subject, path, lastErr)
-}
-
-func liveContractEventList(baseURL string, v openapivalidator.Validator, path string) (contractEventList, error) {
+func liveContractEventList(baseURL string, v *apicontract.Spec, path string) (contractEventList, error) {
 	req, err := liveContractHTTPRequest(baseURL, http.MethodGet, path, nil)
 	if err != nil {
 		return contractEventList{}, err
@@ -1409,11 +1347,8 @@ func liveContractEventList(baseURL string, v openapivalidator.Validator, path st
 		return contractEventList{}, fmt.Errorf("GET %s status %d: %s", path, resp.StatusCode, string(raw))
 	}
 	if v != nil {
-		resp.Body = io.NopCloser(bytes.NewReader(raw))
-		ok, valErrs := v.ValidateHttpResponse(req, resp)
-		_ = resp.Body.Close()
-		if !ok {
-			return contractEventList{}, fmt.Errorf("GET %s response does not match OpenAPI schema: %v; body: %s", path, valErrs, string(raw))
+		if err := v.ValidateResponse(req, resp, raw); err != nil {
+			return contractEventList{}, err
 		}
 	}
 	var events contractEventList
@@ -1423,128 +1358,22 @@ func liveContractEventList(baseURL string, v openapivalidator.Validator, path st
 	return events, nil
 }
 
-func waitForCityAbsent(t *testing.T, baseURL string, v openapivalidator.Validator, cityName string, timeout time.Duration) {
+func assertLiveContractCityAbsent(t *testing.T, baseURL string, v *apicontract.Spec, cityName string) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		cities := liveContractJSON[struct {
-			Items []struct {
-				Name string `json:"name"`
-			} `json:"items"`
-			Total int `json:"total"`
-		}](t, baseURL, v, http.MethodGet, "/v0/cities", nil, http.StatusOK)
-		found := false
-		for _, city := range cities.Items {
-			if city.Name == cityName {
-				found = true
-				break
-			}
+	cities := liveContractJSON[struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}](t, baseURL, v, http.MethodGet, "/v0/cities", nil, http.StatusOK)
+	for _, city := range cities.Items {
+		if city.Name == cityName {
+			t.Fatalf("city %q remained visible after request.result.city.unregister; cities=%+v", cityName, cities.Items)
 		}
-		if !found {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for city %q to disappear from /v0/cities", cityName)
 }
 
-func waitForLiveContractRig(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, rigName, rigDir string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		rigs, err := liveContractRigList(baseURL, v, cityBase)
-		if err != nil {
-			lastErr = err
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		for _, rig := range rigs.Items {
-			if rig.Name == rigName && rig.Path == rigDir {
-				return
-			}
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for rig %q at %q; last error: %v", rigName, rigDir, lastErr)
-}
-
-func liveContractRigList(baseURL string, v openapivalidator.Validator, cityBase string) (contractRigList, error) {
-	req, err := liveContractHTTPRequest(baseURL, http.MethodGet, cityBase+"/rigs", nil)
-	if err != nil {
-		return contractRigList{}, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return contractRigList{}, err
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return contractRigList{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return contractRigList{}, fmt.Errorf("GET %s/rigs status %d: %s", cityBase, resp.StatusCode, string(raw))
-	}
-	if v != nil {
-		resp.Body = io.NopCloser(bytes.NewReader(raw))
-		ok, valErrs := v.ValidateHttpResponse(req, resp)
-		_ = resp.Body.Close()
-		if !ok {
-			return contractRigList{}, fmt.Errorf("GET %s/rigs response does not match OpenAPI schema: %v", cityBase, valErrs)
-		}
-	}
-	var rigs contractRigList
-	if err := json.Unmarshal(raw, &rigs); err != nil {
-		return rigs, err
-	}
-	return rigs, nil
-}
-
-func waitForLiveContractAgent(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent string, timeout time.Duration) {
-	t.Helper()
-	path := cityBase + "/agent/" + url.PathEscape(targetAgent)
-	if dir, base, ok := strings.Cut(targetAgent, "/"); ok {
-		if dir == "" || base == "" {
-			t.Fatalf("target agent %q has an empty qualifier", targetAgent)
-		}
-		path = cityBase + "/agent/" + url.PathEscape(dir) + "/" + url.PathEscape(base)
-	}
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		req, err := liveContractHTTPRequest(baseURL, http.MethodGet, path, nil)
-		if err != nil {
-			t.Fatalf("GET %s build request: %v", path, err)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			lastErr = err
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		raw, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		if resp.StatusCode == http.StatusOK {
-			if v != nil {
-				resp.Body = io.NopCloser(bytes.NewReader(raw))
-				validateLiveContractResponse(t, v, req, resp, raw)
-				_ = resp.Body.Close()
-			}
-			return
-		}
-		lastErr = fmt.Errorf("GET %s status %d: %s", path, resp.StatusCode, string(raw))
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for agent %q at %s; last error: %v", targetAgent, path, lastErr)
-}
-
-func runLiveContractReadSweep(t *testing.T, baseURL string, v openapivalidator.Validator, specBytes []byte, cityName, rigName string) {
+func runLiveContractReadSweep(t *testing.T, baseURL string, v *apicontract.Spec, specBytes []byte, cityName, rigName string) {
 	t.Helper()
 	probes := collectLiveContractReadProbes(t, specBytes, cityName, rigName)
 	if len(probes) == 0 {

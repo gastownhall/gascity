@@ -3,6 +3,7 @@ package docgen
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ func defProperties(t *testing.T, raw map[string]interface{}, defName string) map
 }
 
 func TestGenerateCitySchema(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -63,6 +65,7 @@ func TestGenerateCitySchema(t *testing.T) {
 }
 
 func TestCitySchemaDescriptions(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -91,6 +94,7 @@ func TestCitySchemaDescriptions(t *testing.T) {
 }
 
 func TestCitySchemaCommandTemplateDescriptions(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -130,6 +134,7 @@ func TestCitySchemaCommandTemplateDescriptions(t *testing.T) {
 }
 
 func TestCitySchemaAttachmentListFieldsRemainTombstones(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -166,6 +171,7 @@ func TestCitySchemaAttachmentListFieldsRemainTombstones(t *testing.T) {
 }
 
 func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -196,6 +202,7 @@ func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {
 // lacked omitempty. Real cities use [imports.*] (PackV2) and ship without
 // any [[agent]] block; the schema must reflect that.
 func TestCitySchemaCityAgentNotRequired(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -222,6 +229,7 @@ func TestCitySchemaCityAgentNotRequired(t *testing.T) {
 }
 
 func TestCitySchemaOmitsLegacyPackSourceSurface(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -248,6 +256,7 @@ func TestCitySchemaOmitsLegacyPackSourceSurface(t *testing.T) {
 }
 
 func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	for _, tc := range []struct {
 		name     string
 		generate func() (interface{}, error)
@@ -295,6 +304,7 @@ func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
 }
 
 func TestGeneratePackSchema(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GeneratePackSchema()
 	if err != nil {
 		t.Fatalf("GeneratePackSchema: %v", err)
@@ -319,6 +329,7 @@ func TestGeneratePackSchema(t *testing.T) {
 }
 
 func TestPackSchemaPackMetaRequired(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GeneratePackSchema()
 	if err != nil {
 		t.Fatalf("GeneratePackSchema: %v", err)
@@ -348,6 +359,7 @@ func TestPackSchemaPackMetaRequired(t *testing.T) {
 }
 
 func TestPackSchemaAliasFieldHidden(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GeneratePackSchema()
 	if err != nil {
 		t.Fatalf("GeneratePackSchema: %v", err)
@@ -409,7 +421,88 @@ func TestAddGoCommentsFilteredSkipsHiddenDirs(t *testing.T) {
 	}
 }
 
+// gitOK skips the test if git is not available in PATH.
+func gitOK(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH")
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// TestAddGoCommentsFilteredSkipsUntrackedTopLevelDirs verifies that
+// addGoCommentsFiltered only walks top-level directories known to git, so
+// stray untracked directories (leaked worktree-stage dirs, abandoned
+// PR-checkout dirs, etc. — see ga-vfurlv) are never walked. Without this,
+// AddGoComments's recursive filepath.Walk + go/parser.ParseDir cost is
+// multiplied by however many stray directories have accumulated at the
+// module root, which is what caused schema-gen tests to time out under
+// parallel load.
+func TestAddGoCommentsFilteredSkipsUntrackedTopLevelDirs(t *testing.T) {
+	gitOK(t)
+	tmp := t.TempDir()
+
+	runGit(t, tmp, "init", "-q", "-b", "main")
+	runGit(t, tmp, "config", "user.email", "test@example.com")
+	runGit(t, tmp, "config", "user.name", "test")
+	runGit(t, tmp, "config", "commit.gpgsign", "false")
+
+	// Tracked top-level dir — must be walked.
+	if err := os.MkdirAll(filepath.Join(tmp, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	trackedSrc := "package pkg\n\n// TrackedWidget is committed to git.\ntype TrackedWidget struct{}\n"
+	if err := os.WriteFile(filepath.Join(tmp, "pkg", "widget.go"), []byte(trackedSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tmp, "add", "pkg")
+	runGit(t, tmp, "commit", "-q", "-m", "add pkg")
+
+	// Untracked stray top-level dir, mimicking a leaked worktree-stage or
+	// abandoned PR-checkout directory. Must NOT be walked.
+	strayDir := filepath.Join(tmp, "ga-leaked-worktree")
+	if err := os.MkdirAll(strayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	straySrc := "package stray\n\n// UntrackedGhost must never be walked.\ntype UntrackedGhost struct{}\n"
+	if err := os.WriteFile(filepath.Join(strayDir, "ghost.go"), []byte(straySrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(orig) }()
+
+	r := &jsonschema.Reflector{FieldNameTag: "toml"}
+	if err := addGoCommentsFiltered(r, "example.com/test", "."); err != nil {
+		t.Fatalf("addGoCommentsFiltered: %v", err)
+	}
+
+	if _, ok := r.CommentMap["example.com/test/pkg.TrackedWidget"]; !ok {
+		t.Errorf("expected comment for tracked pkg.TrackedWidget, got map: %v", r.CommentMap)
+	}
+	for k := range r.CommentMap {
+		if strings.Contains(k, "ga-leaked-worktree") {
+			t.Errorf("addGoCommentsFiltered walked untracked top-level dir, found key %q", k)
+		}
+	}
+}
+
 func TestCitySchemaAgentDefinition(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)

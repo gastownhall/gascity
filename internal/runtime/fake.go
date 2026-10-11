@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,21 +15,32 @@ import (
 // When broken is true (via [NewFailFake]), all mutating operations return
 // an error and IsRunning always returns false. Calls are still recorded.
 type Fake struct {
-	mu                      sync.Mutex
-	sessions                map[string]Config            // live sessions
-	meta                    map[string]map[string]string // session → key → value
-	Calls                   []Call                       // recorded calls in order
-	broken                  bool                         // when true, all ops fail
-	OrphanedRuntimes        map[string]LiveRuntime       // session ID → untracked live runtime
-	Zombies                 map[string]bool              // sessions with dead agent processes
-	Attached                map[string]bool              // sessions with attached terminals
-	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
-	PeekOutput              map[string]string            // session → canned peek output
-	Activity                map[string]time.Time         // session → last activity time
-	StartErrors             map[string]error             // per-session Start errors for testing
-	StopErrors              map[string]error             // per-session Stop errors for testing
-	StopLeavesRunning       map[string]bool              // per-session Stop returns nil without deleting the session
+	mu               sync.Mutex
+	sessions         map[string]Config            // live sessions
+	meta             map[string]map[string]string // session → key → value
+	Calls            []Call                       // recorded calls in order
+	broken           bool                         // when true, all ops fail
+	OrphanedRuntimes map[string]LiveRuntime       // session ID → untracked live runtime
+	// ExtraRuntimes are additional scan hits returned verbatim by
+	// FindRuntimesBySessionID, with no field forced. A real process-table scan
+	// reports SEVERAL roots for one session id — the pane plus anything that
+	// merely inherited GC_SESSION_ID and later reparented to init (the
+	// managed-Dolt scope watchdog, a detached supervisor). Those are reported
+	// IsTracked=true, because the tmux scanner keys tracked-ness by session id,
+	// so they cannot be modeled through OrphanedRuntimes, whose contract is that
+	// its entries are untracked orphans.
+	ExtraRuntimes           []LiveRuntime
+	Zombies                 map[string]bool      // sessions with dead agent processes
+	Attached                map[string]bool      // sessions with attached terminals
+	AttachedSequence        map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors          map[string]error     // per-session IsAttachedWithError errors for testing
+	PeekOutput              map[string]string    // session → canned peek output
+	Activity                map[string]time.Time // session → last activity time
+	StartErrors             map[string]error     // per-session Start errors for testing
+	StopErrors              map[string]error     // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool      // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
+	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
 	WaitForIdleErrors       map[string]error
@@ -37,6 +49,7 @@ type Fake struct {
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -53,11 +66,20 @@ type Fake struct {
 	// RelaunchErrors configures Fake.Relaunch errors per session name; an absent
 	// entry relaunches successfully (records the call, updates the live config).
 	RelaunchErrors map[string]error
+	// NudgeErrors configures Fake.Nudge/Fake.NudgeNow errors per session name;
+	// an absent entry nudges successfully.
+	NudgeErrors map[string]error
+	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
+	// a provider whose ListRunning may omit live sessions.
+	ListingUnattested bool
 }
 
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ ListingAttestation  = (*Fake)(nil)
+
+	_ AttachmentObserverWithError = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
@@ -115,6 +137,7 @@ func NewFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		AttachedSequence:        make(map[string][]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
@@ -128,6 +151,8 @@ func NewFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
+		GetMetaErrors:           make(map[string]map[string]error),
+		PendingErrors:           make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
@@ -144,6 +169,7 @@ func NewFailFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -322,6 +348,24 @@ func (f *Fake) IsAttached(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
+	return f.attachedLocked(name)
+}
+
+// IsAttachedWithError returns the configured AttachedErrors entry for the
+// named session. Without one it answers exactly as [Fake.IsAttached] with a
+// nil error, so tests that never set an error see no difference.
+func (f *Fake) IsAttachedWithError(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "IsAttachedWithError", Name: name})
+	if err := f.AttachedErrors[name]; err != nil {
+		return false, err
+	}
+	return f.attachedLocked(name), nil
+}
+
+// attachedLocked is the shared IsAttached answer. The caller holds f.mu.
+func (f *Fake) attachedLocked(name string) bool {
 	if f.broken {
 		return false
 	}
@@ -385,6 +429,9 @@ func (f *Fake) Nudge(name string, content []ContentBlock) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
+	}
 	return nil
 }
 
@@ -400,6 +447,9 @@ func (f *Fake) NudgeNow(name string, content []ContentBlock) error {
 	})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
 	}
 	return nil
 }
@@ -427,6 +477,9 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 	f.Calls = append(f.Calls, Call{Method: "Pending", Name: name})
 	if f.broken {
 		return nil, fmt.Errorf("session unavailable")
+	}
+	if err := f.PendingErrors[name]; err != nil {
+		return nil, err
 	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
@@ -491,6 +544,9 @@ func (f *Fake) GetMeta(name, key string) (string, error) {
 	if f.broken {
 		return "", fmt.Errorf("session unavailable")
 	}
+	if err := f.GetMetaErrors[name][key]; err != nil {
+		return "", err
+	}
 	return f.meta[name][key], nil
 }
 
@@ -551,6 +607,22 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// ListRunningComplete implements [ListingAttestation]: the in-memory listing
+// is complete unless ListingUnattested is set.
+func (f *Fake) ListRunningComplete() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.ListingUnattested
+}
+
+// Synthetic pids for the Fake's provider-owned pane root. The parent is a
+// stand-in for the provider's server process: what matters to consumers is that
+// it is > 1, i.e. the root has NOT been reparented to init.
+const (
+	fakePaneRootPID       = 4242
+	fakeProviderServerPID = 4200
+)
+
 // FindRuntimesBySessionID returns fake tracked and orphaned runtimes matching
 // a GC_SESSION_ID. Empty id returns all runtimes with a session ID.
 func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
@@ -577,6 +649,12 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 		runtime.IsTracked = false
 		out = append(out, runtime)
 	}
+	for _, extra := range f.ExtraRuntimes {
+		if id != "" && strings.TrimSpace(extra.SessionID) != id {
+			continue
+		}
+		out = append(out, extra)
+	}
 	for name, cfg := range f.sessions {
 		sessionID := cfg.Env["GC_SESSION_ID"]
 		if sessionID == "" {
@@ -589,11 +667,21 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 		if city == "" {
 			city = cfg.Env["GC_CITY"]
 		}
+		// A live provider-owned pane: its root process still has the provider's
+		// server as its parent, so PPID is a real pid rather than init and the
+		// scan can positively attribute the parent to the provider. That
+		// attribution is what separates this pane from a process that merely
+		// inherited GC_SESSION_ID (modeled through ExtraRuntimes, which sets no
+		// fields of its own), so it must be part of the fixture.
 		out = append(out, LiveRuntime{
-			SessionID:    sessionID,
-			City:         city,
-			ProviderName: name,
-			IsTracked:    true,
+			SessionID:                      sessionID,
+			City:                           city,
+			ProviderName:                   name,
+			IsTracked:                      true,
+			PID:                            fakePaneRootPID,
+			PPID:                           fakeProviderServerPID,
+			ParentIsProviderInfrastructure: true,
+			Name:                           cfg.Env["GC_AGENT_PROCESS"],
 		})
 	}
 	return out, nil
@@ -604,7 +692,10 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 func (f *Fake) TerminateRuntime(runtime LiveRuntime) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID})
+	// Value carries the PID: a session can have several scan hits (its pane root
+	// plus any detached process that merely inherited GC_SESSION_ID), so tests
+	// asserting WHICH process was terminated need more than the session id.
+	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID, Value: strconv.Itoa(runtime.PID)})
 	if f.broken {
 		return fmt.Errorf("terminating runtime %q: session unavailable", runtime.SessionID)
 	}

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -695,6 +696,36 @@ func recordSessionCircuitBreakerRestart(
 	return state, nil
 }
 
+// sessionCircuitBreakerEntrySnapshot is an identity's breaker entry before a
+// restart was recorded.
+type sessionCircuitBreakerEntrySnapshot struct {
+	entry   *circuitBreakerEntry
+	existed bool
+}
+
+// entrySnapshot captures identity's entry, to undo a restart that turned out
+// not to happen (restoreEntrySnapshot).
+func (b *sessionCircuitBreaker) entrySnapshot(identity string) sessionCircuitBreakerEntrySnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return sessionCircuitBreakerEntrySnapshot{entry: cloneCircuitBreakerEntry(b.entries[identity]), existed: b.entries[identity] != nil}
+}
+
+// restoreEntrySnapshot undoes a restart recorded for a start that never ran
+// (its PreWake was refused): identity's entry goes back to snap and the row's
+// breaker metadata follows. No identity is a no-op.
+func (b *sessionCircuitBreaker) restoreEntrySnapshot(sessFront *session.Store, id, identity string, snap sessionCircuitBreakerEntrySnapshot, now time.Time, stderr io.Writer) {
+	if b == nil || identity == "" {
+		return
+	}
+	b.mu.Lock()
+	b.restoreEntryLocked(identity, snap.entry, snap.existed)
+	b.mu.Unlock()
+	if err := persistSessionCircuitBreakerMetadata(sessFront, id, b, identity, now); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func cloneCircuitBreakerEntry(e *circuitBreakerEntry) *circuitBreakerEntry {
 	if e == nil {
 		return nil
@@ -833,19 +864,21 @@ func defaultSessionCircuitBreaker() *sessionCircuitBreaker {
 	return sessionCircuitBreakerSingleton
 }
 
-// setSessionCircuitBreakerForTest swaps the singleton, returning a cleanup
-// function that restores the previous value. Tests call this to inject a
-// fake-clocked breaker without touching production wiring.
-func setSessionCircuitBreakerForTest(b *sessionCircuitBreaker) func() {
+// setSessionCircuitBreakerForTest swaps the singleton for t, and restores the
+// previous one when t ends. Tests call this to inject a fake-clocked breaker
+// without touching production wiring. It and defaultSessionCircuitBreaker's
+// lazy build are the only writes of the singleton (the testrelax analyzer).
+func setSessionCircuitBreakerForTest(t testing.TB, b *sessionCircuitBreaker) {
+	t.Helper()
 	sessionCircuitBreakerMu.Lock()
 	prev := sessionCircuitBreakerSingleton
 	sessionCircuitBreakerSingleton = b
 	sessionCircuitBreakerMu.Unlock()
-	return func() {
+	t.Cleanup(func() {
 		sessionCircuitBreakerMu.Lock()
 		sessionCircuitBreakerSingleton = prev
 		sessionCircuitBreakerMu.Unlock()
-	}
+	})
 }
 
 // computeNamedSessionProgressSignatures returns a signature per named
@@ -859,25 +892,23 @@ func setSessionCircuitBreakerForTest(b *sessionCircuitBreaker) func() {
 // we resolve to the named-session identity via session bead metadata the
 // same way the rest of the reconciler does.
 func computeNamedSessionProgressSignatures(
-	sessionBeads []beads.Bead,
+	sessionInfos []session.Info,
 	assignedWorkBeads []beads.Bead,
 ) map[string]string {
-	if len(sessionBeads) == 0 {
+	if len(sessionInfos) == 0 {
 		return nil
 	}
 	// Build: resolver key -> identity. Bare session names and aliases are
 	// ignored when more than one configured identity claims the same key.
-	resolve := make(map[string]string, len(sessionBeads)*3)
-	bareResolve := make(map[string]string, len(sessionBeads)*2)
+	resolve := make(map[string]string, len(sessionInfos)*3)
+	bareResolve := make(map[string]string, len(sessionInfos)*2)
 	ambiguous := make(map[string]bool)
 	knownIdentities := make(map[string]bool)
-	for _, sb := range sessionBeads {
-		// Read the identity/name/alias resolver keys through the typed Info
-		// projection instead of cracking sb.Metadata inline. This scan runs in
-		// Phase 0.5 before the reconciler's coherent infoByID snapshot exists, so
-		// it projects per bead (the same shape advanceSessionDrainsWithSessionsTraced uses); the
-		// projection is pure, so it is byte-identical to the raw reads.
-		info := session.InfoFromPersistedBead(sb)
+	for _, info := range sessionInfos {
+		// The SESSION side is typed session.Info (per-parameter split, WI-5 W3);
+		// only the identity/name/alias resolver keys are read. The assigned-work
+		// slice stays raw (ClassWork). The caller feeds the tick's per-bead
+		// projection until W4 hands this the reconciler's typed []Info feed.
 		identity := strings.TrimSpace(info.ConfiguredNamedIdentity)
 		if identity == "" {
 			continue

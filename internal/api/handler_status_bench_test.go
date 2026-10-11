@@ -21,6 +21,10 @@ func (s *benchCounterStore) Count(_ context.Context, query beads.ListQuery, _ ..
 	return s.counts[query.Status], nil
 }
 
+func (s *benchCounterStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	return s.Store.(beads.ContextReadyReader).ReadyContext(ctx, query...)
+}
+
 // benchmarkStatusState seeds nStores rig stores with nBeads work beads each.
 // With useCounter the stores expose beads.Counter; otherwise the status
 // handler hydrates every bead through the legacy List path.
@@ -64,6 +68,9 @@ func benchmarkBuildStatusBody(b *testing.B, useCounter bool) {
 		body := s.buildStatusBody(ctx, false)
 		if body.Work.Open == 0 {
 			b.Fatal("Work.Open = 0, want seeded work")
+		}
+		if body.Partial {
+			b.Fatalf("Partial = true, want successful Ready projection; errors: %v", body.PartialErrors)
 		}
 	}
 }

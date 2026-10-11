@@ -49,22 +49,31 @@ func NewMuxSource(providers func() map[string]events.Provider, cursors func() ma
 
 // toExport projects a tagged event down to the exporter's closed primitive set.
 // It forwards only envelope-safe fields (seq/type/time/actor/subject) plus the
-// two opaque correlation ids (run_id/session_id) the record site stamped onto
-// the typed Event fields; it never reads Payload or Message, so a payload-decode
-// can never reintroduce free-form content. The ids are safeRef-gated again in
-// ProjectEvent before egress.
+// opaque run/session correlation ids and native execution-step topology stamped
+// onto typed Event fields; it never reads Payload or Message, so a payload-decode
+// can never reintroduce free-form content. ProjectEvent validates each field at
+// egress.
 func toExport(te events.TaggedEvent) eventexport.TaggedEvent {
 	return eventexport.TaggedEvent{
-		City:      te.City,
-		Seq:       te.Seq,
-		Type:      te.Type,
-		Ts:        te.Ts,
-		Actor:     te.Actor,
-		Subject:   te.Subject,
-		RunID:     te.RunID,
-		SessionID: te.SessionID,
-		StepID:    te.StepID,
+		City:             te.City,
+		Seq:              te.Seq,
+		Type:             te.Type,
+		Ts:               te.Ts,
+		Actor:            te.Actor,
+		Subject:          te.Subject,
+		RunID:            te.RunID,
+		SessionID:        te.SessionID,
+		StepID:           te.StepID,
+		DependsOnStepIDs: cloneStepDependencies(te.DependsOnStepIDs),
 	}
+}
+
+func cloneStepDependencies(dependencies *[]string) *[]string {
+	if dependencies == nil {
+		return nil
+	}
+	clone := append([]string(nil), (*dependencies)...)
+	return &clone
 }
 
 // Next yields the next tagged event, transparently rebuilding the multiplexer on
@@ -104,11 +113,12 @@ func (s *MuxSource) rebuild(ctx context.Context) error {
 	resume := make(map[string]uint64, len(provs))
 	s.mu.Lock()
 	for city, p := range provs {
+		floor, floorInitialized := s.floor[city]
 		switch {
 		case cur[city] > 0:
 			resume[city] = cur[city] // resume from acked
-		case s.floor[city] > 0:
-			resume[city] = s.floor[city] // keep the floor; never re-floor to a newer head
+		case floorInitialized:
+			resume[city] = floor // keep the floor; never re-floor to a newer head
 		default:
 			head, err := p.LatestSeq()
 			if err != nil {
