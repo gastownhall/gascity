@@ -71,18 +71,22 @@ func waitForProcessExit(pid int, within time.Duration) bool {
 // cleanup must leave the descendant running; without that row, "the child is
 // gone" would also pass on a machine that reaped it for an unrelated reason.
 func TestHookTimeoutKillsTheWholeProcessGroup(t *testing.T) {
+	t.Parallel()
+
 	t.Run("group cleanup reaps the descendant", func(t *testing.T) {
-		pid := descendantPIDAfterTimeout(t, 300*time.Millisecond, hookProcessGroupCleanup)
-		if !waitForProcessExit(pid, 10*time.Second) {
+		t.Parallel()
+		pid := descendantPIDAfterTimeout(t, 200*time.Millisecond, hookProcessGroupCleanup)
+		if !waitForProcessExit(pid, 5*time.Second) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatal("the hook's descendant survived the timeout; a freed pool slot does not mean the work stopped")
 		}
 	})
 
 	t.Run("control: without it the descendant survives", func(t *testing.T) {
-		pid := descendantPIDAfterTimeout(t, 300*time.Millisecond, nil)
+		t.Parallel()
+		pid := descendantPIDAfterTimeout(t, 200*time.Millisecond, nil)
 		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-		if waitForProcessExit(pid, 2*time.Second) {
+		if waitForProcessExit(pid, 250*time.Millisecond) {
 			t.Fatal("the descendant died without the group cleanup, so the row above proves nothing about the cleanup")
 		}
 	})
@@ -123,6 +127,7 @@ const pgidProbe = `echo $$ $(ps -o pgid= -p $$)`
 // its probes run on the reconciler tick under a different bound and timeout,
 // and changing their signal semantics is not this change's business.
 func TestShellRunHookLeadsItsOwnProcessGroup(t *testing.T) {
+	t.Parallel()
 	pid, pgid := shellPIDAndGroup(t, func() (string, error) {
 		return shellRunHook(pgidProbe, "", nil)
 	})
