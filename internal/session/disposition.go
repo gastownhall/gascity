@@ -43,7 +43,7 @@ const (
 	// a start, a retire) or writes one of its own.
 	UnknownIntent
 	// UnknownSince is an unparseable suspended_at, which stands until a cell
-	// that clears the stamp.
+	// that writes the stamp: every cell that sets or clears Since clears it.
 	UnknownSince
 )
 
@@ -380,16 +380,19 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 		}
 		if d.Operator == OperatorSuspended && d.Until.After(now) {
 			d.Since = now // a suspend in force is stamped again: a resume that read the old stamp refuses
+			d.Unknown &^= UnknownSince
 			return d, nil
 		}
 		until := ev.Until
 		if until.IsZero() {
 			until = now.Add(IndefiniteHoldDuration)
 		}
+		d.Unknown &^= UnknownSince
 		d.Operator, d.Until, d.Since, d.Heartbeat, d.IdleStop, d.WaitIntent = OperatorSuspended, until, now, time.Time{}, false, false
 		d.Unknown &^= UnknownHeldUntil
 	case EvSuspendSoft:
 		if d.Operator == OperatorNone {
+			d.Unknown &^= UnknownSince
 			d.Operator, d.Since, d.IdleStop = OperatorSuspendedSoft, now, false
 		}
 	case EvKill:
@@ -423,6 +426,7 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 	case EvSleep:
 		d.IdleStop = false
 		if d.Operator != OperatorSuspended {
+			d.Unknown &^= UnknownSince
 			d.Operator, d.Since = OperatorNone, time.Time{}
 		}
 	case EvPreWake:
@@ -467,6 +471,9 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 	default:
 		return refuse("no such event")
 	}
+	if d.Operator == OperatorSuspended || d.IdleStop || d.WaitIntent {
+		d.Unknown &^= UnknownIntent // a cell's own intent replaces an unrecognized one
+	}
 	return d, nil
 }
 
@@ -488,6 +495,7 @@ func (d Disposition) clearOperator() Disposition {
 	if d.Operator == OperatorSuspended {
 		d.Unknown &^= UnknownHeldUntil
 	}
+	d.Unknown &^= UnknownSince
 	d.Operator, d.Until, d.Since = OperatorNone, time.Time{}, time.Time{}
 	return d
 }

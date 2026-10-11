@@ -737,7 +737,7 @@ func TestKillSleepPatchWritesTheFencesHoldKeys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := classKeys(killSleepPatch(meta, now)), classKeys(fence.wrote); !maps.Equal(got, want) {
+		if got, want := classKeys(killSleepPatch(b.ID, meta, now)), classKeys(fence.wrote); !maps.Equal(got, want) {
 			t.Errorf("%s: killSleepPatch writes hold keys %v, the fence %v", name, got, want)
 		}
 	}

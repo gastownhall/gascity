@@ -396,7 +396,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := m.SetMetadataBatch(id, killSleepPatch(fieldBead(t, m, id).Metadata, now)); err != nil {
+				if err := m.SetMetadataBatch(id, killSleepPatch(id, fieldBead(t, m, id).Metadata, now)); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata

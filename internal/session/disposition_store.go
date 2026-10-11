@@ -106,7 +106,7 @@ func MoveDisposition(meta map[string]string, fresh Info, by ActorKind, ev DispEv
 	if err != nil {
 		return nil, from, err
 	}
-	patch := to.Changed().Into(nil)
+	patch := to.Changed().Into(fresh.ID, nil)
 	if life != nil {
 		for k, v := range life(from, to, fresh) {
 			if to.Encode().Has(k) {

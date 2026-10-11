@@ -15,12 +15,16 @@ Suspend by operator
   none+quarantine-expired       life=asleep   -> held_until=∞ quarantined_until=t0-1m0s sleep_intent=user-hold suspended_at=t00s
   none+unknown-timer            life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   none+unknown-quarantine       life=asleep   -> held_until=∞ quarantined_until=later sleep_intent=user-hold suspended_at=t00s
+  none+unknown-intent           life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  none+unreadable-stamp         life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended-no-until            life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended-unknown-until       life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended-soft                life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended-soft+unreadable     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
 
 Suspend by controller
   none                          life=asleep   -> REFUSED: only an operator's suspend holds
@@ -36,12 +40,16 @@ Suspend by controller
   none+quarantine-expired       life=asleep   -> REFUSED: only an operator's suspend holds
   none+unknown-timer            life=asleep   -> REFUSED: only an operator's suspend holds
   none+unknown-quarantine       life=asleep   -> REFUSED: only an operator's suspend holds
+  none+unknown-intent           life=asleep   -> REFUSED: only an operator's suspend holds
+  none+unreadable-stamp         life=asleep   -> REFUSED: only an operator's suspend holds
   suspended                     life=asleep   -> REFUSED: only an operator's suspend holds
   suspended+wait                life=asleep   -> REFUSED: only an operator's suspend holds
   suspended-finite-expired      life=asleep   -> REFUSED: only an operator's suspend holds
   suspended-no-until            life=asleep   -> REFUSED: only an operator's suspend holds
   suspended-unknown-until       life=asleep   -> REFUSED: only an operator's suspend holds
   suspended-soft                life=asleep   -> REFUSED: only an operator's suspend holds
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: only an operator's suspend holds
+  suspended-soft+unreadable     life=asleep   -> REFUSED: only an operator's suspend holds
 
 Suspend by operator until t02h0m0s
   none                          life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
@@ -57,12 +65,16 @@ Suspend by operator until t02h0m0s
   none+quarantine-expired       life=asleep   -> held_until=t02h0m0s quarantined_until=t0-1m0s sleep_intent=user-hold suspended_at=t00s
   none+unknown-timer            life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
   none+unknown-quarantine       life=asleep   -> held_until=t02h0m0s quarantined_until=later sleep_intent=user-hold suspended_at=t00s
+  none+unknown-intent           life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  none+unreadable-stamp         life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
   suspended-no-until            life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
   suspended-unknown-until       life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
   suspended-soft                life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
+  suspended-soft+unreadable     life=asleep   -> held_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
 
 SuspendSoft by controller
   none                          life=asleep   -> state=suspended suspended_at=t00s
@@ -78,12 +90,16 @@ SuspendSoft by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s state=suspended suspended_at=t00s
   none+unknown-timer            life=asleep   -> held_until=soon state=suspended suspended_at=t00s
   none+unknown-quarantine       life=asleep   -> quarantined_until=later state=suspended suspended_at=t00s
+  none+unknown-intent           life=asleep   -> sleep_intent=someday state=suspended suspended_at=t00s
+  none+unreadable-stamp         life=asleep   -> state=suspended suspended_at=t00s
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> state=suspended suspended_at=garbage
 
 SuspendSoft by sweep
   none                          life=asleep   -> state=suspended suspended_at=t00s
@@ -99,12 +115,16 @@ SuspendSoft by sweep
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s state=suspended suspended_at=t00s
   none+unknown-timer            life=asleep   -> held_until=soon state=suspended suspended_at=t00s
   none+unknown-quarantine       life=asleep   -> quarantined_until=later state=suspended suspended_at=t00s
+  none+unknown-intent           life=asleep   -> sleep_intent=someday state=suspended suspended_at=t00s
+  none+unreadable-stamp         life=asleep   -> state=suspended suspended_at=t00s
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> state=suspended suspended_at=garbage
 
 Kill by operator
   none                          life=asleep   -> (none)
@@ -120,12 +140,16 @@ Kill by operator
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> (none)
+  none+unreadable-stamp         life=asleep   -> (none)
   suspended                     life=asleep   -> (none)
   suspended+wait                life=asleep   -> wait_hold=true
   suspended-finite-expired      life=asleep   -> (none)
   suspended-no-until            life=asleep   -> (none)
   suspended-unknown-until       life=asleep   -> (none)
   suspended-soft                life=asleep   -> (none)
+  suspended+unreadable-stamp    life=asleep   -> (none)
+  suspended-soft+unreadable     life=asleep   -> (none)
 
 Kill by controller
   none                          life=asleep   -> REFUSED: only an operator kills
@@ -141,12 +165,16 @@ Kill by controller
   none+quarantine-expired       life=asleep   -> REFUSED: only an operator kills
   none+unknown-timer            life=asleep   -> REFUSED: only an operator kills
   none+unknown-quarantine       life=asleep   -> REFUSED: only an operator kills
+  none+unknown-intent           life=asleep   -> REFUSED: only an operator kills
+  none+unreadable-stamp         life=asleep   -> REFUSED: only an operator kills
   suspended                     life=asleep   -> REFUSED: only an operator kills
   suspended+wait                life=asleep   -> REFUSED: only an operator kills
   suspended-finite-expired      life=asleep   -> REFUSED: only an operator kills
   suspended-no-until            life=asleep   -> REFUSED: only an operator kills
   suspended-unknown-until       life=asleep   -> REFUSED: only an operator kills
   suspended-soft                life=asleep   -> REFUSED: only an operator kills
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: only an operator kills
+  suspended-soft+unreadable     life=asleep   -> REFUSED: only an operator kills
 
 Resume by operator
   none                          life=asleep   -> (none)
@@ -175,6 +203,10 @@ Resume by operator
   none+unknown-timer            life=draining -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
   none+unknown-quarantine       life=draining -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unknown-intent           life=draining -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> (none)
+  none+unreadable-stamp         life=draining -> (none)
   suspended                     life=asleep   -> (none)
   suspended                     life=draining -> REFUSED: the drain's stop owns the runtime
   suspended+wait                life=asleep   -> wait_hold=true
@@ -187,6 +219,10 @@ Resume by operator
   suspended-unknown-until       life=draining -> REFUSED: the drain's stop owns the runtime
   suspended-soft                life=asleep   -> (none)
   suspended-soft                life=draining -> (none)
+  suspended+unreadable-stamp    life=asleep   -> (none)
+  suspended+unreadable-stamp    life=draining -> REFUSED: the drain's stop owns the runtime
+  suspended-soft+unreadable     life=asleep   -> (none)
+  suspended-soft+unreadable     life=draining -> (none)
 
 Resume by agent
   none                          life=asleep   -> (none)
@@ -202,12 +238,16 @@ Resume by agent
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   none+unknown-quarantine       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended+wait                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-finite-expired      life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-no-until            life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-unknown-until       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-soft                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended-soft+unreadable     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
 
 Resume by background
   none                          life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
@@ -223,12 +263,16 @@ Resume by background
   none+quarantine-expired       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   none+unknown-timer            life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   none+unknown-quarantine       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  none+unknown-intent           life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  none+unreadable-stamp         life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended                     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended+wait                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-finite-expired      life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-no-until            life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-unknown-until       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-soft                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended-soft+unreadable     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
 
 Resume by controller
   none                          life=asleep   -> (none)
@@ -244,12 +288,16 @@ Resume by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   none+unknown-quarantine       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended+wait                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-finite-expired      life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-no-until            life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-unknown-until       life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
   suspended-soft                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended-soft+unreadable     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
 
 Resume by agent (runtime running)
   none                          life=asleep   -> (none)
@@ -265,12 +313,16 @@ Resume by agent (runtime running)
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
 
 Resume by background (runtime running)
   none                          life=asleep   -> (none)
@@ -286,12 +338,16 @@ Resume by background (runtime running)
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> REFUSED: the caller queues on a held row (HoldVerdict)
 
 Restart by agent
   none                          life=asleep   -> (none)
@@ -307,12 +363,16 @@ Restart by agent
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> state=suspended suspended_at=garbage
 
 Heartbeat by agent until t02h0m0s
   none                          life=asleep   -> held_until=t02h0m0s
@@ -328,12 +388,16 @@ Heartbeat by agent until t02h0m0s
   none+quarantine-expired       life=asleep   -> held_until=t02h0m0s quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=t02h0m0s
   none+unknown-quarantine       life=asleep   -> held_until=t02h0m0s quarantined_until=later
+  none+unknown-intent           life=asleep   -> held_until=t02h0m0s sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> held_until=t02h0m0s suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> held_until=t02h0m0s state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> held_until=t02h0m0s state=suspended suspended_at=garbage
 
 Heartbeat by agent until t030m0s
   none                          life=asleep   -> held_until=t030m0s
@@ -349,12 +413,16 @@ Heartbeat by agent until t030m0s
   none+quarantine-expired       life=asleep   -> held_until=t030m0s quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=t030m0s
   none+unknown-quarantine       life=asleep   -> held_until=t030m0s quarantined_until=later
+  none+unknown-intent           life=asleep   -> held_until=t030m0s sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> held_until=t030m0s suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> held_until=t030m0s state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> held_until=t030m0s state=suspended suspended_at=garbage
 
 WaitBegin by agent
   none                          life=asleep   -> sleep_intent=wait-hold wait_hold=true
@@ -370,12 +438,16 @@ WaitBegin by agent
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s sleep_intent=wait-hold wait_hold=true
   none+unknown-timer            life=asleep   -> held_until=soon sleep_intent=wait-hold wait_hold=true
   none+unknown-quarantine       life=asleep   -> quarantined_until=later sleep_intent=wait-hold wait_hold=true
+  none+unknown-intent           life=asleep   -> sleep_intent=wait-hold wait_hold=true
+  none+unreadable-stamp         life=asleep   -> sleep_intent=wait-hold suspended_at=garbage wait_hold=true
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s wait_hold=true
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s wait_hold=true
   suspended-no-until            life=asleep   -> sleep_intent=user-hold wait_hold=true
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold wait_hold=true
   suspended-soft                life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=t00s wait_hold=true
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage wait_hold=true
+  suspended-soft+unreadable     life=asleep   -> sleep_intent=wait-hold state=suspended suspended_at=garbage wait_hold=true
 
 WaitEnd by controller
   none                          life=asleep   -> (none)
@@ -391,12 +463,16 @@ WaitEnd by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> state=suspended suspended_at=garbage
 
 Sleep by controller
   none                          life=asleep   -> (none)
@@ -412,12 +488,16 @@ Sleep by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> (none)
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> (none)
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> (none)
 
 PreWake by controller
   none                          life=asleep   -> (none)
@@ -433,12 +513,16 @@ PreWake by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> (none)
+  none+unreadable-stamp         life=asleep   -> (none)
   suspended                     life=asleep   -> REFUSED: a suspended row never starts
   suspended+wait                life=asleep   -> REFUSED: a suspended row never starts
   suspended-finite-expired      life=asleep   -> REFUSED: a suspended row never starts
   suspended-no-until            life=asleep   -> REFUSED: a suspended row never starts
   suspended-unknown-until       life=asleep   -> REFUSED: a suspended row never starts
   suspended-soft                life=asleep   -> (none)
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: a suspended row never starts
+  suspended-soft+unreadable     life=asleep   -> (none)
 
 IdleStopBegin by controller
   none                          life=asleep   -> sleep_intent=idle-stop-pending
@@ -454,12 +538,16 @@ IdleStopBegin by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s sleep_intent=idle-stop-pending
   none+unknown-timer            life=asleep   -> held_until=soon sleep_intent=idle-stop-pending
   none+unknown-quarantine       life=asleep   -> quarantined_until=later sleep_intent=idle-stop-pending
+  none+unknown-intent           life=asleep   -> sleep_intent=idle-stop-pending
+  none+unreadable-stamp         life=asleep   -> sleep_intent=idle-stop-pending suspended_at=garbage
   suspended                     life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended+wait                life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-finite-expired      life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-no-until            life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-unknown-until       life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-soft                life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended-soft+unreadable     life=asleep   -> REFUSED: an idle stop never runs over a hold
 
 IdleStopEnd by controller
   none                          life=asleep   -> (none)
@@ -475,12 +563,16 @@ IdleStopEnd by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended+wait                life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-finite-expired      life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-no-until            life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-unknown-until       life=asleep   -> REFUSED: an idle stop never runs over a hold
   suspended-soft                life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: an idle stop never runs over a hold
+  suspended-soft+unreadable     life=asleep   -> REFUSED: an idle stop never runs over a hold
 
 Quarantine by controller until t02h0m0s
   none                          life=asleep   -> quarantined_until=t02h0m0s
@@ -496,12 +588,16 @@ Quarantine by controller until t02h0m0s
   none+quarantine-expired       life=asleep   -> quarantined_until=t02h0m0s
   none+unknown-timer            life=asleep   -> held_until=soon quarantined_until=t02h0m0s
   none+unknown-quarantine       life=asleep   -> quarantined_until=t02h0m0s
+  none+unknown-intent           life=asleep   -> quarantined_until=t02h0m0s sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> quarantined_until=t02h0m0s suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ quarantined_until=t02h0m0s sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ quarantined_until=t02h0m0s sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> held_until=t0-1m0s quarantined_until=t02h0m0s sleep_intent=user-hold suspended_at=t0-1h0m0s
   suspended-no-until            life=asleep   -> quarantined_until=t02h0m0s sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon quarantined_until=t02h0m0s sleep_intent=user-hold
   suspended-soft                life=asleep   -> quarantined_until=t02h0m0s state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ quarantined_until=t02h0m0s sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> quarantined_until=t02h0m0s state=suspended suspended_at=garbage
 
 TimerTick by controller
   none                          life=asleep   -> (none)
@@ -517,12 +613,16 @@ TimerTick by controller
   none+quarantine-expired       life=asleep   -> (none)
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=t00s
   suspended+wait                life=asleep   -> held_until=∞ sleep_intent=user-hold wait_hold=true
   suspended-finite-expired      life=asleep   -> (none)
   suspended-no-until            life=asleep   -> sleep_intent=user-hold
   suspended-unknown-until       life=asleep   -> held_until=soon sleep_intent=user-hold
   suspended-soft                life=asleep   -> state=suspended suspended_at=t00s
+  suspended+unreadable-stamp    life=asleep   -> held_until=∞ sleep_intent=user-hold suspended_at=garbage
+  suspended-soft+unreadable     life=asleep   -> state=suspended suspended_at=garbage
 
 Wake by operator
   none                          life=asleep   -> (none)
@@ -538,12 +638,16 @@ Wake by operator
   none+quarantine-expired       life=asleep   -> (none)
   none+unknown-timer            life=asleep   -> (none)
   none+unknown-quarantine       life=asleep   -> (none)
+  none+unknown-intent           life=asleep   -> (none)
+  none+unreadable-stamp         life=asleep   -> (none)
   suspended                     life=asleep   -> (none)
   suspended+wait                life=asleep   -> (none)
   suspended-finite-expired      life=asleep   -> (none)
   suspended-no-until            life=asleep   -> (none)
   suspended-unknown-until       life=asleep   -> (none)
   suspended-soft                life=asleep   -> (none)
+  suspended+unreadable-stamp    life=asleep   -> (none)
+  suspended-soft+unreadable     life=asleep   -> (none)
 
 Wake by controller
   none                          life=asleep   -> (none)
@@ -559,12 +663,16 @@ Wake by controller
   none+quarantine-expired       life=asleep   -> quarantined_until=t0-1m0s
   none+unknown-timer            life=asleep   -> held_until=soon
   none+unknown-quarantine       life=asleep   -> quarantined_until=later
+  none+unknown-intent           life=asleep   -> sleep_intent=someday
+  none+unreadable-stamp         life=asleep   -> suspended_at=garbage
   suspended                     life=asleep   -> REFUSED: only an operator's wake clears a hold
   suspended+wait                life=asleep   -> REFUSED: only an operator's wake clears a hold
   suspended-finite-expired      life=asleep   -> REFUSED: only an operator's wake clears a hold
   suspended-no-until            life=asleep   -> REFUSED: only an operator's wake clears a hold
   suspended-unknown-until       life=asleep   -> REFUSED: only an operator's wake clears a hold
   suspended-soft                life=asleep   -> REFUSED: only an operator's wake clears a hold
+  suspended+unreadable-stamp    life=asleep   -> REFUSED: only an operator's wake clears a hold
+  suspended-soft+unreadable     life=asleep   -> REFUSED: only an operator's wake clears a hold
 
 Retire by controller
   none                          life=asleep   -> (none)
@@ -580,9 +688,13 @@ Retire by controller
   none+quarantine-expired       life=asleep   -> (none)
   none+unknown-timer            life=asleep   -> (none)
   none+unknown-quarantine       life=asleep   -> (none)
+  none+unknown-intent           life=asleep   -> (none)
+  none+unreadable-stamp         life=asleep   -> (none)
   suspended                     life=asleep   -> (none)
   suspended+wait                life=asleep   -> (none)
   suspended-finite-expired      life=asleep   -> (none)
   suspended-no-until            life=asleep   -> (none)
   suspended-unknown-until       life=asleep   -> (none)
   suspended-soft                life=asleep   -> (none)
+  suspended+unreadable-stamp    life=asleep   -> (none)
+  suspended-soft+unreadable     life=asleep   -> (none)

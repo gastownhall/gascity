@@ -2540,7 +2540,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	case infoErr == nil:
 		now := time.Now().UTC()
 		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
-			return killSleepPatch(b.Metadata, now), true
+			return killSleepPatch(b.ID, b.Metadata, now), true
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}

@@ -58,7 +58,7 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		if err != nil {
 			return nil, false
 		}
-		write := map[string]string(killed.Changed().Into(session.LifecycleOnly(patch)))
+		write := map[string]string(killed.Changed().Into(sessionID, session.LifecycleOnly(patch)))
 		// Capture the pre-image from the same observation the fenced write is
 		// conditioned on, so a rollback restores the row the kill replaced.
 		restore := make(map[string]string, len(write))
@@ -152,12 +152,12 @@ func applySessionKillFencePatch(store beads.Store, sessionID string, decide func
 // killSleepPatch is the kill's asleep sync with no fence, on the row's fresh
 // metadata: SleepPatch's lifecycle, the wake request cleared, and the Kill
 // cell's class keys, as the fence writes them (no heartbeat-shaped hold left).
-func killSleepPatch(meta map[string]string, now time.Time) map[string]string {
+func killSleepPatch(id string, meta map[string]string, now time.Time) map[string]string {
 	patch := map[string]string(session.LifecycleOnly(session.SleepPatch(now, string(session.SleepReasonKilled))))
 	patch["synced_at"] = now.Format(time.RFC3339)
 	maps.Copy(patch, session.ClearWakeRequestPatch())
 	if killed, err := session.DecodeDisposition(meta).Apply(session.ActorOperator, session.DispEvent{Kind: session.EvKill}, session.State(meta["state"]), now); err == nil {
-		killed.Changed().Into(patch)
+		killed.Changed().Into(id, patch)
 	}
 	return patch
 }

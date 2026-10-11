@@ -11,9 +11,10 @@ import "sync/atomic"
 
 var sessionKeyHook atomic.Pointer[func(key string)]
 
-// sessionWriteHook sees each update's whole metadata patch to a session row
-// (not a create's seed), for internal/session's disposition write guard.
-var sessionWriteHook atomic.Pointer[func(kvs map[string]string)]
+// sessionWriteHook sees each write's whole metadata to a session row, an
+// update's patch or a create's seed, once per write, with the row's ID, for
+// internal/session's disposition write guard.
+var sessionWriteHook atomic.Pointer[func(id string, kvs map[string]string)]
 
 // SetSessionKeyHook installs fn to see every metadata key a MemStore writes to
 // a session bead; nil removes it.
@@ -25,9 +26,9 @@ func SetSessionKeyHook(fn func(key string)) {
 	sessionKeyHook.Store(&fn)
 }
 
-// SetSessionWriteHook installs fn to see every metadata patch an update
-// writes to a session bead; nil removes it.
-func SetSessionWriteHook(fn func(kvs map[string]string)) {
+// SetSessionWriteHook installs fn to see every metadata write to a session
+// bead, an update's patch or a create's seed; nil removes it.
+func SetSessionWriteHook(fn func(id string, kvs map[string]string)) {
 	if fn == nil {
 		sessionWriteHook.Store(nil)
 		return
@@ -39,17 +40,8 @@ func SetSessionWriteHook(fn func(kvs map[string]string)) {
 // row to learn its type only in a guarded test.
 func sessionHooked() bool { return sessionKeyHook.Load() != nil || sessionWriteHook.Load() != nil }
 
-// noteSessionCreate reports a created session row's seed keys to the key
-// hook; a seed is no update, so the write hook does not see it.
-func noteSessionCreate(b Bead) {
-	if isSessionBead(b) {
-		if fn := sessionKeyHook.Load(); fn != nil {
-			for k := range b.Metadata {
-				(*fn)(k)
-			}
-		}
-	}
-}
+// noteSessionCreate reports a created session row's seed to both hooks.
+func noteSessionCreate(b Bead) { noteSessionKeys(b, b.Metadata) }
 
 // isSessionBead is type "session", or untyped with the "gc:session" label
 // (internal/session's BeadType and LabelSession, which this package cannot
@@ -71,7 +63,7 @@ func noteSessionKeys(b Bead, kvs map[string]string) {
 		}
 	}
 	if fn := sessionWriteHook.Load(); fn != nil {
-		(*fn)(kvs)
+		(*fn)(b.ID, kvs)
 	}
 }
 

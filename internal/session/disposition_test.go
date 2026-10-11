@@ -44,12 +44,16 @@ func dispSeeds() []struct {
 		{"none+quarantine-expired", map[string]string{"quarantined_until": at(-time.Minute)}},
 		{"none+unknown-timer", map[string]string{"held_until": "soon"}},
 		{"none+unknown-quarantine", map[string]string{"quarantined_until": "later"}},
+		{"none+unknown-intent", map[string]string{"sleep_intent": "someday"}},
+		{"none+unreadable-stamp", map[string]string{"suspended_at": "garbage"}},
 		{"suspended", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "suspended_at": at(0)}},
 		{"suspended+wait", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "wait_hold": "true"}},
 		{"suspended-finite-expired", map[string]string{"sleep_intent": "user-hold", "held_until": at(-time.Minute), "suspended_at": at(-time.Hour)}},
 		{"suspended-no-until", map[string]string{"sleep_intent": "user-hold"}},
 		{"suspended-unknown-until", map[string]string{"sleep_intent": "user-hold", "held_until": "soon"}},
 		{"suspended-soft", map[string]string{"state": "suspended", "suspended_at": at(0)}},
+		{"suspended+unreadable-stamp", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "suspended_at": "garbage"}},
+		{"suspended-soft+unreadable", map[string]string{"state": "suspended", "suspended_at": "garbage"}},
 	}
 	out := make([]struct {
 		name string
