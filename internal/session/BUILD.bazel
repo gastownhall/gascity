@@ -97,6 +97,7 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "acp_permission_test.go",
         "actor_fence_test.go",
         "actor_test.go",
         "address_directory_test.go",

@@ -150,7 +150,7 @@ func TestArmCloseDecides(t *testing.T) {
 			want: decideCloseFailedCreate, check: func(t *testing.T, it intent) {
 				want := failedCreateCloseLife(gatherNow)
 				want["sleep_intent"], want["wait_hold"] = "", "" // the Retire cell's clears
-				if !maps.Equal(it.Patch, want) {
+				if !maps.Equal(it.folded(), want) || !it.Class.Has("sleep_intent") {
 					t.Errorf("patch %v, want failedCreateClosePatch's lifecycle with the Retire cell (%v)", it.Patch, want)
 				}
 			},

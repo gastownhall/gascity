@@ -133,7 +133,7 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 			}
 		}
 	}
-	base := foldInfo(v.Row, v.It.Patch) // a dead committed row's heal and accrual (A6 item 4)
+	base := foldInfo(v.Row, v.It.folded()) // a dead committed row's heal and accrual (A6 item 4)
 	_, _, patch, class := preWakePatch(base, v.Now, f.token)
 	maps.Copy(patch, class.Fold())
 	next := foldInfo(foldInfo(base, patch), f.bind)
@@ -185,35 +185,37 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return healInstead(v, txStep{Refuse: causeSessionName})
-	case session.HoldsInfo(foldInfo(v.Row, v.It.Patch), v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too; TODO(R7): Disposition
+	case session.HoldsInfo(foldInfo(v.Row, v.It.folded()), v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too; TODO(R7): Disposition
 		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
 	}
 	tp := ticket.launch.tp
-	base := foldInfo(v.Row, v.It.Patch)
+	base := foldInfo(v.Row, v.It.folded())
 	patch := maps.Clone(v.It.Patch)
 	if patch == nil {
 		patch = session.MetadataPatch{}
 	}
-	_, _, wake, class := preWakePatch(base, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{wake, class.Fold(), f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
+	_, _, wake, wakeClass := preWakePatch(base, v.Now, f.token)
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
+	// The heal's cells and then the PreWake cell, minted at the write.
+	class := v.It.Class.With(wakeClass)
 	if len(f.reset) > 0 {
 		epoch, _ := strconv.Atoi(patch["continuation_epoch"])
 		patch["continuation_epoch"], patch["continuation_reset_pending"] = strconv.Itoa(epoch+1), ""
 	}
-	next := foldInfo(v.Row, patch)
+	next := foldInfo(foldInfo(v.Row, patch), class.Fold())
 	transcript := f.transcript
 	if next.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" && f.key != "" {
 		patch["session_key"], transcript = f.key, sessTranscriptAbsent
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch, len(f.reset) > 0)}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
-	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
+	return txStep{Write: patch, Class: class, Facts: effectFacts{Work: f.work}, Pass: pass}
 }
 
 // preWakeUndoOf is what a failed launch restores (S3) of the PreWake
@@ -428,7 +430,8 @@ func commitStep(v txView) txStep {
 	case errors.Is(out.err, runtime.ErrSessionInitializing) || errors.Is(out.err, runtime.ErrRuntimeUnavailable):
 		return txStep{Fail: causeStartDeferred, Err: out.err}
 	case runtime.IsProviderCapacity(out.err) && out.paced:
-		return txStep{Write: restorePatch(out.undo, v.Meta), Fail: causeCapacity, Err: out.err}
+		patch, class := restorePatch(out.undo, v.Meta)
+		return txStep{Write: patch, Class: class, Fail: causeCapacity, Err: out.err}
 	case runtime.IsProviderCapacity(out.err): // no ticket, or the poison valve blamed this template: legacy's failure arms, which back off
 		return failStart(v, out, causeStartError, out.err)
 	case died && (v.RT.Class == rtAbsent || v.RT.Class == rtCorpse || v.RT.Class == rtZombie):

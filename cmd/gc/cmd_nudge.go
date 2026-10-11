@@ -3082,11 +3082,20 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 // queuedNudgeReleaseAfter reports whether a delivery error leaves the nudges
 // undelivered rather than failed, so their claims are released without
 // spending one of their bounded attempts, and when a later pass may claim them
-// again. A session that went away may be back at once. A permission prompt the
-// runtime refused to type into (#2892) stays up until someone answers it, so
-// claiming the nudges again on the very next pass would only be refused again.
+// again. A vanished session and a seat holding a pending interaction are
+// refusals, not delivery failures: nothing was typed, and charging them would
+// dead-letter a good nudge for arriving at the wrong moment. A session that
+// went away may be back at once. The ACP provider refuses a nudge while it
+// holds a permission request, and the next pass tries again. A permission
+// prompt the runtime refused to type into (#2892) stays up until someone
+// answers it, so claiming the nudges again on the very next pass would only
+// be refused again.
 func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 	switch {
+	// Before ErrPendingInteraction: the session layer wraps this refusal in
+	// session.ErrPendingInteraction, which is that sentinel.
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
+		return time.Time{}, true
 	case errors.Is(err, runtime.ErrPendingInteraction):
 		return now.Add(defaultQueuedNudgeRetryDelay), true
 	case errors.Is(err, runtime.ErrSessionNotFound):

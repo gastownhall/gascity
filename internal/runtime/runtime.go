@@ -51,6 +51,18 @@ var ErrInputClearSkipped = errors.New("input box left alone: a client may be att
 // sent nothing rather than guess which option to pick.
 var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
 
+// ErrInteractionResponseInvalid reports that a response to a pending
+// interaction cannot be applied: it names no outstanding request, or its
+// action is unknown or not offered by the interaction. The interaction stays
+// pending so the caller can answer again.
+var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
+
+// ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
+// the session is blocked on a pending interaction, such as a tool-call
+// approval a client has not answered yet. Delivery layers translate it into
+// their own refusal (session.ErrPendingInteraction).
+var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
+
 // ErrSessionDiedDuringStartup reports that a provider created a session
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
@@ -161,10 +173,52 @@ func MetaValue(v string, err error) (string, error) {
 // still return raw strings). Callers that treat a missing session as
 // benign (e.g. bulk Stop) use this helper so the semantics live in one
 // place.
+//
+// A joined error is gone only when every leaf is: a composite's Stop joins a
+// failed backend's error with another backend's "not found", and errors.Is
+// (or a substring of the joined message) would read that failed kill as gone.
+// A wrap over a join is judged by the join, not by the wrap's text. An error
+// tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
-	if err == nil {
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
+	case nil:
 		return false
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return isSessionGoneLeaf(err)
+		}
+		for _, child := range children {
+			if !IsSessionGone(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		if wrapsJoin(wrapped.Unwrap()) {
+			return IsSessionGone(wrapped.Unwrap())
+		}
 	}
+	return isSessionGoneLeaf(err)
+}
+
+// wrapsJoin reports whether err's single-wrap chain reaches a non-empty join.
+func wrapsJoin(err error) bool {
+	for err != nil {
+		switch wrapped := err.(type) { //nolint:errorlint // walks the wrap chain by hand to find a join
+		case interface{ Unwrap() []error }:
+			return len(wrapped.Unwrap()) > 0
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isSessionGoneLeaf is IsSessionGone's rule for an error tree with no join.
+func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
 	}
@@ -507,15 +561,30 @@ type IdleProbeBudgetProvider interface {
 // idleness for interactive TUIs whose coarse activity clock (last pane
 // output) cannot distinguish an idle-but-repainting TUI from a working one —
 // a TUI that continuously repaints its status line keeps the activity clock
-// perpetually fresh even while genuinely idle.
+// perpetually fresh even while genuinely idle. The pool execution backstop
+// uses its busy reading the other way, to keep a stale activity clock from
+// counting a session that is still working as quiet.
 //
-// idle reports whether the session currently looks idle. A non-nil err means
-// the observation could not be made (the caller must not treat the session as
-// idle on error); a session that has gone away is reported as an error, not as
-// idle.
+// idle reports whether the session currently looks idle; idle=false with a nil
+// err is the provider's busy reading. What that proves is provider-specific:
+// for ACP a prompt response is outstanding, while a pane scan found an
+// active-processing indicator string in its capture, usually the live
+// indicator but possibly a stale frame or transcript text.
+// [ErrIdleIndeterminate] means the observation was made but matched neither a
+// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// other non-nil err means the observation could not be made (the caller must
+// not treat the session as idle on error); a session that has gone away is
+// reported as an error, not as idle.
 type IdleSnapshotProvider interface {
 	SnapshotIdle(name string) (idle bool, err error)
 }
+
+// ErrIdleIndeterminate reports that an [IdleSnapshotProvider] observation saw
+// neither a ready prompt nor an active-processing indicator: the prompt may be
+// scrolled away, covered by an alternate screen, or overwritten by a broadcast
+// message. It is not evidence of a running turn; callers fall back to the
+// signal they would use without a snapshot.
+var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard

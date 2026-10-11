@@ -130,8 +130,8 @@ func abandonStep(v txView) txStep {
 	if err != nil {
 		return txStep{Fail: causeCallError, Err: err}
 	}
-	abandon := func(patch session.MetadataPatch, facts effectFacts) txStep {
-		return txStep{Write: patch, Fail: f.cause, Err: f.err, Facts: facts}
+	abandon := func(patch session.MetadataPatch, class session.DispositionPatch, facts effectFacts) txStep {
+		return txStep{Write: patch, Class: class, Fail: f.cause, Err: f.err, Facts: facts}
 	}
 	var facts effectFacts
 	if f.pending && f.terminal == "" && errors.Is(f.err, context.DeadlineExceeded) {
@@ -141,11 +141,12 @@ func abandonStep(v txView) txStep {
 	case f.cause == causeAttribution: // deferred: S1 attributes it next pass
 		return txStep{Refuse: causeAttribution, Err: f.err}
 	case f.terminal != "" && !f.pending:
-		return abandon(providerTerminalErrorPatch(f.terminal, v.Now), facts)
+		return abandon(providerTerminalErrorPatch(f.terminal, v.Now), session.DispositionPatch{}, facts)
 	case f.rateLimit:
-		return abandon(rateLimitQuarantine(v.Row, v.Now), facts)
+		patch, class := rateLimitQuarantine(v.Row, v.Now)
+		return abandon(patch, class, facts)
 	case f.cause == causePrepare, f.pending && f.terminal == "" && f.configured && !f.died:
-		return abandon(session.MetadataPatch{"last_woke_at": ""}, facts)
+		return abandon(session.MetadataPatch{"last_woke_at": ""}, session.DispositionPatch{}, facts)
 	case f.pending:
 		td, cause := ownTeardown(v)
 		if cause != "" {
@@ -157,11 +158,11 @@ func abandonStep(v txView) txStep {
 		}
 		return txStep{Pass: td, Facts: facts}
 	}
-	patch, quarantined := otherFailurePatch(v.Row, v.Meta, f, v.Now)
+	patch, class, quarantined := otherFailurePatch(v.Row, v.Meta, f, v.Now)
 	if quarantined {
 		facts.Quarantined = f.display
 	}
-	return abandon(patch, facts)
+	return abandon(patch, class, facts)
 }
 
 // otherFailurePatch is S3's any-other class: PreWake restored, unless it
@@ -170,13 +171,14 @@ func abandonStep(v txView) txStep {
 // conversation reset unless its transcript is on disk (unprobeable
 // providers included), and one wake attempt more, quarantined at the
 // threshold.
-func otherFailurePatch(row session.Info, meta map[string]string, f startFailureRead, now time.Time) (_ session.MetadataPatch, quarantined bool) {
+func otherFailurePatch(row session.Info, meta map[string]string, f startFailureRead, now time.Time) (_ session.MetadataPatch, _ session.DispositionPatch, quarantined bool) {
 	patch := session.MetadataPatch{}
+	var class session.DispositionPatch
 	if !f.relaunched {
-		patch = restorePatch(f.undo, meta)
+		patch, class = restorePatch(f.undo, meta)
 	}
 	if !creating(row) {
-		return patch, false
+		return patch, class, false
 	}
 	if (row.SessionKey != "" || row.StartedConfigHash != "") && !f.keeps {
 		maps.Copy(patch, session.ConversationResetPatch(true))
@@ -184,23 +186,21 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
 	accrual := session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, now.Add(defaultQuarantineDuration))
 	maps.Copy(patch, accrual.Patch)
-	maps.Copy(patch, accrual.Class(row, now).Fold())
-	return patch, accrual.Quarantined
+	return patch, class.With(accrual.Class(row, now)), accrual.Quarantined
 }
 
 // restorePatch is restorePreWakeState's decide on the fresh row's
 // metadata: each key PreWake wrote goes back while it still holds PreWake's
 // value, so anything written since wins.
-func restorePatch(u preWakeUndo, meta map[string]string) session.MetadataPatch {
+func restorePatch(u preWakeUndo, meta map[string]string) (session.MetadataPatch, session.DispositionPatch) {
 	patch := make(session.MetadataPatch, len(u.restore))
 	for key, value := range u.restore {
 		if written := u.written[key]; meta[key] == written && value != written {
 			patch[key] = value
 		}
 	}
-	// The PreWake cell's undo, folded (the v2 deciders cannot mint).
-	maps.Copy(patch, session.UndoDisposition(u.before, u.class, meta).Fold())
-	return patch
+	// The PreWake cell's undo, typed: the write mints it.
+	return patch, session.UndoDisposition(u.before, u.class, meta)
 }
 
 // teardown is a rollback's own-runtime stop, when it has one, and what its
@@ -280,7 +280,8 @@ func rollbackClose(v txView) txStep {
 	case stop:
 		return txStep{Refuse: causeRuntimePresent}
 	}
-	return txStep{Terminal: rollbackPatch(v.Row, v.Now, td.more), Fail: td.fail, Err: td.err}
+	patch, class := rollbackPatch(v.Row, v.Now, td.more)
+	return txStep{Terminal: patch, Class: class, Fail: td.fail, Err: td.err}
 }
 
 // rollbackable is CanRollback on the row the premise holds to the expected
@@ -291,27 +292,25 @@ func rollbackable(row session.Info) bool {
 }
 
 // rateLimitQuarantine is legacy's recordRateLimitQuarantine for row at now: its
-// lifecycle and the Quarantine cell's quarantined_until, folded (the v2
-// deciders cannot mint; the write admits it).
-func rateLimitQuarantine(row session.Info, now time.Time) session.MetadataPatch {
-	patch := session.RateLimitQuarantinePatch()
-	maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now).Fold())
-	return patch
+// lifecycle and the Quarantine cell's quarantined_until (class, minted by the
+// write).
+func rateLimitQuarantine(row session.Info, now time.Time) (session.MetadataPatch, session.DispositionPatch) {
+	return session.RateLimitQuarantinePatch(), session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now)
 }
 
 // rollbackPatch is legacy's rollbackPendingCreateClears as one atomic close:
 // last_woke_at cleared, more, then failedCreateClosePatch over them, and an
 // explicit session name cleared in the same write (legacy clears it in a
 // second write once the close landed).
-func rollbackPatch(row session.Info, now time.Time, more session.MetadataPatch) session.MetadataPatch {
+func rollbackPatch(row session.Info, now time.Time, more session.MetadataPatch) (session.MetadataPatch, session.DispositionPatch) {
 	patch := session.MetadataPatch{"last_woke_at": ""}
 	maps.Copy(patch, more)
 	maps.Copy(patch, failedCreateCloseLife(now))
-	maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
 	if strings.TrimSpace(row.SessionNameExplicit) == "true" {
 		patch["session_name"] = ""
 	}
-	return patch
+	// The row ends: its holds are the disposition's Retire cell.
+	return patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now)
 }
 
 // rollbackSections are A10's rollback (C3): a screen on its listed dead pane
@@ -325,36 +324,43 @@ var rollbackSections = []section{
 // paneScreen is legacy's checkRateLimitStability on the rollback's fresh
 // read: a crash candidate whose pane is listed but not alive is peeked; a
 // terminal provider error parks it, a rate-limit screen quarantines it.
-func paneScreen(ctx context.Context, _ effectReads, v txView) (session.MetadataPatch, error) {
+// screenWrite is a pane screen's write: its patch and its cells' keys.
+type screenWrite struct {
+	patch session.MetadataPatch
+	class session.DispositionPatch
+}
+
+func paneScreen(ctx context.Context, _ effectReads, v txView) (screenWrite, error) {
 	if v.RT == nil || v.RT.Class != rtZombie && v.RT.Class != rtCorpse || v.World.Env == nil || v.World.Env.Cfg == nil {
-		return nil, nil
+		return screenWrite{}, nil
 	}
 	facts := session.ExitFacts{SubprocessProvider: v.World.Env.Cfg.Session.Provider == "subprocess", LastWokeAt: v.Row.LastWokeAt, Now: v.Now, ScreenAvailable: true}
 	if session.DecideSessionExit(facts) != session.ExitGatherScreen {
-		return nil, nil
+		return screenWrite{}, nil
 	}
 	content := peekPane(ctx, v.RT.leaf, strings.TrimSpace(v.Row.SessionName))
 	if reason := runtime.ProviderTerminalErrorReason(content); reason != "" {
-		return providerTerminalErrorPatch(reason, v.Now), nil
+		return screenWrite{patch: providerTerminalErrorPatch(reason, v.Now)}, nil
 	}
 	if facts.Screen = session.ScreenOther; runtime.ContainsProviderRateLimitScreen(content) {
 		facts.Screen = session.ScreenRateLimit
 	}
 	if session.DecideSessionExit(facts) == session.ExitRateLimitQuarantine {
-		return rateLimitQuarantine(v.Row, v.Now), nil
+		patch, class := rateLimitQuarantine(v.Row, v.Now)
+		return screenWrite{patch: patch, class: class}, nil
 	}
-	return nil, nil
+	return screenWrite{}, nil
 }
 
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
 // teardown of the fresh read's own runtime for the Call.
-func rollbackStep(v txView, screen session.MetadataPatch, _ error) txStep {
+func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 	td, cause := ownTeardown(v)
 	switch {
 	case !rollbackable(v.Row):
 		return txStep{Refuse: causeRedecided}
-	case len(screen) > 0:
-		return txStep{Write: screen, Done: true}
+	case len(screen.patch) > 0 || screen.class.Len() > 0:
+		return txStep{Write: screen.patch, Class: screen.class, Done: true}
 	case cause != "":
 		return txStep{Refuse: cause}
 	}

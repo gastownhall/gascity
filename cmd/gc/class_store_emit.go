@@ -555,10 +555,17 @@ func (s *emittingClassStore) DepRemove(issueID, dependsOnID string) error {
 // beads package publishes for it, or with the zero value where the question is
 // a capability question and the honest answer is "no".
 
+// CreateWithStorage forwards a storage-class create. The wrapper carries the
+// method for every engine, so a caller's StorageCreateStore assertion always
+// matches it, including over the native Dolt engine, which has no such
+// capability. Over such an engine it does what that caller does for a store
+// without one (createWithStoragePolicy): the storage class rides the bead's
+// own flags through the plain create, which still emits (mc-03yxh: refusing
+// broke `gc session new` on every single-store native Dolt city).
 func (s *emittingClassStore) CreateWithStorage(bead beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
 	creator, ok := s.Store.(beads.StorageCreateStore)
 	if !ok {
-		return beads.Bead{}, fmt.Errorf("creating with a storage class: %T does not support it", s.Store)
+		return s.Create(applyStorageClass(bead, storage))
 	}
 	created, err := creator.CreateWithStorage(bead, storage)
 	s.emitCreated(created, err)

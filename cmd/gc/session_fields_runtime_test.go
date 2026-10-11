@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -320,7 +321,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		return func(t *testing.T, meta []string) map[string]string {
 			c := newHealCase(t, livenessAlive, desireKeep, meta...)
 			it, _ := arm(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
-			if err := c.store.SetMetadataBatch(c.k.ID, it.Patch); err != nil {
+			if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
 				t.Fatal(err)
 			}
 			return c.meta(t)
@@ -455,10 +456,10 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				c := ownRuntimeCase(t, "tok-3", meta...)
 				it, ok := armAwakeHeal(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
-				if !ok || it.Patch["state"] != "awake" {
+				if !ok || it.folded()["state"] != "awake" {
 					t.Fatalf("the awake heal did not fire: %+v", it)
 				}
-				if err := c.store.SetMetadataBatch(c.k.ID, it.Patch); err != nil {
+				if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
 					t.Fatal(err)
 				}
 				return c.meta(t)
@@ -477,7 +478,11 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		},
 		"cmd/gc/reconcile_session_decide.go:timerHealPatch": {
 			[]string{"state", "active", unknownStateFirstSeenKey, ago(time.Hour), unknownStateValueKey, "weird", unknownStateEscalatedKey, ago(time.Minute)},
-			patchSite(func(i session.Info) session.MetadataPatch { p, _ := timerHealPatch(i, now); return p }),
+			patchSite(func(i session.Info) session.MetadataPatch {
+				p, class, _ := timerHealPatch(i, now)
+				maps.Copy(p, class.Fold())
+				return p
+			}),
 		},
 		"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced": {
 			[]string{"wait_hold", "true", "sleep_intent", "wait-hold", "sleep_reason", "wait-hold"},

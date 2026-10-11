@@ -119,6 +119,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a client watches the event stream; a consumer that matches these events on
   actor `api` must match `controller` (#7083).
 
+- **An ACP agent's permission request now waits for an answer through `/pending`
+  and `/respond`.** gc used to drop the agent's `session/request_permission`, so
+  the turn hung. It now holds the request, and `POST .../respond` answers it
+  with 202 where it used to return 501. Echo the `request_id` from `/pending`;
+  ACP ids have the form `acp-<nonce>-<id>`, so do not construct one. A stale id,
+  an unknown `action` or an option kind the agent did not offer gets `409
+  invalid_interaction`, and the request stays pending. An `action` equal to an
+  offered option id selects that option, even an id that reads like `approve` or
+  `cancel`. While a request is outstanding, a submit or nudge is refused with
+  `409 pending_interaction`, including one already waiting on the busy turn,
+  which used to wait out `nudge_busy_timeout`. Queued nudges stay queued,
+  without spending retry attempts, until the request is answered or the nudge
+  expires. The reconciler treats such a session as waiting on a human: it stays
+  awake, and it is exempt from idle kill, max-age restart and config-drift
+  drain. An unattended agent that asks therefore waits until an API client
+  answers, so configure unattended pools not to ask, through the agent's
+  permission mode or a permission timeout in the agent. A pool slot that
+  holds a claimed bead is the exception, as before: the pool-slot backstop
+  still drains it once it goes quiet, and the request goes with it. Every
+  other agent-to-client request, such as `fs/read_text_file`, now gets
+  JSON-RPC `-32601` instead of hanging the turn (#6598).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's

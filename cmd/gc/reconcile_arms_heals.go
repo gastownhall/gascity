@@ -41,8 +41,13 @@ const (
 
 // heal is the row write of patch as kind, at the incarnation the pass saw.
 func (r *rowFacts) heal(kind, reason string, patch session.MetadataPatch) (intent, bool) {
+	return r.healClass(kind, reason, patch, session.DispositionPatch{})
+}
+
+// healClass is heal with the disposition cells' keys class beside patch.
+func (r *rowFacts) healClass(kind, reason string, patch session.MetadataPatch, class session.DispositionPatch) (intent, bool) {
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch}, true
+	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch, Class: class}, true
 }
 
 // freshGone is gone for a fresh kind's arm: it rests the decision on the
@@ -151,8 +156,8 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
 		return intent{}, false
 	}
-	patch, _ := deadRuntimePatch(r, true)
-	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, patch)
+	patch, class, _ := deadRuntimePatch(r, true)
+	return r.healClass(intentRowHealFresh, decideDeadRuntimeHeal, patch, class)
 }
 
 // deadRuntimePatch is legacy's write for a committed row whose runtime is
@@ -171,16 +176,14 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // With heal false the patch is the death's accrual alone, the row left
 // committed: a stranded seat's record of its death while its restart
 // cannot run (startHealed).
-func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accrued bool) {
+func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, class session.DispositionPatch, accrued bool) {
 	info := r.row.Info
 	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
 		// SESS-532: an idle stop was pending, so the death is the idle
 		// sleep it asked for, which accrues nothing: legacy's
 		// SleepPatch(idle), which keeps the pre-drain sleep_policy_fingerprint,
 		// with the disposition's Sleep cell.
-		patch := session.SleepPatch(r.w.Now, drainIdle)
-		maps.Copy(patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now).Fold())
-		return patch, false
+		return session.SleepPatch(r.w.Now, drainIdle), session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now), false
 	}
 	patch = session.MetadataPatch{}
 	if heal {
@@ -215,14 +218,14 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accr
 		if info.ChurnCount != "" && info.ChurnCount != "0" {
 			patch["churn_count"] = "0"
 		}
-		return patch, false
+		return patch, class, false
 	default:
-		return patch, false
+		return patch, class, false
 	}
 	maps.Copy(patch, accrual.Patch)
-	maps.Copy(patch, accrual.Class(info, r.w.Now).Fold())
+	class = accrual.Class(info, r.w.Now)
 	patch["last_woke_at"] = ""
-	return patch, true
+	return patch, class, true
 }
 
 // heartbeatHeld reports SESS-602's heartbeat hold (Disposition.HeartbeatHeld).
@@ -278,17 +281,18 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		patch["wake_attempts"] = "0"
 	}
+	var class session.DispositionPatch
 	if info.QuarantinedUntil != "" {
 		// The Quarantine cell with no deadline: the quarantine ends.
-		maps.Copy(patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine}, r.w.Now).Fold())
+		class = session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine}, r.w.Now)
 	}
 	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
 		patch["churn_count"] = "0"
 	}
-	if len(patch) == 0 {
+	if len(patch) == 0 && class.Len() == 0 {
 		return intent{}, false
 	}
-	return r.heal(intentRowHeal, decideStabilityClear, patch)
+	return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 }
 
 // armDetachedAt is SESS-533/535/536 (reconcileDetachedAtInfo; v5.8 A6 item

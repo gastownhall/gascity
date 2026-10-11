@@ -907,15 +907,16 @@ func TestNudgeNow_RefusesToTypeIntoApprovalPrompt(t *testing.T) {
 func TestSnapshotPaneIdle_ApprovalPromptIsNotIdle(t *testing.T) {
 	// "❯ 1. Yes" matches the ready-prompt prefix, so without an explicit
 	// approval check a permission prompt reads as an idle composer and
-	// wait-idle delivery types into it.
+	// wait-idle delivery types into it. The pane shows no busy indicator
+	// either, so the scan reports it indeterminate rather than busy.
 	fe := &fakeExecutor{out: readApprovalFixture(t, "bash-manual-80x24.txt")}
 	tm := &Tmux{exec: fe}
 	idle, err := tm.snapshotPaneIdleWithPrefix("s", DefaultReadyPromptPrefix)
-	if err != nil {
-		t.Fatalf("snapshotPaneIdleWithPrefix: %v", err)
-	}
 	if idle {
 		t.Fatal("pane showing a permission prompt reported idle")
+	}
+	if !errors.Is(err, runtime.ErrIdleIndeterminate) {
+		t.Fatalf("snapshotPaneIdleWithPrefix error = %v, want runtime.ErrIdleIndeterminate", err)
 	}
 
 	fe.out = readApprovalFixture(t, "idle-after-deny-80x24.txt")

@@ -381,10 +381,12 @@ func (sc *sessionConn) awaitIdle(ctx context.Context, name string, idleCh <-chan
 // response outstanding right now. A session this provider does not own, or
 // whose agent connection has closed, is an error, never idle.
 //
-// The only caller today is the reconciler's content clock, which excludes the
-// ACP transport by construction (idleTrackerContentClockApplies: ACP delivers
-// in-process, with no repainting pane to scan), so this answer is unreachable
-// through that path. It is implemented anyway to keep the optional-interface
+// Both callers today skip sessions whose recorded transport is ACP: the
+// reconciler's content clock (idleTrackerContentClockApplies: ACP delivers
+// in-process, with no repainting pane to scan) and the pool execution
+// backstop's snapshot veto (executionSnapshotVetoApplies: busy-readable
+// provider families on a non-ACP transport). So this answer is unreachable
+// through either path. It is implemented anyway to keep the optional-interface
 // set complete for a provider that can answer it cheaply and correctly — the
 // wrapping seam, auto, and hybrid all forward it, so a future caller that is
 // not gated on transport gets the real answer rather than

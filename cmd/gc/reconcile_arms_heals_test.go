@@ -166,8 +166,8 @@ func TestCreatingRowWithoutClaimHealedToAsleep(t *testing.T) {
 	if it.Kind != intentRowHealFresh || it.Reason != decideCreatingHeal {
 		t.Fatalf("decideRow = (%q, %q), want the creating heal", it.Kind, it.Reason)
 	}
-	if want := legacyHeal(c.w.Census.Rows[c.k].Info); !maps.Equal(it.Patch, want) {
-		t.Fatalf("patch %v, want legacy's %v", it.Patch, want)
+	if want := legacyHeal(c.w.Census.Rows[c.k].Info); !maps.Equal(it.folded(), want) {
+		t.Fatalf("patch %v, want legacy's %v", it.folded(), want)
 	}
 	if s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
@@ -298,15 +298,15 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 				t.Fatalf("decideRow = (%q, %q), want the dead-runtime heal %v", it.Kind, it.Reason, tc.heal)
 			}
 			if tc.desired == desireWake && tc.liveness == livenessGone {
-				if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentStart || !maps.Equal(it.Patch, want) {
-					t.Fatalf("intent (%q, %v), want a start carrying legacy's heal %v", it.Kind, it.Patch, want)
+				if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentStart || !maps.Equal(it.folded(), want) {
+					t.Fatalf("intent (%q, %v), want a start carrying legacy's heal %v", it.Kind, it.folded(), want)
 				}
 			}
 			if !tc.heal {
 				return
 			}
-			if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentRowHealFresh || !maps.Equal(it.Patch, want) {
-				t.Fatalf("intent (%q, %v), want a fresh heal of legacy's %v", it.Kind, it.Patch, want)
+			if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentRowHealFresh || !maps.Equal(it.folded(), want) {
+				t.Fatalf("intent (%q, %v), want a fresh heal of legacy's %v", it.Kind, it.folded(), want)
 			}
 			_, s := c.run(t, gone().tmux(), nil)
 			m := c.meta(t)
@@ -387,8 +387,8 @@ func TestLeftoverClaimClearedOnCommittedRow(t *testing.T) {
 			if tc.want != decideClaimClear {
 				return
 			}
-			if it.Kind != intentRowHeal || !maps.Equal(it.Patch, want) {
-				t.Fatalf("intent (%q, %v), want a row heal of %v", it.Kind, it.Patch, want)
+			if it.Kind != intentRowHeal || !maps.Equal(it.folded(), want) {
+				t.Fatalf("intent (%q, %v), want a row heal of %v", it.Kind, it.folded(), want)
 			}
 			if _, s := c.run(t, nil, nil); s.Outcome != settledLanded || c.meta(t)["pending_create_claim"] != "" {
 				t.Fatalf("settlement %+v, want the claim cleared", s)
@@ -404,8 +404,8 @@ func TestStrandedMarkerClearedOnAliveRow(t *testing.T) {
 	c := newHealCase(t, livenessAlive, desireKeep, marker...)
 	it := c.decide()
 	legacy := clearStrandedEventMarker(beads.NewMemStoreFrom(0, []beads.Bead{sessionRow(c.k.ID, marker...)}, nil), c.w.Census.Rows[c.k].Info, nil, io.Discard)
-	if it.Kind != intentRowHeal || it.Reason != decideStrandedClear || !maps.Equal(it.Patch, legacy) {
-		t.Fatalf("decideRow = (%q, %q, %v), want the stranded clear of legacy's %v", it.Kind, it.Reason, it.Patch, legacy)
+	if it.Kind != intentRowHeal || it.Reason != decideStrandedClear || !maps.Equal(it.folded(), legacy) {
+		t.Fatalf("decideRow = (%q, %q, %v), want the stranded clear of legacy's %v", it.Kind, it.Reason, it.folded(), legacy)
 	}
 	if _, s := c.run(t, nil, nil); s.Outcome != settledLanded || c.meta(t)[strandedEventEmittedKey] != "" {
 		t.Fatalf("settlement %+v, want the marker cleared", s)
@@ -455,8 +455,8 @@ func TestCurrentBeadStampedOnAliveWakeRow(t *testing.T) {
 				return
 			}
 			legacy := recordCurrentBeadIDOnWake(c.w.Census.Rows[c.k].Info, sessionFrontDoor(beads.NewMemStoreFrom(0, []beads.Bead{sessionRow(c.k.ID, meta...)}, nil)), tc.work.BeadID, io.Discard)
-			if it.Kind != intentRowHeal || !maps.Equal(it.Patch, legacy) {
-				t.Fatalf("intent (%q, %v), want a row heal of legacy's %v", it.Kind, it.Patch, legacy)
+			if it.Kind != intentRowHeal || !maps.Equal(it.folded(), legacy) {
+				t.Fatalf("intent (%q, %v), want a row heal of legacy's %v", it.Kind, it.folded(), legacy)
 			}
 			if _, s := c.run(t, nil, nil); s.Outcome != settledLanded || c.meta(t)[session.CurrentBeadIDKey] != "ga-7" {
 				t.Fatalf("settlement %+v, want the bead recorded", s)
@@ -512,8 +512,8 @@ func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
 				return
 			}
 			legacy := healStatePatchWithRollbackInfo(c.w.Census.Rows[c.k].Info, true, true, &clock.Fake{Time: gatherNow}, 0, true)
-			if !maps.Equal(it.Patch, session.MetadataPatch(legacy)) {
-				t.Fatalf("patch %v, want legacy's %v", it.Patch, legacy)
+			if !maps.Equal(it.folded(), session.MetadataPatch(legacy)) {
+				t.Fatalf("patch %v, want legacy's %v", it.folded(), legacy)
 			}
 			sp := &freshObserver{
 				Fake: runtime.NewFake(), l: runtime.Liveness{Running: tc.alive, Alive: tc.alive},
@@ -613,7 +613,7 @@ func TestStabilityClearMatchesLegacy(t *testing.T) {
 			c := newHealCase(t, tc.liveness, desireKeep, tc.meta...)
 			it := c.decide()
 			if got := it.Reason == decideStabilityClear; got != tc.clear {
-				t.Fatalf("decideRow = (%q, %q, %v), want the stability clear %v", it.Kind, it.Reason, it.Patch, tc.clear)
+				t.Fatalf("decideRow = (%q, %q, %v), want the stability clear %v", it.Kind, it.Reason, it.folded(), tc.clear)
 			}
 			if !tc.clear {
 				return
@@ -677,9 +677,9 @@ func TestDetachedAtFollowsTheAttachFact(t *testing.T) {
 			c.w.SleepPolicies = map[string]resolvedSessionSleepPolicy{c.k.ID: tc.policy}
 			c.w.Observed = map[rowKey]rowObservation{c.k: tc.obs}
 			it := c.decide()
-			got, wrote := it.Patch["detached_at"]
+			got, wrote := it.folded()["detached_at"]
 			if wrote != (tc.want != nil) || wrote && got != *tc.want {
-				t.Fatalf("decideRow = (%q, %q, %v), want detached_at %v", it.Kind, it.Reason, it.Patch, tc.want)
+				t.Fatalf("decideRow = (%q, %q, %v), want detached_at %v", it.Kind, it.Reason, it.folded(), tc.want)
 			}
 		})
 	}
@@ -704,8 +704,8 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 	c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "ga-7"}
 	want := session.MetadataPatch{"wake_attempts": "0", "detached_at": rowAt(0), strandedEventEmittedKey: "", session.CurrentBeadIDKey: "ga-7"}
 	it, s := c.run(t, nil, nil)
-	if it.Kind != intentRowHeal || it.Reason != decideStabilityClear || !maps.Equal(it.Patch, want) || s.Outcome != settledLanded {
-		t.Fatalf("intent (%q, %q, %v), settlement %+v, want the stability clear carrying %v", it.Kind, it.Reason, it.Patch, s, want)
+	if it.Kind != intentRowHeal || it.Reason != decideStabilityClear || !maps.Equal(it.folded(), want) || s.Outcome != settledLanded {
+		t.Fatalf("intent (%q, %q, %v), settlement %+v, want the stability clear carrying %v", it.Kind, it.Reason, it.folded(), s, want)
 	}
 	for key, value := range want {
 		if c.meta(t)[key] != value {
@@ -714,17 +714,30 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 	}
 
 	gone := newHealCase(t, livenessGone, desireSleep, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
-	if it := gone.decide(); it.Kind != intentRowHealFresh || it.Patch["state"] != "asleep" || it.Patch["detached_at"] != "" || len(it.Patch) != len(legacyHeal(gone.w.Census.Rows[gone.k].Info))+1 {
-		t.Fatalf("decideRow = (%q, %v), want the dead-runtime heal carrying the detached_at clear", it.Kind, it.Patch)
+	if it := gone.decide(); it.Kind != intentRowHealFresh || it.folded()["state"] != "asleep" || it.folded()["detached_at"] != "" || len(it.folded()) != len(legacyHeal(gone.w.Census.Rows[gone.k].Info))+1 {
+		t.Fatalf("decideRow = (%q, %v), want the dead-runtime heal carrying the detached_at clear", it.Kind, it.folded())
 	}
 	held := newHealCase(t, livenessGone, desireSleep, "state", "active", "held_until", rowAt(-time.Minute), "sleep_reason", "user-hold")
-	if it := held.decide(); it.Reason != decideTimerHeal || it.Patch["state"] != "" {
-		t.Fatalf("decideRow = (%q, %v), want the timer heal without the fresh heal's state", it.Reason, it.Patch)
+	if it := held.decide(); it.Reason != decideTimerHeal || it.folded()["state"] != "" {
+		t.Fatalf("decideRow = (%q, %v), want the timer heal without the fresh heal's state", it.Reason, it.folded())
 	}
 	quarantine := newHealCase(t, livenessAlive, desireKeep, "state", "active", "last_woke_at", rowAt(-time.Hour), "quarantined_until", rowAt(-time.Minute),
 		"sleep_reason", "quarantine", "wake_attempts", "4", strandedEventEmittedKey, rowAt(-time.Hour))
-	if it := quarantine.decide(); it.Reason != decideTimerHeal || it.Patch["sleep_reason"] != "" || it.Patch["wake_attempts"] != "0" || it.Patch[strandedEventEmittedKey] != "" || len(it.Patch) != 5 {
-		t.Fatalf("decideRow = (%q, %v), want the timer heal's own patch carrying the stranded clear", it.Reason, it.Patch)
+	if it := quarantine.decide(); it.Reason != decideTimerHeal || it.folded()["sleep_reason"] != "" || it.folded()["wake_attempts"] != "0" || it.folded()[strandedEventEmittedKey] != "" || len(it.folded()) != 5 {
+		t.Fatalf("decideRow = (%q, %v), want the timer heal's own patch carrying the stranded clear", it.Reason, it.folded())
+	}
+	// A later item's cells fold in too: the stability clear's end of a live
+	// quarantine rides the timer heal's unknown-state clear.
+	marked := newHealCase(t, livenessAlive, desireKeep, "state", "active", "last_woke_at", rowAt(-time.Hour), "quarantined_until", rowAt(time.Hour),
+		unknownStateFirstSeenKey, rowAt(-time.Hour), unknownStateValueKey, "weird")
+	if it := marked.decide(); it.Reason != decideTimerHeal || !it.Class.Has("quarantined_until") || it.Class.Get("quarantined_until") != "" {
+		t.Fatalf("decideRow = (%q, class %v), want the timer heal carrying the stability clear's quarantine end", it.Reason, it.Class.Fold())
+	}
+	// A timer heal whose only change is a hold's (an expired heartbeat, no
+	// reason to clear) is still decided.
+	beat := newHealCase(t, livenessGone, desireSleep, "state", "asleep", "held_until", rowAt(-time.Minute))
+	if it := beat.decide(); it.Reason != decideTimerHeal || !it.Class.Has("held_until") {
+		t.Fatalf("decideRow = (%q, class %v), want the timer heal clearing the expired heartbeat", it.Reason, it.Class.Fold())
 	}
 }
 

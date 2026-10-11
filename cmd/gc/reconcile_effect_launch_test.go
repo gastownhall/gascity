@@ -1097,15 +1097,20 @@ func TestRefusedStartStillHeals(t *testing.T) {
 				tc.arrange(k)
 			}
 			k.it.Reason = decideStart
-			heal, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
-			maps.Copy(heal, tc.patch)
-			k.it.Patch, k.it.Heal = heal, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal}
+			heal, class, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
+			if until, err := time.Parse(time.RFC3339, tc.patch["quarantined_until"]); err == nil { // a quarantine is the Quarantine cell's
+				class = class.With(session.CellInfo(row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, gatherNow))
+			}
+			k.it.Patch, k.it.Class, k.it.Heal = heal, class, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal, Class: class}
 			s := k.runKind()
 			if got := k.meta("state"); got != tc.wantState || len(k.starts()) != 0 {
 				t.Fatalf("settlement %+v: state %q, %d starts; want %q and no start", s, got, len(k.starts()), tc.wantState)
 			}
 			if healed := tc.wantState == "asleep"; healed != (s.Outcome == settledLanded) || s.Cause != tc.cause {
 				t.Fatalf("settlement %+v, want landed %v with cause %q", s, healed, tc.cause)
+			}
+			if q := tc.patch["quarantined_until"]; q != "" && k.meta("quarantined_until") != q {
+				t.Fatalf("quarantined_until %q after the heal written alone, want its cell's %q", k.meta("quarantined_until"), q)
 			}
 		})
 	}

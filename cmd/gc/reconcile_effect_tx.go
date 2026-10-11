@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -445,6 +446,10 @@ type txFence struct {
 // sections only a failure reaches.
 type txStep struct {
 	Write session.MetadataPatch
+	// Class is the disposition cells' keys the write carries beside Write (or,
+	// in a premiseClose section, beside Terminal), minted where the section
+	// writes them.
+	Class session.DispositionPatch
 	// Title and the label deltas ride Write's CAS (LL4's UpdateRowFenced):
 	// the row-metadata verb's (M1). A step that sets them writes metadata
 	// too (its synced_at).
@@ -697,8 +702,13 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		var ended *settlement
 		var wroteFacts session.Facts
 		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.RowPatch {
-			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 {
+			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 && step.Class.Len() == 0 {
 				return session.RowPatch{}
+			}
+			if step.Class.Len() > 0 {
+				// The cells the deciders moved, minted for this row's write; a
+				// lost attempt unmints (Store.UpdateMetadataFenced).
+				step.Write = step.Class.Into(t.view.It.Key.ID, maps.Clone(step.Write))
 			}
 			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
 			return session.RowPatch{Metadata: step.Write, Title: step.Title, AddLabels: step.AddLabels, RemoveLabels: step.RemoveLabels}
@@ -751,6 +761,10 @@ func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
 			read = true
 			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Terminal) == 0 {
 				return nil, false
+			}
+			if step.Class.Len() > 0 {
+				// The close's cells, minted for this row's close.
+				step.Terminal = step.Class.Into(t.view.It.Key.ID, maps.Clone(step.Terminal))
 			}
 			return step.Terminal, true
 		})
@@ -863,7 +877,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	switch {
 	case step.Refuse != "":
 		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
-	case step.Fail != "" && len(step.Write) == 0 && len(step.Terminal) == 0:
+	case step.Fail != "" && len(step.Write) == 0 && step.Class.Len() == 0 && len(step.Terminal) == 0:
 		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}
@@ -871,7 +885,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		// Not subsumed by the facts: a row the pass already read under an
 		// honored kill fence has equal facts, and the fence still refuses.
 		s = refused(causePremise)
-	case len(step.Write) == 0 && len(step.Terminal) == 0:
+	case len(step.Write) == 0 && step.Class.Len() == 0 && len(step.Terminal) == 0:
 		return step, nil
 	default:
 		err := t.c.beginWrite(ctx)

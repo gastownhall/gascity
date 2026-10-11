@@ -47,6 +47,22 @@ type sessionConn struct {
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
 
+	// permissions holds the agent's unanswered session/request_permission
+	// requests, oldest first.
+	permissions []pendingPermission
+	// permissionNonce makes permission RequestIDs unique to this
+	// connection; set when the first request is held.
+	permissionNonce string
+	// permissionSeq numbers held requests in arrival order.
+	permissionSeq uint64
+	// permissionHeld, when non-nil, is closed the next time a permission
+	// request is held, waking waitNudgeable.
+	permissionHeld chan struct{}
+
+	// unsupportedSeen records agent request methods already logged as
+	// unsupported, so each is reported once per connection.
+	unsupportedSeen map[string]struct{}
+
 	// capture records JSON-RPC traffic to the session transcript; nil when
 	// capture is disabled. Set before readLoop starts and closed by the
 	// process monitor after readLoop exits.
@@ -113,12 +129,20 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 			continue
 		}
 
-		// Capture before the typed decode: a JSON-RPC line gc cannot decode
-		// (a string request id, for one) is exactly what a transcript is
-		// for. scanner.Bytes is reused by the next Scan; the capture owns a
-		// copy.
+		// Capture before anything decodes the line: a JSON-RPC line gc
+		// cannot decode (a string request id, for one) is exactly what a
+		// transcript is for, and an agent request answered below must be
+		// captured too. scanner.Bytes is reused by the next Scan; the capture
+		// owns a copy.
 		if sc.capture != nil && isJSONObjectLine(line) {
 			sc.capture.record(captureIn, bytes.Clone(line))
+		}
+
+		// Agent->client requests are answered before the typed decode,
+		// which cannot represent string ids.
+		if req, ok := parseAgentRequest(line); ok {
+			sc.handleAgentRequest(req)
+			continue
 		}
 
 		var msg JSONRPCMessage
@@ -145,6 +169,10 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		sc.handleUpdate(msg)
 		return
 	}
+	if msg.ID == nil && msg.Method == methodCancelRequest {
+		sc.cancelRequestedPermission(msg.Params)
+		return
+	}
 
 	// Response (has ID, no method): route to waiter.
 	if msg.ID != nil && msg.Method == "" {
@@ -155,7 +183,12 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		}
 		// Settle the turn if this is the active prompt response.
 		var usageErr error
+		var canceled []pendingPermission
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
+			// The turn is over once its prompt is answered, so no
+			// permission the agent asked for during it can still be
+			// granted. Cancel them as the turn reads as idle.
+			canceled = sc.takePermissionsLocked()
 			outcome := promptOutcome(msg)
 			if outcome.usageErr != nil && !sc.usageWarned {
 				sc.usageWarned = true
@@ -165,6 +198,7 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 			sc.markIdleLocked()
 		}
 		sc.mu.Unlock()
+		sc.replyCanceled(canceled)
 		if usageErr != nil {
 			fmt.Fprintf(os.Stderr, "acp: dropping undecodable prompt usage (logged once per session): %v\n", usageErr)
 		}
@@ -356,13 +390,17 @@ func (sc *sessionConn) setActivePrompt(id int64) bool {
 	return true
 }
 
-// drainPending fails the running turn, clears busy state, and closes all
-// pending response channels. cause is the stdout read error, or nil for EOF
-// and for the process-exit path. Safe to call multiple times — the first
-// call settles the turn and closed channels are deleted from the map.
+// drainPending cancels outstanding permission requests, fails the running
+// turn, clears busy state, and closes all pending response channels. cause is
+// the stdout read error, or nil for EOF and for the process-exit path. Safe to
+// call multiple times — the first call settles the turn and closed channels
+// are deleted from the map.
 func (sc *sessionConn) drainPending(cause error) {
 	sc.mu.Lock()
 	sc.drained = true
+	// Taken under the lock that sets drained, so a request restorePermission
+	// puts back is either canceled here or dropped there.
+	canceled := sc.takePermissionsLocked()
 	sc.endTurnLocked(turnOutcome{state: turnFailed, err: drainFailure(cause)}, time.Now())
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
@@ -370,6 +408,7 @@ func (sc *sessionConn) drainPending(cause error) {
 		delete(sc.pending, id)
 	}
 	sc.mu.Unlock()
+	sc.replyCanceled(canceled)
 }
 
 // abandonPrompt fails the turn for prompt id, which was never delivered to

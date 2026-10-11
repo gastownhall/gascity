@@ -148,7 +148,7 @@ func healInstead(v txView, refuse txStep) txStep {
 	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
 		return refuse
 	}
-	step := txStep{Write: heal.Patch, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
+	step := txStep{Write: heal.Patch, Class: heal.Class, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
 	if heal.Event != nil {
 		step.Facts.Events = append(step.Facts.Events, *heal.Event)
 	}

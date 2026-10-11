@@ -124,7 +124,7 @@ func TestAbandonStepClasses(t *testing.T) {
 		event    string
 	}{
 		{"terminal", terminal, txRuntime{Class: rtAbsent}, session.MetadataPatch(providerTerminalErrorPatch("model_not_found", gatherNow)), "", false, false, ""},
-		{"rate-limit", limited, txRuntime{Class: rtAbsent}, rateLimitQuarantine(session.Info{}, gatherNow), "", false, false, ""},
+		{"rate-limit", limited, txRuntime{Class: rtAbsent}, foldClass(session.RateLimitQuarantinePatch(), session.Cell(map[string]string{}, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: gatherNow.Add(defaultRateLimitQuarantineDuration)}, gatherNow)), "", false, false, ""},
 		{"prepare", prepare, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
 		{"configured named pending, not died", named, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
 		{"configured named pending, died", namedDied, txRuntime{Class: rtAbsent}, nil, "", true, false, ""},
@@ -143,7 +143,7 @@ func TestAbandonStepClasses(t *testing.T) {
 				t.Fatalf("step %+v, want refusal %q", step, c.refuse)
 			case isTeardown != c.teardown || (td.stop != nil) != c.stop:
 				t.Fatalf("step %+v, want teardown %v with a stop %v", step, c.teardown, c.stop)
-			case c.want != nil && (step.Fail != c.f.cause || !maps.Equal(step.Write, c.want)):
+			case c.want != nil && (step.Fail != c.f.cause || !maps.Equal(foldClass(step.Write, step.Class), c.want)):
 				t.Fatalf("write %v fail %q, want %v failing %q", step.Write, step.Fail, c.want, c.f.cause)
 			case c.want == nil && len(step.Write) > 0:
 				t.Fatalf("write %v, want none", step.Write)
@@ -200,8 +200,8 @@ func TestRollbackClose(t *testing.T) {
 	explicit := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "pending_create_claim", "true", "session_name_explicit", "true", "last_woke_at", gatherNow.Format(time.RFC3339))
 	v := txView{World: k.p.World, Row: sessionInfoFromBead(explicit), RT: &txRuntime{Class: rtAbsent}, Now: gatherNow, prev: teardown{fail: causeStartError}}
 	step := rollbackClose(v)
-	want := rollbackPatch(v.Row, gatherNow, nil)
-	if step.Fail != causeStartError || !maps.Equal(step.Terminal, want) || want["session_name"] != "" || want["last_woke_at"] != "" || want["state"] != string(session.StateFailedCreate) || want["pending_create_claim"] != "" {
+	want := foldClass(rollbackPatch(v.Row, gatherNow, nil))
+	if step.Fail != causeStartError || !maps.Equal(foldClass(step.Terminal, step.Class), want) || want["session_name"] != "" || want["last_woke_at"] != "" || want["state"] != string(session.StateFailedCreate) || want["pending_create_claim"] != "" {
 		t.Fatalf("close %+v, want legacy's rollback clears (%v) failing start-error", step, want)
 	}
 	if _, kept := want["session_name"]; !kept {
@@ -231,7 +231,7 @@ func failingLaunch(t *testing.T, err error, state string, meta ...string) *txKit
 // Kills an abandon that is not written, a start that settles as anything
 // but its failure, and a PreWake left on the row: a failed launch of an
 // asleep seat restores what the PreWake wrote, its incarnation bumped, and
-// accrues one wake failure.
+// accrues one wake failure, quarantining at the threshold.
 func TestFailedLaunchRestoresAndAccrues(t *testing.T) {
 	k := failingLaunch(t, errors.New("boom"), "asleep", "sleep_reason", "idle", "wake_attempts", "1")
 	s := k.runKind()
@@ -241,6 +241,13 @@ func TestFailedLaunchRestoresAndAccrues(t *testing.T) {
 	if k.meta("state") != "asleep" || k.meta("sleep_reason") != "idle" || k.meta("last_woke_at") != "" || k.meta("wake_attempts") != "2" || k.meta("generation") != "4" || k.meta("instance_token") == "tok" {
 		t.Fatalf("row state %q reason %q woke %q attempts %q generation %q token %q; want restored, accrued, the incarnation bumped",
 			k.meta("state"), k.meta("sleep_reason"), k.meta("last_woke_at"), k.meta("wake_attempts"), k.meta("generation"), k.meta("instance_token"))
+	}
+
+	// The fifth failure quarantines: the accrual's Quarantine cell writes
+	// quarantined_until beside its lifecycle.
+	fifth := failingLaunch(t, errors.New("boom"), "asleep", "sleep_reason", "idle", "wake_attempts", "4")
+	if fifth.runKind(); fifth.meta("wake_attempts") != "5" || fifth.meta("sleep_reason") != "quarantine" || fifth.meta("quarantined_until") == "" {
+		t.Fatalf("the fifth failure: attempts %q reason %q quarantined_until %q; want it quarantined", fifth.meta("wake_attempts"), fifth.meta("sleep_reason"), fifth.meta("quarantined_until"))
 	}
 
 	relaunch := failingLaunch(t, errors.New("boom"), "creating")
@@ -266,13 +273,36 @@ func TestFailedLaunchRestoresAndAccrues(t *testing.T) {
 func TestCapacityRefusalRestoresThePreWake(t *testing.T) {
 	now := gatherNow
 	guard := newEndpointCapacityGuard(func() time.Time { return now })
-	k := failingLaunch(t, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity), "asleep", "sleep_reason", "idle")
+	k := failingLaunch(t, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity), "asleep", "sleep_reason", "idle", "sleep_intent", "idle-stop-pending")
 	row := k.p.World.Census.Rows[k.it.Key]
 	tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
 	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
 	k.p.held.start.capacity, k.it.Endpoint = guard, endpointKey("provider:test-agent")
 	if s := k.runKind(); s.Cause != causeCapacity || k.meta("state") != "asleep" || k.meta("sleep_reason") != "idle" || k.meta("last_woke_at") != "" || k.meta("wake_attempts") != "" {
 		t.Fatalf("settlement %+v, state %q reason %q attempts %q; want capacity, restored, no accrual", s, k.meta("state"), k.meta("sleep_reason"), k.meta("wake_attempts"))
+	}
+	// The PreWake cell's clear of the idle stop's intent is undone too
+	// (UndoDisposition).
+	if got := k.meta("sleep_intent"); got != "idle-stop-pending" {
+		t.Fatalf("sleep_intent %q after the refusal, want the PreWake's clear undone", got)
+	}
+
+	// A dead row whose idle stop was pending restarts over A6's idle sleep
+	// (SESS-532): the refusal restores the healed row, so the Sleep cell's
+	// clear of the intent is Kept, not undone.
+	k, _ = launchKit(t, "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), "sleep_intent", "idle-stop-pending")
+	row = k.p.World.Census.Rows[k.it.Key]
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}
+	it, ok := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startIntent(decideStart)
+	if !ok || it.Kind != intentStart {
+		t.Fatalf("startIntent = (%+v, %v), want a start", it, ok)
+	}
+	it.Key, it.Deadline, it.Endpoint = k.it.Key, k.it.Deadline, endpointKey("provider:test-agent")
+	k.it, k.sp.nextStart = it, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity)
+	k.p.held.start.capacity = newEndpointCapacityGuard(func() time.Time { return now })
+	if s := k.runKind(); s.Cause != causeCapacity || k.meta("state") != "asleep" || k.meta("sleep_reason") != "idle" || k.meta("sleep_intent") != "" {
+		t.Fatalf("a dead idle row: settlement %+v, state %q reason %q intent %q; want capacity, asleep idle, the Sleep cell's clear kept", s, k.meta("state"), k.meta("sleep_reason"), k.meta("sleep_intent"))
 	}
 }
 
@@ -282,7 +312,7 @@ func TestCapacityRefusalRestoresThePreWake(t *testing.T) {
 // accrues the episode; a configured named one that did not die keeps its
 // row with last_woke_at cleared.
 func TestPendingCreateFailureRollsBack(t *testing.T) {
-	pending := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}
+	pending := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339), "wait_hold", "true"}
 	k := failingLaunch(t, nil, "creating", pending...)
 	k.on(seamAfterCall, func() {})
 	k.on(seamAfterCall, func() { k.mutate(func(r *simRuntime) { r.zombie = true }) })
@@ -290,6 +320,9 @@ func TestPendingCreateFailureRollsBack(t *testing.T) {
 	b, _ := k.backing.Get("gc-1")
 	if s.Outcome != settledFailed || s.Cause != causeDiedDuringStartup || !s.Closed || b.Status != "closed" || b.Metadata["state"] != string(session.StateFailedCreate) || b.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("settlement %+v, row %s %v; want failed died-during-startup, rolled back", s, b.Status, b.Metadata)
+	}
+	if b.Metadata["wait_hold"] != "" { // the rollback close's Retire cell
+		t.Fatalf("wait_hold %q on the rolled-back row, want the close's Retire cell to clear it", b.Metadata["wait_hold"])
 	}
 	if n := len(k.sp.kills); n != 1 || k.sp.kills[0].Hit == nil {
 		t.Fatalf("kills %+v, want its own zombie stopped once", k.sp.kills)
@@ -535,8 +568,8 @@ func TestComposedStartFailureRestoresTheHealedRow(t *testing.T) {
 	})
 	t.Run("timer heal", func(t *testing.T) {
 		k, _ := launchKit(t, "asleep", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339), "sleep_reason", "user-hold")
-		healPatch, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
-		heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch}
+		healPatch, healClass, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
+		heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch, Class: healClass}
 		r := &rowFacts{w: k.p.World, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
 		it := r.startHealed(heal)
 		if it.Kind != intentStart {
@@ -601,7 +634,7 @@ func TestComposedUndoMatchesLegacyRestore(t *testing.T) {
 	maps.Copy(patch, wake)
 	ours := preWakeUndoOf(txView{It: k.it, Row: sessionInfoFromBead(b), Meta: b.Metadata}, patch, false)
 	woken := patch.Apply(b.Metadata)
-	after := restorePatch(ours, woken).Apply(woken)
+	after := foldClass(restorePatch(ours, woken)).Apply(woken)
 
 	// Legacy: the healed row, its PreWake, then restorePreWakeState.
 	m := beads.NewMemStore()
@@ -656,9 +689,9 @@ func TestComposedStartKeepsTheFoldedHeal(t *testing.T) {
 	k, _ := launchKit(t, "active", "last_woke_at", woke, "detached_at", woke)
 	row := k.p.World.Census.Rows[k.it.Key]
 	r := &rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}}
-	patch, _ := deadRuntimePatch(r, true)
+	patch, class, _ := deadRuntimePatch(r, true)
 	patch["detached_at"] = ""
-	it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: patch})
+	it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: patch, Class: class})
 	if it.Kind != intentStart {
 		t.Fatalf("startHealed = %+v, want a start", it)
 	}

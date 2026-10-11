@@ -76,6 +76,15 @@ func CellIntoInfo(info Info, by ActorKind, ev DispEvent, now time.Time, patch Me
 	return CellInfo(info, by, ev, now).Into(info.ID, patch)
 }
 
+// With is p and q's keys, q's where both write one: cells moved from the
+// same row, q's the later (a start after its heal's quarantine).
+func (p DispositionPatch) With(q DispositionPatch) DispositionPatch {
+	out := make(MetadataPatch, len(p.kv)+len(q.kv))
+	maps.Copy(out, p.kv)
+	maps.Copy(out, q.kv)
+	return DispositionPatch{out}
+}
+
 // UndoDisposition is the undo of a cell's write: for each class key written
 // (the write's patch) that current (the row now) still holds as written,
 // the value before held (the row the write was decided on). An undo restores
@@ -156,53 +165,6 @@ func spendDisposition(id string, class MetadataPatch) bool {
 	return false
 }
 
-// shape is a set of value forms a bypass writer may write to a class key.
-type shape uint8
-
-const (
-	shapeEmpty shape       = 1 << iota // "": a clear
-	shapeTime                          // an RFC3339 timestamp
-	shapeAny   = ^shape(0)             // any text: an undo restores what its cell replaced, readable or not
-)
-
-func (s shape) admits(v string) bool {
-	switch {
-	case s == shapeAny:
-		return true
-	case v == "":
-		return s&shapeEmpty != 0
-	}
-	_, err := time.Parse(time.RFC3339, v)
-	return s&shapeTime != 0 && err == nil
-}
-
-// bypassWrite bounds a listed bypass writer: the class keys it writes today,
-// each with the value forms it writes, and the cell that replaces it.
-type bypassWrite struct {
-	cell string
-	keys map[string]shape
-}
-
-func (b bypassWrite) admits(class MetadataPatch) bool {
-	for k, v := range class {
-		if !b.keys[k].admits(v) {
-			return false
-		}
-	}
-	return true
-}
-
-// dispositionBypass are the production writers that still write class keys
-// without a mint, by function, each bounded by the keys and value forms it
-// writes and naming the cells it carries. The guard admits a write that fits
-// the bound of a listed writer on its stack. Only v2's casRow is left: its
-// deciders are pure and cannot mint, so their cells reach it folded until
-// R7c2b carries them typed and deletes the list.
-var dispositionBypass = map[string]bypassWrite{
-	"cmd/gc.fencedWriter.closeRow": {"v2's A10 rollback close: the Retire cell, folded by its pure decider; R7c2b carries it typed and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty}},
-	"cmd/gc.fencedWriter.casRow":   {"v2 row patches (the launch's PreWake, the expired-timer TimerTick, the dead runtime's Sleep and quarantine, the stability clear): their cells, folded by the pure deciders; R7c2b carries them typed to the write and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty | shapeTime}},
-}
-
 // dispositionPlumbing are the store wrappers between a writer and the backend,
 // by file, and dispositionVerbs the session store's generic verbs, by
 // function, which forward their caller's patch: the guard looks past both for
@@ -213,7 +175,7 @@ var (
 		"internal/session.(*Store).ApplyPatch": true, "internal/session.(*Store).ApplyPatchInfo": true,
 		"internal/session.(*Store).commitIf": true, "internal/session.(*Store).applyPatchIfLifecycleUnchanged": true,
 		"internal/session.(*Store).ApplyPatchIfLifecycleUnchanged": true, "internal/session.(*Store).ApplyPatchIfLifecycleUnchangedUnder": true,
-		"internal/session.(*Store).UpdateMetadataFenced": true, "internal/session.(*Store).WithPendingCreateRollback": true,
+		"internal/session.(*Store).UpdateMetadataFenced": true, "internal/session.(*Store).UpdateRowFenced": true, "internal/session.(*Store).WithPendingCreateRollback": true,
 		"internal/session.(*Store).CloseWithTerminalPatch": true, "internal/session.(*Store).CloseWithTerminalPatchUnder": true,
 		"internal/session.(*Store).closeAtomically": true, "internal/session.(*Store).RollbackPendingCreateAtomically": true,
 		"internal/session.(*Store).RollbackPendingCreateAtomicallyUnder": true, "internal/session.(*Store).CommitStartedIfCurrent": true,
@@ -226,8 +188,7 @@ var (
 // or a create's seed) that carries a disposition class key no
 // DispositionPatch.Into minted for that row call fail with the keys and the
 // stack. A write a _test.go file makes (through the plumbing at most) is a
-// fixture and passes; so does one a listed bypass writer on the stack makes
-// within its bound. Tests install it beside GuardSessionKeys; production
+// fixture and passes. Tests install it beside GuardSessionKeys; production
 // never does.
 func GuardDispositionWrites(fail func(msg string)) {
 	dispositionGuard.on.Store(true)
@@ -243,9 +204,8 @@ func GuardDispositionWrites(fail func(msg string)) {
 
 // checkDispositionWrite is the guard's verdict on one store write's metadata
 // to row id: "" when it carries no class key, spends a mint for id, or writer
-// (the stack's reading) finds a fixture or a listed bypass writer whose bound
-// admits the class keys; else the violation.
-func checkDispositionWrite(id string, kvs map[string]string, writer func() (at string, bypass []string, fixture bool)) string {
+// (the stack's reading) finds a fixture; else the violation.
+func checkDispositionWrite(id string, kvs map[string]string, writer func() (at string, fixture bool)) string {
 	class := MetadataPatch{}
 	for _, k := range dispositionKeys {
 		if v, ok := kvs[k]; ok {
@@ -255,48 +215,65 @@ func checkDispositionWrite(id string, kvs map[string]string, writer func() (at s
 	if len(class) == 0 || spendDisposition(id, class) {
 		return ""
 	}
-	at, bypass, fixture := writer()
+	at, fixture := writer()
 	if fixture {
 		return ""
 	}
-	for _, name := range bypass {
-		if dispositionBypass[name].admits(class) {
-			return ""
-		}
-	}
-	return fmt.Sprintf("session row %s disposition keys %v written by hand at %s (bypass writers on the stack, none admitting it: %v): write them through a cell (DispositionPatch.Into from Disposition.Changed)\n%s", id, class, at, bypass, stackText())
+	return fmt.Sprintf("session row %s disposition keys %v written by hand at %s: write them through a cell (CellInto, Cell(...).Into, UndoDisposition)\n%s", id, class, at, stackText())
 }
 
 // dispositionWriter reads the stack of a store write: at is its first frames
 // past the plumbing, innermost first; fixture when the first is a _test.go
-// file's; bypass the listed bypass writers on the stack.
-func dispositionWriter() (at string, bypass []string, fixture bool) {
+// file's. A test's store adapter (a _test.go method named for a store write
+// verb: storeWriteMethod) is plumbing too, so a production writer that
+// writes through one is judged as the writer it is.
+func dispositionWriter() (at string, fixture bool) {
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs)])
 	for {
 		f, more := frames.Next()
 		name := dispositionFuncName(f.Function)
-		if !plumbing(f.File) && !dispositionVerbs[name] {
+		if !plumbing(f.File) && !dispositionVerbs[name] && !storeWriteMethod(f.File, name) {
 			switch {
 			case at == "":
 				at = name
 				if strings.HasSuffix(f.File, "_test.go") {
-					return at, nil, true
+					return at, true
 				}
 			case strings.Count(at, " <- ") < 3:
 				at += " <- " + name
 			}
-			if _, ok := dispositionBypass[name]; ok {
-				bypass = append(bypass, name)
-			}
 		}
-		if !more {
-			return at, bypass, false
+		if !more || strings.Count(at, " <- ") >= 3 {
+			return at, false
 		}
 	}
 }
 
-// dispositionModule prefixes every function the bypass list names.
+// storeWriteVerbs are beads.Store's write methods (and the conditional
+// writers', the storage-class create's and the transaction's), by name.
+var storeWriteVerbs = map[string]bool{
+	"Create": true, "Update": true, "Close": true, "Reopen": true, "CloseAll": true, "SetMetadata": true, "SetMetadataBatch": true,
+	"UpdateIfMatch": true, "CloseWithMetadataIfMatch": true, "Tx": true,
+	"CompareAndSetMetadataKey": true, "CreateWithStorage": true, "UpdateIfAssignment": true,
+}
+
+// storeWriteMethod reports a _test.go method named for a store write verb: a
+// test's store adapter between a writer and the backend. The guard looks past
+// one to the writer that called it, so an adapter must delegate directly: a
+// write it makes of its own (a race it injects, a fixture it seeds) belongs
+// in a method not named for a verb (TestApplyDispositionFencesItsWrite's
+// landRace), where the guard reads it as the fixture's.
+func storeWriteMethod(file, name string) bool {
+	if !strings.HasSuffix(file, "_test.go") {
+		return false
+	}
+	i := strings.LastIndex(name, ".")
+	recv := name[:max(i, 0)]
+	return i > 0 && storeWriteVerbs[name[i+1:]] && strings.Contains(recv, ".")
+}
+
+// dispositionModule prefixes every function the guard names.
 const dispositionModule = "github.com/gastownhall/gascity/"
 
 func plumbing(file string) bool {
@@ -312,7 +289,7 @@ func plumbing(file string) bool {
 	return false
 }
 
-// dispositionFuncName is a frame's function as the bypass list names it: by
+// dispositionFuncName is a frame's function as the guard reports it: by
 // its package's path in the module, closures folded into the function that
 // holds them ("cmd/gc.reopenNamed.func1" is "cmd/gc.reopenNamed").
 func dispositionFuncName(full string) string {

@@ -236,7 +236,9 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	if e.Desired == desireWake && strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
-		return intent{Kind: intentRowHeal, Reason: decideIdleStopClear, Basis: basis, Patch: session.MetadataPatch{"sleep_intent": ""}}, true
+		// The idle stop's end is the disposition's IdleStopEnd cell.
+		class := session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
+		return intent{Kind: intentRowHeal, Reason: decideIdleStopClear, Basis: basis, Patch: session.MetadataPatch{}, Class: class}, true
 	}
 	reason := drainReasonOf(r)
 	allowed, _ := idleProof(r.w, info, reason)

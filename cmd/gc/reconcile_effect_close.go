@@ -279,7 +279,7 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 			step.Err = v.Fence.Work.Err
 		}
 	default:
-		step.Terminal = fresh.Patch
+		step.Terminal, step.Class = fresh.Patch, fresh.Class
 	}
 	return step
 }

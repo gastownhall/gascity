@@ -153,11 +153,17 @@ type firstCASRacer struct {
 }
 
 func (c *firstCASRacer) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	c.landRace(id)
+	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
+}
+
+// landRace is the fixture's write, outside the store adapter the guard
+// looks past (storeWriteMethod).
+func (c *firstCASRacer) landRace(id string) {
 	if !c.raced {
 		c.raced = true
 		_ = c.backing.SetMetadataBatch(id, c.race)
 	}
-	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
 }
 
 // TestOperatorSuspendInForceStampsAgain: a suspend over one in force writes a
