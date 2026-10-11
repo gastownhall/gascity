@@ -945,20 +945,27 @@ func TestCityRuntimeShutdownStopsRecordedSessionsTheRuntimeCannotList(t *testing
 				{"session_name": "idler-draining", "template": "idler", "state": "draining"},
 				{"session_name": "idler-unknown", "template": "idler", "state": "awake"},
 				{"session_name": "idler-starting", "template": "idler", "state": "creating"},
+				{"session_name": "idler-starting-unknown", "template": "idler", "state": "creating"},
 			} {
 				if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
 					t.Fatalf("Create: %v", err)
 				}
 			}
 			fake := runtime.NewFake()
-			for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining", "idler-unknown", "idler-starting", "not-ours"} {
+			for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining", "idler-unknown", "idler-starting", "idler-starting-unknown", "not-ours"} {
 				if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
 					t.Fatalf("Start %s: %v", name, err)
 				}
 			}
 			sp := blindProbeProvider{
 				blindListProvider: blindListProvider{fake},
-				probeErr:          map[string]error{"idler-unknown": errors.New("is-running: transport error")},
+				// idler-starting-unknown is an async start still in flight
+				// on a remote runtime: its probe fails too, and it is still
+				// its start's, not stopped as unknown.
+				probeErr: map[string]error{
+					"idler-unknown":          errors.New("is-running: transport error"),
+					"idler-starting-unknown": errors.New("is-running: transport error"),
+				},
 			}
 			var stdout, stderr lockedBuffer
 			cr := &CityRuntime{
@@ -985,8 +992,10 @@ func TestCityRuntimeShutdownStopsRecordedSessionsTheRuntimeCannotList(t *testing
 			if !fake.IsRunning("not-ours") {
 				t.Error("not-ours was stopped: shutdown must only add sessions the city's store records")
 			}
-			if !fake.IsRunning("idler-starting") {
-				t.Error("idler-starting was stopped: a session recorded creating is its start's to finish")
+			for _, name := range []string{"idler-starting", "idler-starting-unknown"} {
+				if !fake.IsRunning(name) {
+					t.Errorf("%s was stopped: a session recorded creating is its start's to finish; stdout = %q", name, stdout.String())
+				}
 			}
 			// None of the idler agents exits on an interrupt: none may be
 			// reported as having exited gracefully. (probe-1's interrupt wave

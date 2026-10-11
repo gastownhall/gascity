@@ -433,11 +433,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// running past the stop, with no controller left to reap them. Also stop the
 	// city's own recorded sessions that a per-name probe reports running or
 	// cannot rule out (doStopWithoutSuccess withholds success for an unknown).
-	for _, sn := range appendStoreRecordedRunning(nil, sessionFrontDoor(sessStore), sp, stderr) {
-		if !desired[sn] {
-			sessionNames = append(sessionNames, sn)
-			desired[sn] = true
-		}
+	for _, sn := range storeRecordedRunningOutside(desired, sessionFrontDoor(sessStore), sp, stderr) {
+		sessionNames = append(sessionNames, sn)
+		desired[sn] = true
 	}
 	recorder := openCityRecorderAt(cityPath, stderr)
 
@@ -510,8 +508,9 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 // creating row, so without this its runtime outlives the stop. The row is left
 // as it is, for the reconciler to resolve on the next start.
 //
-// A runtime whose flock is held is a start in flight: it is reported and
-// returned in inFlight, for the caller to keep out of the rest of the stop.
+// A name whose flock is held is a start in flight, whether or not its runtime
+// is up yet: it is reported and returned in inFlight, for the caller to keep
+// out of the rest of the stop.
 // left is true when any creating runtime is not known stopped (a start in
 // flight, a failed liveness probe, a failed stop), so the stop is not
 // confirmed.
@@ -529,15 +528,9 @@ func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp 
 		if name == "" || sessionMetadataStateInfo(info) != "creating" {
 			continue
 		}
-		running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc stop: observing session %s left creating: %v\n", name, err) //nolint:errcheck // best-effort stderr
-			left = true
-			continue
-		}
-		if !running {
-			continue
-		}
+		// The flock first: a held one is a start in flight whether or not its
+		// runtime is up yet (on a remote runtime provisioning is the long part
+		// of a start), and the check is local, so it also spares the probe.
 		_, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: session %s is starting; leaving it to its start: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -546,6 +539,17 @@ func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp 
 			}
 			inFlight[name] = true
 			left = true
+			continue
+		}
+		running, err := stopProbeRunning(sp, name)
+		if err != nil {
+			release()
+			fmt.Fprintf(stderr, "gc stop: observing session %s left creating: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			left = true
+			continue
+		}
+		if !running {
+			release()
 			continue
 		}
 		// StopForCleanup already absorbs a real "session gone" answer; any
@@ -1059,6 +1063,9 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		}
 	}
 	var running, unverified []string
+	// unlisted holds the running names the runtime inventory did not show,
+	// so gracefulStopAll reads them per name without probing them again.
+	var unlisted map[string]bool
 	for _, sn := range sessionNames {
 		sn = strings.TrimSpace(sn)
 		if sn == "" {
@@ -1068,6 +1075,12 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		switch {
 		case err == nil && alive:
 			running = append(running, sn)
+			if !visible[sn] {
+				if unlisted == nil {
+					unlisted = make(map[string]bool)
+				}
+				unlisted[sn] = true
+			}
 			continue
 		case err != nil && !errors.Is(err, session.ErrSessionNotFound):
 			// The session's own observation failed, so it is unknown, not
@@ -1082,7 +1095,7 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 			running = append(running, sn)
 		}
 	}
-	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
+	gracefulStopAllWithForceSignal(running, unlisted, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr, nil)
 	if len(unverified) > 0 {
 		fmt.Fprintf(stderr, "gc stop: stop not confirmed: could not verify that session(s) %s stopped, so they may still be running; resolve the error above and run gc stop again\n", strings.Join(unverified, ", ")) //nolint:errcheck // best-effort stderr
 	}

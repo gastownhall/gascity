@@ -2645,15 +2645,18 @@ func TestCmdStopBodyStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
 // otherwise stop it as "exited gracefully".
 func TestCmdStopBodyLeavesCreatingSessionWithLiveStarter(t *testing.T) {
 	// The session is a manual one, outside the configuration, or the
-	// configured named session of the city's one agent.
+	// configured named session of the city's one agent (max_active_sessions
+	// = 1, so the agent does not expand into a pool and its session name is
+	// one the stop sweep itself targets).
 	configured := agent.SessionNameFor("blind-list-city", "idler", "")
+	one := 1
 	for _, tc := range []struct {
 		name    string
 		session string
 		agents  []config.Agent
 	}{
 		{name: "manual", session: "idler-starting"},
-		{name: "configured", session: configured, agents: []config.Agent{{Name: "idler"}}},
+		{name: "configured", session: configured, agents: []config.Agent{{Name: "idler", MaxActiveSessions: &one}}},
 	} {
 		for _, timeout := range []string{"0s", "5s"} {
 			t.Run(tc.name+"/shutdown_timeout="+timeout, func(t *testing.T) {
@@ -2667,7 +2670,8 @@ func assertStopLeavesStartInFlight(t *testing.T, timeout string, agents []config
 	t.Helper()
 	fake := runtime.NewFake()
 	startStopTestSessions(t, fake, name)
-	cityDir, cfg := stopTestCityWithRecordedSessions(t, timeout, agents, blindListProvider{fake},
+	sp := &interruptRecordingProvider{blindListProvider: blindListProvider{fake}}
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, timeout, agents, sp,
 		map[string]string{"session_name": name, "template": "idler", "state": "creating"},
 	)
 
@@ -2689,6 +2693,57 @@ func assertStopLeavesStartInFlight(t *testing.T, timeout string, agents []config
 	}
 	if strings.Contains(stderr.String(), "illegal transition") {
 		t.Errorf("the stop sweep tried to stop a start it should have left alone; stderr = %q", stderr.String())
+	}
+	if got := sp.interruptedNames(); len(got) > 0 {
+		t.Errorf("the stop interrupted %v under a live start; stdout = %q", got, stdout.String())
+	}
+}
+
+// interruptRecordingProvider is a blindListProvider that records the names it
+// is asked to interrupt.
+type interruptRecordingProvider struct {
+	blindListProvider
+	mu          sync.Mutex
+	interrupted []string
+}
+
+func (p *interruptRecordingProvider) Interrupt(name string) error {
+	p.mu.Lock()
+	p.interrupted = append(p.interrupted, name)
+	p.mu.Unlock()
+	return p.Fake.Interrupt(name)
+}
+
+func (p *interruptRecordingProvider) interruptedNames() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.interrupted)
+}
+
+// A start in flight whose runtime is not up yet (on a remote runtime,
+// provisioning is the long part of a start) is still a start in flight: the
+// stop must not confirm itself and print "City stopped." while that start
+// goes on to bring the runtime up.
+func TestCmdStopBodyDoesNotConfirmOverAStartNotYetProvisioned(t *testing.T) {
+	fake := runtime.NewFake()
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "5s", nil, blindListProvider{fake},
+		map[string]string{"session_name": "idler-provisioning", "template": "idler", "state": "creating"},
+	)
+	starter, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: cityDir, Name: "idler-provisioning"})
+	if err != nil {
+		t.Fatalf("taking the starter's flock: %v", err)
+	}
+	defer starter.Release()
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("cmdStopBody = 0 with a start in flight; stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("the stop confirmed itself over a start in flight; stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "idler-provisioning is starting") {
+		t.Errorf("stderr does not report the start in flight; stderr = %q", stderr.String())
 	}
 }
 

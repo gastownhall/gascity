@@ -4996,9 +4996,10 @@ func (cr *CityRuntime) shutdown() {
 		// session this city started running past the stop. Also stop the city's
 		// open sessions that a per-name probe reports running or cannot rule out
 		// (gracefulStopAll reads those per name, not from the blind list).
-		running = appendStoreRecordedRunning(running, sessionFrontDoor(store.Store), cr.sp, cr.stderr)
+		recorded := storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, cr.stderr)
+		running = append(running, recorded...)
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
-		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+		gracefulStopAllWithForceSignal(running, setOf(recorded), cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {
 			lateRunning, lateListErr := cr.sp.ListRunning("")
 			if lateListErr != nil {
@@ -5011,7 +5012,7 @@ func (cr *CityRuntime) shutdown() {
 			}
 			if len(lateRunning) > 0 {
 				markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
-				gracefulStopAllWithForceSignal(lateRunning, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
+				gracefulStopAllWithForceSignal(lateRunning, nil, cr.sp, 0, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 			}
 		}
 		// With every enumerated session stopped, tear down the provider's
@@ -5034,42 +5035,41 @@ func (cr *CityRuntime) shutdown() {
 	})
 }
 
-// appendStoreRecordedRunning returns running plus the names of the city's open
-// (not closed) sessions that running does not already hold and that the
-// provider reports running or cannot rule out. Shutdown stops only what it
-// lists; for a provider whose ListRunning cannot see the fleet this is the
-// city's own record of what it started. The recorded state is not trusted to
-// say what is up: a session caught draining, or one recorded asleep whose
-// sandbox survived, is as running as an awake one, so a per-name probe
-// decides, and a probe that fails keeps the name (unknown is not absent; the
-// stop reports it as unknown). A session recorded creating is skipped: it is
-// its start's to finish (shutdown waits for async starts first, and a
-// standalone stop reaps one whose start died with its controller in
-// stopInterruptedStartsForStop). A store read error leaves running unchanged.
-func appendStoreRecordedRunning(running []string, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
+// storeRecordedRunningOutside returns the names of the city's open (not
+// closed) sessions that skip does not hold and that the provider reports
+// running or cannot rule out. Shutdown stops only what it lists; for a
+// provider whose ListRunning cannot see the fleet this is the city's own
+// record of what it started. The recorded state is not trusted to say what is
+// up: a session caught draining, or one recorded asleep whose sandbox
+// survived, is as running as an awake one, so a per-name probe
+// (stopProbeRunning, one provider op) decides, and a probe that fails keeps
+// the name (unknown is not absent; the stop reports it as unknown). A session
+// recorded creating is skipped: it is its start's to finish (shutdown waits
+// for async starts first, and a standalone stop reaps one whose start died
+// with its controller in stopInterruptedStartsForStop). A store read error
+// returns nothing.
+func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
 	if !sessFront.Backed() || sp == nil {
-		return running
+		return nil
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		fmt.Fprintf(stderr, "shutdown: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return running
+		return nil
 	}
-	seen := make(map[string]bool, len(running))
-	for _, name := range running {
-		seen[name] = true
-	}
+	seen := make(map[string]bool)
+	var found []string
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionName)
-		if name == "" || seen[name] || sessionMetadataStateInfo(info) == "creating" {
+		if name == "" || skip[name] || seen[name] || sessionMetadataStateInfo(info) == "creating" {
 			continue
 		}
 		seen[name] = true
-		if alive, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name); err != nil || alive {
-			running = append(running, name)
+		if alive, err := stopProbeRunning(sp, name); err != nil || alive {
+			found = append(found, name)
 		}
 	}
-	return running
+	return found
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {

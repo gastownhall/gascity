@@ -1018,11 +1018,18 @@ func gracefulStopAll(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	gracefulStopAllWithForceSignal(names, nil, sp, timeout, rec, cfg, store, stdout, stderr, nil)
 }
 
+// gracefulStopAllWithForceSignal is gracefulStopAll that a force stop can cut
+// short. knownUnlisted holds names the caller's own per-name probe already found
+// running (or could not rule out) that the runtime inventory did not list.
+// They are read per name without probing them again before the interrupt; on
+// a remote runtime every probe is a round trip. Nil when the caller probed
+// nothing.
 func gracefulStopAllWithForceSignal(
 	names []string,
+	knownUnlisted map[string]bool,
 	sp runtime.Provider,
 	timeout time.Duration,
 	rec events.Recorder,
@@ -1046,7 +1053,7 @@ func gracefulStopAllWithForceSignal(
 	// unsupported answers an empty inventory). Read its liveness per name below:
 	// trusting the list would read it as exited at once, cut the grace window
 	// short and stop it outside the worker boundary as "exited gracefully".
-	unlisted := unlistedSessionSet(sp, names)
+	unlisted := unlistedSessionSet(sp, names, knownUnlisted)
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
 	// This is intentionally flat: interrupts are a best-effort graceful hint,
@@ -1102,9 +1109,12 @@ func gracefulStopAllWithForceSignal(
 	for _, name := range names {
 		running := false
 		var observeErr error
-		if listed && !unlisted[name] {
+		switch {
+		case listed && !unlisted[name]:
 			running = runningSet[name]
-		} else {
+		case listed:
+			running, observeErr = stopProbeRunning(sp, name)
+		default:
 			running, observeErr = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 		}
 		if observeErr != nil {
@@ -1161,22 +1171,36 @@ func stopForceRequested(forceStopRequested func() bool) bool {
 	return forceStopRequested != nil && forceStopRequested()
 }
 
+// stopProbeRunning is the per-name liveness read for a name the runtime
+// inventory did not list. It is the bare provider liveness observation, one
+// provider op on a remote runtime (the worker observation also reads
+// metadata, attachment and activity, several round trips each), and it
+// reports a failed probe as an error wherever the provider can tell one
+// (runtime.LivenessObserverWithError); elsewhere it is the bool IsRunning.
+func stopProbeRunning(sp runtime.Provider, name string) (bool, error) {
+	obs, err := runtime.ObserveLivenessWithError(sp, name, nil)
+	return obs.Running, err
+}
+
 // unlistedSessionSet returns the names that a complete runtime inventory does
-// not list but that a per-name probe reports running or cannot rule out. Nil
-// when the inventory is incomplete (every name is then read per name anyway)
-// or lists every name.
-func unlistedSessionSet(sp runtime.Provider, names []string) map[string]bool {
+// not list but that a per-name probe reports running or cannot rule out,
+// together with known, the names the caller's own probe already found so
+// (they are not probed again). Nil when the inventory is incomplete (every
+// name is then read per name anyway) or lists every name.
+func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bool) map[string]bool {
 	runningSet, ok := runningSessionSet(sp, names)
 	if !ok {
 		return nil
 	}
 	var unlisted map[string]bool
 	for _, name := range names {
-		if runningSet[name] {
-			continue
-		}
-		if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name); err == nil && !running {
-			continue
+		if !known[name] {
+			if runningSet[name] {
+				continue
+			}
+			if running, err := stopProbeRunning(sp, name); err == nil && !running {
+				continue
+			}
 		}
 		if unlisted == nil {
 			unlisted = make(map[string]bool)
@@ -1190,7 +1214,7 @@ func unlistedSessionSet(sp runtime.Provider, names []string) map[string]bool {
 // exited. An unknown state is not an exit.
 func namesObservedExited(sp runtime.Provider, names map[string]bool) bool {
 	for name := range names {
-		running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+		running, err := stopProbeRunning(sp, name)
 		if err != nil || running {
 			return false
 		}
