@@ -81,13 +81,24 @@ func (k *txKit) mutate(mark func(*simRuntime)) {
 // Kills a launch that commits a token the runtime does not carry, a commit
 // without legacy's session.woke, a Start without FreshOnly (I24), and a
 // reused incarnation: a gone runtime launches under generation 4 and a new
-// token, which the started runtime carries and the commit writes.
+// token, which the started runtime carries and the commit writes;
+// session.woke is recorded by the effect once the commit lands, not when its
+// settlement drains, and a refused launch records none.
 func TestLaunchCommitsThePreWakeToken(t *testing.T) {
 	k, _ := launchKit(t, "asleep")
+	rec := events.NewFake()
+	k.p.held.start.rec = rec
 	s := k.runKind()
 	want := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: (TemplateParams{TemplateName: "worker"}).DisplayName(), SessionID: "gc-1"}
-	if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || !reflect.DeepEqual(s.Facts.Events[0], want) || s.Facts.Noted == nil {
-		t.Fatalf("settlement %+v, want landed, noted, with %+v", s, want)
+	if s.Outcome != settledLanded || len(s.Facts.Events) != 0 || len(rec.Events) != 1 || rec.Events[0].Type != want.Type || rec.Events[0].Subject != want.Subject || rec.Events[0].SessionID != want.SessionID || s.Facts.Noted == nil {
+		t.Fatalf("settlement %+v, recorded %+v; want landed, noted, with %+v recorded by the effect", s, rec.Events, want)
+	}
+	refused, leaf := launchKit(t, "asleep")
+	refusedRec := events.NewFake()
+	refused.p.held.start.rec = refusedRec
+	leaf.onStart = func(context.Context) { refused.runtimeAs("gc-2", "theirs", nil) }
+	if s := refused.runKind(); s.Outcome == settledLanded || len(refusedRec.Events) != 0 {
+		t.Fatalf("a refused commit: settlement %+v, recorded %+v; want no session.woke", s, refusedRec.Events)
 	}
 	token := k.meta("instance_token")
 	if k.meta("generation") != "4" || token == "tok" || k.meta("state") != "awake" || k.meta("started_config_hash") == "" {
@@ -917,12 +928,14 @@ func TestStaleKeyResetRotatesTheContinuation(t *testing.T) {
 // during the Start still refuses occupied.
 func TestLaunchKeysOnTheVerbSectionsTemplate(t *testing.T) {
 	k, _ := launchKit(t, "asleep")
+	rec := events.NewFake()
+	k.p.held.start.rec = rec
 	k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{Patch: session.MetadataPatch{"gc.trigger_bead_id": "w-1"}}}
 	s := k.runKind()
 	k.leaf.mu.Lock()
 	names := slices.Clone(k.leaf.names)
 	k.leaf.mu.Unlock()
-	if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || s.Facts.Events[0].Subject != "worker" || len(names[len(names)-1]) == 0 {
+	if s.Outcome != settledLanded || len(rec.Events) != 1 || rec.Events[0].Subject != "worker" || len(names[len(names)-1]) == 0 {
 		t.Fatalf("settlement %+v, process names per read %v; want landed, session.woke for worker, the commit read with process names", s, names)
 	}
 	k, leaf := launchKit(t, "asleep")

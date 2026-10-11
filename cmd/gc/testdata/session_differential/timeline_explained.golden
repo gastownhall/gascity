@@ -13,15 +13,11 @@ row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|sou
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 ## 1 crash (+1m19s)
 @ +39s
-event:session.woke worker null legacy="1" v2="" [woke-at-drain]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
-row:gc-1:state legacy="active" v2="awake" [commit-writes-awake]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +49s
-event:session.woke worker null legacy="" v2="1" [woke-at-drain]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
-@ +59s
-event:session.woke worker null resolved
 === a crash 31s after wake
 ## 0 seed (+20s)
 @ +0s
@@ -45,15 +41,11 @@ row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|sou
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 ## 1 crash (+5m50s)
 @ +5m0s
-event:session.woke worker null legacy="1" v2="" [woke-at-drain]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
-row:gc-1:state legacy="active" v2="awake" [commit-writes-awake]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +5m10s
-event:session.woke worker null legacy="" v2="1" [woke-at-drain]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
-@ +5m20s
-event:session.woke worker null resolved
 === a live quarantined row 29s after wake
 ## 0 seed (+0s)
 @ +0s
@@ -197,15 +189,11 @@ provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 ## 1 swap (+1m10s)
 @ +30s
-event:session.woke worker-1 null legacy="1" v2="" [woke-at-drain]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
-row:gc-1:state legacy="active" v2="awake" [commit-writes-awake]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +40s
-event:session.woke worker-1 null legacy="" v2="1" [woke-at-drain]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
-@ +50s
-event:session.woke worker-1 null resolved
 ## 2 the next pass (+2m40s)
 === a quarantine, then a kill fence, expires
 ## 0 seed (+20s)
@@ -218,7 +206,6 @@ row:gc-1:quarantined_until legacy="" v2="T+2m0s" [§12.2#35 fenced-timer-heal]
 row:gc-1:wake_attempts legacy="0" v2="" [§12.2#35 fenced-timer-heal]
 ## 2 the kill fence expires (+6m30s)
 @ +5m0s
-event:session.woke worker-1 null legacy="1" v2="" [woke-at-drain]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:churn_count resolved
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
@@ -228,15 +215,12 @@ row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-row:gc-1:state legacy="active" v2="awake" [commit-writes-awake]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 row:gc-1:wake_attempts resolved
 @ +5m10s
-event:session.woke worker-1 null legacy="" v2="1" [woke-at-drain]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:currently_processing_bead_id resolved
 row:gc-1:state resolved
-@ +5m20s
-event:session.woke worker-1 null resolved
 === a reload turns idle sleep on for a detached row
 ## 0 seed (+20s)
 @ +0s
@@ -513,15 +497,11 @@ provider:SetMeta s-gc-1 resolved
 ## 1 kill (+40s)
 ## 2 past the kill grace (+7m10s)
 @ +5m20s
-event:session.woke worker-1 null legacy="1" v2="" [woke-at-drain]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
-row:gc-1:state legacy="active" v2="awake" [commit-writes-awake]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
 @ +5m30s
-event:session.woke worker-1 null legacy="" v2="1" [woke-at-drain]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
-@ +5m40s
-event:session.woke worker-1 null resolved
 === suspend, then wake
 ## 0 seed (+20s)
 @ +0s
@@ -543,15 +523,11 @@ provider:SetMeta s-gc-1 resolved
 row:gc-1:state legacy="asleep" v2="suspended" [suspended-row-heal]
 ## 2 wake (+1m20s)
 @ +1m0s
-event:session.woke worker-1 null legacy="1" v2="" [woke-at-drain]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:slept_at legacy="" v2="T+1m0s" [suspended-row-heal]
 row:gc-1:state legacy="active" v2="awake" [suspended-row-heal]
 row:gc-1:suspended_at legacy="T+20s" v2="" [suspended-row-heal]
 @ +1m10s
-event:session.woke worker-1 null legacy="" v2="1" [woke-at-drain]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
-@ +1m20s
-event:session.woke worker-1 null resolved
 ## 3 the next pass (+2m50s)

@@ -863,12 +863,11 @@ func tlStarted(subject, cause string) map[string]string {
 	return tlMerged(tlStartState(cause), map[string]string{"provider:Start s-gc-1": cause, "provider:RemoveMeta s-gc-1": cause, "event:session.woke " + subject + " null": cause})
 }
 
-// tlRestarted is a restart of row gc-1 under s-gc-1 both copies make, as
-// subject: legacy's runtime metadata clears (§12.2 #38), v2's session.woke
-// recorded when the start's settlement drains, a pass later, and v2's commit
-// writing the awake state legacy's next tick heals its active to.
-func tlRestarted(subject string) map[string]string {
-	return map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears", "event:session.woke " + subject + " null": "woke-at-drain", "row:gc-1:state": "commit-writes-awake"}
+// tlRestarted is a restart of row gc-1 under s-gc-1 both copies make:
+// legacy's runtime metadata clears (§12.2 #38), and v2's commit writing the
+// awake state legacy's next tick heals its active to (§12.2 #39).
+func tlRestarted() map[string]string {
+	return map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears", "row:gc-1:state": "§12.2#39 commit-writes-awake"}
 }
 
 // stabilityTimeline is SESS-537..540 through time, on a pool of one whose
@@ -912,9 +911,9 @@ func stabilityTimeline() []timelineFixture {
 	drained := map[string]string{"provider:SetMeta s-gc-1": "A20 drain-begin", "provider:RemoveMeta s-gc-1": "A20 drain-begin"}
 	lagged := map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}
 	return []timelineFixture{
-		crashAfter(29*time.Second, tlRestarted("worker")),
+		crashAfter(29*time.Second, tlRestarted()),
 		crashAfter(31*time.Second, nil),
-		crashAfter(5*time.Minute, tlRestarted("worker")),
+		crashAfter(5*time.Minute, tlRestarted()),
 		quarantinedAt(29*time.Second, map[string]map[string]string{
 			"seed": drained, "alive": drained, "settled": tlMerged(drained, lagged),
 		}),
@@ -1117,7 +1116,7 @@ func operatorTimeline() []timelineFixture {
 	}
 	// restarted is a restart both copies make: legacy's runtime metadata
 	// clears and its next tick's active-to-awake heal.
-	restarted := tlMerged(tlIdent(), tlRestarted("worker-1"))
+	restarted := tlMerged(tlIdent(), tlRestarted())
 	// woken is the managed-suspended row woken: legacy heals it asleep and
 	// restarts it, consuming the wake request (D7) in its start; v2 keeps it
 	// suspended (mc-92clf), so it neither restarts nor consumes the wake;

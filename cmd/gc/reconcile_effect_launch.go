@@ -254,6 +254,14 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	if res, ok := in.w.Templates.launchTemplate(in.row, c.start.clock.Now()); ok { // the bound row, at the tick (its prompt's beacon)
 		in.tp, in.agent = res.TP, res.Agent
 	}
+	// session.woke once the commit has landed, as legacy records it after
+	// its commit: at the effect's end, whether or not afterCommit ran.
+	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: in.tp.DisplayName(), SessionID: in.row.ID}
+	c.onExit(func(final settlement) {
+		if final.Outcome == settledLanded && c.start.rec != nil {
+			c.start.rec.Record(woke)
+		}
+	})
 	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.transcript)
 	if err != nil {
 		return startOutcome{}, err
@@ -294,7 +302,8 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 
 // commitStep is the commit's Decide on the read after the Start: only a
 // runtime alive with the PreWake token commits (I3), whatever the Start
-// returned, with the MCP keys, the #46 mirror cleared and session.woke; a
+// returned, with the MCP keys and the #46 mirror cleared (the launch Call
+// records session.woke once it lands); a
 // death is died during startup (S3).
 func commitStep(v txView) txStep {
 	out, err := callResult[startOutcome](v)
@@ -325,9 +334,8 @@ func commitStep(v txView) txStep {
 	if out.accrued {
 		patch[startupHealthActiveCountMetadataKey], patch[startupHealthActiveKindMetadataKey] = "0", ""
 	}
-	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: out.tp.DisplayName(), SessionID: v.Row.ID}
 	noted := &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now}
-	return txStep{Write: patch, Facts: effectFacts{Events: []events.Event{woke}, Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}
+	return txStep{Write: patch, Facts: effectFacts{Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}
 }
 
 // landedCommit is what a landed commit hands the after-commit Call.

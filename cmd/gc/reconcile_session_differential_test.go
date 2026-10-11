@@ -109,7 +109,9 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #35 (A2 before A6; mc-uyclc)", "an expired quarantine is not cleared while a kill fence is live: v2 holds the row until the fence expires; legacy clears it (and zeroes wake_attempts and churn_count) under the live fence",
 		[]string{"quarantined_until", "wake_attempts", "churn_count"},
 	},
-	"§12.2#38 start-meta-clears": {"CONTRACT v5 §12.2 #38 (A18, C5a1)", "legacy's start clears stale runtime metadata (RemoveMeta) on the runtime it starts; v2's FreshOnly start creates a runtime without any and removes nothing", nil},
+	"§12.2#40 held-start-bind":     {"CONTRACT v5 §12.2 #40 (C5b; PreWake binds, S1)", "legacy's realize binds a wanted seat's trigger and stamps its origin when a start gate then holds it; v2 binds in the PreWake, so a held seat carries neither until it launches (the trigger is presence only, claims are pull, and a work item binds once per pass: no double claim or spawn)", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "gc.work_dir", "session_origin", "continuation_epoch"}},
+	"§12.2#39 commit-writes-awake": {"CONTRACT v5 §12.2 #39 (C5b)", "v2's start and adopt commits write awake, the state legacy's next tick heals its committed active row to; for that one tick legacy reads active", []string{"state"}},
+	"§12.2#38 start-meta-clears":   {"CONTRACT v5 §12.2 #38 (A18, C5a1)", "legacy's start clears stale runtime metadata (RemoveMeta) on the runtime it starts; v2's FreshOnly start creates a runtime without any and removes nothing", nil},
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
@@ -146,10 +148,7 @@ var parityFindings = map[string]parityEntry{
 	},
 	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so a later wake neither restarts it nor is consumed", append([]string{"state", "wake_request", "wake_requested_at", "suspended_at", "slept_at"}, parityStartKeys...)},
 	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
-	"commit-writes-awake":  {"C5b (coordinator ruling: match legacy's end state)", "v2's start and adopt commits write awake, the state legacy's next tick heals its committed active row to; for that one tick legacy reads active", []string{"state"}},
-	"held-start-bind":      {"C5b (PreWake binds, S1)", "legacy's realize binds a wanted seat's trigger and stamps its origin when a start gate then holds it; v2 binds in the PreWake, so a held seat carries neither until it launches", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "gc.work_dir", "session_origin", "continuation_epoch"}},
-	"episode-mirror":       {"C5b follow-up (SESS-607 mirror; the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
-	"woke-at-drain":        {"C5b (CONTRACT v5 P5: an effect's facts apply when its settlement drains)", "legacy records session.woke in its start's tick; v2 records it when the start's settlement drains, at the next pass", nil},
+	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
 	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
@@ -1064,7 +1063,7 @@ func parityFixtures() []parityFixture {
 				eps, _ := m.List(beads.ListQuery{Type: session.StartupHealthEpisodeType})
 				return append([]parityRow{row}, eps...)
 			}(), Work: assigned,
-			Explain: explain(map[string]string{"row:gc-1:*sync": "A7 row-metadata", "row:gc-1:*bind": "held-start-bind", "row:gc-1:*mirror": "episode-mirror"}),
+			Explain: explain(map[string]string{"row:gc-1:*sync": "A7 row-metadata", "row:gc-1:*bind": "§12.2#40 held-start-bind", "row:gc-1:*mirror": "episode-mirror"}),
 		},
 		{
 			Name: "a heartbeat-held seat whose runtime died respawns for its work", Behaviors: []string{"SESS-602"},
