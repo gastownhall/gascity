@@ -161,6 +161,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"generation", func(i *Info, v string) { i.Generation = v }},
 	{"started_config_hash", func(i *Info, v string) { i.StartedConfigHash = v }},
 	{"pin_awake", func(i *Info, v string) { i.PinAwake = v }},
+	{DrainAckStrandedAtKey, func(i *Info, v string) { i.DrainAckStrandedAt = v }},
 
 	// reconciler decision-read cluster (front-door Phase 5)
 	{"held_until", func(i *Info, v string) { i.HeldUntil = v }},
