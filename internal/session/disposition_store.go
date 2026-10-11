@@ -81,6 +81,9 @@ func (s *Store) applyDisposition(id string, holds func(Info) bool, attempts int,
 		} else {
 			err = writer.UpdateIfMatch(id, b.Revision, opts)
 		}
+		if err != nil {
+			UnmintDisposition(id, patch)
+		}
 		switch {
 		case err == nil:
 			w.Wrote, w.Was = patch, MetadataPatch{}

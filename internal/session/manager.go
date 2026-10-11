@@ -1258,6 +1258,23 @@ func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand
 // suspendRollback is the restore of a failed stop's suspend w over the row
 // meta reads now: nothing unless meta still carries the suspend's stamp, and
 // then Was for each key w changed that meta still reads as w wrote it.
+// rollbackSuspend writes suspendRollback on a fresh read, fenced.
+func (m *Manager) rollbackSuspend(id string, suspended DispositionWrite) error {
+	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
+		return suspendRollback(suspended, p.Metadata)
+	})
+	return err
+}
+
+// stampSoftSuspend writes a suspend that holds nothing (the chat idle
+// auto-suspend, the city stop sweep): patch's state and stamp.
+func (m *Manager) stampSoftSuspend(id string, patch MetadataPatch) error {
+	if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return fmt.Errorf("updating suspension state: %w", err)
+	}
+	return nil
+}
+
 func suspendRollback(w DispositionWrite, meta map[string]string) MetadataPatch {
 	if w.Wrote == nil || meta["suspended_at"] != w.Wrote["suspended_at"] {
 		return nil
@@ -1428,9 +1445,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				// stamp, and only the keys the suspend changed that still read
 				// as it wrote them, so a write since (a wait, a quarantine)
 				// stands.
-				if _, rbErr := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
-					return suspendRollback(suspended, p.Metadata)
-				}); rbErr != nil {
+				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
 					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
 				}
 				return err
@@ -1457,11 +1472,7 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				patch[k] = v
 			}
 		}
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
-		}
-
-		return nil
+		return m.stampSoftSuspend(id, patch)
 	})
 }
 

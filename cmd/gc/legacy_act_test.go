@@ -433,6 +433,34 @@ func TestIdleRespawnOverAnIdleStopPendingIntentKeepsItsBasis(t *testing.T) {
 	}
 }
 
+// TestIdleRespawnRefusedCommitUnmints: an idle respawn whose fenced record of
+// the attempt is refused (the row moved) begins no drain and leaves no open
+// disposition mint for the idle stop's clear it carried.
+func TestIdleRespawnRefusedCommitUnmints(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now().UTC()}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "w", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: "w", Generation: "1", SleepIntent: "idle-stop-pending", DetachedAt: clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)}
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "60s", Capability: runtime.SessionSleepCapabilityFull, Duration: time.Minute}
+	eval := wakeEvaluation{Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy, AssignedWorkBeadID: "work-1"}
+	sessFront := idleRespawnUnitStore(t, info)
+	if err := sessFront.ApplyPatch(info.ID, sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending", "generation": "2"}); err != nil { // the row moved
+		t.Fatal(err)
+	}
+	dt := newDrainTracker()
+	probe := dt.startIdleProbe(info.ID)
+	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
+	before := sessionpkg.OpenDispositionMints(info.ID)
+	if began, _, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk); err != nil || began {
+		t.Fatalf("begin over a moved row = %v, %v; want refused", began, err)
+	}
+	if n := sessionpkg.OpenDispositionMints(info.ID) - before; n != 0 {
+		t.Errorf("the refused attempt left %d open mints", n)
+	}
+}
+
 // TestUnreadableAckSourceDefers: an ack whose source cannot be read is
 // neither the agent's nor the controller's. Over a consumed hold, the mark
 // and the timeout both defer: the row is not marked stop-pending, the drain

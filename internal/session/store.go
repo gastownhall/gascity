@@ -261,11 +261,15 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 		opts := beads.UpdateOpts{Metadata: map[string]string(patch)}
 		if writer == nil {
 			if err := s.store.Update(id, opts); err != nil {
+				UnmintDisposition(id, patch)
 				return false, err
 			}
 			return true, nil
 		}
 		err = writer.UpdateIfMatch(id, bead.Revision, opts)
+		if err != nil {
+			UnmintDisposition(id, patch) // decide mints again on the next attempt
+		}
 		switch {
 		case err == nil:
 			return true, nil

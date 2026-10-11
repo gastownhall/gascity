@@ -70,6 +70,35 @@ func mintDisposition(id string, kv MetadataPatch) {
 	dispositionGuard.mints[id] = append(dispositionGuard.mints[id], maps.Clone(kv))
 }
 
+// UnmintDisposition spends the mint a write to row id of written (the patch
+// whose class keys a DispositionPatch.Into minted) left, when that write did
+// not land: a lost CAS attempt, a refused or failed write. A writer that
+// re-decides after a lost attempt mints again, so an unspent mint would
+// otherwise admit a later hand-built write of the same content to any row of
+// that ID, in any store of the test.
+func UnmintDisposition(id string, written map[string]string) {
+	if !dispositionGuard.on.Load() {
+		return
+	}
+	class := MetadataPatch{}
+	for _, k := range dispositionKeys {
+		if v, ok := written[k]; ok {
+			class[k] = v
+		}
+	}
+	if len(class) > 0 {
+		spendDisposition(id, class)
+	}
+}
+
+// OpenDispositionMints is the number of mints for row id no write has spent:
+// a guarded test's check that a writer unmints what did not land.
+func OpenDispositionMints(id string) int {
+	dispositionGuard.mu.Lock()
+	defer dispositionGuard.mu.Unlock()
+	return len(dispositionGuard.mints[id])
+}
+
 // spendDisposition reports whether class, a write's class keys to row id, is
 // a mint for id, and spends it.
 func spendDisposition(id string, class MetadataPatch) bool {
@@ -138,7 +167,7 @@ var (
 // empties it.
 var dispositionBypass = map[string]bypassWrite{
 	"cmd/gc.preWakeCommitWith":                                                 {"PreWakePatch's intent clear: the PreWake cell", map[string]shape{"sleep_intent": shapeEmpty}},
-	"cmd/gc.restorePreWakeState":                                               {"the PreWake rollback: an undo of the cell's own write", undoHold},
+	"cmd/gc.restorePreWakeState":                                               {"the PreWake rollback: an undo of the cell's own write", map[string]shape{"sleep_intent": shapeAny}},
 	"cmd/gc.fencedWriter.casRow":                                               {"v2 row patches (the launch's PreWakePatch, the expired-timer clears, the heal's quarantine accrual and clear): their cells", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty | shapeTime}},
 	"cmd/gc.closeFailedCreateBead":                                             {"failedCreateClosePatch's clears: the Retire cell", clearsAll},
 	"cmd/gc.closeFailedCreateBeadInTx":                                         {"failedCreateClosePatch's clears: the Retire cell", clearsAll},
@@ -155,7 +184,8 @@ var dispositionBypass = map[string]bypassWrite{
 	"cmd/gc.recordChurn":                                                       {"the churn quarantine: the Quarantine cell", quarantined},
 	"cmd/gc.recordRateLimitQuarantine":                                         {"the rate-limit quarantine: the Quarantine cell", quarantined},
 	"cmd/gc.(*sessionKillFence).rollback":                                      {"the kill fence rollback: an undo of the Kill cell's own write", undoHold},
-	"internal/session.(*Manager).Suspend":                                      {"the soft suspend's stamp and the failed-stop rollback: the Suspend cell and its undo", undoHold},
+	"internal/session.(*Manager).stampSoftSuspend":                             {"the chat idle auto-suspend's and the city stop sweep's stamp: the SuspendSoft cell", map[string]shape{"suspended_at": shapeTime}},
+	"internal/session.(*Manager).rollbackSuspend":                              {"the failed-stop rollback: an undo of the Suspend cell's own write", undoHold},
 	"internal/session.(*Manager).clearWakeAndHoldOverrides":                    {"the close's hold clear: the Retire cell", clearsAll},
 }
 

@@ -742,3 +742,20 @@ func TestKillSleepPatchWritesTheFencesHoldKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionKillFenceUnmintsLostAttempts: a kill fence whose every CAS
+// attempt loses leaves no open disposition mint for its row, so a later
+// hand-built write of the same class content still fails the guard.
+func TestSessionKillFenceUnmintsLostAttempts(t *testing.T) {
+	m, id := stampedMem(t, gate.Require)
+	if err := m.SetMetadataBatch(id, map[string]string{"state": "active", "sleep_intent": "user-hold", "held_until": "2126-01-01T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	before := sessionpkg.OpenDispositionMints(id)
+	if _, err := writeSessionKillFence(casLoser{m}, id, time.Now()); err == nil {
+		t.Fatal("a kill fence under a CAS that always loses landed")
+	}
+	if n := sessionpkg.OpenDispositionMints(id) - before; n != 0 {
+		t.Errorf("the lost fence left %d open mints", n)
+	}
+}

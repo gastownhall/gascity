@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // The census is the guard: this package's tests, like cmd/gc's, internal/api's
@@ -119,6 +120,12 @@ func TestGuardDispositionWrites(t *testing.T) {
 		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"wait_hold": "true"}, false},
 		{"cmd/gc.preWakeCommitWith", map[string]string{"sleep_intent": ""}, true},
 		{"cmd/gc.preWakeCommitWith", map[string]string{"held_until": ""}, false},
+		{"internal/session.(*Manager).stampSoftSuspend", map[string]string{"suspended_at": stamp}, true},
+		{"internal/session.(*Manager).stampSoftSuspend", map[string]string{"sleep_intent": "user-hold"}, false},
+		{"internal/session.(*Manager).stampSoftSuspend", map[string]string{"held_until": stamp}, false},
+		{"internal/session.(*Manager).rollbackSuspend", map[string]string{"held_until": "", "sleep_intent": "", "suspended_at": ""}, true},
+		{"cmd/gc.restorePreWakeState", map[string]string{"sleep_intent": "idle-stop"}, true},
+		{"cmd/gc.restorePreWakeState", map[string]string{"held_until": stamp}, false},
 	} {
 		on := func() (string, []string, bool) { return "cmd/gc.inner", []string{tc.writer}, false }
 		if msg := checkDispositionWrite("r3", tc.class, on); (msg == "") != tc.admit {
@@ -170,3 +177,57 @@ func TestDispositionGuardReadsTheStack(t *testing.T) {
 func dispositionWriterFromHere() (string, []string, bool) { return hookFrame() }
 
 func hookFrame() (string, []string, bool) { return dispositionWriter() }
+
+// TestLostDispositionWritesLeaveNoMint (L1, L1b): a move whose every CAS
+// attempt loses leaves no open mint, so a hand-built write of the same
+// content fails the guard, on its row and on the same ID in another store
+// (every MemStore's first row is gc-1).
+func TestLostDispositionWritesLeaveNoMint(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive), "sleep_intent": "idle-stop-pending"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	if w, err := NewStore(beads.SessionStore{Store: loser}).ApplyDispositionFresh(b.ID, ActorController, DispEvent{Kind: EvIdleStopEnd}, nil, dispT0); err != nil || w.Result != CommitContended {
+		t.Fatalf("IdleStopEnd under a CAS that always loses = %+v, %v; want contended", w, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost move left %d open mints for %s", n, b.ID)
+	}
+	other := beads.NewMemStore()
+	b2, err := other.Create(beads.Bead{Title: "x", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod := func() (string, []string, bool) { return "cmd/gc.someHandWriter", nil, false }
+	if b2.ID == b.ID && checkDispositionWrite(b2.ID, map[string]string{"sleep_intent": ""}, prod) == "" {
+		t.Errorf("a hand-built {sleep_intent: \"\"} to %s in another store passed the guard", b2.ID)
+	}
+}
+
+// TestUpdateMetadataFencedUnmintsLostAttempts: a fenced decider that mints
+// (the wait clear, the undos) and loses every CAS attempt leaves no open mint.
+func TestUpdateMetadataFencedUnmintsLostAttempts(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	ok, err := NewStore(beads.SessionStore{Store: loser}).UpdateMetadataFenced(b.ID, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+		to, err := DispositionOfInfo(info).Apply(ActorController, DispEvent{Kind: EvWaitEnd}, State(info.MetadataState), dispT0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return to.Changed().Into(info.ID, nil)
+	})
+	if ok || err != nil {
+		t.Fatalf("UpdateMetadataFenced under a CAS that always loses = %v, %v; want not written", ok, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost attempts left %d open mints", n)
+	}
+}

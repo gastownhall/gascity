@@ -139,9 +139,16 @@ func applySessionKillFencePatch(store beads.Store, sessionID string, decide func
 			return nil
 		}
 		if writer == nil {
-			return store.SetMetadataBatch(sessionID, patch)
+			err := store.SetMetadataBatch(sessionID, patch)
+			if err != nil {
+				session.UnmintDisposition(sessionID, patch)
+			}
+			return err
 		}
 		lastErr = writer.UpdateIfMatch(sessionID, b.Revision, beads.UpdateOpts{Metadata: patch})
+		if lastErr != nil {
+			session.UnmintDisposition(sessionID, patch) // decide mints again on the next attempt
+		}
 		if lastErr == nil || !beads.IsPreconditionFailed(lastErr) {
 			return lastErr
 		}
