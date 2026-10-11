@@ -17,6 +17,10 @@ const (
 	DrainAckAtKey             = "drain_ack_at"
 )
 
+// stopRequestPremiseKeys are the stop request's keys a premise compares
+// (FactsBaseline): the controller half and the ack's incarnation.
+var stopRequestPremiseKeys = []string{DrainIntentReasonKey, DrainIntentAtKey, DrainIntentIncarnationKey, DrainAckIncarnationKey}
+
 // ClearStopRequestPatch clears both halves of a row's stop request.
 func ClearStopRequestPatch() MetadataPatch {
 	return MetadataPatch{

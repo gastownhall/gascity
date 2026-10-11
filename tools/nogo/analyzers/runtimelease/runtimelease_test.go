@@ -200,3 +200,78 @@ func markerLine(marker string) int {
 	}
 	return -1
 }
+
+// skippedSrc is a file another lint covers (SkipFiles): its runtime verbs
+// are not this lint's, but the actor rules still hold in it.
+const skippedSrc = `package p
+
+func effectStop(sp Provider) { _ = sp.Stop("a") }
+
+func effectActor(ctx Context) { _ = killCtx(ctx, Actor{Kind: ActorOperator}, "/c", "a") } // LK1
+`
+
+// actorSrc holds the actor rules' other shapes: a package-level use of the
+// sweep's kind, and an actor built field by field.
+const actorSrc = `package p
+
+const sweepKind = ActorSweep // LA1
+
+func fieldBuilt(ctx Context) {
+	var by Actor // LA2
+	by.Kind = ActorOperator
+	_ = killCtx(ctx, by, "/c", "a")
+}
+
+func fieldBuiltWithCity(ctx Context) {
+	var by Actor
+	by.Kind = ActorOperator
+	by.City = CityDir{"/c"}
+	_ = killCtx(ctx, by, "/c", "a")
+}
+
+func assignedWhole(ctx Context, from Actor) {
+	var by Actor
+	by = from
+	_ = killCtx(ctx, by, "/c", "a")
+}
+`
+
+// TestRuntimeLeaseActorRulesEverywhere: the actor rules hold in a skipped
+// file and at package scope, and catch an actor built by field assignment
+// with no City; a skipped file's verbs stay unreported.
+func TestRuntimeLeaseActorRulesEverywhere(t *testing.T) {
+	cfg := analyzer(map[string]runtimelease.Allowance{pkg + ":StopForCleanup": {Reason: "the runtime package's own"}})
+	cfg.SkipFiles = []string{"reconcile_effect"}
+	diags := analyzertest.Run(t, runtimelease.New(*cfg), pkg, map[string]string{"p.go": src, "reconcile_effect_x.go": skippedSrc, "actors.go": actorSrc})
+	got := map[string][]string{}
+	for _, d := range diags {
+		got[d.File] = append(got[d.File], fmt.Sprintf("%d %s", d.Line, d.Message))
+	}
+	want := map[string]map[int]string{
+		"reconcile_effect_x.go": {lineOf(skippedSrc, "LK1"): "effectActor builds an actor with no City"},
+		"actors.go": {
+			lineOf(actorSrc, "LA1"): "package scope names the stop sweep's actor kind",
+			lineOf(actorSrc, "LA2"): "fieldBuilt declares an actor it never gives a City",
+		},
+	}
+	for file, lines := range want {
+		if len(got[file]) != len(lines) {
+			t.Errorf("%s: findings %v, want %d", file, got[file], len(lines))
+		}
+		for line, msg := range lines {
+			if !slicesContain(got[file], fmt.Sprintf("%d ", line), msg) {
+				t.Errorf("%s: no finding %q on line %d; got %v", file, msg, line, got[file])
+			}
+		}
+	}
+}
+
+// lineOf is the line of text carrying "// marker".
+func lineOf(text, marker string) int {
+	for i, line := range strings.Split(text, "\n") {
+		if strings.HasSuffix(line, "// "+marker) {
+			return i + 1
+		}
+	}
+	return -1
+}

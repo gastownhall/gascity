@@ -449,11 +449,13 @@ func TestAllocator_UnknownStateRowNoneButOccupiesSlot(t *testing.T) {
 	}
 }
 
-// Kills: rolling back a row legacy would not (F8, SESS-501, MAINT-034): a
-// pending create past its lease is a rollback candidate only when its own
+// Kills: rolling back a row legacy would not (F8, SESS-501, MAINT-034), and
+// a lease predicate as an input (v5 P4, SC A5; C5b): a pending create past
+// A10's never-started deadline is a rollback candidate only when its own
 // runtime is not running (absent, or the name another row holds) and its
-// endpoint does not hold it; one within its lease, alive, dead or of
-// unknown liveness stays managed.
+// endpoint does not hold it; one before the deadline, one that recorded a
+// start (whatever its attempt's age), alive, dead or of unknown liveness
+// stays managed.
 func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 9)}, Workspace: config.Workspace{Provider: "claude"}}
 	expired := func(id string, slot int) beads.Bead {
@@ -464,6 +466,7 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 		expired("gc-alive", 2),
 		expired("gc-dead", 3),
 		poolRow("gc-lease", "worker", 4, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(time.Minute)),
+		poolRow("gc-woke", "worker", 5, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(30*time.Minute), "last_woke_at", ago(2*time.Minute)),
 		expired("gc-shared", 7),
 		poolRow("gc-owner", "worker", 8, "active", "session_name", "s-gc-shared"),
 	).alive("s-gc-alive", InventoryAttrs{}).corpse("s-gc-dead").
@@ -471,7 +474,7 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	f.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
 	d := f.decide()
 	for id, want := range map[string]bool{
-		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false,
+		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false, "gc-woke": false,
 		"gc-shared": true,
 	} {
 		e := entryOf(t, d, id)
@@ -1030,5 +1033,30 @@ func TestAllocator_DecideRefusesAZeroClock(t *testing.T) {
 	in.Now = time.Time{}
 	if _, err := decideAllocation(in); !errors.Is(err, errDecideNoClock) {
 		t.Fatalf("err = %v, want errDecideNoClock", err)
+	}
+}
+
+// Kills: the idle latch's override counting a wait's own intent (D-J 3). An
+// idle-latched waiter holding work whose wait turned ready wakes through the
+// latch though it kept sleep_intent=wait-hold; any other intent still
+// refuses the override.
+func TestAllocator_ConfigSleepSuppressionWakesAReadyWaiter(t *testing.T) {
+	for intent, wake := range map[string]bool{"wait-hold": true, "idle-stop-pending": false} {
+		cfg := chatCity("on_demand")
+		cfg.Agents[0].MaxActiveSessions = intPtr(1)
+		f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1",
+			"configured_named_mode", "on_demand", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+			"slept_at", ago(10*time.Minute), "wait_hold", "true", "sleep_intent", intent))
+		f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}}
+		f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "chat"}}
+		f.in.Demand.AssignedStoreRefs = []string{""}
+		f.in.ReadyWaits = map[string]bool{"gc-1": true}
+		e := entryOf(t, f.decide(), "gc-1")
+		if wake && e.Desired != desireWake {
+			t.Errorf("intent %q: idle-latched waiter whose wait is ready = %s/%s, want a wake", intent, e.Desired, e.Reason)
+		}
+		if !wake && (e.Desired != desireSleep || e.Reason != reasonConfigSleep) {
+			t.Errorf("intent %q: idle-latched row = %s/%s, want %s/%s", intent, e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+		}
 	}
 }

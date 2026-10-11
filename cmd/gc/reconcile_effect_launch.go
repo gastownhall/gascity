@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
@@ -129,8 +132,9 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 			}
 		}
 	}
-	_, _, patch := preWakePatch(v.Row, v.Now, f.token)
-	next := foldInfo(foldInfo(v.Row, patch), f.bind)
+	base := foldInfo(v.Row, v.It.Patch) // a dead committed row's heal and accrual (A6 item 4)
+	_, _, patch := preWakePatch(base, v.Now, f.token)
+	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
 	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent {
@@ -139,9 +143,13 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 	return f, nil
 }
 
-// launchPass is what the PreWake hands the launch Call.
+// launchPass is what the PreWake hands the launch Call: bound is the row
+// its template resolves on, bound but not yet woken, as legacy binds and
+// resolves at the tick before its PreWake (a pool seat's alias defers on a
+// creating row).
 type launchPass struct {
 	launchRow
+	bound      session.Info
 	transcript sessTranscriptState
 	ticket     *startTicket
 }
@@ -164,23 +172,28 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	ticket, err := callResult[*startTicket](v)
 	switch {
 	case errors.Is(err, errEndpointGate):
-		return txStep{Refuse: causeEndpointGate}
+		return healInstead(v, txStep{Refuse: causeEndpointGate})
 	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
 	case probeErr != nil && f.work != nil:
-		return txStep{Refuse: causeWorktree, Err: probeErr, Facts: effectFacts{Work: f.work}}
+		return healInstead(v, txStep{Refuse: causeWorktree, Err: probeErr, Facts: effectFacts{Work: f.work}})
 	case probeErr != nil:
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
-		return txStep{Refuse: causeSessionName}
-	case session.HoldsInfo(v.Row, v.Now).In&preWakeHolds != 0 || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
-		return txStep{Refuse: causeHeld}
+		return healInstead(v, txStep{Refuse: causeSessionName})
+	case session.HoldsInfo(foldInfo(v.Row, v.It.Patch), v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too; TODO(R7): Disposition
+		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
 	}
 	tp := ticket.launch.tp
-	_, _, patch := preWakePatch(v.Row, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
+	base := foldInfo(v.Row, v.It.Patch)
+	patch := maps.Clone(v.It.Patch)
+	if patch == nil {
+		patch = session.MetadataPatch{}
+	}
+	_, _, wake := preWakePatch(base, v.Now, f.token)
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
 	if len(f.reset) > 0 {
@@ -194,7 +207,18 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: launchPass{launchRow: launch, transcript: transcript, ticket: ticket}}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket}
+	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
+}
+
+// preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
+// by the agent heartbeat's hold it respawns through (v5.9i), which the
+// premise holds the fresh row to.
+func preWakeHoldsFor(v txView) session.Hold {
+	if v.It.Reason == decideHeartbeatRespawn {
+		return preWakeHolds &^ session.HoldTimer
+	}
+	return preWakeHolds
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps
@@ -236,6 +260,20 @@ type startOutcome struct {
 // its slack, the stale-key wait after a start with a key, and the commit's
 // reads.
 func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, error) {
+	switch res, ok := in.w.Templates.launchTemplate(in.bound, c.start.clock.Now()); { // at the tick (its prompt's beacon)
+	case ok:
+		in.tp, in.agent = res.TP, res.Agent
+	case res.Err != nil && c.start.stderr != nil:
+		fmt.Fprintf(c.start.stderr, "v2 start %s: resolving its template at launch: %v; launching the pass's\n", in.row.ID, res.Err) //nolint:errcheck // best-effort stderr
+	}
+	// session.woke once the commit has landed, as legacy records it after
+	// its commit: at the effect's end, whether or not afterCommit ran.
+	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: in.tp.DisplayName(), SessionID: in.row.ID}
+	c.onExit(func(final settlement) {
+		if final.Outcome == settledLanded && c.start.rec != nil {
+			c.start.rec.Record(woke)
+		}
+	})
 	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.transcript)
 	if err != nil {
 		return startOutcome{}, err
@@ -247,6 +285,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	leaf, _, _ := runtime.ResolveBackend(c.start.sp, name)
 	prepared.cfg.FreshOnly = true
 	in.w.Templates.installSideEffects(in.agent, in.tp)
+	if !beginStart(ctx) {
+		return startOutcome{}, context.Cause(ctx) // the shutdown came first: never begin a start after it
+	}
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), tp: in.tp, prepared: prepared}
 	stop()
@@ -274,9 +315,77 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	return out, nil
 }
 
+// outlivesShutdown is ctx for a start's Call (callWatched, before its lease
+// watch), with ctx's values, ended with ctx's cause by any end of ctx (a
+// provider swap, the effect's own deadline, a stop that does not preserve
+// sessions), except that a preserve-sessions shutdown (errEffectShutdown)
+// that lands after the provider's Start began (beginStart) is ignored. A
+// provider's failed start kills the runtime it launched (tmux's
+// cleanupFailedStart), so a start such a shutdown canceled mid-launch would
+// kill its own runtime and the next boot would relaunch it under a new token
+// instead of adopting it (§12.2 #4, START-024; staging J35 A/B). The lease
+// watch, taken on the result, still ends the start on a lost lease. Its
+// caller bounds the Start by the effect's deadline; the executor's closed
+// write latch keeps a start that finishes during shutdown from writing.
+// release stops the relay.
+func outlivesShutdown(ctx context.Context) (context.Context, func()) {
+	g := &startGate{parent: ctx}
+	detached, cancel := context.WithCancelCause(context.WithValue(parentDeadline{context.WithoutCancel(ctx), ctx}, startGateKey{}, g))
+	g.cancel = cancel
+	unrelay := context.AfterFunc(ctx, func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if cause := context.Cause(ctx); !g.begun || !errors.Is(cause, errEffectShutdown) {
+			cancel(cause)
+		}
+	})
+	return detached, func() { unrelay(); cancel(context.Canceled) }
+}
+
+// parentDeadline reports its parent's deadline, which the relay enforces,
+// so a lease watch taken on it never outlives the effect (Watch).
+type parentDeadline struct {
+	context.Context
+	parent context.Context
+}
+
+func (d parentDeadline) Deadline() (time.Time, bool) { return d.parent.Deadline() }
+
+// startGate is outlivesShutdown's record of whether the Start began.
+type startGate struct {
+	mu     sync.Mutex
+	parent context.Context
+	cancel context.CancelCauseFunc
+	begun  bool
+}
+
+type startGateKey struct{}
+
+// beginStart reports whether a start may begin on ctx, and from then on lets
+// it outlive a preserve-sessions shutdown: false once ctx, or the context
+// outlivesShutdown detached it from, has ended, so no Start begins after the
+// shutdown deadline.
+func beginStart(ctx context.Context) bool {
+	g, ok := ctx.Value(startGateKey{}).(*startGate)
+	if !ok {
+		return ctx.Err() == nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.parent.Err() != nil {
+		g.cancel(context.Cause(g.parent))
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	g.begun = true
+	return true
+}
+
 // commitStep is the commit's Decide on the read after the Start: only a
 // runtime alive with the PreWake token commits (I3), whatever the Start
-// returned, with the MCP keys, the #46 mirror cleared and session.woke; a
+// returned, with the MCP keys and the #46 mirror cleared (the launch Call
+// records session.woke once it lands); a
 // death is died during startup (S3).
 func commitStep(v txView) txStep {
 	out, err := callResult[startOutcome](v)
@@ -302,14 +411,13 @@ func commitStep(v txView) txStep {
 	default:
 		return txStep{Refuse: cause}
 	}
-	patch := startCommitPatch(out.prepared, v.Row, v.Now)
+	patch := startCommit(out.prepared, v.Row, v.Now)
 	maps.Copy(patch, out.mcp)
 	if out.accrued {
 		patch[startupHealthActiveCountMetadataKey], patch[startupHealthActiveKindMetadataKey] = "0", ""
 	}
-	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: out.tp.DisplayName(), SessionID: v.Row.ID}
 	noted := &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now}
-	return txStep{Write: patch, Facts: effectFacts{Events: []events.Event{woke}, Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}
+	return txStep{Write: patch, Facts: effectFacts{Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}
 }
 
 // landedCommit is what a landed commit hands the after-commit Call.

@@ -11459,6 +11459,82 @@
         ],
         "type": "object"
       },
+      "SlingChildConflict": {
+        "additionalProperties": false,
+        "properties": {
+          "blocking_workflow_ids": {
+            "description": "Live workflow roots that refused the launch.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "hint": {
+            "description": "Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.",
+            "type": "string"
+          },
+          "source_bead_id": {
+            "description": "Source bead whose live workflow refused the launch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_bead_id",
+          "blocking_workflow_ids",
+          "hint"
+        ],
+        "type": "object"
+      },
+      "SlingChildOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "Child bead ID.",
+            "type": "string"
+          },
+          "conflict": {
+            "$ref": "#/components/schemas/SlingChildConflict",
+            "description": "Set when the child failed because its source bead already has a live workflow."
+          },
+          "formula": {
+            "description": "Formula attached to the child, when one was.",
+            "type": "string"
+          },
+          "molecule_id": {
+            "description": "Root of the formula wisp attached to the child, when a non-graph formula was attached.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).",
+            "enum": [
+              "routed",
+              "failed",
+              "skipped"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why routing the child failed. Present only for outcome failed.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The child's bead status when it was skipped because it was not open.",
+            "type": "string"
+          },
+          "workflow_id": {
+            "description": "Graph workflow launched for the child, when one was.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SlingInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -11545,6 +11621,16 @@
           "bead": {
             "type": "string"
           },
+          "children": {
+            "description": "One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.",
+            "items": {
+              "$ref": "#/components/schemas/SlingChildOutcome"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "convoy_id": {
             "description": "Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.",
             "type": "string"
@@ -11571,6 +11657,11 @@
             "description": "Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."
           },
           "status": {
+            "description": "slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.",
+            "enum": [
+              "slung",
+              "partial"
+            ],
             "type": "string"
           },
           "target": {
@@ -49577,6 +49668,7 @@
     },
     "/v0/city/{cityName}/sling": {
       "post": {
+        "description": "A convoy bead is expanded and each open child is routed separately, as gc sling does; the response then carries batch counts and one children entry per child. When some children were routed and others failed, the sling has already changed state, so it answers 200 with status \"partial\" and the per-child outcomes (failed children carry a reason, and a conflict naming the blocking workflows when a live source workflow refused them) rather than an error; do not retry such a request as a whole. A convoy sling that routed no child and failed at least one is an error, as before.",
         "operationId": "post-v0-city-by-city-name-sling",
         "parameters": [
           {

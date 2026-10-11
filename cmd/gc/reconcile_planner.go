@@ -111,10 +111,10 @@ type bootState struct {
 func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && b.RecordingSeen }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, fairSeed, boot, last, rowTrace, memo and stalled; other
-// goroutines reach the planner through markDirty, the settlement queue, the
-// execution-stalled inbox, the start pause and stop, and read what a pass
-// publishes through out.
+// backoff, bucket, fairSeed, boot, last, rowTrace, idleProbes, memo and
+// stalled; other goroutines reach the planner through markDirty, the
+// settlement queue, the execution-stalled inbox, the start pause and stop,
+// and read what a pass publishes through out.
 type planner struct {
 	clock       plannerClock
 	seam        txSeamFunc           // every pass's (effectPass.seam): stagingSeam's, or a test's
@@ -141,12 +141,16 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
-	memo     gatherMemo
-	out      passOutputs
-	obs      passObserver
+	// idleProbes are the idle begins submitted to prove an agent idle, by
+	// row, which paceIdleProbes holds a patrol apart.
+	idleProbes map[rowKey]idleProbe
+	memo       gatherMemo
+	out        passOutputs
+	obs        passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
 	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	softReload    atomic.Pointer[softReloadRequest] // the open soft reload (M2)
 	stalled       map[string]executionStalledRequest
 	stalledMu     sync.Mutex
 	stalledPosted []executionStalledRequest
@@ -318,6 +322,7 @@ func (p *planner) drainSettlements(now time.Time) {
 		if !s.Late {
 			p.backoffSettled(s)
 			p.observeSettlement(s)
+			p.softReload.Load().settle(s)
 		}
 	}
 	for _, s := range items {
@@ -326,9 +331,9 @@ func (p *planner) drainSettlements(now time.Time) {
 }
 
 // applyFacts applies an effect's facts, on time or late alike: its events to
-// the recorder, each recovered alone; its drain transition to legacy's
-// telemetry; its worktree verdict to the work item's backoff record
-// (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+// the recorder, each recovered alone; its drain transition and its
+// quarantine to legacy's telemetry; its worktree verdict to the work item's
+// backoff record (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
 func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	for _, ev := range f.Events {
 		if p.rec != nil {
@@ -337,6 +342,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 	if t := f.Transition; t != nil {
 		recordDrainTransition(context.Background(), t.Name, t.Reason, t.Transition)
+	}
+	if f.Quarantined != "" {
+		recordAgentQuarantine(context.Background(), f.Quarantined)
 	}
 	switch {
 	case f.Work == nil:
@@ -356,8 +364,12 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 }
 
-// recordDrainTransition is legacy's drain telemetry; a test reads it.
-var recordDrainTransition = telemetry.RecordDrainTransition
+// recordDrainTransition and recordAgentQuarantine are legacy's drain and
+// quarantine telemetry; a test reads them.
+var (
+	recordDrainTransition = telemetry.RecordDrainTransition
+	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+)
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
 // pass record; a panicking recorder is logged and skips this event only.
@@ -374,7 +386,8 @@ func (p *planner) record(ev events.Event) {
 }
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
-// resets its record; a refusal, failure or ambiguous outcome (an abandoned
+// resets its record; a refusal (a landing with a cause, a heal written in a
+// refusal's stead, included), failure or ambiguous outcome (an abandoned
 // write) backs it off with its cause, except a swap pause and an endpoint-gate
 // refusal, deferrals the gate itself paces.
 func (p *planner) backoffSettled(s settlement) {
@@ -384,9 +397,9 @@ func (p *planner) backoffSettled(s settlement) {
 	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
+	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

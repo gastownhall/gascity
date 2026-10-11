@@ -281,6 +281,16 @@ const (
 	// no kill fence (tx.decide); a row already closed is a no-op that ends the
 	// effect.
 	premiseClose
+	// premiseDrainBasis: a drain begin (A20). Open, carrying the locked
+	// runtime name, at the basis expected, with the registry's FactsDrainBasis
+	// site's facts: the drain basis, so an agent's heartbeat (held_until)
+	// cannot starve the begin; its Decide re-decides on the fresh row.
+	premiseDrainBasis
+	// premiseBaseline: a baseline write (A8). The default premise with the
+	// registry's FactsBaseline site's facts: the incarnation, the stored
+	// config hash and the stop request; its Decide re-decides on the fresh
+	// row.
+	premiseBaseline
 )
 
 // section is one span of an effect under the row's session mutation lock,
@@ -416,6 +426,9 @@ type effectFacts struct {
 	// Noted is a fresh read that found the row's runtime alive and Current,
 	// which the planner notes in the observation cache (v5 O4).
 	Noted *notedRuntime
+	// Quarantined is the agent a landed death accrual quarantined, for
+	// legacy's RecordAgentQuarantine.
+	Quarantined string
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -425,7 +438,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == ""
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -433,6 +446,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Transition = cmp.Or(g.Transition, f.Transition)
 	f.Work = cmp.Or(g.Work, f.Work)
 	f.Noted = cmp.Or(g.Noted, f.Noted)
+	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -711,7 +725,11 @@ func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
 // wrote, otherwise a no-op with the step's cause.
 func (t *tx) done(step txStep) settlement {
 	if t.landed {
-		return settlement{Outcome: settledLanded}
+		s := settlement{Outcome: settledLanded}
+		if len(step.Write) > 0 { // this step's write stood in for a refusal (healInstead)
+			s.Cause = step.Cause
+		}
+		return s
 	}
 	return settlement{Outcome: settledNoop, Cause: step.Cause}
 }
@@ -825,9 +843,14 @@ func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string)
 			return []string{"no own write"}
 		}
 		return session.FactsCommit.Moved(fresh, t.facts0)
-	case premiseDefault, premiseClose:
+	case premiseDefault, premiseClose, premiseDrainBasis, premiseBaseline:
 		site := session.FactsDefault
-		if t.started {
+		switch {
+		case rule == premiseDrainBasis:
+			site = session.FactsDrainBasis
+		case rule == premiseBaseline:
+			site = session.FactsBaseline
+		case t.started:
 			site = session.FactsAfterStart
 		}
 		moved = site.Moved(t.compared(fresh), t.compared(t.facts0))
@@ -863,6 +886,13 @@ var errPremiseMoved = errors.New("the row moved since the pass")
 func (t *tx) callWatched(ctx context.Context, sec section) (any, error) {
 	c := t.c
 	c.by = sessionActor(session.ActorController, t.p.World.CityPath)
+	if sec.callKind == callStart {
+		// Detached before the lease watch, so a lost lease still ends a Start
+		// that outlives a preserve-sessions shutdown (outlivesShutdown).
+		detached, release := outlivesShutdown(ctx)
+		defer release()
+		ctx = detached
+	}
 	if t.lease == nil {
 		return sec.call(ctx, c, t.pass)
 	}

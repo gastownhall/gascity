@@ -393,7 +393,7 @@ func TestDrainMidDrainHeartbeatAndSuspend(t *testing.T) {
 	assertStopPending(t, env, snapshot.ID)
 
 	env, snapshot, work, dops = drainAckFixture(t, true, false)
-	if err := sessionFrontDoor(env.store).OperatorSuspend(snapshot.ID, env.clk.Now()); err != nil {
+	if _, err := sessionFrontDoor(env.store).OperatorSuspend(snapshot.ID, env.clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -207,9 +208,11 @@ func listWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event,
 	return ep.List(filter)
 }
 
+// filterIsEmpty reports whether every Filter field is at its zero value, so
+// the city and supervisor event lists may take their unfiltered paths. Filter
+// holds a slice, so it is not comparable with ==.
 func filterIsEmpty(f events.Filter) bool {
-	return f.Type == "" && f.Actor == "" && f.Subject == "" &&
-		f.Since.IsZero() && f.Until.IsZero() && f.AfterSeq == 0
+	return reflect.ValueOf(f).IsZero()
 }
 
 func parseEventSince(value string) (time.Duration, bool, error) {
@@ -367,9 +370,6 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 		return
 	}
 	defer watcher.Close() //nolint:errcheck
-	// Keep the city's pending monitor running while this client watches, so
-	// session.pending / session.pending_cleared transitions reach the log.
-	defer s.acquirePendingMonitor()()
 	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)

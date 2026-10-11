@@ -111,6 +111,13 @@ func stopCancelPatch() session.MetadataPatch {
 	return session.MetadataPatch{session.DrainIntentReasonKey: "", session.DrainIntentAtKey: "", session.DrainIntentIncarnationKey: ""}
 }
 
+// cancelsStop reports a patch that writes the controller half's cancel
+// (stopCancelPatch).
+func cancelsStop(patch session.MetadataPatch) bool {
+	reason, ok := patch[session.DrainIntentReasonKey]
+	return ok && reason == ""
+}
+
 // stopVoidResiduePatch clears both halves of a request rule 2 ended.
 func stopVoidResiduePatch() session.MetadataPatch {
 	return session.ClearStopRequestPatch()
