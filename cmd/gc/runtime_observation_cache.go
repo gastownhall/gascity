@@ -502,8 +502,12 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	at := pass.StartedAt
 	swapped := pass.ProviderGen != prev.Inventory.ProviderGen
 
+	// Activity is this pass's read or unknown: a stale reading never
+	// carries over, enriched or not, so a missed read cannot make a row
+	// look idle.
 	byName := make(map[string]RuntimeObservation, len(prev.ByName))
 	for name, obs := range prev.ByName {
+		obs.LastActivity, obs.LastActivityKnown = time.Time{}, false
 		byName[name] = obs
 	}
 
@@ -649,11 +653,8 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	if a.AttachedKnown {
 		obs.Attached = poller(obsFactOf(a.Attached))
 	}
-	// Activity is this pass's read or unknown: a stale reading never
-	// carries over, so a missed read cannot make a row look idle.
-	obs.LastActivity, obs.LastActivityKnown = time.Time{}, a.ActivityKnown
 	if a.ActivityKnown {
-		obs.LastActivity = a.LastActivity
+		obs.LastActivity, obs.LastActivityKnown = a.LastActivity, true
 	}
 	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {

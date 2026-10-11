@@ -242,6 +242,7 @@ type inventoryFixturePane struct {
 type inventoryFixtureSession struct {
 	name, id, created, attached string
 	panes                       []inventoryFixturePane
+	activity                    map[int]string // #{window_activity} by window index
 	env                         map[string]string
 	envErr                      error
 }
@@ -287,6 +288,18 @@ func (f *inventoryFixtureExecutor) execute(args []string) (string, error) {
 		}
 		if lines == nil {
 			return "", ErrSessionNotFound
+		}
+		return strings.Join(lines, "\n"), nil
+	case "list-windows":
+		s, ok := f.session(flag("-t"))
+		if !ok {
+			return "", ErrSessionNotFound
+		}
+		var lines []string
+		for i, p := range s.panes {
+			if i == 0 || p.window != s.panes[i-1].window {
+				lines = append(lines, f.render(flag("-F"), s, p))
+			}
 		}
 		return strings.Join(lines, "\n"), nil
 	case "display-message":
@@ -340,6 +353,7 @@ func (f *inventoryFixtureExecutor) render(format string, s inventoryFixtureSessi
 		"#{pane_index}", strconv.Itoa(p.pane),
 		"#{pane_dead}", p.dead,
 		"#{pane_pid}", p.pid,
+		"#{window_activity}", s.activity[p.window],
 	).Replace(format)
 }
 
@@ -352,36 +366,42 @@ func inventoryFixtureFleet() *inventoryFixtureExecutor {
 	return &inventoryFixtureExecutor{sessions: []inventoryFixtureSession{
 		{
 			name: "gc-live", id: "$1", created: "1700000001", attached: "0",
-			panes: []inventoryFixturePane{{0, 0, "0", "101"}},
-			env:   map[string]string{"GC_SESSION_ID": "gc-101", "GC_INSTANCE_TOKEN": "tok-101"},
+			panes:    []inventoryFixturePane{{0, 0, "0", "101"}},
+			activity: map[int]string{0: "1700000101"},
+			env:      map[string]string{"GC_SESSION_ID": "gc-101", "GC_INSTANCE_TOKEN": "tok-101"},
 		},
 		{
 			name: "gc-corpse", id: "$2", created: "1700000002", attached: "0",
-			panes: []inventoryFixturePane{{0, 0, "1", "201"}, {0, 1, "1", "202"}},
-			env:   map[string]string{"GC_SESSION_ID": "gc-201"},
+			panes:    []inventoryFixturePane{{0, 0, "1", "201"}, {0, 1, "1", "202"}},
+			activity: map[int]string{0: "1700000201"},
+			env:      map[string]string{"GC_SESSION_ID": "gc-201"},
 		},
 		{
 			name: "gc-mixed", id: "$3", created: "1700000003", attached: "1",
-			panes: []inventoryFixturePane{{0, 0, "1", "301"}, {1, 0, "0", "302"}},
-			env:   map[string]string{"GC_SESSION_ID": "gc-301", "GC_INSTANCE_TOKEN": "tok-301"},
+			panes:    []inventoryFixturePane{{0, 0, "1", "301"}, {1, 0, "0", "302"}},
+			activity: map[int]string{0: "1700000399", 1: "1700000301"},
+			env:      map[string]string{"GC_SESSION_ID": "gc-301", "GC_INSTANCE_TOKEN": "tok-301"},
 		},
 		{
 			name: "gc-ownerless", id: "$4", created: "1700000004", attached: "0",
-			panes: []inventoryFixturePane{{0, 0, "0", "401"}},
-			env:   map[string]string{"PATH": "/usr/bin"},
+			panes:    []inventoryFixturePane{{0, 0, "0", "401"}},
+			activity: map[int]string{0: "1700000401"},
+			env:      map[string]string{"PATH": "/usr/bin"},
 		},
 		{
 			name: "gc-unreadable", id: "$5", created: "1700000005", attached: "0",
-			panes:  []inventoryFixturePane{{0, 0, "0", "501"}},
-			envErr: errors.New("tmux show-environment: server busy"),
+			panes:    []inventoryFixturePane{{0, 0, "0", "501"}},
+			activity: map[int]string{0: "1700000501"},
+			envErr:   errors.New("tmux show-environment: server busy"),
 		},
 	}}
 }
 
 // Differential: on one fleet fixture, the batched inventory answers exactly
 // what the legacy per-session reads answer — the entry set is the listing,
-// AllPanesDead is IsDeadRuntimeSession, and Attached is IsAttached (whose
-// "exactly one client" reading agrees with a client count for 0 and 1).
+// AllPanesDead is IsDeadRuntimeSession, Attached is IsAttached (whose
+// "exactly one client" reading agrees with a client count for 0 and 1), and
+// LastActivity is GetLastActivity (legacy's idle reference).
 // Kills: an inventory that diverges from the per-runtime probes it replaces.
 func TestTmuxRuntimeInventory_MatchesPerSessionProbes(t *testing.T) {
 	raw := NewProviderWithConfig(Config{})
@@ -419,6 +439,13 @@ func TestTmuxRuntimeInventory_MatchesPerSessionProbes(t *testing.T) {
 		}
 		if entry.Incarnation == "" {
 			t.Errorf("%s: inventory incarnation is empty", name)
+		}
+		activity, err := raw.GetLastActivity(name)
+		if err != nil {
+			t.Fatalf("GetLastActivity(%s): %v", name, err)
+		}
+		if !entry.ActivityKnown || !entry.LastActivity.Equal(activity) {
+			t.Errorf("%s: inventory activity = %v (known %v), GetLastActivity = %v", name, entry.LastActivity, entry.ActivityKnown, activity)
 		}
 	}
 }

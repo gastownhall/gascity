@@ -921,25 +921,26 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 	return len(names)
 }
 
-// readActivities reads the last activity of every enriched name whose pane
-// is alive, on a leaf without a batched inventory (whose inventory read
-// carries activity: tmux's #{window_activity}, at no extra fork) that can
-// report it for that name (sessionActivityReportable): GetLastActivity, the
-// read legacy's idle reference makes (sessionIdleReferenceInfoWithError). On
-// tmux that read would refresh the fleet snapshot, a full process scan,
-// every pass, so tmux names are never read here. At most concurrency
-// run at a time, each on its own goroutine within ctx (the pass's
-// enrichment bound), so a wedged read cannot hold the pass. Only an
-// error-free, non-zero answer is known; anything else, a read past ctx
-// included, leaves the activity unknown, and AL1 never sleeps a live row on
-// unknown activity (configSleepSuppressed). It returns the reads made.
+// readActivities reads the last activity of every enriched name on a leaf
+// without a batched inventory (whose inventory read carries activity: tmux's
+// #{window_activity}, at no extra fork) that can report it for that name
+// (sessionActivityReportable): GetLastActivity, the read legacy's idle
+// reference makes (sessionIdleReferenceInfoWithError). Such a leaf reports no
+// pane liveness, so every listed name is read. On tmux that read would
+// refresh the fleet snapshot, a full process scan, every pass, so tmux names
+// are never read here. At most concurrency run at a time, each on its own
+// goroutine within ctx (the pass's enrichment bound), so a wedged read cannot
+// hold the pass, and none starts once ctx is done. Only an error-free,
+// non-zero answer is known; anything else, a read past ctx included, leaves
+// the activity unknown, and AL1 never sleeps a live row on unknown activity
+// (configSleepSuppressed). It returns the reads made.
 func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) int {
 	var names []string
-	for name, a := range attrs {
+	for name := range attrs {
 		if _, batched := hosts[name].(runtime.InventoryProvider); batched {
 			continue // its inventory carried the activity, or proved none (tmux)
 		}
-		if a.DeadKnown && !a.AllPanesDead && sessionActivityReportable(hosts[name], name) {
+		if sessionActivityReportable(hosts[name], name) {
 			names = append(names, name)
 		}
 	}
@@ -951,8 +952,16 @@ func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 	}
 	answers := make(chan answer, len(names))
 	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
 	for _, name := range names {
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
 		go func(leaf runtime.Provider) {
 			defer func() { <-sem }()
 			done := make(chan answer, 1)
@@ -973,13 +982,13 @@ func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 			}
 		}(hosts[name])
 	}
-	for range names {
+	for range reads {
 		got := <-answers
 		a := attrs[got.name]
 		a.ActivityKnown, a.LastActivity = got.ok, got.at
 		attrs[got.name] = a
 	}
-	return len(names)
+	return reads
 }
 
 // probedIncarnation reports whether a probe answered for incarnation: the

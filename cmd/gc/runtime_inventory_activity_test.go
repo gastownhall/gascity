@@ -39,40 +39,71 @@ func newActivityLeaf(t *testing.T) *activityLeaf {
 	return l
 }
 
-var livePane = InventoryAttrs{DeadKnown: true}
-
 // TestReadActivitiesKnownOnlyOnACleanRead (C6a2b). Kills an activity fact
-// that reads idle where nothing was proved: only a live pane's error-free,
-// non-zero answer is known; an error, a zero time, a dead pane, a pane whose
-// liveness is unknown, or a leaf that cannot report activity stays unknown,
-// and AL1 never sleeps a live row on unknown activity.
+// that reads idle where nothing was proved: only an error-free, non-zero
+// answer is known; an error, a zero time, or a leaf that cannot report
+// activity stays unknown, and AL1 never sleeps a live row on unknown
+// activity.
 func TestReadActivitiesKnownOnlyOnACleanRead(t *testing.T) {
 	at := gatherNow.Add(-time.Hour)
 	leaf := newActivityLeaf(t)
-	leaf.at["a"], leaf.at["b"], leaf.err["b"], leaf.at["d"], leaf.at["e"] = at, at, errors.New("probe failed"), at, at
-	attrs := map[string]InventoryAttrs{
-		"a": livePane, "b": livePane, "c": livePane,
-		"d": {DeadKnown: true, AllPanesDead: true},
-		"e": {},
-	}
-	hosts := map[string]runtime.Provider{}
-	for name := range attrs {
-		hosts[name] = leaf
-	}
+	leaf.at["a"], leaf.at["b"], leaf.err["b"] = at, at, errors.New("probe failed")
+	attrs := map[string]InventoryAttrs{"a": {}, "b": {}, "c": {}}
+	hosts := map[string]runtime.Provider{"a": leaf, "b": leaf, "c": leaf}
 	reads := readActivities(context.Background(), attrs, hosts, 4)
 	if got := attrs["a"]; !got.ActivityKnown || !got.LastActivity.Equal(at) {
 		t.Fatalf("a clean read: %+v, want known at %v", got, at)
 	}
-	for _, name := range []string{"b", "c", "d", "e"} {
+	for _, name := range []string{"b", "c"} {
 		if attrs[name].ActivityKnown {
 			t.Errorf("%s: activity known, want unknown", name)
 		}
 	}
-	if reads != 3 || leaf.reads["d"] != 0 || leaf.reads["e"] != 0 {
-		t.Fatalf("reads %d (%v), want 3, none on a dead or unknown pane", reads, leaf.reads)
+	if reads != 3 {
+		t.Fatalf("reads %d (%v), want 3", reads, leaf.reads)
 	}
-	if n := readActivities(context.Background(), map[string]InventoryAttrs{"x": livePane}, map[string]runtime.Provider{"x": unreportable{leaf.Fake}}, 4); n != 0 {
+	if n := readActivities(context.Background(), map[string]InventoryAttrs{"x": {}}, map[string]runtime.Provider{"x": unreportable{leaf.Fake}}, 4); n != 0 {
 		t.Fatalf("an unreportable leaf was read %d times, want 0", n)
+	}
+}
+
+// TestLaneReadsActivityOnALeafWithoutAnInventory (C6a2b). Kills an activity
+// read the lane never makes on a leaf without a batched inventory (acp,
+// subprocess), whose names enrich leaves without pane liveness: one real
+// inventory pass reads every listed name there and publishes its clean
+// answer.
+func TestLaneReadsActivityOnALeafWithoutAnInventory(t *testing.T) {
+	at := gatherNow.Add(-time.Hour)
+	leaf := newActivityLeaf(t)
+	for _, name := range []string{"s", "t"} {
+		if err := leaf.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		leaf.at[name] = at
+	}
+	if _, batched := runtime.Provider(leaf).(runtime.InventoryProvider); batched || !sessionActivityReportable(leaf, "s") {
+		t.Fatal("fixture: want a leaf without an inventory that reports activity")
+	}
+	cr := inventoryLaneTestRuntime(t, leaf, nil)
+	runTestInventoryPass(cr)
+	snap := cr.inventoryLane.cache.Snapshot()
+	for _, name := range []string{"s", "t"} {
+		if obs := snap.ByName[name]; !obs.LastActivityKnown || !obs.LastActivity.Equal(at) {
+			t.Fatalf("%s: published activity %v (known %v), want %v; reads %v", name, obs.LastActivity, obs.LastActivityKnown, at, leaf.reads)
+		}
+	}
+}
+
+// TestReadActivitiesStartsNoneAfterTheBound (C6a2b). Kills reads spawned
+// past the pass's bound: a done ctx starts no read.
+func TestReadActivitiesStartsNoneAfterTheBound(t *testing.T) {
+	leaf := newActivityLeaf(t)
+	leaf.at["a"] = gatherNow
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	attrs := map[string]InventoryAttrs{"a": {}}
+	if n := readActivities(ctx, attrs, map[string]runtime.Provider{"a": leaf}, 4); n != 0 || leaf.reads["a"] != 0 || attrs["a"].ActivityKnown {
+		t.Fatalf("a done ctx: %d reads (%v), attrs %+v, want none", n, leaf.reads, attrs["a"])
 	}
 }
 
@@ -90,7 +121,7 @@ func (unreportable) SleepCapability(string) runtime.SessionSleepCapability {
 func TestReadActivitiesIsBounded(t *testing.T) {
 	leaf := newActivityLeaf(t)
 	leaf.at["a"], leaf.block["w"] = gatherNow, true
-	attrs := map[string]InventoryAttrs{"a": livePane, "w": livePane}
+	attrs := map[string]InventoryAttrs{"a": {}, "w": {}}
 	hosts := map[string]runtime.Provider{"a": leaf, "w": leaf}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -107,7 +138,7 @@ func TestReadActivitiesIsBounded(t *testing.T) {
 }
 
 // TestActivityNeverCarriesOver (C6a2b). Kills a stale activity fact: a pass
-// that did not read a name's activity leaves it unknown, never the last
+// that did not read a name's activity, or did not enrich it, leaves it unknown, never the last
 // pass's time, so a missed read cannot make a row look idle.
 func TestActivityNeverCarriesOver(t *testing.T) {
 	c := newObserveCache()
@@ -119,6 +150,13 @@ func TestActivityNeverCarriesOver(t *testing.T) {
 	second := c.publish(censusNow.Add(time.Second), map[string]InventoryAttrs{"s": {DeadKnown: true}}, completeBackend("tmux", "s"))
 	if obs := second.ByName["s"]; obs.LastActivityKnown || !obs.LastActivity.IsZero() {
 		t.Fatalf("second pass with no read: %+v, want activity unknown", obs)
+	}
+	// Listed but not enriched (its inventory failed or omitted it): the
+	// other facts keep, the activity does not.
+	c.publish(censusNow.Add(2*time.Second), map[string]InventoryAttrs{"s": {DeadKnown: true, ActivityKnown: true, LastActivity: at}}, completeBackend("tmux", "s"))
+	unenriched := c.publish(censusNow.Add(3*time.Second), map[string]InventoryAttrs{}, completeBackend("tmux", "s"))
+	if obs := unenriched.ByName["s"]; obs.LastActivityKnown || !obs.LastActivity.IsZero() {
+		t.Fatalf("a listed, unenriched pass: %+v, want activity unknown", obs)
 	}
 }
 
