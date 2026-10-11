@@ -2249,7 +2249,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 	statePtr := &nudgeState
 
 	mailTTL := nudgeMailSweepMailTTLForConfig(cfg, cr.stderr)
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, nudgeMailSweepWatchdogCloseBudget)
+	unreadMailTTL := nudgeMailSweepUnreadMailTTLForConfig(cfg, cr.stderr)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
@@ -3918,7 +3919,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(gcSweepSessionBeadsAt(cityPath, store.Store, rigStores, candidates, sweepTime))
+	return len(gcSweepSessionBeadsAt(cityPath, cfg, store.Store, rigStores, candidates, sweepTime))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {

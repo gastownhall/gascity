@@ -616,7 +616,9 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return waitForStartedSupervisor(stdout, stderr, jsonOut, "see "+logPath)
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	return waitForStartedSupervisor(stdout, stderr, jsonOut, "see "+logPath, exited)
 }
 
 // supervisorStartLaunchdPlistPath locates the installed launchd plist for
@@ -660,15 +662,20 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 		fmt.Fprintf(stderr, "gc supervisor start: warning: could not start launchd service %q (%v); starting the supervisor outside launchd instead. It will not be restarted by launchd and inherits this shell's environment, including provider credentials unless %s=1 is set.\n", label, err, supervisorOmitProviderCredsEnv) //nolint:errcheck // best-effort stderr
 		return false, 0
 	}
-	return true, waitForStartedSupervisor(stdout, stderr, jsonOut, "check 'launchctl print "+supervisorLaunchdServiceTarget(label)+"' and "+supervisorLogPath())
+	return true, waitForStartedSupervisor(stdout, stderr, jsonOut, "check 'launchctl print "+supervisorLaunchdServiceTarget(label)+"' and "+supervisorLogPath(), nil)
 }
 
 // waitForStartedSupervisor waits for a just-started supervisor to answer on
 // its control socket and reports the result. failureHint tells the operator
-// where to look when it never becomes ready.
-func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHint string) int {
-	deadline := time.Now().Add(supervisorReadyTimeout)
-	for time.Now().Before(deadline) {
+// where to look when it never becomes ready. exited, when non-nil, delivers
+// the forked supervisor's exit: a supervisor that exits during startup (its
+// API port in use, a config error) fails the start at once with the exit and
+// the tail of supervisor.log, rather than after supervisorReadyTimeout spent
+// polling the socket of a process that is gone.
+func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHint string, exited <-chan error) int {
+	deadline := time.NewTimer(supervisorReadyTimeout)
+	defer deadline.Stop()
+	for {
 		if pid := supervisorAliveHook(); pid != 0 {
 			if jsonOut {
 				return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor start", lifecycleActionJSON{
@@ -682,11 +689,73 @@ func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHin
 			printDashboardStartHint(stdout)
 			return 0
 		}
-		time.Sleep(supervisorReadyPollInterval)
+		select {
+		case err := <-exited:
+			if supervisorInstanceLockHeld() {
+				// Another instance holds the single-instance lock — a
+				// concurrent start won the race and this child stood down.
+				// Its readiness is what this start waits for now.
+				exited = nil
+				continue
+			}
+			status := "exit status 0"
+			if err != nil {
+				status = err.Error()
+			}
+			fmt.Fprintf(stderr, "gc supervisor start: supervisor exited before it became ready (%s); %s\n", status, failureHint) //nolint:errcheck // best-effort stderr
+			if tail := supervisorLogTail(supervisorLogPath(), supervisorStartFailureLogLines); tail != "" {
+				fmt.Fprintf(stderr, "last lines of %s:\n%s", supervisorLogPath(), tail) //nolint:errcheck // best-effort stderr
+			}
+			return 1
+		case <-deadline.C:
+			fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; %s\n", failureHint) //nolint:errcheck // best-effort stderr
+			return 1
+		case <-time.After(supervisorReadyPollInterval):
+		}
 	}
+}
 
-	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; %s\n", failureHint) //nolint:errcheck // best-effort stderr
-	return 1
+// supervisorInstanceLockHeld reports whether some supervisor instance holds
+// the single-instance lock. A variable so tests can model a concurrent start.
+var supervisorInstanceLockHeld = func() bool {
+	lock, err := acquireSupervisorLock()
+	if err != nil {
+		return true
+	}
+	lock.Close() //nolint:errcheck // release probe lock
+	return false
+}
+
+// supervisorStartFailureLogLines is how much of supervisor.log a failed start
+// echoes: the startup lines of the instance that just exited.
+const supervisorStartFailureLogLines = 20
+
+// supervisorLogTailBytes bounds how much of the log supervisorLogTail reads.
+const supervisorLogTailBytes = 64 << 10
+
+// supervisorLogTail returns the last n lines of the log at path, each ending
+// in a newline, or "" when it cannot be read. It reads at most the last
+// supervisorLogTailBytes of the file.
+func supervisorLogTail(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	if info, err := f.Stat(); err == nil && info.Size() > supervisorLogTailBytes {
+		if _, err := f.Seek(-supervisorLogTailBytes, io.SeekEnd); err != nil {
+			return ""
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, supervisorLogTailBytes))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	lines := strings.SplitAfter(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "") + "\n"
 }
 
 // supervisorForkEnv derives the environment for a forked `gc supervisor run`

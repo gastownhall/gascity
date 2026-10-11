@@ -36,7 +36,7 @@ func writeTrackingProcRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(proctable.SetScanRootForTesting(root))
+	proctable.SetScanRootForTesting(t, root)
 }
 
 // Kills: a tracking read that drops a failed per-session GC_SESSION_ID read.

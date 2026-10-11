@@ -1,0 +1,24 @@
+# TestLegacyRawSessionWrites baseline (R8): raw writes of premise keys per production file.
+# The counts may only fall; lower a file's count when it falls. Not a C9 gate until the ratchet counts
+# session-row writes at F1's chokepoint (mc-8s63i): it matches by name and misses the generic writes.
+cmd/gc/cmd_handoff.go 1
+cmd/gc/cmd_prime.go 1
+cmd/gc/cmd_session_pin.go 1
+cmd/gc/cmd_session_wake.go 1
+cmd/gc/cmd_stop.go 1
+cmd/gc/cmd_wait.go 1
+cmd/gc/execution_backstop.go 1
+cmd/gc/session_bead_cycle.go 1
+cmd/gc/session_beads.go 5
+cmd/gc/session_circuit_breaker.go 3
+cmd/gc/session_lifecycle_parallel.go 5
+cmd/gc/session_pool_drain_deadline.go 2
+cmd/gc/session_reconcile.go 13
+cmd/gc/session_reconciler.go 13
+cmd/gc/session_sleep.go 6
+cmd/gc/session_wake.go 2
+cmd/gc/soft_reload.go 1
+internal/session/chat.go 7
+internal/session/manager.go 2
+internal/session/runtime_lease.go 2
+internal/session/store.go 7
