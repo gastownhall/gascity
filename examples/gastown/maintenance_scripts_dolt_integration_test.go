@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -301,7 +302,7 @@ func runDoltSQLForMaintenanceTest(t *testing.T, doltPath, dir, query string) str
 	return runDoltForMaintenanceTest(t, doltPath, dir, "sql", "-q", query)
 }
 
-func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string) int {
+func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string, extraEnv ...string) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -325,6 +326,7 @@ func startDoltServerForMaintenanceTest(t *testing.T, doltPath, dataDir string) i
 		"--data-dir", dataDir,
 		"--loglevel", "warning",
 	)
+	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -377,22 +379,8 @@ func waitForDoltServerForMaintenanceTest(t *testing.T, doltPath string, port int
 
 func queryMaintenanceStatusByID(t *testing.T, doltPath string, port int, db string, table string) map[string]string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, doltPath,
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-		"--user", "root",
-		"--no-tls",
-		"--use-db", db,
-		"sql", "-r", "csv", "-q", fmt.Sprintf("SELECT id,status FROM %s ORDER BY id", table),
-	)
-	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("query %s.%s statuses: %v\n%s", db, table, err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := doltServerCSVQuery(t, doltPath, port, db, fmt.Sprintf("SELECT id,status FROM %s ORDER BY id", table))
+	out := strings.Join(lines, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "id,status" {
 		t.Fatalf("unexpected status output for %s.%s:\n%s", db, table, out)
 	}
@@ -405,6 +393,28 @@ func queryMaintenanceStatusByID(t *testing.T, doltPath string, port int, db stri
 		statuses[fields[0]] = fields[1]
 	}
 	return statuses
+}
+
+// doltServerCSVQuery runs query against db on the local dolt sql-server at
+// port and returns the trimmed CSV output split into lines.
+func doltServerCSVQuery(t *testing.T, doltPath string, port int, db, query string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, doltPath,
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprintf("%d", port),
+		"--user", "root",
+		"--no-tls",
+		"--use-db", db,
+		"sql", "-r", "csv", "-q", query,
+	)
+	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query %s (%s): %v\n%s", db, query, err, out)
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n")
 }
 
 func requireMaintenanceStatuses(t *testing.T, got map[string]string, want map[string]string) {
@@ -577,4 +587,86 @@ exit 0
 		"rig-ext":  "open",
 		"rig-ext2": "open",
 	})
+}
+
+func TestReaperAgeGatesUseUTCUnderNonUTCServerRealDolt(t *testing.T) {
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skipf("dolt not found: %v", err)
+	}
+
+	seed := `
+INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated_at, assignee, metadata) VALUES
+  ('past-age', 'updated beyond the stale age', 'open', 'task', 2, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 61 HOUR), DATE_SUB(UTC_TIMESTAMP(), INTERVAL 49 HOUR), '', '{}'),
+  ('within-age', 'updated inside the stale age', 'open', 'task', 2, DATE_SUB(UTC_TIMESTAMP(), INTERVAL 61 HOUR), DATE_SUB(UTC_TIMESTAMP(), INTERVAL 47 HOUR), '', '{}');
+`
+	cityDir := t.TempDir()
+	dataDir := filepath.Join(t.TempDir(), "dolt")
+	dbDir := filepath.Join(dataDir, "citydb")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", dbDir, err)
+	}
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "init", "--name", "Gas City", "--email", "test@example.com")
+	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, maintenanceReaperSchemaSQL())
+	runDoltSQLForMaintenanceTest(t, doltPath, dbDir, seed)
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "add", ".")
+	runDoltForMaintenanceTest(t, doltPath, dbDir, "commit", "-m", "seed age gate rows")
+
+	port := startDoltServerForMaintenanceTest(t, doltPath, dataDir, "TZ=America/Los_Angeles")
+	waitForDoltServerForMaintenanceTest(t, doltPath, port, "citydb")
+	if off := queryDoltServerUTCOffsetHours(t, doltPath, port, "citydb"); off != -7 && off != -8 {
+		t.Fatalf("dolt sql-server ignored TZ=America/Los_Angeles; the test cannot distinguish NOW() from UTC_TIMESTAMP() (offset %d hours)", off)
+	}
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.Symlink(doltPath, filepath.Join(binDir, "dolt")); err != nil {
+		t.Fatalf("Symlink(dolt): %v", err)
+	}
+	writeRealDoltBdDouble(t, filepath.Join(binDir, "bd"))
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+case "$1 $2" in
+  "session prune")
+    printf '{"count":0}\n'
+    ;;
+esac
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":               bdLog,
+		"GC_CITY":                   cityDir,
+		"GC_CITY_PATH":              cityDir,
+		"GC_DOLT_HOST":              "127.0.0.1",
+		"GC_DOLT_PORT":              fmt.Sprintf("%d", port),
+		"GC_DOLT_USER":              "root",
+		"GC_DOLT_PASSWORD":          "",
+		"GC_REAPER_STALE_ISSUE_AGE": "48h",
+		"FAKE_RIG_LIST_JSON":        `{"rigs":[]}`,
+		"FAKE_SCOPE_DBS":            "city=citydb",
+		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	reaperOut, err := runScriptResult(t, coreScriptPath("reaper.sh"), env)
+	if err != nil {
+		t.Fatalf("reaper.sh failed: %v\n%s", err, reaperOut)
+	}
+
+	requireMaintenanceStatuses(t, queryMaintenanceStatusByID(t, doltPath, port, "citydb", "issues"), map[string]string{
+		"past-age":   "closed",
+		"within-age": "open",
+	})
+}
+
+func queryDoltServerUTCOffsetHours(t *testing.T, doltPath string, port int, db string) int {
+	t.Helper()
+	lines := doltServerCSVQuery(t, doltPath, port, db, "SELECT TIMESTAMPDIFF(HOUR, UTC_TIMESTAMP(), NOW()) AS off")
+	if len(lines) != 2 || strings.TrimSpace(lines[0]) != "off" {
+		t.Fatalf("unexpected UTC offset output for %s:\n%s", db, strings.Join(lines, "\n"))
+	}
+	off, err := strconv.Atoi(strings.TrimSpace(lines[1]))
+	if err != nil {
+		t.Fatalf("parse UTC offset %q: %v", lines[1], err)
+	}
+	return off
 }

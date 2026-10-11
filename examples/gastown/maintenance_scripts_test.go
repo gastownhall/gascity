@@ -3138,7 +3138,7 @@ func TestReaperScriptSQLReflectsCurrentSchema(t *testing.T) {
 	}
 	for _, required := range []string{
 		"issue_type NOT IN ('message')",
-		"created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)",
+		"created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL $MAX_AGE_H HOUR)",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("reaper script is missing stale-only query fragment %q", required)
@@ -4216,8 +4216,8 @@ exit 0
 		"JSON_UNQUOTE(JSON_EXTRACT(child_issue.metadata, '$.\"gc.root_bead_id\"')) = root.id",
 		"COALESCE(w.assignee, '') = ''",
 		"COALESCE(i.assignee, '') = ''",
-		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(NOW(), INTERVAL",
-		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(NOW(), INTERVAL",
+		"COALESCE(w.updated_at, w.created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL",
+		"COALESCE(i.updated_at, i.created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL",
 		"descendant_wisp.status, descendant_issue.status) IN ('open', 'hooked', 'in_progress', 'blocked', 'deferred', 'pinned', 'review', 'testing')",
 		"roots_with_recent_descendants",
 		"child_dep.type IN ('parent-child', 'tracks', 'blocks')",

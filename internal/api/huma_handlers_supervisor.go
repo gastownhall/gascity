@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -854,6 +855,10 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		cursor = strings.TrimSpace(input.AfterCursor)
 	}
 
+	// Subscribe to city-set changes before reading the city set, so a city
+	// that starts while the stream is still connecting closes this channel
+	// and is attached by the loop below instead of waiting for the resync.
+	changes := sm.cityChanges()
 	mux := sm.buildMultiplexer()
 	// Resolve per-city cursors so no city falls through to Watch(0) full-history
 	// replay: head-start clients start every city from now, and a resume cursor
@@ -875,12 +880,50 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 
+	// The city set is not fixed at connect time (#6861): attach cities that
+	// start after the client connected and detach cities that go away,
+	// whenever the resolver signals a change and on a slow periodic resync.
+	resync := time.NewTicker(sm.eventStreamResyncInterval())
+	defer resync.Stop()
+	replayNewCitiesFromZero := cursor == "0"
+	syncCities := func() {
+		known := maps.Clone(cursors)
+		started, err := mw.Sync(sm.globalEventProviders(), func(city string, p events.Provider) (uint64, error) {
+			// A city the client already has a position for (from its resume
+			// cursor, or from before it stopped) resumes there without a gap.
+			// Otherwise it starts from "now", like a head-start connection,
+			// unless the client asked for replay from zero.
+			if seq, ok := known[city]; ok {
+				return seq, nil
+			}
+			if replayNewCitiesFromZero {
+				return 0, nil
+			}
+			return p.LatestSeq()
+		})
+		if err != nil {
+			log.Printf("api: supervisor events-stream: syncing city watchers: %v", err)
+		}
+		// Record each new city's start seq so the composite SSE id carries it
+		// and a reconnect resumes the city from where this stream attached.
+		for city, seq := range started {
+			if _, ok := cursors[city]; !ok {
+				cursors[city] = seq
+			}
+		}
+	}
+
 	ch := readEventsAhead(hctx.Context(), mw.Next)
 
 	for {
 		select {
 		case <-hctx.Context().Done():
 			return
+		case <-changes:
+			changes = sm.cityChanges()
+			syncCities()
+		case <-resync.C:
+			syncCities()
 		case r, ok := <-ch:
 			if !ok {
 				return
