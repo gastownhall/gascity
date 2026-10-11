@@ -22,8 +22,14 @@ import (
 // begin, the begin, the store and the leaf.
 func admittedBegin(t *testing.T, entry func(*selectionEntry), world ...func(*World)) (*effectPass, intent, beads.Store, *fenceLeaf) {
 	t.Helper()
+	return admittedBeginOn(t, nil, entry, world...)
+}
+
+// admittedBeginOn is admittedBegin on a row carrying meta too.
+func admittedBeginOn(t *testing.T, meta []string, entry func(*selectionEntry), world ...func(*World)) (*effectPass, intent, beads.Store, *fenceLeaf) {
+	t.Helper()
 	store, _ := stampedMem(t, gate.Require)
-	b, err := store.Create(drainRow("last_woke_at", rowAt(-time.Hour)))
+	b, err := store.Create(drainRow(append([]string{"last_woke_at", rowAt(-time.Hour)}, meta...)...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,6 +335,51 @@ func TestDrainBeginRedecidesOutsideTheBasis(t *testing.T) {
 			got, _ := store.Get(it.Key.ID)
 			if s.Outcome != settledRefused || s.Cause != causeRedecided || got.Metadata[session.DrainIntentReasonKey] != "" {
 				t.Fatalf("%+v %v, want refused %q and no request", s, got.Metadata, causeRedecided)
+			}
+		})
+	}
+}
+
+// Kills a config-drift begin that trusts the pass's attach and work reads
+// (SESS-552/553/559): attached at the effect's fresh read (L3), or holding
+// work assigned after the pass (L5), it refuses and writes nothing; detached
+// with no work it writes the config-drift request.
+func TestConfigDriftBeginFencesAttachAndWork(t *testing.T) {
+	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	drifted := []string{"started_config_hash", runtime.FingerprintVersion + ":stale"}
+	desired := func(e *selectionEntry) { e.InDesired, e.Desired = true, desireKeep }
+	memo := func(w *World) { // every row resolves (the store seeds one beside the drain row)
+		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}}
+		for _, row := range w.Census.Rows {
+			w.Templates.entries[templateMemoKeyOf(row.Info)] = templateResolution{TP: tp}
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		setup func(*fenceLeaf, beads.Store, string)
+		cause string
+	}{
+		{"attached", func(l *fenceLeaf, _ beads.Store, _ string) { l.SetAttached("s-gc-1", true) }, fenceAttached},
+		{"work assigned after the pass", func(_ *fenceLeaf, store beads.Store, id string) {
+			if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "open", Assignee: id}); err != nil {
+				t.Fatal(err)
+			}
+		}, causeHasWork},
+		{"detached, no work", func(*fenceLeaf, beads.Store, string) {}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, it, store, leaf := admittedBeginOn(t, drifted, desired, memo)
+			if it.Kind != intentDrainBegin || it.Reason != decideDrainBegin+drainConfigDrift {
+				t.Fatalf("%+v, want the config-drift begin", it)
+			}
+			c.setup(leaf, store, it.Key.ID)
+			s := runBegin(p, it)
+			got, _ := store.Get(it.Key.ID)
+			switch {
+			case c.cause != "" && (s.Outcome != settledRefused || s.Cause != c.cause || got.Metadata[session.DrainIntentReasonKey] != ""):
+				t.Fatalf("%+v %v, want refused %q and no request", s, got.Metadata, c.cause)
+			case c.cause == "" && (s.Outcome != settledLanded || got.Metadata[session.DrainIntentReasonKey] != drainConfigDrift):
+				t.Fatalf("%+v %v, want the config-drift request", s, got.Metadata)
 			}
 		})
 	}

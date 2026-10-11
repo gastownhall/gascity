@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -353,11 +354,12 @@ func (n normalizer) view(o, prev parityOutcome, sp *simProvider) map[string]stri
 }
 
 // goldenShown renders an aspect's value for the goldens: a config hash, which
-// digests the paths, as <changed>, and core_hash_breakdown's Env field
+// digests the paths, as <changed> (as a drift deferral key, which carries
+// one), and core_hash_breakdown's Env field
 // masked; the other breakdown fields as they are.
 func goldenShown(aspect, v string) string {
 	key := aspect[strings.LastIndex(aspect, ":")+1:]
-	if v != "" && (strings.HasSuffix(key, "_hash") || key == "core_hash_breakdown.Env") {
+	if v != "" && (strings.HasSuffix(key, "_hash") || strings.HasSuffix(key, "drift_deferred_key") || key == "core_hash_breakdown.Env") {
 		return "<changed>"
 	}
 	return v
@@ -577,6 +579,7 @@ var (
 // new digest; the last entry per fixture is the one in force.
 var timelineGoldenRulings = []goldenRuling{
 	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
+	{"a live drift on a seat", timelineGoldenBaseline, "f5175dc3cf8b"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
@@ -596,6 +599,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"an unwanted row woken by a clock ten minutes ahead", timelineGoldenBaseline, "27e15af2efe9"},
 	{"an unwanted row woken by a clock two minutes ahead", timelineGoldenBaseline, "7863a5af3820"},
 	{"attach, then detach, then idle", timelineGoldenBaseline, "a8a76fb85cf8"},
+	{"drift deferrals through time", timelineGoldenBaseline, "276c26877b00"},
 	{"idle, then sleep, then the next pass", timelineGoldenBaseline, "df4154567a92"},
 	{"kill a seat holding a dep-blocked claim", timelineGoldenBaseline, "44f501ec9412"},
 	{"kill a seat holding a ready claim", timelineGoldenBaseline, "a6a3283ef592"},
@@ -787,7 +791,7 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline())
+	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline(), driftTimeline())
 }
 
 func tlAt(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
@@ -895,6 +899,50 @@ func baselineTimeline() []timelineFixture {
 			{Name: "the live hash cleared", Advance: time.Minute, Op: set("started_live_hash", "", "live_hash", "")},
 			{Name: "a v5 live hash", Advance: time.Minute, Op: set("started_live_hash", "v5:live")},
 		}, tlMerged(tlPol("gc-1"), tlIdent()), nil)}
+}
+
+// driftTimeline is A14 (C7b1) through time on a seat both copies start for
+// its claim, so its stored hashes are this generation's: deferral keys left on
+// the converged seat are cleared (SESS-562); attached to a drift it stamps
+// its deferral (SESS-553), and detached inside five minutes it waits
+// (SESS-554). A live drift runs session_live again (SESS-565), C7b2's.
+func driftTimeline() []timelineFixture {
+	one := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents[0].MaxActiveSessions, cfg.Agents[0].MinActiveSessions = intPtr(1), intPtr(0)
+		return cfg
+	}
+	row := tlRow("gc-1", 1, time.Hour, "state", "asleep")
+	row.Metadata["alias"], row.Metadata["agent_name"] = "worker", "worker"
+	set := func(kv ...string) func(tw twin) { return func(tw twin) { tw.set("gc-1", kv...) } }
+	attach := func(on bool) func(tw twin) { // a copy that never started the seat has none to attach
+		return func(tw twin) {
+			_, b := tw.row("gc-1")
+			tw.sp.mu.Lock()
+			_, running := tw.sp.rts[b.Metadata["session_name"]]
+			tw.sp.mu.Unlock()
+			if running {
+				tw.runtime("gc-1", func(rt simRuntime) *simRuntime { rt.attached = on; return &rt })
+			}
+		}
+	}
+	drifted := runtime.FingerprintVersion + ":drifted"
+	started := tlMerged(tlIdent(), tlRestarted(), map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"})
+	standing := tlMerged(tlPol("gc-1"), tlIdent())
+	liveApplied := map[string]string{"row:gc-1:started_live_hash": "C7b2 live-apply", "provider:RunLive s-gc-1": "C7b2 live-apply", "event:session.updated worker null": "C7b2 live-apply"}
+	deferrals := tlFixture("drift deferrals through time", one, []parityRow{row}, tlClaim("in_progress", "worker"), nil,
+		[]parityStep{
+			{Name: "deferral keys left on the converged seat", Advance: time.Minute, Op: set("config_drift_deferred_key", "k", "config_drift_deferred_at", tlAt(0), "attached_config_drift_deferred_key", "k", "attached_config_drift_deferred_at", tlAt(0))},
+			{Name: "attached, then drifted", Advance: time.Minute, Op: func(tw twin) { attach(true)(tw); set("started_config_hash", drifted)(tw) }},
+			{Name: "detached inside five minutes", Advance: time.Minute, Op: attach(false)},
+		}, standing, map[string]map[string]string{"seed": started})
+	deferrals.Behaviors = []string{"SESS-562", "SESS-553", "SESS-554"}
+	live := tlFixture("a live drift on a seat", one, []parityRow{row}, tlClaim("in_progress", "worker"), nil,
+		[]parityStep{
+			{Name: "the live hash drifts", Advance: time.Minute, Op: set("started_live_hash", runtime.FingerprintVersion+":other")},
+		}, standing, map[string]map[string]string{"seed": started, "the live hash drifts": liveApplied})
+	live.Behaviors = []string{"SESS-565"}
+	return []timelineFixture{deferrals, live}
 }
 
 // stabilityTimeline is SESS-537..540 through time, on a pool of one whose

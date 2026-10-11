@@ -60,7 +60,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		}
 		last = n
 	}
-	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A8", "A9", "A10", "A10", "A17", "A18", "A19", "A20", "A21"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A8", "A9", "A10", "A10", "A14", "A16", "A17", "A18", "A19", "A20", "A21"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 

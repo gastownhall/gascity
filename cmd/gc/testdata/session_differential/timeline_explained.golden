@@ -59,6 +59,31 @@ row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 ## 1 v5 hashes at the cutover (+40s)
 ## 2 the live hash cleared (+2m0s)
 ## 3 a v5 live hash (+3m20s)
+=== a live drift on a seat
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
+row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
+row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
+@ +10s
+provider:RemoveMeta s-gc-1 resolved
+row:gc-1:currently_processing_bead_id resolved
+row:gc-1:state resolved
+## 1 the live hash drifts (+1m40s)
+@ +1m20s
+event:session.updated worker null legacy="1" v2="" [C7b2 live-apply]
+provider:RunLive s-gc-1 legacy="1" v2="" [C7b2 live-apply]
+row:gc-1:started_live_hash legacy="<changed>" v2="<changed>" [C7b2 live-apply]
+@ +1m30s
+event:session.updated worker null resolved
+provider:RunLive s-gc-1 resolved
 === a live quarantined row 29s after wake
 ## 0 seed (+0s)
 @ +0s
@@ -519,6 +544,26 @@ provider:SetMeta s-gc-1 resolved
 ## 2 idle past sleep_after_idle (+8m10s)
 @ +6m20s
 row:gc-1:config_wake_suppressed legacy="true" v2="" [sleep-policy-keys]
+=== drift deferrals through time
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
+row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
+row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
+row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
+@ +10s
+provider:RemoveMeta s-gc-1 resolved
+row:gc-1:currently_processing_bead_id resolved
+row:gc-1:state resolved
+## 1 deferral keys left on the converged seat (+1m40s)
+## 2 attached, then drifted (+3m0s)
+## 3 detached inside five minutes (+4m20s)
 === idle, then sleep, then the next pass
 ## 0 seed (+20s)
 @ +0s

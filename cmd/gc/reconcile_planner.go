@@ -24,8 +24,8 @@ import (
 // plannerMinGap is the shortest time from one pass's start to the next's.
 const plannerMinGap = 250 * time.Millisecond
 
-// plannerPaceFactor spaces pass starts at this many times the last pass's
-// duration, which keeps the duty cycle near 1/plannerPaceFactor.
+// plannerPaceFactor spaces pass starts at this many times the pace duration
+// (paceGap), which keeps the duty cycle near 1/plannerPaceFactor.
 const plannerPaceFactor = 4
 
 // passFunc runs one pass at now. C2c1 supplies gather, allocate, decideRow
@@ -237,8 +237,7 @@ func (p *planner) startsPaused() bool { return p.paused.Load() }
 // a dirty mark, the patrol interval after the last pass ends (bounding a lost
 // wake, R-6), or the last pass's earliest row deadline. One timer serves the
 // patrol, the row deadline and the pacing wait. An owed pass starts at once
-// if the planner is idle; otherwise it waits until max(plannerMinGap,
-// plannerPaceFactor × last duration) after the last start.
+// if the planner is idle; otherwise it waits paceGap after the last start.
 func (p *planner) run(ctx context.Context) {
 	p.running.Store(true)
 	defer close(p.done)
@@ -253,7 +252,7 @@ func (p *planner) run(ctx context.Context) {
 		now := p.clock.Now()
 		wakeAt := due
 		if owed {
-			wakeAt = p.last.Start.Add(max(plannerMinGap, plannerPaceFactor*p.last.Duration))
+			wakeAt = p.last.Start.Add(p.paceGap())
 			if !now.Before(wakeAt) {
 				owed = false
 				res := p.runPass(now)
@@ -279,6 +278,18 @@ func (p *planner) run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// paceGap is the wait from the last pass's start to an owed pass's
+// (CONTRACT v5.9j P1): plannerPaceFactor times the last pass's duration,
+// at least plannerMinGap, and at most the patrol's due time, one patrol
+// after the last pass ended. So the idle time after a pass is at least
+// min(3 × its duration, the patrol): passes run at most a quarter of the
+// time, or d/(d+patrol) for a pass of d longer than a third of the patrol,
+// and an owed pass is never later than the patrol would have run it. A 101s
+// freeze once bought a 404s stall (staging J40 C); now at most a patrol.
+func (p *planner) paceGap() time.Duration {
+	return max(plannerMinGap, min(plannerPaceFactor*p.last.Duration, p.last.Duration+p.patrol()))
 }
 
 // runPass applies the settlements posted since the last pass

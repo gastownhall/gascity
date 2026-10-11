@@ -643,8 +643,8 @@ func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
 // Kills a rollback that stops a foreign occupant outside C8.2(a), and an I4
 // that flags the stop C8.2(a) admits (the C5a2 review): a pending create
 // whose bead-scoped name another row's runtime holds is rolled back, the
-// occupant stopped by name, with no violation; the same occupant under a
-// configured named row's name is never stopped.
+// occupant stopped by name, with no violation. (A Foreign runtime under any
+// other name is rolled back without a stop: TestRollbackRuntime.)
 func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
 	run := func(t *testing.T, row beads.Bead) *sim {
 		t.Helper()
@@ -665,4 +665,45 @@ func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
 	if b, _ := s.legs[0].backing.Get("gc-1"); b.Status != "closed" || len(s.sp.kills) != 1 {
 		t.Fatalf("bead-scoped: row %s kills %+v, want rolled back with the occupant stopped", b.Status, s.sp.kills)
 	}
+}
+
+// Kills a drift drain over an attached human (GUAR-006, SESS-553/554/561):
+// a drifted seat that is attached stamps its deferral and is never drained
+// or stopped; detached, it waits out the recent-deferral window, then its
+// config-drift request is written, and nothing kills its runtime (the stop
+// is C6b2's).
+func TestSimConfigDriftWaitsForTheHumanThenDrains(t *testing.T) {
+	stale := runtime.FingerprintVersion + ":stale"
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale))
+	s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+	attach := func(on bool) {
+		s.sp.mu.Lock()
+		s.sp.rts["s-gc-1"].attached = on
+		s.sp.touch("s-gc-1")
+		s.sp.mu.Unlock()
+	}
+	attach(true)
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	if m := s.gc1(); m["attached_config_drift_deferred_key"] == "" || m[session.DrainIntentReasonKey] != "" {
+		t.Fatalf("attached: row %v, want the deferral stamped and no request", m)
+	}
+	attach(false)
+	s.advance(time.Minute)
+	s.settle()
+	if m := s.gc1(); m[session.DrainIntentReasonKey] != "" {
+		t.Fatalf("detached inside the window: request %q, want none", m[session.DrainIntentReasonKey])
+	}
+	s.advance(6 * time.Minute)
+	s.settle()
+	s.settle()
+	if m := s.gc1(); m[session.DrainIntentReasonKey] != drainConfigDrift {
+		t.Fatalf("past the window: row %v, want the config-drift request", m)
+	}
+	if len(s.sp.kills) != 0 {
+		t.Fatalf("kills %v, want none", s.sp.kills)
+	}
+	s.noViolations(t)
 }

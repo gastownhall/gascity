@@ -1379,3 +1379,53 @@ func TestExecutorStopCancelsWithTheShutdownCause(t *testing.T) {
 		}
 	}
 }
+
+// TestLaunchRefusesAStartTheShutdownOvertook (#7592 delta review). Kills a
+// launch that ignores beginStart: a preserve-sessions shutdown that lands in
+// the launch's pre-start steps (here its template resolution) leaves the
+// provider's Start uncalled.
+func TestLaunchRefusesAStartTheShutdownOvertook(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	defer shutdown(nil)
+	row := k.p.World.Census.Rows[k.it.Key]
+	k.p.World.Templates = &templateMemo{
+		entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: TemplateParams{TemplateName: "worker"}}},
+		resolveAt: func(session.Info, time.Time) templateResolution {
+			shutdown(errEffectShutdown) // past the tx's pre-Call check
+			return templateResolution{TP: TemplateParams{TemplateName: "worker"}}
+		},
+	}
+	s := k.run(ctx, effectSpecs[intentStart])
+	if len(leaf.cfgs) != 0 || s.Outcome == settledLanded {
+		t.Fatalf("settlement %+v, %d provider Starts; want none after the shutdown", s, len(leaf.cfgs))
+	}
+}
+
+// TestOutlivingStartStillEndsAtTheEffectsDeadline (#7592 delta review).
+// Kills a deadline the detached context only reports: after a
+// preserve-sessions shutdown spent the relay on a begun start, the effect's
+// deadline still ends it, and a later child deadline (the lease watch's
+// SafeUntil) ends with it.
+func TestOutlivingStartStillEndsAtTheEffectsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		effect, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		ctx, shutdown := context.WithCancelCause(effect)
+		defer shutdown(nil)
+		detached, release := outlivesShutdown(ctx)
+		defer release()
+		if !beginStart(detached) {
+			t.Fatal("the start did not begin")
+		}
+		shutdown(errEffectShutdown)
+		synctest.Wait()
+		safeUntil, stop := context.WithDeadline(detached, time.Now().Add(110*time.Second))
+		defer stop()
+		start := time.Now()
+		<-safeUntil.Done()
+		if waited := time.Since(start); waited != time.Minute || !errors.Is(detached.Err(), context.DeadlineExceeded) {
+			t.Fatalf("ended after %v with %v, want the effect's deadline at 1m", waited, detached.Err())
+		}
+	})
+}

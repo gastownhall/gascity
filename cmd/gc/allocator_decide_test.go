@@ -145,18 +145,20 @@ func (f *allocFixture) observation() *ObservationSnapshot {
 			attrs[name] = a
 		}
 	}
+	// The lane's activity read (readActivities) publishes through the
+	// pass's attrs.
+	for name, at := range f.activity {
+		a := attrs[name]
+		a.ActivityKnown, a.LastActivity = true, at
+		attrs[name] = a
+	}
 	snap := cache.publish(f.in.Now, attrs, completeBackend("tmux", f.listed...))
-	if len(f.activity) == 0 && len(f.facts) == 0 {
+	if len(f.facts) == 0 {
 		return snap
 	}
-	// No lane publishes activity yet (F1); a session key's write-back
-	// would land like this.
 	clone := *snap
 	clone.ByName = make(map[string]RuntimeObservation, len(snap.ByName))
 	for name, obs := range snap.ByName {
-		if at, ok := f.activity[name]; ok {
-			obs.LastActivity, obs.LastActivityKnown = at, true
-		}
 		for kind, v := range f.facts[name] {
 			*obs.fact(kind) = RuntimeFact{Value: v, ObservedAt: f.in.Now, Source: SourceProbe}
 		}

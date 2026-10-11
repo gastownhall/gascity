@@ -167,7 +167,10 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
 	it.Patch, it.Key = patch, heal.Key
-	if heal.Reason != decideDeadRuntimeHeal { // a dead runtime's heal is the start's own (startIntent's Kept)
+	if heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded() {
+		// The whole heal stays, the items A6 folded beside a dead runtime's
+		// (detached_at) included; a stranded seat keeps its death's accrual
+		// alone (startIntent's Kept).
 		kept := maps.Clone(heal.Patch)
 		maps.Copy(kept, it.Kept)
 		it.Kept = kept

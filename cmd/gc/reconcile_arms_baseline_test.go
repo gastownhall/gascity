@@ -167,8 +167,9 @@ func TestSoftReloadRequestRecordsEachRowOnce(t *testing.T) {
 	settle("gc-a", q.reason, settledLanded, "")
 	settle("gc-b", q.reason, settledRefused, causePremise)
 	settle("gc-b", q.reason, settledRefused, causeCAS)
-	if v := q.view(); v.Attempted[row("gc-b")] {
-		t.Fatal("two transient refusals dropped gc-b")
+	settle("gc-f", q.reason, settledRefused, causeRedecided) // a redecided refusal retries too (the C7c review's D02)
+	if v := q.view(); v.Attempted[row("gc-b")] || v.Attempted[row("gc-f")] {
+		t.Fatal("a transient refusal dropped its row")
 	}
 	settle("gc-b", q.reason, settledRefused, causeNameBusy)
 	settle("gc-c", q.reason, settledFailed, causeWrite)
