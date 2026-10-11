@@ -540,7 +540,7 @@ func TestDiscardDoesNothing(_ *testing.T) {
 
 func TestReadAllEmpty(t *testing.T) {
 	// Missing file → nil, nil.
-	events, err := ReadAll("/nonexistent/path/events.jsonl")
+	events, err := ReadAll(filepath.Join(t.TempDir(), "nonexistent", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("ReadAll(missing) error: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func TestReadLatestSeq(t *testing.T) {
 
 func TestReadLatestSeqEmpty(t *testing.T) {
 	// Missing file → (0, nil)
-	seq, err := ReadLatestSeq("/nonexistent/path/events.jsonl")
+	seq, err := ReadLatestSeq(filepath.Join(t.TempDir(), "nonexistent", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("ReadLatestSeq(missing) error: %v", err)
 	}
@@ -1123,7 +1123,7 @@ func TestReadFrom(t *testing.T) {
 }
 
 func TestReadFromMissingFile(t *testing.T) {
-	evts, off, err := ReadFrom("/nonexistent/path/events.jsonl", 0)
+	evts, off, err := ReadFrom(filepath.Join(t.TempDir(), "nonexistent", "events.jsonl"), 0)
 	if err != nil {
 		t.Fatalf("ReadFrom(missing) error: %v", err)
 	}

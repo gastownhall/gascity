@@ -64,8 +64,9 @@ func TestBdBackupStateCheck_FlagsStaleBackupRegistration(t *testing.T) {
 	// healthy. Observed live: backup_url=file:///data/tmp/tmp.y9AoDggtwt/...
 	// (a long-deleted mktemp dir).
 	city := t.TempDir()
+	staleBackupPath := filepath.ToSlash(filepath.Join(t.TempDir(), "tmp.gone", ".beads", "backup"))
 	writeBackupStateFixture(t, city, map[string]string{
-		".beads/dolt-backup.json": `{"backup_url":"file:///nonexistent/tmp.gone/.beads/backup","backup_name":"default"}`,
+		".beads/dolt-backup.json": `{"backup_url":"file://` + staleBackupPath + `","backup_name":"default"}`,
 	}, ".beads/dolt")
 
 	check := NewBdBackupStateCheckForScopeRoots(city, []string{city})
