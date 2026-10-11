@@ -165,17 +165,17 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	ticket, err := callResult[*startTicket](v)
 	switch {
 	case errors.Is(err, errEndpointGate):
-		return txStep{Refuse: causeEndpointGate}
+		return healInstead(v, txStep{Refuse: causeEndpointGate})
 	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
 	case probeErr != nil && f.work != nil:
-		return txStep{Refuse: causeWorktree, Err: probeErr, Facts: effectFacts{Work: f.work}}
+		return healInstead(v, txStep{Refuse: causeWorktree, Err: probeErr, Facts: effectFacts{Work: f.work}})
 	case probeErr != nil:
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
-		return txStep{Refuse: causeSessionName}
+		return healInstead(v, txStep{Refuse: causeSessionName})
 	case session.HoldsInfo(v.Row, v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
-		return txStep{Refuse: causeHeld}
+		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
 	}

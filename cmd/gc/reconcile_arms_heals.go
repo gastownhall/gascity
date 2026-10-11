@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Arm A6's row-local heals and markers beside the timer heals (CONTRACT v5
@@ -143,19 +144,12 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // asleep with runtime-missing, which A21's pool-slot close can free; a named
 // row no close arm takes would otherwise read active forever. A row still
 // holding a claim is armClaimClear's first, as legacy projects it
-// start-pending. The heal carries the death's accrual (deadRuntimePatch). A
-// row a start arm restarts this pass (A17, A18) gets that start here: it
-// carries the same patch, with A6's later items folded in, into its
-// PreWake's CAS, so the restart takes no extra pass, as legacy heals and
-// wakes in one tick.
+// start-pending. The heal carries the death's accrual (deadRuntimePatch);
+// decideRow composes it with the row's restart (startHealed).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
 	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
 		return intent{}, false
-	}
-	if it, ok := r.restart(); ok && it.Kind == intentStart {
-		r.rests |= it.Rests
-		return it, true
 	}
 	patch, _ := deadRuntimePatch(r)
 	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, patch)
@@ -167,8 +161,7 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // churn before the productivity threshold, or a productive death's churn
 // clear), each edge-triggered by clearing last_woke_at. A drain the row asked
 // for is no crash. The provider-screen lane (rate limit, terminal error) is
-// C5a3's classification; a wake failure's conversation reset is the PreWake's
-// stale-key clear, which probes the transcript as legacy's does.
+// C5a3's classification.
 //
 // accrued reports a wake failure or churn recorded, after which legacy skips
 // the row for the tick ("record, fold, continue"): A18 starts it on the next
@@ -185,6 +178,15 @@ func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 		Now: r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
 	}) {
 	case session.ExitRapidCrash:
+		// Legacy resets the conversation unless a probe finds its transcript;
+		// for a provider with a keyed transcript the PreWake's stale-key
+		// clear probes it as legacy's does, and for one without, nothing can,
+		// so the reset is written here (a heal that keeps the conversation,
+		// a named mode=always row, would otherwise resume a crash loop).
+		if folded := foldInfo(info, patch); (strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "") &&
+			!transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info)) {
+			maps.Copy(patch, session.ConversationResetPatch(true))
+		}
 		attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
 		accrual = session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, until)
 	case session.ExitChurn:

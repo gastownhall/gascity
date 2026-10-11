@@ -121,7 +121,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		res, ok := v.World.Templates.lookup(v.Row)
 		switch cause := runtimeCause(v.Row, v.RT); {
 		case !ok || res.Err != nil:
-			return txStep{Refuse: causeTemplate, Err: res.Err}
+			return healInstead(v, txStep{Refuse: causeTemplate, Err: res.Err})
 		case cause == causeNotPresent && !adopt:
 			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}
 		case cause != "":
@@ -136,6 +136,23 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		}
 		return txStep{Write: startCommit(prepared, v.Row, v.Now), Done: true, Facts: noted}
 	}
+}
+
+// healInstead is refuse, a start's refusal before its PreWake, or, when the
+// start carries an A6 heal (intent.Heal) and its fresh read still finds the
+// runtime absent, on which every such heal rests, that heal written alone:
+// a start that cannot run still heals its row, and the next pass's start
+// meets the refusal again on the healed row.
+func healInstead(v txView, refuse txStep) txStep {
+	heal := v.It.Heal
+	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
+		return refuse
+	}
+	step := txStep{Write: heal.Patch, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
+	if heal.Event != nil {
+		step.Facts.Events = append(step.Facts.Events, *heal.Event)
+	}
+	return step
 }
 
 // runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""

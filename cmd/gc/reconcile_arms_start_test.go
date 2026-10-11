@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -153,19 +155,25 @@ func TestDeadRuntimeAccrualMatchesLegacy(t *testing.T) {
 		meta     []string
 		want     map[string]string // keys the dead-runtime patch must carry
 		sameTick bool              // the start lands in this pass
+		kept     string            // a key the patch must not write
 	}{
-		{"a rapid crash", []string{"last_woke_at", woke(10 * time.Second), "wake_attempts", "1"}, map[string]string{"wake_attempts": "2", "last_woke_at": ""}, false},
-		{"a rapid crash at the limit", []string{"last_woke_at", woke(10 * time.Second), "wake_attempts", "4"}, map[string]string{"wake_attempts": "5", "sleep_reason": "quarantine"}, false},
-		{"churn", []string{"last_woke_at", woke(2 * time.Minute), "churn_count", "1"}, map[string]string{"churn_count": "2", "last_woke_at": "", "continuation_reset_pending": "true"}, false},
-		{"churn on a named always row, whose heal keeps the conversation", []string{"last_woke_at", woke(2 * time.Minute), "configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}, map[string]string{"churn_count": "1", "session_key": "", "continuation_reset_pending": "true"}, false},
-		{"a productive death", []string{"last_woke_at", woke(10 * time.Minute), "churn_count", "2"}, map[string]string{"churn_count": "0", "state": "asleep"}, true},
-		{"a drain it asked for", []string{"last_woke_at", woke(10 * time.Second), "drain_intent_reason", "idle", "drain_intent_at", woke(time.Minute), "drain_intent_incarnation", "3"}, map[string]string{"state": "asleep"}, true},
+		{"a rapid crash", []string{"last_woke_at", woke(10 * time.Second), "wake_attempts", "1"}, map[string]string{"wake_attempts": "2", "last_woke_at": ""}, false, ""},
+		{"a rapid crash at the limit", []string{"last_woke_at", woke(10 * time.Second), "wake_attempts", "4"}, map[string]string{"wake_attempts": "5", "sleep_reason": "quarantine"}, false, ""},
+		{"a rapid crash of a named always codex row, whose heal keeps the conversation", []string{"last_woke_at", woke(10 * time.Second), "provider_kind", "codex", "configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}, map[string]string{"wake_attempts": "1", "session_key": "", "started_config_hash": "", "continuation_reset_pending": "true"}, false, ""},
+		{"churn", []string{"last_woke_at", woke(2 * time.Minute), "churn_count", "1"}, map[string]string{"churn_count": "2", "last_woke_at": "", "continuation_reset_pending": "true"}, false, ""},
+		{"a rapid crash of a named always claude row keeps the conversation for its probe", []string{"last_woke_at", woke(10 * time.Second), "provider_kind", "claude", "configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}, map[string]string{"wake_attempts": "1"}, false, "session_key"},
+		{"churn on a named always row, whose heal keeps the conversation", []string{"last_woke_at", woke(2 * time.Minute), "configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}, map[string]string{"churn_count": "1", "session_key": "", "continuation_reset_pending": "true"}, false, ""},
+		{"a productive death", []string{"last_woke_at", woke(10 * time.Minute), "churn_count", "2"}, map[string]string{"churn_count": "0", "state": "asleep"}, true, ""},
+		{"a drain it asked for", []string{"last_woke_at", woke(10 * time.Second), "drain_intent_reason", "idle", "drain_intent_at", woke(time.Minute), "drain_intent_incarnation", "3"}, map[string]string{"state": "asleep"}, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireWake, append([]string{"state", "active", "session_key", "k-1", "started_config_hash", "h"}, tc.meta...)...)
 			it := c.decide()
 			if started := it.Kind == intentStart; started != tc.sameTick {
 				t.Fatalf("decideRow = (%q, %q), want a same-pass start %v", it.Kind, it.Reason, tc.sameTick)
+			}
+			if _, wrote := it.Patch[tc.kept]; tc.kept != "" && wrote {
+				t.Fatalf("patch %v writes %s, which the PreWake's transcript probe owns", it.Patch, tc.kept)
 			}
 			for k, v := range tc.want {
 				if got, ok := it.Patch[k]; !ok || got != v {
@@ -187,5 +195,14 @@ func TestTimerHealStartsAWantedRowInTheSamePass(t *testing.T) {
 	}
 	if _, ok := it.Patch["held_until"]; !ok {
 		t.Fatalf("patch %v, want the expired hold cleared in the start's CAS", it.Patch)
+	}
+	// The heal the start carries for when it cannot run lands as its own
+	// row write, though the fresh decision composes the start again.
+	p, it := c.pass(t, runtime.NewFake(), nil)
+	if it.Heal == nil || it.Heal.Kind != intentRowHeal {
+		t.Fatalf("start carries heal %+v, want its A6 row heal", it.Heal)
+	}
+	if s := runTx(context.Background(), p, *it.Heal, effectSpecs[it.Heal.Kind], nil); s.Outcome != settledLanded || c.meta(t)["held_until"] != "" {
+		t.Fatalf("heal settled %+v with held_until %q, want it landed and cleared", s, c.meta(t)["held_until"])
 	}
 }

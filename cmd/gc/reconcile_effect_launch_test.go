@@ -1036,3 +1036,51 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 		}
 	}
 }
+
+// Kills a heal lost behind its start (should-fix 2): a start carrying its
+// A6 heal that refuses before its PreWake (the endpoint's breaker open, no
+// template) writes the heal alone, but only while its fresh read still finds
+// the runtime absent, on which the heal rests.
+func TestRefusedStartStillHeals(t *testing.T) {
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name       string
+		open, tmpl bool // the endpoint's breaker open; the template resolves
+		alive      bool
+		wantState  string
+	}{
+		{"endpoint gate", true, true, false, "asleep"},
+		{"no template", false, false, false, "asleep"},
+		{"no template over a live runtime", false, false, true, "active"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k, _ := launchKit(t, "active", "session_key", "k-1", "started_config_hash", "h", "last_woke_at", woke)
+			row := k.p.World.Census.Rows[k.it.Key]
+			k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}}
+			if tc.tmpl {
+				tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
+				k.p.World.Templates.entries[templateMemoKeyOf(row.Info)] = templateResolution{TP: tp}
+			}
+			if tc.open {
+				guard := newEndpointCapacityGuard(func() time.Time { return gatherNow })
+				k.it.Endpoint = endpointKey("provider:test-agent")
+				trip, _ := guard.Admit(k.it.Endpoint, "outside", "outside")
+				trip.Resolve(verdictCapacity)
+				k.p.held.start.capacity = guard
+			}
+			if tc.alive {
+				k.runtimeAs("gc-1", "tok", nil)
+			}
+			k.it.Reason = decideStart
+			heal, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}})
+			k.it.Patch, k.it.Heal = heal, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal}
+			s := k.runKind()
+			if got := k.meta("state"); got != tc.wantState || len(k.starts()) != 0 {
+				t.Fatalf("settlement %+v: state %q, %d starts; want %q and no start", s, got, len(k.starts()), tc.wantState)
+			}
+			if healed := tc.wantState == "asleep"; healed != (s.Outcome == settledLanded) {
+				t.Fatalf("settlement %+v, want landed %v", s, healed)
+			}
+		})
+	}
+}

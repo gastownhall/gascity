@@ -149,7 +149,12 @@ var parityFindings = map[string]parityEntry{
 	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so a later wake neither restarts it nor is consumed", append([]string{"state", "wake_request", "wake_requested_at", "suspended_at", "slept_at"}, parityStartKeys...)},
 	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
 	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
-	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
+	// Owed by C5a2, which has no fixture until its start-failure path lands:
+	// legacy's wake-failure accrual (wakeFailureKeepsConversation) resets
+	// the conversation of a provider without a keyed transcript. v2's
+	// dead-runtime accrual writes that reset (deadRuntimePatch); C5a2's
+	// start failure must write the same ConversationResetPatch(true).
+	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
@@ -185,6 +190,10 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
 	intentRekey: regexp.MustCompile(`\bS4\b`),
+	// S1's start (C5a1's effect, A17/A18's kind) owns its Launch and
+	// PreWake rows; S1's adopt owns no row yet.
+	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
+	intentAdopt: regexp.MustCompile(`\bS1 adopt\b`),
 }
 
 var parityArmRef = regexp.MustCompile(`\bA(\d{1,2})\b`)
@@ -1018,7 +1027,7 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "creating", "pending_create_claim", "true", "pending_create_started_at", at(-10*time.Second))},
 			Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-1", "s-gc-1", "worker-1", nil),
 		},
-		{Name: "an always named session is created", Behaviors: []string{"SESS-711"}, City: chat(false), Explain: started("gc-1", "chat", "chat", nil)},
+		{Name: "an always named session is created", Behaviors: []string{"SESS-711", "START-014", "GUAR-017"}, City: chat(false), Explain: started("gc-1", "chat", "chat", nil)},
 		{
 			Name: "a closed named row is reopened", Behaviors: []string{"SESS-709"}, City: chat(false),
 			Rows:    []parityRow{func() parityRow { b := chatRow("gc-c", "1", "session_name", "chat"); b.Status = "closed"; return b }()},
@@ -1036,8 +1045,16 @@ func parityFixtures() []parityFixture {
 		// A18's gates (C5b). The twin has no provider-health registry, so
 		// health reads unknown and fails open in both copies; the red skip
 		// and the green tick are TestDecideRowStartGates'.
+		// S1's start end to end: the PreWake's incarnation bump, one Start
+		// per admission, the commit; legacy's runtime meta clears are §12.2
+		// #38. The start's deadline, stale-key wait, panic recovery and
+		// session-name guard (START-016/019/038, SESS-640) are inside the
+		// effect, which the twin runs unbounded and over valid names (legacy
+		// replaces an invalid-name seat every tick); TestLaunchDeadlines,
+		// TestResumedStartWaitsStaleKeyDetectDelay, the executor's panic
+		// recovery and TestLaunchRefusesEmptySessionName pin them.
 		{
-			Name: "a wanted row whose provider health is unknown starts", Behaviors: []string{"GUAR-034", "SESS-610", "SESS-630", "START-807", "START-808", "START-809"},
+			Name: "a wanted row whose provider health is unknown starts", Behaviors: []string{"GUAR-034", "SESS-610", "SESS-630", "START-807", "START-808", "START-809", "SESS-641", "START-012", "START-026", "GUAR-002", "START-025", "START-016", "START-019", "START-038", "SESS-640"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1")}, Work: assigned,
 			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
 		},

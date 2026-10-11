@@ -95,13 +95,13 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 			if it.Kind != "" { // a hold has no effect to read anything
 				it.Rests = r.rests
 			}
+			it.Key = k
 			if arm.name == "A6" && it.Kind != "" {
 				it.Patch = r.fold(it.Patch, rowArms[i+1:])
-				if it.Kind == intentRowHeal {
+				if it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal {
 					it = r.startHealed(it)
 				}
 			}
-			it.Key = k
 			return it, r.next
 		}
 	}

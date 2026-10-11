@@ -121,20 +121,24 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch}, true
 }
 
-// startHealed is heal, an A6 row write, or the start the start arms propose
-// for the row once healed, carrying the heal into its PreWake's CAS: a heal
-// that frees a wanted row (an expired kill fence or hold) restarts it in the
-// same pass, as legacy heals and wakes in one tick.
+// startHealed is heal, an A6 row write, or the start the start arms (A17,
+// A18) propose for the row once healed, carrying the heal into its
+// PreWake's CAS: a heal that frees a wanted row (an expired kill fence or
+// hold, a dead runtime) restarts it in the same pass, as legacy heals and
+// wakes in one tick. A dead runtime's start decides on the unhealed row,
+// whose death startIntent accrues. The start keeps heal (intent.Heal) for
+// when it cannot run.
 func (r *rowFacts) startHealed(heal intent) intent {
 	healed := *r
-	healed.row.Info = foldInfo(r.row.Info, heal.Patch)
+	if heal.Reason != decideDeadRuntimeHeal {
+		healed.row.Info = foldInfo(r.row.Info, heal.Patch)
+	}
 	it, ok := healed.restart()
 	if !ok || it.Kind != intentStart {
 		return heal
 	}
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
-	it.Patch, it.Key = patch, heal.Key
-	r.next = healed.next
+	it.Patch, it.Key, it.Heal = patch, heal.Key, &heal
 	return it
 }
