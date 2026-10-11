@@ -587,3 +587,45 @@ func TestPinnedSenderWinsASessionNameCollision(t *testing.T) {
 		t.Fatalf("pinned send recorded session %q, want the pinned %s", b.Metadata[fromSessionIDMetadataKey], info.ID)
 	}
 }
+
+// TestInboxAllAndCountsMatchTheProvider pins the inbox's all-mail and count
+// projections against the provider's per-recipient answers for the same
+// mailbox, so a reader that counts or lists from one inbox read agrees with
+// one that asks address by address.
+func TestInboxAllAndCountsMatchTheProvider(t *testing.T) {
+	_, p, info := newInboxFixture(t)
+	inbox, err := p.InboxForRoutes(session.RecipientRoutesFromInfo(info))
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	routes := inbox.Routes()
+
+	var want []mail.Message
+	for _, route := range routes {
+		msgs, err := p.All(route)
+		if err != nil {
+			t.Fatalf("All(%q): %v", route, err)
+		}
+		for _, m := range msgs {
+			if !slices.ContainsFunc(want, func(w mail.Message) bool { return w.ID == m.ID }) {
+				want = append(want, m)
+			}
+		}
+	}
+	sortMessagesByArrival(want)
+	if got := messageIDs(inbox.All()); !slices.Equal(got, messageIDs(want)) {
+		t.Fatalf("Inbox.All = %v, want %v", got, messageIDs(want))
+	}
+
+	wantTotal, wantUnread, err := p.CountRecipients(routes)
+	if err != nil {
+		t.Fatalf("CountRecipients: %v", err)
+	}
+	if total, unread := inbox.Counts(); total != wantTotal || unread != wantUnread {
+		t.Fatalf("Inbox.Counts = (%d, %d), want (%d, %d)", total, unread, wantTotal, wantUnread)
+	}
+	if total, unread := inbox.Counts(); total != len(inbox.All()) || unread != len(inbox.Unread()) || unread == total {
+		t.Fatalf("Inbox.Counts = (%d, %d) for %d messages, %d unread; want them equal and some mail read",
+			total, unread, len(inbox.All()), len(inbox.Unread()))
+	}
+}

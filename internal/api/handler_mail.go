@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -108,45 +109,56 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	return "", apiSessionTargetNotFound(recipient)
 }
 
-func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
+// apiMailQuery is the mailbox a mail list or count query reads: the recipient
+// addresses, and — when the query named one session — that session, whose
+// own mailbox is read as one inbox (mailInboxForQuery) instead of expanding
+// each address again.
+type apiMailQuery struct {
+	recipients []string
+	session    *session.Info
+}
+
+// resolveMailQueryWithContext resolves the agent a mail list or count query
+// names onto the mailbox it reads.
+func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient string) apiMailQuery {
 	recipient = strings.TrimSpace(recipient)
 	if recipient == "" {
-		return []string{""}
+		return apiMailQuery{recipients: []string{""}}
 	}
 	if recipient == "human" {
-		return []string{"human"}
+		return apiMailQuery{recipients: []string{"human"}}
 	}
 	store := s.state.SessionsBeadStore().Store
 	if store == nil {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
 			if resolved == recipient {
-				return []string{resolved}
+				return apiMailQuery{recipients: []string{resolved}}
 			}
 			// Compatibility: older tests and direct provider callers may have
 			// persisted mail under the raw bare name while API sends now
 			// canonicalize to the qualified recipient.
-			return []string{resolved, recipient}
+			return apiMailQuery{recipients: []string{resolved, recipient}}
 		}
-		return []string{recipient}
+		return apiMailQuery{recipients: []string{recipient}}
 	}
 	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
 		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil {
 			recipients = uniqueNonEmptyMailRecipients(append(recipients, recipient))
 			if len(recipients) > 0 {
-				return recipients
+				return apiMailQuery{recipients: recipients}
 			}
 		}
 	}
 	resolved, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{})
 	if err != nil {
-		return []string{recipient}
+		return apiMailQuery{recipients: []string{recipient}}
 	}
-	if bead, getErr := store.Get(resolved); getErr == nil {
-		if recipients := session.MailboxAddressesIncludingRuntimeName(bead); len(recipients) > 0 {
-			return recipients
+	if info, _, getErr := session.ResolveSessionRecordByExactID(store, resolved); getErr == nil {
+		if recipients := session.MailboxAddressesIncludingRuntimeNameFromInfo(info); len(recipients) > 0 {
+			return apiMailQuery{recipients: recipients, session: &info}
 		}
 	}
-	return []string{resolved}
+	return apiMailQuery{recipients: []string{resolved}}
 }
 
 func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedSessionSpec) ([]string, error) {
@@ -300,16 +312,50 @@ func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier st
 	return spec.Identity, true, nil
 }
 
-func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
-	recipients = uniqueMailRecipients(recipients)
+// mailSessionInboxReader is the optional mail-provider capability of reading a
+// session's own mailbox in one listing (beadmail.Provider.InboxForSession) —
+// the mailbox the CLI's self-reads, hook injection and SessionStart mail read,
+// so the API's answer for a session agrees with theirs.
+type mailSessionInboxReader interface {
+	InboxForSession(info session.Info) (*beadmail.Inbox, error)
+}
+
+// sessionInboxForQuery reads the mailbox of a query that named one session as
+// one inbox, when mp can; ok is false for any other query or provider.
+func sessionInboxForQuery(mp mail.Provider, q apiMailQuery) (inbox *beadmail.Inbox, ok bool, err error) {
+	reader, reads := mp.(mailSessionInboxReader)
+	if !reads || q.session == nil {
+		return nil, false, nil
+	}
+	inbox, err = reader.InboxForSession(*q.session)
+	return inbox, true, err
+}
+
+// mailInboxForQuery returns the unread mail of the mailbox q names.
+func mailInboxForQuery(mp mail.Provider, q apiMailQuery) ([]mail.Message, error) {
+	if inbox, ok, err := sessionInboxForQuery(mp, q); ok {
+		if err != nil {
+			return nil, err
+		}
+		return inbox.Unread(), nil
+	}
+	recipients := uniqueMailRecipients(q.recipients)
 	if inboxer, ok := mp.(mail.MultiRecipientInboxer); ok {
 		return inboxer.InboxRecipients(recipients)
 	}
 	return mailMessagesForRecipients(mp.Inbox, recipients)
 }
 
-func mailAllForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
-	return mailMessagesForRecipients(mp.All, recipients)
+// mailAllForQuery returns all open mail, read or unread, of the mailbox q
+// names.
+func mailAllForQuery(mp mail.Provider, q apiMailQuery) ([]mail.Message, error) {
+	if inbox, ok, err := sessionInboxForQuery(mp, q); ok {
+		if err != nil {
+			return nil, err
+		}
+		return inbox.All(), nil
+	}
+	return mailMessagesForRecipients(mp.All, q.recipients)
 }
 
 func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
@@ -334,8 +380,17 @@ func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recip
 	return all, nil
 }
 
-func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {
-	recipients = uniqueMailRecipients(recipients)
+// mailCountForQuery returns the total and unread counts of the mailbox q
+// names.
+func mailCountForQuery(mp mail.Provider, q apiMailQuery) (int, int, error) {
+	if inbox, ok, err := sessionInboxForQuery(mp, q); ok {
+		if err != nil {
+			return 0, 0, err
+		}
+		total, unread := inbox.Counts()
+		return total, unread, nil
+	}
+	recipients := uniqueMailRecipients(q.recipients)
 	if counter, ok := mp.(interface {
 		CountRecipients([]string) (int, int, error)
 	}); ok {

@@ -146,6 +146,29 @@ func (in *Inbox) Unread() []mail.Message {
 	return messages
 }
 
+// All returns every message in the inbox, read or unread, oldest first (ties
+// by id) — the set [Provider.All] yields for the same mailbox.
+func (in *Inbox) All() []mail.Message {
+	messages := make([]mail.Message, 0, len(in.rows))
+	for _, b := range in.rows {
+		messages = append(messages, beadToMessage(b))
+	}
+	sortMessagesByArrival(messages)
+	return messages
+}
+
+// Counts returns how many messages the inbox holds and how many of them are
+// unread — the counts [Provider.CountRecipients] yields for the same mailbox.
+func (in *Inbox) Counts() (total, unread int) {
+	for _, b := range in.rows {
+		total++
+		if !hasLabel(b.Labels, "read") {
+			unread++
+		}
+	}
+	return total, unread
+}
+
 // UnreadAutoHandoffs returns the inbox's unread auto-handoff mail that opted
 // into archive-after-inject, oldest first (ties by id) — the set and order
 // [Provider.CheckAutoHandoffs] yields for the same mailbox.
