@@ -138,7 +138,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   496,
+			BaselineCalls:   492,
 			BaselineFiles:   183,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -179,7 +179,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   317,
+			BaselineCalls:   313,
 			BaselineFiles:   122,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -644,7 +644,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   317,
+			BaselineCalls:   313,
 			BaselineFiles:   122,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
