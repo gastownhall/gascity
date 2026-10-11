@@ -76,7 +76,7 @@ var (
 	// is not proof the machine stays supervised. Tri-state like
 	// supervisorLaunchdLoaded: known is false when launchd cannot be asked.
 	supervisorLaunchdDisabled = func(label string) (disabled bool, known bool) {
-		out, err := exec.Command("launchctl", "print-disabled", "gui/"+strconv.Itoa(os.Getuid())).Output()
+		out, err := exec.Command("launchctl", "print-disabled", supervisorLaunchdDomain()).Output()
 		if err != nil {
 			return false, false
 		}
@@ -292,25 +292,74 @@ func launchdPrintDisabledReportsDisabled(out, label string) (disabled bool, know
 }
 
 // supervisorLaunchdSupervisionWarning returns why launchd is not supervising
-// this machine, or "" when it is (or when the platform is not macOS, or the
-// agent was never installed). Process liveness alone hides the failure the
-// stop path creates: a foreground supervisor answers every probe while the
-// launchd agent stays disabled, so the next logout leaves the city unrun.
-func supervisorLaunchdSupervisionWarning() string {
+// this machine. Process liveness alone hides the failure the stop path
+// creates: a foreground supervisor answers every probe while the launchd
+// agent stays disabled, so the next logout leaves the city unrun.
+//
+// It returns "" when launchd is supervising, and also when the host is not
+// macOS, when no agent plist is installed, when the plist cannot be read, and
+// when launchd cannot be asked: status reports only a problem it found, and
+// does not guess about an agent it cannot inspect. socketAlive reports
+// whether a supervisor answers the control socket; together with the plist
+// it decides the remedy the warning names.
+func supervisorLaunchdSupervisionWarning(socketAlive bool) string {
 	if supervisorRuntimeGOOS != "darwin" {
 		return ""
 	}
-	if _, err := os.Stat(supervisorLaunchdPlistPath()); err != nil {
+	plist, err := os.ReadFile(supervisorLaunchdPlistPath())
+	if err != nil {
 		return ""
 	}
 	label := supervisorLaunchdLabel()
 	if disabled, known := supervisorLaunchdDisabled(label); known && disabled {
-		return fmt.Sprintf("launchd agent %s is disabled; it will not start after logout or reboot. Run 'gc supervisor start' to clear the override", label)
+		return fmt.Sprintf("launchd agent %s is disabled; it will not start after logout or reboot. %s",
+			label, supervisorLaunchdRemedy(string(plist), socketAlive, "Run 'gc supervisor start' to clear the override"))
 	}
 	if _, absent, _ := supervisorLaunchdLoaded(label); absent {
-		return fmt.Sprintf("launchd agent %s is not loaded; it will not restart if the supervisor exits. Run 'gc supervisor start' to load it", label)
+		return fmt.Sprintf("launchd agent %s is not loaded; it will not restart if the supervisor exits. %s",
+			label, supervisorLaunchdRemedy(string(plist), socketAlive, "Run 'gc supervisor start' to load it"))
 	}
 	return ""
+}
+
+// supervisorLaunchdRemedy names the commands that put the agent back under
+// launchd. Only `gc supervisor start` enables, loads, and kickstarts the
+// installed job, and only when no supervisor answers the control socket (it
+// refuses while one does) and the plist runs this gc (otherwise it starts
+// this gc outside launchd). So a live supervisor is stopped first, with
+// --wait because a plain stop returns before the supervisor has exited, and
+// a plist that runs another gc is rewritten by `install --force`, which
+// enables, loads, and kickstarts the job itself. A plain
+// `gc supervisor install` is never the remedy: with the plist unchanged and
+// a supervisor alive it returns before enabling the job. When this gc's own
+// path cannot be resolved, start fails and says why, so the start remedy
+// stands.
+func supervisorLaunchdRemedy(plist string, socketAlive bool, startRemedy string) string {
+	stopFirst := ""
+	if socketAlive {
+		stopFirst = "'gc supervisor stop --wait' then "
+	}
+	if gcPath, err := os.Executable(); err == nil {
+		if binary := supervisorLaunchdPlistBinary(plist); !supervisorSameBinary(binary, gcPath) {
+			return fmt.Sprintf("It runs %s, not this gc; run %s'%s supervisor install --force' to make it run this gc and put it back under launchd",
+				binary, stopFirst, shellQuotePath(gcPath))
+		}
+	}
+	if socketAlive {
+		return "Run " + stopFirst + "'gc supervisor start' to put it back under launchd"
+	}
+	return startRemedy
+}
+
+// supervisorLaunchdPlistBinary is the gc binary a launchd plist runs, or a
+// placeholder naming the problem when its ProgramArguments cannot be read.
+// The placeholder never matches a real binary, so callers comparing it
+// against this gc treat an unreadable plist as another gc's.
+func supervisorLaunchdPlistBinary(plist string) string {
+	if binary := supervisorLaunchdPlistGCPath(plist); binary != "" {
+		return binary
+	}
+	return "(unreadable ProgramArguments)"
 }
 
 func cleanupSupervisorWorkspaceServicesForWarmRefresh(gcHome string) error {
@@ -675,8 +724,10 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 }
 
 // supervisorStartLaunchdPlistPath locates the installed launchd plist for
-// gc supervisor start. Overridable for tests.
-var supervisorStartLaunchdPlistPath = supervisorLaunchdPlistPath
+// gc supervisor start. Overridable for tests. It resolves through
+// supervisorLaunchdPlistPath at call time, so redirecting that seam covers
+// start too.
+var supervisorStartLaunchdPlistPath = func() string { return supervisorLaunchdPlistPath() }
 
 // startSupervisorViaInstalledLaunchd starts the installed launchd job
 // instead of forking a detached supervisor (#6966). A forked supervisor runs
@@ -700,10 +751,7 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 		return false, 0
 	}
 	label := supervisorLaunchdLabel()
-	plistBinary := supervisorLaunchdPlistGCPath(string(content))
-	if plistBinary == "" {
-		plistBinary = "(unreadable ProgramArguments)"
-	}
+	plistBinary := supervisorLaunchdPlistBinary(string(content))
 	if !supervisorSameBinary(plistBinary, gcPath) {
 		fmt.Fprintf(stderr, "gc supervisor start: warning: launchd service %q runs %s, not this gc (%s); starting this gc outside launchd. Run '%s supervisor install --force' to make the service run this gc.\n", label, plistBinary, gcPath, shellQuotePath(gcPath)) //nolint:errcheck // best-effort stderr
 		return false, 0
@@ -1862,11 +1910,18 @@ var supervisorLaunchdPlistPath = func() string {
 	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
 }
 
+// supervisorLaunchdDomain is the launchd domain the agent runs in, the
+// logged-in user's GUI session. Commands that act on the job and probes that
+// read its overrides both address it, so they cannot drift apart.
+func supervisorLaunchdDomain() string {
+	return "gui/" + strconv.Itoa(os.Getuid())
+}
+
 func supervisorLaunchdServiceTarget(label string) string {
 	if label == "" {
 		label = supervisorLaunchdLabel()
 	}
-	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
+	return supervisorLaunchdDomain() + "/" + label
 }
 
 func loadAndStartSupervisorLaunchd(path, label string) error {

@@ -1046,6 +1046,7 @@ go_test(
         "cmd_supervisor_city_test.go",
         "cmd_supervisor_fork_env_test.go",
         "cmd_supervisor_install_guard_test.go",
+        "cmd_supervisor_launchd_override_test.go",
         "cmd_supervisor_launchd_start_test.go",
         "cmd_supervisor_lifecycle_actor_test.go",
         "cmd_supervisor_portcollision_test.go",
