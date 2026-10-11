@@ -7,6 +7,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // An interactive session a human is attached to must not idle-sleep, however
@@ -158,5 +160,44 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForAttached(t *testing.T) 
 				t.Errorf("%s/%s: override = %v, want %v", class, tc.name, got, tc.want)
 			}
 		}
+	}
+}
+
+// With pool demand, the attach probe runs only where the attachment can
+// change the decision: an interactive template whose effective sleep policy
+// can idle-sleep. A non-interactive template, a policy that is off, and an
+// interactive template on a runtime without full sleep capability (its
+// effective policy is off) keep the desired fast path free of attach probes.
+func TestShouldProbeAttachmentForAwakeInputWithPoolDemand(t *testing.T) {
+	noAttach := false
+	info := sessionpkg.Info{MetadataState: "active", Template: "worker", SessionNameMetadata: "worker"}
+	poolDesired := map[string]int{"worker": 1}
+	for _, tc := range []struct {
+		name       string
+		agent      config.Agent
+		capability runtime.SessionSleepCapability
+		want       bool
+	}{
+		{"interactive, full capability", config.Agent{Name: "worker"}, runtime.SessionSleepCapabilityFull, true},
+		{"interactive, timed_only capability", config.Agent{Name: "worker"}, runtime.SessionSleepCapabilityTimedOnly, false},
+		{"interactive, policy off", config.Agent{Name: "worker", SleepAfterIdle: config.SessionSleepOff}, runtime.SessionSleepCapabilityFull, false},
+		{"non-interactive", config.Agent{Name: "worker", Attach: &noAttach}, runtime.SessionSleepCapabilityFull, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{
+				SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s", NonInteractive: "60s"},
+				Agents:       []config.Agent{tc.agent},
+			}
+			sp := runtime.NewFake()
+			sp.SleepCapabilityValue = tc.capability
+			if got := shouldProbeAttachmentForAwakeInput(info, true, cfg, sp, poolDesired); got != tc.want {
+				t.Fatalf("shouldProbeAttachmentForAwakeInput = %v, want %v", got, tc.want)
+			}
+			// Without pool demand an active, never-detached session is probed
+			// whatever its policy (the probe can still change the decision).
+			if !shouldProbeAttachmentForAwakeInput(info, true, cfg, sp, nil) {
+				t.Fatal("shouldProbeAttachmentForAwakeInput without pool demand = false, want true")
+			}
+		})
 	}
 }
