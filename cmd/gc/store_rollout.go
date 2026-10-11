@@ -115,6 +115,9 @@ func conditionalWritesEventStoreKind(kind string) string {
 		return "mem"
 	case "CachingStore":
 		return "caching"
+	case "SQLiteStore":
+		// The SQLite engine a relocated class binding opens.
+		return "sqlite-graph"
 	case "*beads.DoltliteReadStore":
 		// DoltliteReadStore only exists under the gascity_native_beads build
 		// tag, so beads.conditionalStoreKind cannot name it and it arrives as

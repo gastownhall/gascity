@@ -997,6 +997,12 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		}
 		idleTicksSinceObserve = 0
 
+		// Observing reads the bead store, and on a stopped city that read
+		// restarts the bd and Dolt servers `gc stop` just retired (#6857).
+		if nudgePollCityStopped(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city controller and session %q are not running; exiting and leaving queued nudges for the next start\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
 		obs, err := nudgeObserveTarget(target, sessStore, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck

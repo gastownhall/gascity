@@ -37,6 +37,11 @@ pillow>=12.3.0
 # at 2.8.0 until transitive constraints pull a patched version on their own.
 urllib3>=2.8.0
 
+# Security floor: CVE-2026-104851 (HIGH, arbitrary code execution via a
+# crafted fsspec URL) in fsspec < 2026.6.0. fsspec arrives transitively via
+# huggingface-hub; drop once its constraint carries the patched release itself.
+fsspec>=2026.6.0
+
 # Security floor: idna < 3.15 has GHSA-65pc-fj4g-8rjx (MEDIUM, IDNA
 # bypass of the CVE-2024-3651 fix). Drop once transitive constraints
 # carry the patched version themselves.

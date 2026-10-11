@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,17 @@ type CachingStore struct {
 	// store-wide degrade latch is not enough and why "IsBlocked == nil" is not
 	// the same question (ga-cfhgr).
 	readyProjectionLost map[string]struct{}
+
+	// unannouncedCloses holds rows this cache installed as closed over a cached
+	// row that was not closed, on a path that did not itself announce the
+	// transition: a live list, a dirty-row read, or an event patch observing a
+	// close another process made (bd close, gc bd close). The next notification
+	// drains them as bead.closed. Without it the reconcile pass later found an
+	// already-closed row and evicted it silently, so the close was never
+	// announced at all (gastownhall/gascity#6860, #2546). hasUnannouncedCloses
+	// mirrors len(unannouncedCloses) > 0 so the drain costs no lock when idle.
+	unannouncedCloses    map[string]Bead
+	hasUnannouncedCloses atomic.Bool
 
 	reconciling    atomic.Bool
 	syncFailures   int
@@ -477,16 +489,26 @@ type absorbOpts struct {
 	seqMode    absorbSeqMode
 	readyMode  absorbReadyMode
 	clearDirty bool
+	// closeAnnounced says the caller owns the bead.closed announcement for a
+	// closed row it installs: it emits bead.closed itself, or the row came from
+	// an event already on the bus. Every other absorb that closes a cached row
+	// queues the close for the next notification (see unannouncedCloses).
+	closeAnnounced bool
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
 // that installs a cached row alongside clearing the row's tombstone/staleness
 // state. now is the caller's clock read for the whole pass; it is consulted
-// only by seqClearGuarded. Caller must hold c.mu in write mode.
-func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+// only by seqClearGuarded. It reports whether a caller passing
+// opts.closeAnnounced owns the bead.closed announcement for this absorb (see
+// trackCloseTransitionLocked); callers that do not announce ignore it. Caller
+// must hold c.mu in write mode.
+func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) (announceClose bool) {
 	c.advanceObservationLocked()
+	previous, hadPrevious := c.beads[id]
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
+	announceClose = c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -514,6 +536,60 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	case seqClearBeadSeqOnly:
 		delete(c.beadSeq, id)
 	}
+	return announceClose
+}
+
+// trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
+// installed for id. A row that is not closed cancels any queued close (a
+// reopen before the drain must not announce a stale close). A not-closed to
+// closed transition is queued unless the caller announces it itself.
+//
+// For a caller that announces (announced=true) installing a closed row, the
+// result reports whether that caller owns the bead.closed: it does when this
+// absorb is the not-closed to closed transition (or there was no cached row
+// to compare), or when it canceled a close another absorb queued but had not
+// drained yet. When a concurrent reader already installed and announced the
+// close, the caller does not own it, so the close is announced exactly once.
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) bool {
+	if installed.Status != "closed" || announced {
+		_, queued := c.unannouncedCloses[id]
+		if queued {
+			delete(c.unannouncedCloses, id)
+			c.hasUnannouncedCloses.Store(len(c.unannouncedCloses) > 0)
+		}
+		return announced && installed.Status == "closed" &&
+			(queued || !hadPrevious || previous.Status != "closed")
+	}
+	if !hadPrevious || previous.Status == "closed" {
+		return false
+	}
+	if c.unannouncedCloses == nil {
+		c.unannouncedCloses = make(map[string]Bead)
+	}
+	c.unannouncedCloses[id] = cloneBead(installed)
+	c.hasUnannouncedCloses.Store(true)
+	return false
+}
+
+// takeUnannouncedClosesLocked drains the queued closes in id order. Caller
+// must hold c.mu in write mode.
+func (c *CachingStore) takeUnannouncedClosesLocked() []Bead {
+	if len(c.unannouncedCloses) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(c.unannouncedCloses))
+	for id := range c.unannouncedCloses {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	closed := make([]Bead, 0, len(ids))
+	for _, id := range ids {
+		closed = append(closed, c.unannouncedCloses[id])
+	}
+	c.unannouncedCloses = nil
+	c.hasUnannouncedCloses.Store(false)
+	return closed
 }
 
 // absorbReadyProjectionLocked decides what happens to a row's is_blocked
@@ -727,6 +803,9 @@ func (c *CachingStore) cacheServableLocked() bool {
 // non-NotFound error, the cache is not servable, or residual dirty churn
 // survived the bounded retry. No backing I/O happens under c.mu (I7).
 func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close made by another process.
+	defer c.announceUnannouncedCloses()
 	suppressed := make(map[string]struct{})
 	for pass := 0; pass < 2; pass++ {
 		c.mu.RLock()
@@ -928,12 +1007,6 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -942,6 +1015,12 @@ func (c *CachingStore) PrimeActive() error {
 	if depErr != nil {
 		partialErr = errors.Join(partialErr, depErr)
 		c.recordProblem("prime active dep cache", depErr)
+	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
+	all = enriched
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
 	}
 
 	c.mu.Lock()
@@ -1044,15 +1123,6 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-	if err := c.cacheContextErr(ctx); err != nil {
-		return err
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -1061,6 +1131,17 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	depMap, depsComplete, depErr := c.fetchDepsForBeads(beadMap)
 	if depErr != nil {
 		c.recordProblem("prime dep cache", depErr)
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
+	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
+	}
+	for _, b := range enriched {
+		beadMap[b.ID] = cloneBead(b)
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -1459,6 +1540,13 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 // applyReadyProjection enriches items with the backing store's ready projection
 // and returns the failure that leaves the snapshot INCOMPLETE, having already
 // recorded every failure on the problem log.
+//
+// Callers run it AFTER reading the deps they install beside the rows. A cached
+// verdict is trusted over the cached edges, so the verdict must be at least as
+// fresh as they are: an edge added between an earlier projection and the deps
+// read would sit, open, next to IsBlocked=false, and the cache would offer work
+// the store holds back. Projected last, a racing edge can only leave a verdict
+// stricter than the edges, which the next re-scan corrects.
 //
 // A projection the backing store cannot serve AT ALL costs the snapshot one
 // column, not rows: the cache latches readyProjectionDegraded, its readiness

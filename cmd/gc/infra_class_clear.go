@@ -84,7 +84,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -448,15 +447,15 @@ func infraBindingRows(target infraBindingTarget) (map[string]beads.Bead, error) 
 }
 
 // infraBindingCopySatisfies reports whether the binding's copy of id no longer
-// blocks a dependent: it is closed with an outcome that releases dependents, or
-// the binding's own GC collected it, which it does only to closed workflows and
-// read mail.
+// blocks a dependent: it is closed with an outcome that releases dependents (as
+// Ready judges it), or the binding's own GC collected it, which it does only to
+// closed workflows and read mail.
 func infraBindingCopySatisfies(held map[string]beads.Bead, id string) bool {
 	b, ok := held[id]
 	if !ok {
 		return true
 	}
-	return beads.DependencySatisfied(b.Status, b.Metadata[beadmeta.WorkOutcomeMetadataKey])
+	return beads.DependencySatisfied(b.Status, beads.ReadinessWorkOutcome(b.Metadata))
 }
 
 // infraBackupEntryFor reads one retained row's edges, with payloads.

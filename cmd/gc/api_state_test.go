@@ -4819,3 +4819,76 @@ func TestControllerStateUpdateRigPathDetachesProviderOwnershipBeforeConfigWrite(
 		t.Fatalf("ownership after prefix-only update = (%q, %t, %v), want attached rig label", key, owned, err)
 	}
 }
+
+// Regression for ga-opn27h (read-after-write half): a runtime reload that
+// publishes the previous mutation's config while a newer API mutation is
+// swapping in its own snapshot must not overwrite it. Before the fix the
+// reload's candidate still matched the previous pending revision (the new one
+// is marked only after the swap), so it was accepted and published over the
+// mutation, whose own read-after-write then failed until the next reload.
+func TestControllerStateMutationNotOverwrittenByConcurrentRuntimePublish(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	cityToml := "[workspace]\nname = \"city1\"\n\n[beads]\nprovider = \"file\"\n\n[providers.bash]\ncommand = \"bash\"\n\n[[agent]]\nname = \"worker\"\nprovider = \"bash\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cs := newControllerState(context.Background(), &config.City{Workspace: config.Workspace{Name: "city1"}}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	// Each iteration's reload candidate is the config of the previous
+	// mutation, which the runtime has not published yet (its revision is still
+	// the pending one).
+	if err := cs.ResumeAgent("worker"); err != nil {
+		t.Fatalf("seed mutation: %v", err)
+	}
+
+	// The city-store reopen runs inside the mutation's snapshot swap. Use it
+	// to start the reload's publish at that moment; the test waits for the
+	// publish to finish before reading back.
+	prevOpen := newControllerStateOpenCityStore
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+	for i := 0; i < 20; i++ {
+		want := i%2 == 0
+		staleCfg, staleRev, err := cs.loadCurrentConfigSnapshot()
+		if err != nil {
+			t.Fatalf("mutation %d: load reload candidate: %v", i, err)
+		}
+		published := make(chan struct{})
+		var armed atomic.Bool
+		armed.Store(true)
+		newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
+			if armed.CompareAndSwap(true, false) {
+				started := make(chan struct{})
+				go func() {
+					defer close(published)
+					close(started)
+					cs.updateFromRuntime(staleCfg, runtime.NewFake(), staleRev)
+				}()
+				<-started
+			}
+			return prevOpen(cityPath, mode)
+		}
+		if want {
+			err = cs.SuspendAgent("worker")
+		} else {
+			err = cs.ResumeAgent("worker")
+		}
+		if err != nil {
+			t.Fatalf("mutation %d: %v", i, err)
+		}
+		if armed.Load() {
+			t.Fatalf("mutation %d did not reopen the city store; the test seam moved", i)
+		}
+		<-published
+		got := false
+		for _, a := range cs.Config().Agents {
+			if a.Name == "worker" {
+				got = a.Suspended
+			}
+		}
+		if got != want {
+			t.Fatalf("mutation %d: read after write saw suspended=%v, want %v (a concurrent runtime publish overwrote the mutation)", i, got, want)
+		}
+	}
+}
