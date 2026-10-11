@@ -130,6 +130,10 @@ type intent struct {
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
+	// Finish is the stop verb's finalize builder (D4); nil is
+	// finalizePatch. C7a's restart and idle-timeout, and C6d's idle
+	// respawn, call the verb with their own.
+	Finish stopFinish
 	// Patch is a row write's patch and Event what it records once it lands.
 	// The row-write effect re-decides on the fresh row and writes the
 	// re-decided intent's (R2).

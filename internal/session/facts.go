@@ -62,6 +62,9 @@ const (
 	// FactsAfterStart is a v2 transaction's premise after a Call that starts
 	// a runtime.
 	FactsAfterStart FactsSite = "v2.tx.after-start"
+	// FactsAfterStop is a v2 transaction's premise after a Call that stops
+	// a runtime (the stop verb, v5 D3).
+	FactsAfterStop FactsSite = "v2.tx.after-stop"
 	// FactsCommit is a v2 transaction's commit after its own write (v5 S2).
 	FactsCommit FactsSite = "v2.tx.commit"
 	// FactsDrainBasis is a v2 drain begin's premise: the drain basis alone.
@@ -113,6 +116,10 @@ var factsSites = map[FactsSite]factsSite{
 	FactsAfterStart: {
 		Drop:   []string{"session_key", beadmeta.CurrentClaimBeadIDMetadataKey},
 		Reason: "a runtime the Call started writes its own resumable session key and the claim it took while the start is in flight; those do not make the row another row. Nothing writes the current bead or detached_at then, so they stay compared",
+	},
+	FactsAfterStop: {
+		Only:   append(slices.Clone(drainBasisKeys), "state", "state_reason"),
+		Reason: "the stop verb's finalize (v5 D3, D4), after its stop, rests on what the legacy drain stop does (FactsLegacyStopPending, FactsLegacyDrainStop): the incarnation, the operator's intent and requests, and the stop-pending state; a wake request landing since the pass refuses it (D7 rule 4). An agent's heartbeat (held_until) and its own ack (drain_ack_*) move while it runs and must not strand a stopped runtime's row signaled (I16)",
 	},
 	FactsCommit: {
 		Only:   []string{"instance_token"},

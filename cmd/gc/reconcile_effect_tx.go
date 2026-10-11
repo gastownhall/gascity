@@ -54,6 +54,7 @@ const (
 	capEpisode                        // the #46 startup-health episode record (a Call's)
 	capRetire                         // the retired-session cleanup after a close (an around's)
 	capRelease                        // the close's raw work legs, for its release Call and its around's cascade
+	capProviderStop                   // the stop's composite provider and clock (a Call's)
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -70,10 +71,19 @@ type txCaps struct {
 	reads   effectReads         // capReadStores: read-only, blind writes refused
 	start   startCaps           // capProviderStart
 	episode startupHealthRecord // capEpisode
+	stop    stopCaps            // capProviderStop
 	// by is the controller, as a Call's leasing helper (a Manager start or
 	// stop) is handed it, carrying the effect's lease (callWatched).
 	by      session.Actor
 	release *closeReleases // capRelease
+}
+
+// stopCaps are what the stop verb's Call holds: the composite provider,
+// whose routed leaf the fence's verdict names and through whose hops C8.8
+// confirms, and the clock.
+type stopCaps struct {
+	sp    runtime.Provider
+	clock plannerClock
 }
 
 // startCaps are what the start's Calls hold to admit the endpoint ticket and
@@ -119,6 +129,9 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capRelease != 0 {
 		c.release = p.held.release
+	}
+	if grant&capProviderStop != 0 {
+		c.stop = stopCaps{sp: p.Runtime, clock: p.Clock}
 	}
 	return c
 }
@@ -359,8 +372,9 @@ const (
 	// registry's FactsAfterStart facts, since the started runtime writes the
 	// keys that exception drops.
 	callStart callKind = iota + 1
-	// callStop stops one: the full premise holds after it, a start's
-	// before it included.
+	// callStop stops one: after it the premise is the registry's
+	// FactsAfterStop site's (the stop verb's finalize, v5 D3), whatever a
+	// start before it ran.
 	callStop
 	// callWork writes work beads (a release), not the runtime: the premise
 	// after it is the one before it.
@@ -482,6 +496,8 @@ type effectFacts struct {
 	// AliasOwed is the row whose landed alias write owes its runtime the
 	// alias (A7's runtime-alias sync, M1).
 	AliasOwed *rowKey
+	// Stopped is a stop the stop verb performed, for legacy's stop metric.
+	Stopped *agentStop
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -491,7 +507,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -501,6 +517,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Noted = cmp.Or(g.Noted, f.Noted)
 	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
 	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
+	f.Stopped = cmp.Or(g.Stopped, f.Stopped)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -628,6 +645,7 @@ type tx struct {
 	facts0  session.Facts         // its premise facts
 	basis   rowBasis              // its incarnation and token
 	started bool                  // a callStart ran, and no callStop since
+	stopped bool                  // a callStop ran
 	landed  bool                  // a section's write landed
 	last    bool                  // the concluded step ends the effect after its Call (txStep.Last)
 	facts   effectFacts
@@ -672,7 +690,7 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		case callStart:
 			t.started = true
 		case callStop:
-			t.started = false // a stopped runtime writes nothing more
+			t.started, t.stopped = false, true // a stopped runtime writes nothing more
 		}
 		if err := t.c.at(ctx, seamAfterCall); err != nil {
 			s = injected(err)
@@ -935,6 +953,8 @@ func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string)
 			site = session.FactsBaseline
 		case t.started:
 			site = session.FactsAfterStart
+		case t.stopped:
+			site = session.FactsAfterStop
 		}
 		moved = site.Moved(t.compared(fresh), t.compared(t.facts0))
 		if len(moved) == 0 && rowBasisOf(t.view.It.Key, row) != t.basis {

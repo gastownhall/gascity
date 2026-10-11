@@ -127,7 +127,7 @@ func (s *sim) checkStarts() {
 }
 
 // checkDestructive is I4 (I-fence) and I5 (I-attached) over v2's provider
-// kills: each hits its row's own runtime (O2 Current, or the own-runtime
+// kills, each checked at its step: each hits its row's own runtime (O2 Current, or the own-runtime
 // exception's StaleSelf with epoch = generation) or the dead object the
 // corpse and start-recycle exceptions name, or a pending create's
 // bead-scoped name (C8.2(a)), and never an attached one. The
@@ -245,7 +245,8 @@ func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
-// reason, a suspend the row's state, and an unexpired hold or quarantine its
+// reason, a suspend the row's state (but for the dormant stop's drain
+// completion, asleep or drained), and an unexpired hold or quarantine its
 // timer and sleep reason, though A6's stability clear may clear the
 // quarantine's timer on a row its pass read stable (v5.8, SESS-539; stable,
 // sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
@@ -261,8 +262,9 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 	if session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], t) {
 		owned, dormant = append(owned, "state", "state_reason", "sleep_reason", "slept_at"), true
 	}
-	if m["state"] == string(session.StateSuspended) {
-		owned, dormant = append(owned, "state", "suspended_at"), true
+	suspended := m["state"] == string(session.StateSuspended)
+	if suspended {
+		owned, dormant = append(owned, "suspended_at"), true
 	}
 	if until("held_until") {
 		owned = append(owned, "held_until")
@@ -283,6 +285,12 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 		if a[k] != m[k] {
 			return k
 		}
+	}
+	// A suspend owns the row's state, but for the drain completion the
+	// operator-dormant stop writes, as legacy's does (asleep or drained,
+	// the hold kept; C6b2 ruling).
+	if suspended && a["state"] != m["state"] && a["state"] != string(session.StateAsleep) && a["state"] != string(session.StateDrained) {
+		return "state"
 	}
 	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
 		if dormant && a[k] != m[k] && a[k] != "" {
@@ -307,22 +315,38 @@ func (s *sim) livePane(b beads.Bead) bool {
 	return rt != nil && !rt.corpse && rt.id == b.ID && rt.token == b.Metadata["instance_token"]
 }
 
+// namedPane reports whether b's name holds a live pane the stop verb must
+// not finalize over: b's own runtime, whatever its token, or, under b's
+// bead-scoped pool name, any runtime (never Foreign there, v5.2 D3; L2
+// refuses it). Another row's runtime under any other name is the Foreign
+// verdict, which proves b's gone.
+func (s *sim) namedPane(b beads.Bead) bool {
+	s.sp.mu.Lock()
+	defer s.sp.mu.Unlock()
+	name := b.Metadata["session_name"]
+	rt := s.sp.rts[name]
+	beadScoped := b.Metadata["pool_managed"] == "true" && strings.HasSuffix(name, "-"+b.ID)
+	return rt != nil && !rt.corpse && (rt.id == b.ID || beadScoped)
+}
+
 func signaledRow(b beads.Bead) bool {
 	return b.Status != "closed" && b.Metadata["state"] == string(session.StateDraining) && b.Metadata["state_reason"] == session.DrainAckStopPendingReason
 }
 
 // checkFinalized is I16 (I-STOP-5): a stop effect that ran while its row's
-// runtime had no live pane leaves the row's request finalized.
+// name held no live pane, the absence C8.8 confirms, leaves the row's
+// request finalized. A live pane of another token under the name is no
+// absence: the verb refuses it (L2), and finalizes nothing.
 func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 	l := s.legOf(e.it.Key.Leg)
 	if e.it.Kind != intentStop || l == nil {
 		return func(settlement) {}
 	}
 	before, _ := l.backing.Get(e.it.Key.ID)
-	paneBefore := s.livePane(before)
+	paneBefore := s.namedPane(before)
 	return func(res settlement) {
 		b, err := l.backing.Get(e.it.Key.ID)
-		if !paneBefore && res.Cause != "name-busy" && err == nil && signaledRow(b) && !s.livePane(b) {
+		if !paneBefore && res.Cause != "name-busy" && err == nil && signaledRow(b) && !s.namedPane(b) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
 		}
 	}

@@ -26,6 +26,9 @@ type finalizeFacts struct {
 	RestartRequested bool
 }
 
+// stopFinish builds a stopped row's finalize from its facts.
+type stopFinish func(finalizeFacts) finalizeChoice
+
 // finalizeChoice is a finalize's write: the premise close, or Patch.
 type finalizeChoice struct {
 	CloseSeat bool

@@ -191,13 +191,14 @@ type rowArm struct {
 
 // rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
 // (A1, A6) takes one line per row. Later PRs insert their arms at their
-// numbers: A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline
+// numbers: A7 row metadata (C7d), A8 the baseline
 // (C7c), A11-A17 and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A1", armCensusOnly},
 	{"A2", armKillFence},
 	{"A3", armIdentity},
+	{"A4", armStop},
 	{"A5", armUnknownState},
 	{"A6", armTimerHeals},
 	{"A6", armClaimClear},

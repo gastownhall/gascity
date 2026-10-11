@@ -302,7 +302,6 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		// own runtime the inventory reads alive.
 		{name: "asleep", meta: []string{"state", "asleep"}, entry: undesired(drainOrphaned), want: decideNoAction, world: func(w *World) { w.Obs = nil }},
 		{name: "heartbeat hold (SESS-617)", meta: []string{"held_until", rowAt(time.Minute)}, entry: func(e *selectionEntry) { e.Desired = desireSleep }, want: decideNoAction},
-		{name: "user-hold intent (C6b2's)", meta: []string{"sleep_intent", "user-hold"}, entry: undesired(drainOrphaned), want: decideNoAction},
 	} {
 		var world []func(*World)
 		if c.world != nil {
@@ -312,6 +311,11 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		if it.Kind != "" || it.Reason != c.want {
 			t.Errorf("%s: %+v, want hold %q", c.name, it, c.want)
 		}
+	}
+	// A user-hold intent on a live own runtime is A4's direct stop (C6b2),
+	// never a drain begin.
+	if it, _ := decideDrain(t, []string{"sleep_intent", "user-hold"}, undesired(drainOrphaned)); it.Kind != intentStop || it.Reason != decideDormantStop {
+		t.Errorf("user-hold intent: %+v, want A4's direct stop", it)
 	}
 }
 

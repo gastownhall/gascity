@@ -386,6 +386,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	if f.AliasOwed != nil {
 		p.aliasOwed[*f.AliasOwed] = true
 	}
+	if s := f.Stopped; s != nil {
+		recordAgentStop(context.Background(), s.Name, s.Identity, "drain-ack", nil)
+	}
 	switch {
 	case f.Work == nil:
 	case f.Work.Refused:
@@ -404,11 +407,12 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 }
 
-// recordDrainTransition and recordAgentQuarantine are legacy's drain and
-// quarantine telemetry; a test reads them.
+// recordDrainTransition, recordAgentQuarantine and recordAgentStop are
+// legacy's drain, quarantine and stop telemetry; a test reads them.
 var (
 	recordDrainTransition = telemetry.RecordDrainTransition
 	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+	recordAgentStop       = telemetry.RecordAgentStop
 )
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the

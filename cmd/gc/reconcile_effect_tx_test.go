@@ -633,9 +633,13 @@ func TestTxPremiseComparesTheRegistryFacts(t *testing.T) {
 		{"after a start: the current bead", []string{session.CurrentBeadIDKey, "b-1"}, false, []callKind{callStart}, true},
 		{"after a start: the current claim", []string{beadmeta.CurrentClaimBeadIDMetadataKey, "b-1"}, false, []callKind{callStart}, false},
 		{"after a start: lifecycle", []string{"state_reason", "x"}, false, []callKind{callStart}, true},
-		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, true},
-		{"after a stop: detached_at", []string{"detached_at", rowAt(0)}, false, []callKind{callStop}, true},
-		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, true},
+		{"after a stop: an agent's heartbeat", []string{"held_until", rowAt(time.Hour)}, false, []callKind{callStop}, false},
+		{"after a stop: its ack", []string{"drain_ack_at", rowAt(0)}, false, []callKind{callStop}, false},
+		{"after a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStop}, false},
+		{"after a stop: the operator's intent", []string{"sleep_intent", "user-hold"}, false, []callKind{callStop}, true},
+		{"after a stop: a wake request", []string{"wake_request", "explicit"}, false, []callKind{callStop}, true},
+		{"after a stop: the state", []string{"state_reason", "x"}, false, []callKind{callStop}, true},
+		{"after a start, then a stop: a session key", []string{"session_key", "k2"}, false, []callKind{callStart, callStop}, false},
 	} {
 		k := newTxKit(t)
 		spec := effectSpec{sections: []section{{Decide: mark(txKeyA)}}}
@@ -827,7 +831,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRepair, intentLiveApply, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentDriftRepair, intentLiveApply, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentSignal, intentSignalFresh, intentStart, intentStop}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -850,6 +854,7 @@ var effectCapGrants = map[string]caps{
 	intentRollback:    capProviderStart | capRetire,
 	intentClose:       capReadStores | capRelease,
 	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
+	intentStop: capReadStores | capProviderStop,
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -871,6 +876,12 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 	savedQ := recordAgentQuarantine
 	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
 	t.Cleanup(func() { recordAgentQuarantine = savedQ })
+	var stops []string
+	savedS := recordAgentStop
+	recordAgentStop = func(_ context.Context, name, identity, reason string, _ error) {
+		stops = append(stops, name+"/"+identity+"/"+reason)
+	}
+	t.Cleanup(func() { recordAgentStop = savedS })
 	f := effectFacts{
 		Events:      []events.Event{{Type: "session.test"}},
 		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
@@ -878,6 +889,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
 		Quarantined: "worker-1",
 		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
+		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -887,6 +899,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
+		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

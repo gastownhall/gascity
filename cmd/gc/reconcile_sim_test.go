@@ -233,6 +233,12 @@ func (p *simProvider) IsAttached(name string) bool {
 	return p.rts[name] != nil && p.rts[name].attached
 }
 
+// IsAttachedWithError is IsAttached, error-free: the fence's L3 probe reads
+// it, never the embedded Fake's own attach map.
+func (p *simProvider) IsAttachedWithError(name string) (bool, error) { //nolint:unparam // runtime.AttachmentObserverWithError's signature
+	return p.IsAttached(name), nil
+}
+
 // Start creates a runtime carrying cfg's identity env, unless a scripted
 // outcome fails it or the name is held (FreshOnly's ErrSessionExists).
 func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) error {

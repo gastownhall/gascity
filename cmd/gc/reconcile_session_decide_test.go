@@ -60,7 +60,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		}
 		last = n
 	}
-	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A7", "A8", "A9", "A10", "A10", "A14", "A16", "A17", "A18", "A19", "A20", "A21"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A1", "A2", "A3", "A4", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A7", "A8", "A9", "A10", "A10", "A14", "A16", "A17", "A18", "A19", "A20", "A21"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 
@@ -89,7 +89,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		{name: "A3 newer-self holds before A6 heals", meta: expiredHold, identity: newerSelf, want: decideNewerSelf},
 		{name: "A3 refused rekey falls through to A6", meta: append([]string{"pending_create_claim", "true"}, expiredHold...), identity: staleSelf, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A5 unknown state before A6 heals", meta: append([]string{"state", "hibernating"}, expiredHold...), want: decideUnknownState},
-		{name: "stop-pending is not A5's", meta: []string{"state", "draining", "state_reason", "drain-ack-stop-pending"}, want: decideNoAction},
+		{name: "A4 takes a stop-pending row before A5 (DS F1)", meta: []string{"state", "draining", "state_reason", "drain-ack-stop-pending"}, wantKind: intentStop, want: decideStopVerb},
 		{name: "A6 heals before A9 liveness", meta: expiredHold, unknown: true, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A6 heals before A9's desire gate", meta: expiredHold, unranked: true, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A6 running timer falls through to A9", meta: []string{"held_until", rowAt(time.Minute)}, unknown: true, want: decideLivenessUnknown, wantNext: gatherNow.Add(time.Minute + time.Second)},
@@ -117,7 +117,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 				delete(a.Snapshot.Entries, k)
 			}
 			it, next := decideRow(w, a, k)
-			if fresh := it.Kind == intentRekey || it.Kind == intentRowHealFresh || it.Kind == intentStart || it.Kind == intentAdopt; fresh != (it.Rests != 0) || it.Kind == "" && it.Rests != 0 {
+			if fresh := it.Kind == intentRekey || it.Kind == intentRowHealFresh || it.Kind == intentStart || it.Kind == intentAdopt || it.Kind == intentStop; fresh != (it.Rests != 0) || it.Kind == "" && it.Rests != 0 {
 				t.Errorf("%s: kind %q rests %b: a fresh kind records its rests, a plain one none (ruling (c))", tc.name, it.Kind, it.Rests)
 			}
 			if it.Kind != tc.wantKind || it.Reason != tc.want || it.Key != k {

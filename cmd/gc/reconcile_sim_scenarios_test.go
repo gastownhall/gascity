@@ -403,7 +403,15 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 				delete(patch, "quarantined_until")
 				return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 			}
-			s := scriptedWith(t, simOpts{arms: mutateHeal(write)}, []string{"gc-1"}, tc.row)
+			arms := mutateHeal(write)
+			if tc.row.Metadata["sleep_intent"] == "user-hold" {
+				// A4's direct stop of the live user-hold row would preempt the
+				// seeded write; the oracle under test is I15's, not A4's.
+				arms = func(in []rowArm) []rowArm {
+					return slices.DeleteFunc(mutateHeal(write)(in), func(a rowArm) bool { return a.name == "A4" })
+				}
+			}
+			s := scriptedWith(t, simOpts{arms: arms}, []string{"gc-1"}, tc.row)
 			if tc.zombie {
 				s.sp.mu.Lock()
 				s.sp.rts["s-gc-1"].zombie = true
