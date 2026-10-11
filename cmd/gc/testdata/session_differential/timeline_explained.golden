@@ -248,11 +248,11 @@ row:gc-1:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
 provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
 provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
 row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
-row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:effective_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
+row:gc-1:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
-row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
-row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
 runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
 runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
 @ +10s
@@ -266,6 +266,7 @@ event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","templa
 provider:RemoveMeta s-gc-1 legacy="6" v2="" [A20 drain-begin]
 provider:SetMeta s-gc-1 legacy="4" v2="" [A20 drain-begin]
 provider:Stop s-gc-1 legacy="1" v2="" [A20 drain-begin]
+row:gc-1:detached_at legacy="" v2="T+0s" [A20 wait-sleep]
 row:gc-1:drain_at legacy="T+20s" v2="" [A20 drain-begin]
 row:gc-1:last_woke_at legacy="" v2="T-1h0m0s" [A20 drain-begin]
 row:gc-1:sleep_reason legacy="idle" v2="" [A20 drain-begin]
@@ -280,7 +281,71 @@ event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","templa
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 provider:Stop s-gc-1 resolved
-## 2 the next pass (+2m10s)
+## 2 the wait turns ready (+1m30s)
+@ +50s
+row:gc-1:drain_at legacy="T+20s" v2="" [A20 wait-sleep]
+row:gc-1:last_woke_at legacy="" v2="T-1h0m0s" [A20 wait-sleep]
+row:gc-1:sleep_reason legacy="idle" v2="" [A20 wait-sleep]
+row:gc-1:slept_at legacy="T+20s" v2="" [A20 wait-sleep]
+row:gc-1:state legacy="asleep" v2="awake" [A20 wait-sleep]
+row:gc-1:stranded_event_emitted_at legacy="T+20s" v2="" [A20 wait-sleep]
+runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A20 wait-sleep]
+@ +1m10s
+event:session.woke worker-1 null legacy="1" v2="" [A20 wait-sleep]
+provider:RemoveMeta s-gc-1 legacy="5" v2="" [A20 wait-sleep]
+provider:Start s-gc-1 legacy="1" v2="" [A20 wait-sleep]
+row:gc-1:awake_started_at legacy="T+1m10s" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.Command legacy="b5bea41b6c623f7c" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.CopyFiles legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.Env legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.FPExtra legacy="86c07f15f30c8738" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.Lifecycle legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.MCPServers legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.MouseOn legacy="b1865da277ec01c2" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.OverlayDir legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.OverlayProviders legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.PreStart legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.SessionSetup legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.SessionSetupScript legacy="e3b0c44298fc1c14" v2="" [A20 wait-sleep]
+row:gc-1:core_hash_breakdown.version legacy="v6" v2="" [A20 wait-sleep]
+row:gc-1:creation_complete_at legacy="T+1m10s" v2="" [A20 wait-sleep]
+row:gc-1:generation legacy="2" v2="1" [A20 wait-sleep]
+row:gc-1:last_woke_at legacy="T+1m10s" v2="T-1h0m0s" [A20 wait-sleep]
+row:gc-1:live_hash legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:primed_at legacy="T+1m10s" v2="" [A20 wait-sleep]
+row:gc-1:prompt_hash legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:sleep_intent legacy="" v2="wait-hold" [A20 wait-sleep]
+row:gc-1:sleep_reason resolved
+row:gc-1:started_config_hash legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:started_launch_hash legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:started_live_hash legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:started_provision_hash legacy="<changed>" v2="" [A20 wait-sleep]
+row:gc-1:state legacy="active" v2="awake" [A20 wait-sleep]
+row:gc-1:state_reason legacy="creation_complete" v2="" [A20 wait-sleep]
+runtime:s-gc-1 legacy="id=gc-1 epoch=2 token=<set> alive attached=false" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A20 wait-sleep]
+work:gc-2:nudge_id legacy="" v2="wait-gc-2-0-1" [A20 wait-sleep]
+work:gc-3 legacy="" v2="present" [A20 wait-sleep]
+work:gc-3:agent legacy="" v2="worker-1" [A20 wait-sleep]
+work:gc-3:deliver_after legacy="" v2="T+1m10s" [A20 wait-sleep]
+work:gc-3:expires_at legacy="" v2="<wall>" [A20 wait-sleep]
+work:gc-3:labels legacy="" v2="agent:worker-1,gc:nudge,nudge:wait-gc-2-0-1,source:wait" [A20 wait-sleep]
+work:gc-3:message legacy="" v2="Wait satisfied (gc-2): Wait satisfied." [A20 wait-sleep]
+work:gc-3:nudge_id legacy="" v2="wait-gc-2-0-1" [A20 wait-sleep]
+work:gc-3:reference_json legacy="" v2="{\"kind\":\"bead\",\"id\":\"gc-2\"}" [A20 wait-sleep]
+work:gc-3:session_id legacy="" v2="gc-1" [A20 wait-sleep]
+work:gc-3:source legacy="" v2="wait" [A20 wait-sleep]
+work:gc-3:state legacy="" v2="queued" [A20 wait-sleep]
+work:gc-3:status legacy="" v2="open" [A20 wait-sleep]
+work:gc-3:title legacy="" v2="nudge:wait-gc-2-0-1" [A20 wait-sleep]
+work:gc-3:type legacy="" v2="chore" [A20 wait-sleep]
+@ +1m20s
+event:session.woke worker-1 null resolved
+provider:RemoveMeta s-gc-1 resolved
+provider:Start s-gc-1 resolved
+row:gc-1:detached_at legacy="T+1m20s" v2="T+0s" [A20 wait-sleep]
+row:gc-1:state resolved
+row:gc-1:stranded_event_emitted_at resolved
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
 @ +0s

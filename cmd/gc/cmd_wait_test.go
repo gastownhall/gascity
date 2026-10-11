@@ -4293,8 +4293,9 @@ func TestWaitReadiesOnADependencyTheMigrationRelocated(t *testing.T) {
 
 // TestClearOrphanedWaitHoldsRederivesEachPass (mc-q6x43): every pass clears
 // the wait hold of each open row with no non-terminal wait left, whether or
-// not that pass ended the wait, so a clear that lost its CAS is owed again
-// next pass. A live wait, an operator's hold and a closed row are left alone.
+// not that pass ended the wait, so a clear that lost its CAS or failed is
+// owed again next pass, and one row's failure spends no other's clear. A
+// live wait, an operator's hold and a closed row are left alone.
 func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
 	snap := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{
 		{ID: "orphan", WaitHold: "true", SleepIntent: "wait-hold"},
@@ -4306,19 +4307,15 @@ func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
 		{ID: "closed", WaitHold: "true", SleepIntent: "wait-hold", Closed: true},
 	})
 	waits := []sessionpkg.WaitInfo{{SessionID: "ended", State: waitStateClosed}, {SessionID: "waiting", State: waitStatePending}}
-	for pass := 1; pass <= 2; pass++ {
+	for pass, fail := range []error{fmt.Errorf("%w: lost", errWaitHoldClearContended), errors.New("store down")} {
 		var cleared []string
-		err := clearOrphanedWaitHolds(nil, snap, waits, func(_ *sessionpkg.Store, id string) error {
+		clearOrphanedWaitHolds(nil, snap, waits, func(_ *sessionpkg.Store, id string) error {
 			cleared = append(cleared, id)
-			return fmt.Errorf("%w: %s", errWaitHoldClearContended, id) // every clear loses
+			return fail // every clear fails
 		})
 		slices.Sort(cleared)
-		if err != nil || !slices.Equal(cleared, []string{"ended", "intent-only", "orphan"}) {
-			t.Fatalf("pass %d: cleared %v, err %v; want ended, intent-only and orphan, the lost clears skipped", pass, cleared, err)
+		if !slices.Equal(cleared, []string{"ended", "intent-only", "orphan"}) {
+			t.Fatalf("pass %d (%v): cleared %v; want ended, intent-only and orphan, each tried", pass, fail, cleared)
 		}
-	}
-	failed := errors.New("store down")
-	if err := clearOrphanedWaitHolds(nil, snap, waits, func(*sessionpkg.Store, string) error { return failed }); !errors.Is(err, failed) {
-		t.Fatalf("a failed clear = %v, want it reported", err)
 	}
 }

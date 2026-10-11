@@ -178,8 +178,9 @@ func (s *sim) checkTokens() {
 var stopKeys = []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
 
 // checkWrite checks one row change v2 made:
-//   - I7 (I-legacy): it writes no state outside knownSessionStates, but the
-//     signaled projection (draining + stop-pending);
+//   - I7 (I-legacy): it writes no session row state outside
+//     knownSessionStates, but the signaled projection (draining +
+//     stop-pending); a wait or nudge bead's state is its own;
 //   - I14 (I-STOP-1/2): a stop request names the row's current incarnation;
 //   - I15 (I-STOP-3/4): no request survives a v2 PreWake, and no write
 //     rewrites what an operator holds dormant (dormantChange);
@@ -193,7 +194,7 @@ func (s *sim) checkWrite(w simWrite) {
 	if w.Leg != simCityLeg {
 		s.failf("AL1 census-only", "v2 wrote %s, a census-only row", id)
 	}
-	if st := a["state"]; st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
+	if st := a["state"]; w.After.Type == sessionBeadType && st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
 		s.failf("I7 I-legacy", "v2 wrote state %q on %s", st, id)
 	}
 	if inc := a[session.DrainIntentIncarnationKey]; inc != "" && inc != b[session.DrainIntentIncarnationKey] && inc != a["generation"] {

@@ -1251,9 +1251,7 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 		}
 		pending(wait)
 	}
-	if err := clearOrphanedWaitHolds(sessFront, sessionBeads, waits, clearHold); err != nil {
-		return nil, err
-	}
+	clearOrphanedWaitHolds(sessFront, sessionBeads, waits, clearHold)
 	return readyWaitSet, nil
 }
 
@@ -1262,8 +1260,9 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 // among this pass's waits has its hold cleared, whatever pass ended the wait
 // and whether its own clear then lost. clearHold reads the waits again
 // fresh, so a wait registered since keeps its hold. A clear that loses every
-// CAS is owed again and retried on the next pass.
-func clearOrphanedWaitHolds(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot, waits []sessionpkg.WaitInfo, clearHold func(*sessionpkg.Store, string) error) error {
+// CAS, or fails, is owed again and retried on the next pass; a failure is
+// logged and spends no other row's clear nor the pass's ready waits.
+func clearOrphanedWaitHolds(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot, waits []sessionpkg.WaitInfo, clearHold func(*sessionpkg.Store, string) error) {
 	live := make(map[string]bool, len(waits))
 	for _, w := range waits {
 		if !isWaitTerminal(w.State) {
@@ -1276,10 +1275,9 @@ func clearOrphanedWaitHolds(sessFront *sessionpkg.Store, sessionBeads *sessionBe
 			continue
 		}
 		if err := clearHold(sessFront, info.ID); err != nil && !errors.Is(err, errWaitHoldClearContended) {
-			return err
+			log.Printf("gc wait: clearing session %s's orphaned wait hold: %v", info.ID, err)
 		}
 	}
-	return nil
 }
 
 // lookupSessionBeadByIDInfo is the wait-diagnostic fallback that reads a single

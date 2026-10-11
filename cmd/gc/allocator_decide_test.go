@@ -1032,3 +1032,28 @@ func TestAllocator_DecideRefusesAZeroClock(t *testing.T) {
 		t.Fatalf("err = %v, want errDecideNoClock", err)
 	}
 }
+
+// Kills: the idle latch's override counting a wait's own intent (D-J 3). An
+// idle-latched waiter holding work whose wait turned ready wakes through the
+// latch though it kept sleep_intent=wait-hold; any other intent still
+// refuses the override.
+func TestAllocator_ConfigSleepSuppressionWakesAReadyWaiter(t *testing.T) {
+	for intent, wake := range map[string]bool{"wait-hold": true, "idle-stop-pending": false} {
+		cfg := chatCity("on_demand")
+		cfg.Agents[0].MaxActiveSessions = intPtr(1)
+		f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1",
+			"configured_named_mode", "on_demand", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+			"slept_at", ago(10*time.Minute), "wait_hold", "true", "sleep_intent", intent))
+		f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}}
+		f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "chat"}}
+		f.in.Demand.AssignedStoreRefs = []string{""}
+		f.in.ReadyWaits = map[string]bool{"gc-1": true}
+		e := entryOf(t, f.decide(), "gc-1")
+		if wake && e.Desired != desireWake {
+			t.Errorf("intent %q: idle-latched waiter whose wait is ready = %s/%s, want a wake", intent, e.Desired, e.Reason)
+		}
+		if !wake && (e.Desired != desireSleep || e.Reason != reasonConfigSleep) {
+			t.Errorf("intent %q: idle-latched row = %s/%s, want %s/%s", intent, e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+		}
+	}
+}

@@ -298,6 +298,34 @@ func TestBareDrainAckKeepsTheIdleStop(t *testing.T) {
 	}
 }
 
+// TestBareDrainAckRefusesARowClosedSince: the bare drain-ack is fenced on a
+// fresh read, so a row another observer closed after the tick's snapshot
+// takes no state=drained, and the tick folds nothing.
+func TestBareDrainAckRefusesARowClosedSince(t *testing.T) {
+	e, work, name := runningSeatWithWork(t)
+	if err := e.mem.Close(work.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mem.SetMetadataBatch(e.seat.ID, session.DrainAckStopPendingPatch(e.clk.Now())); err != nil {
+		t.Fatal(err)
+	}
+	info, err := sessionFrontDoor(e.mem).Get(e.seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mem.Close(e.seat.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := e.reload(t, e.seat.ID).Metadata["state"]
+	res := finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+	if got := e.reload(t, e.seat.ID).Metadata["state"]; got != before || res.folded != nil {
+		t.Fatalf("drain-ack on a row closed since: state %q -> %q, fold %+v; want no write and no fold", before, got, res.folded)
+	}
+}
+
 // TestWaitAndHeartbeatKeepAUserHold: a `gc session wait --sleep` and its
 // clear, and a `gc runtime heartbeat`, on a row an operator suspended leave
 // the operator's intent and held_until as they are, so none of them turns

@@ -587,8 +587,8 @@ var timelineGoldenRulings = []goldenRuling{
 	{"a provider swap stops the runtime", timelineGoldenBaseline, "68a5d9d9b0ef"},
 	{"a quarantine, then a kill fence, expires", timelineGoldenBaseline, "e6f3872c765e"},
 	{"a reload turns idle sleep on for a detached row", timelineGoldenBaseline, "787037012e13"},
-	{"a waiter sleeps", timelineGoldenBaseline, "05218385ffdf"},
-	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "0866842bd621"},
+	{"a waiter sleeps", timelineGoldenBaseline, "6b615dd20429"},
+	{"a waiter sleeps", "fix #7590 (mc-q6x43): the sleep keeps the wait's intent (D-J 3)", "064ac1bc84b8"},
 	{"an idle on-demand named session sleeps", timelineGoldenBaseline, "2752bd8f4cc4"},
 	{"an unwanted row inside, then past, the wake grace", timelineGoldenBaseline, "c4d3c5eb08a0"},
 	{"an unwanted row of a suspended agent", timelineGoldenBaseline, "90405aa55ba7"},
@@ -1245,14 +1245,26 @@ func operatorTimeline() []timelineFixture {
 			"the quarantine expires": {"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal"},
 			"the kill fence expires": tlMerged(tlPol("gc-1"), restarted, map[string]string{"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal", "row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}),
 		})
-	// gc session wait --sleep on a live seat holding a claim: the wait holds
-	// it (wait_hold, sleep_intent=wait-hold), so legacy drains it, and the
-	// drain completes as a sleep (the claim) that, since R7b2, keeps the
-	// wait's intent (D-J 3) rather than leaving a bare wait_hold. The wait,
-	// on an open bead, stays pending; the run ends before legacy's stranded
-	// repair of the sleeping seat.
-	waitDrained := tlMerged(tlIdent(), drainedRow, map[string]string{"runtime:s-gc-1": "A20 drain-begin", "row:gc-1:state": "A20 drain-begin", "row:gc-1:*stranded": "A21 stranded"})
-	waiter := tlFixture("a waiter sleeps", tlCity, []parityRow{tlRow("gc-1", 1, time.Hour)},
+	// gc session wait --sleep on a live seat holding a claim, under an idle
+	// policy: the wait holds it (wait_hold, sleep_intent=wait-hold), so legacy
+	// drains it, and the drain completes as a sleep (the claim) that, since
+	// R7b2, keeps the wait's intent (D-J 3) rather than leaving a bare
+	// wait_hold. When the wait's dependency closes, legacy wakes it through
+	// the idle latch: the wait's own intent is no explicit sleep intent
+	// (explicitSleepIntentInfo), so its claim is not stranded.
+	waitDrained := tlMerged(tlIdent(), drainedRow, map[string]string{"runtime:s-gc-1": "A20 drain-begin", "row:gc-1:state": "A20 drain-begin", "row:gc-1:*stranded": "A21 stranded", "row:gc-1:detached_at": "A20 wait-sleep"})
+	napping := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents[0].SleepAfterIdle = "5m"
+		return cfg
+	}
+	// nudgeQueued is the wait's nudge v2's waits step queues to the live
+	// waiter, gc-3.
+	nudgeQueued := map[string]string{}
+	for _, k := range []string{"agent", "deliver_after", "expires_at", "labels", "message", "nudge_id", "reference_json", "session_id", "source", "state", "status", "title", "type"} {
+		nudgeQueued["work:gc-3:"+k] = "A20 wait-sleep"
+	}
+	waiter := tlFixture("a waiter sleeps", napping, []parityRow{tlRow("gc-1", 1, time.Hour)},
 		append(tlClaim("in_progress", "s-gc-1"), parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}}), []simRuntime{tlLive("gc-1")},
 		[]parityStep{
 			{Name: "wait", Op: func(tw twin) {
@@ -1266,7 +1278,12 @@ func operatorTimeline() []timelineFixture {
 					tw.t.Fatal(err)
 				}
 			}},
-			{Name: "the next pass", Advance: time.Minute},
+			{Name: "the wait turns ready", Advance: 30 * time.Second, Op: func(tw twin) {
+				st, _ := tw.row("gw-2")
+				if err := st.Close("gw-2"); err != nil {
+					tw.t.Fatal(err)
+				}
+			}},
 		}, standing, map[string]map[string]string{
 			"seed": tlAliasSeed(),
 			"wait": tlMerged(waitDrained, map[string]string{
@@ -1275,7 +1292,10 @@ func operatorTimeline() []timelineFixture {
 				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "A20 drain-begin",
 				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "A21 stranded",
 			}),
-			"the next pass": waitDrained,
+			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
+				"row:gc-1:*waitsleep": "A20 wait-sleep", "runtime:s-gc-1": "A20 wait-sleep", "provider:Start s-gc-1": "A20 wait-sleep", "provider:RemoveMeta s-gc-1": "A20 wait-sleep",
+				"event:session.woke worker-1 null": "A20 wait-sleep", "work:gc-2:nudge_id": "A20 wait-sleep", "work:gc-3": "A20 wait-sleep",
+			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}
 }

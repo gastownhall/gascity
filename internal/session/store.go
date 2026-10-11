@@ -464,7 +464,8 @@ func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
 // SetWaitHold begins (on) or ends an agent's wait on the row: the
 // disposition's WaitBegin or WaitEnd cell, decided on a fresh read. A wait
 // never replaces an operator's user-hold intent. reason is the wait's, which
-// the wait hold no longer records.
+// the wait hold no longer records. A closed row takes no write and no error,
+// as main's blind write succeeded there (`gc session wait --sleep` exits 0).
 func (s *Store) SetWaitHold(id string, on bool, _ string) error {
 	ev := DispEvent{Kind: EvWaitEnd}
 	if on {
@@ -475,7 +476,7 @@ func (s *Store) SetWaitHold(id string, on bool, _ string) error {
 	case err != nil:
 		return err
 	case w.Result == CommitClosed:
-		return fmt.Errorf("session %s: closed", id)
+		return nil
 	case w.Result != CommitLanded:
 		return fmt.Errorf("session %s: wait hold lost to concurrent writes; retry", id)
 	}

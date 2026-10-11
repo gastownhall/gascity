@@ -372,3 +372,52 @@ func mustGet(t *testing.T, store beads.Store, id string) beads.Bead {
 	}
 	return b
 }
+
+// TestApplyLifecycleIsFencedAndMovesNoHold: a lifecycle write decided on an
+// older read lands only on the read it decided (every CAS lost is an error),
+// writes nothing to a closed row, and refuses a disposition key, which only
+// a cell writes.
+func TestApplyLifecycleIsFencedAndMovesNoHold(t *testing.T) {
+	mem := beads.NewMemStore()
+	b := wakeRow(t, mem)
+	ack := AcknowledgeDrainPatch(time.Now(), false)
+	stamped := stampedMemStore(t, gate.Auto, mem)
+	if _, err := NewStore(beads.SessionStore{Store: &everyGetWrites{Store: stamped}}).ApplyLifecycle(b.ID, ack); err == nil {
+		t.Fatal("ApplyLifecycle under a writer winning every fence returned no error")
+	}
+	front := NewStore(beads.SessionStore{Store: mem})
+	if _, err := front.ApplyLifecycle(b.ID, MetadataPatch{"state": "asleep", "sleep_intent": ""}); err == nil {
+		t.Fatal("ApplyLifecycle wrote a disposition key")
+	}
+	written, err := front.ApplyLifecycle(b.ID, ack)
+	if err != nil || written["state"] != string(StateDrained) || mustGet(t, mem, b.ID).Metadata["state"] != string(StateDrained) {
+		t.Fatalf("ApplyLifecycle = %v, %v; want the ack written", written, err)
+	}
+	if err := mem.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := mustGet(t, mem, b.ID).Metadata
+	if written, err := front.ApplyLifecycle(b.ID, MetadataPatch{"state": "asleep"}); written != nil || err != nil || mustGet(t, mem, b.ID).Metadata["state"] != before["state"] {
+		t.Fatalf("ApplyLifecycle on a closed row = %v, %v; want nil, nil and no write", written, err)
+	}
+}
+
+// TestSetWaitHoldOnAClosedRow: a wait begun or ended on a closed row writes
+// nothing and reports no error, as main's blind write succeeded there.
+func TestSetWaitHoldOnAClosedRow(t *testing.T) {
+	mem := beads.NewMemStore()
+	b := wakeRow(t, mem)
+	if err := mem.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := mustGet(t, mem, b.ID).Metadata
+	front := NewStore(beads.SessionStore{Store: mem})
+	for _, on := range []bool{true, false} {
+		if err := front.SetWaitHold(b.ID, on, ""); err != nil {
+			t.Errorf("SetWaitHold(on=%v) on a closed row = %v, want nil", on, err)
+		}
+	}
+	if after := mustGet(t, mem, b.ID).Metadata; after["wait_hold"] != before["wait_hold"] || after["sleep_intent"] != before["sleep_intent"] {
+		t.Errorf("closed row wait_hold %q -> %q, intent %q -> %q; want no write", before["wait_hold"], after["wait_hold"], before["sleep_intent"], after["sleep_intent"])
+	}
+}

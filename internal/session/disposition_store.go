@@ -134,6 +134,35 @@ func LifecycleOnly(patch MetadataPatch) MetadataPatch {
 	return out
 }
 
+// ApplyLifecycle writes patch, which must carry none of the disposition
+// class's keys (those are the cells'), fenced on a fresh read: the write of a
+// lifecycle move decided on an older read that moves no hold (a bare
+// drain-ack). It returns nil with no error when the row is closed, and an
+// error when every CAS attempt lost.
+func (s *Store) ApplyLifecycle(id string, patch MetadataPatch) (MetadataPatch, error) {
+	for _, k := range dispositionKeys {
+		if _, ok := patch[k]; ok {
+			return nil, fmt.Errorf("writing session %q: %s is a disposition key; write it through its cell", id, k)
+		}
+	}
+	closed := false
+	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+		if closed = info.Closed; closed {
+			return nil
+		}
+		return patch
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case closed:
+		return nil, nil
+	case !ok:
+		return nil, fmt.Errorf("writing session %q: lost to concurrent writes; retry", id)
+	}
+	return patch, nil
+}
+
 // ApplySleep writes a sleep (a drain's completion, an idle sleep, a kill
 // site's sleep) decided on an older read: patch's lifecycle with the
 // disposition's Sleep cell, on a fresh read. An operator's suspend, a wait

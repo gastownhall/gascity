@@ -563,7 +563,7 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "", explicitWakePendingInfo(info))
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, explicitSleepIntentInfo(info), explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,

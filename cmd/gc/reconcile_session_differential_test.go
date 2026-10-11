@@ -178,6 +178,10 @@ var parityUnported = map[string]parityEntry{
 	},
 	"A20 drain-begin": {"C6a2 (A20 + D2)", "legacy begins a drain v2 does not: on a live row its quarantine keeps from waking (canceled again once its work vetoes it), on an unwanted row past the INC-003 grace, and on a managed suspend; v2 registers no drain-begin arm yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"A21 killed-seat": {"C5c1 (#7314), owner ruling B1 (CONTRACT C3 killed pool seats)", "past the kill grace legacy releases a killed seat's open claim and closes it, and the freed demand creates and starts a fresh seat; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
+	"A20 wait-sleep": {
+		"C6a2 (A20 + D2)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch (a wait's own intent is no explicit sleep intent) and delivers the wait's nudge with the start; v2 registers no drain-begin arm yet, so the waiter's runtime stays up and its waits step queues the nudge to it live",
+		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at"}, parityStartKeys...),
+	},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
@@ -523,10 +527,17 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 		}
 		open = updated.OpenInfos()
 	}
+	// The wait wake state (prepareWaitWakeStateWithSnapshot), as the tick
+	// prepares it: ready waits wake their sleeping sessions.
+	deps := waitDependencyReaderFunc(func(id string) (beads.Bead, error) { return loadWaitDependencyBead("", w.store, id) })
+	readyWaits, err := prepareWaitWakeStateWithSnapshot(sessionFrontDoor(w.store), deps, beads.NudgesStore{Store: w.store}, now, updated)
+	if err != nil {
+		t.Fatalf("legacy prepare waits: %v", err)
+	}
 	gates := w.gateIdleProbes()
 	awake, awakeRefs, awakeStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, w.cityPath, w.store, open, assigned, refs, stores)
 	reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), w.cityPath, updated.OpenForReconcile(), updated, result.State, cfgNames, cfg, w.sp, w.store,
-		w.dops, awake, w.rigs, nil, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
+		w.dops, awake, w.rigs, readyWaits, w.dt, nil, poolDesired, result.NamedSessionDemand, result.NamedSessionRoutedDemand,
 		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, nil, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
@@ -733,6 +744,10 @@ func newV2World(t *testing.T, f parityFixture, cityPath string, rows, rig []bead
 	w.lane = newExternalReadsLane(simPatrol, s.env.externalReadsEnv, nil, nil, w.rec, io.Discard)
 	w.lane.now = s.clk.Now
 	w.lane.addPoolSteps(s.p.out.summary.Load, nil)
+	// K1's waits step, whose ready waits the allocation reads (I10).
+	w.lane.addWaitsStep()
+	s.env.Nudges = func() beads.NudgesStore { return beads.NudgesStore{Store: s.legs[0].cache} }
+	s.env.ReadyWaits = w.lane.readyWaitSet
 	s.advance(parityNow.Sub(s.clk.Now()))
 	return w
 }
@@ -758,13 +773,17 @@ func (w *v2World) once(t *testing.T) bool {
 	for _, id := range w.pending {
 		s.lane.cache.Note("s-"+id, FactPending, ObsYes, s.clk.Now(), SourceProbe, "")
 	}
+	env, err := s.env.externalReadsEnv()
+	if err != nil {
+		t.Fatalf("v2 lane env: %v", err)
+	}
+	w.lane.waits(context.Background(), env)
 	s.pass()
 	admitted := intentKeys(s.p.out.record.Load().Admitted)
 	for len(s.parked) > 0 {
 		s.release(0)
 	}
-	env, err := s.env.externalReadsEnv()
-	if err != nil {
+	if env, err = s.env.externalReadsEnv(); err != nil {
 		t.Fatalf("v2 lane env: %v", err)
 	}
 	w.lane.orphanRelease(context.Background(), env)
