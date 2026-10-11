@@ -449,11 +449,13 @@ func TestAllocator_UnknownStateRowNoneButOccupiesSlot(t *testing.T) {
 	}
 }
 
-// Kills: rolling back a row legacy would not (F8, SESS-501, MAINT-034): a
-// pending create past its lease is a rollback candidate only when its own
+// Kills: rolling back a row legacy would not (F8, SESS-501, MAINT-034), and
+// a lease predicate as an input (v5 P4, SC A5; C5b): a pending create past
+// A10's never-started deadline is a rollback candidate only when its own
 // runtime is not running (absent, or the name another row holds) and its
-// endpoint does not hold it; one within its lease, alive, dead or of
-// unknown liveness stays managed.
+// endpoint does not hold it; one before the deadline, one that recorded a
+// start (whatever its attempt's age), alive, dead or of unknown liveness
+// stays managed.
 func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 9)}, Workspace: config.Workspace{Provider: "claude"}}
 	expired := func(id string, slot int) beads.Bead {
@@ -464,6 +466,7 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 		expired("gc-alive", 2),
 		expired("gc-dead", 3),
 		poolRow("gc-lease", "worker", 4, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(time.Minute)),
+		poolRow("gc-woke", "worker", 5, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(30*time.Minute), "last_woke_at", ago(2*time.Minute)),
 		expired("gc-shared", 7),
 		poolRow("gc-owner", "worker", 8, "active", "session_name", "s-gc-shared"),
 	).alive("s-gc-alive", InventoryAttrs{}).corpse("s-gc-dead").
@@ -471,7 +474,7 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	f.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed}}
 	d := f.decide()
 	for id, want := range map[string]bool{
-		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false,
+		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false, "gc-woke": false,
 		"gc-shared": true,
 	} {
 		e := entryOf(t, d, id)
