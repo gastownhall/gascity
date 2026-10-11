@@ -3184,11 +3184,22 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// capacity refusal does, so a claimless row is not left creating with its
 	// in-flight marker cleared, which the stuck-creating reaper ages from
 	// CreatedAt and closes as stale-session (mc-ydyvj). The wake failure below
-	// still accrues and bounds a crash loop.
-	if result.prepared.preWakeUndo.written != nil {
+	// still accrues and bounds a crash loop. A PreWake that found the row
+	// already creating was a relaunch of a start a crashed holder abandoned
+	// (mc-5a1ma): restoring would put back that creating row with no marker,
+	// the same reaped shape, so this attempt's marker stays. Its holder is
+	// gone once this start releases the lease, so the next pass reads it
+	// abandoned and relaunches it, and the reaper's claimless exemption
+	// spares it meanwhile.
+	undo := result.prepared.preWakeUndo
+	relaunched := sessionpkg.State(strings.TrimSpace(undo.restore["state"])) == sessionpkg.StateCreating
+	switch {
+	case undo.written != nil && !relaunched:
 		restorePreWakeState(result.prepared, sessFront, stderr)
-	} else if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+	case undo.written == nil:
+		if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+		}
 	}
 	// tp.DisplayName() is the exact identity the start counter records, so a
 	// quarantine triggered by repeated start failures joins the start series
