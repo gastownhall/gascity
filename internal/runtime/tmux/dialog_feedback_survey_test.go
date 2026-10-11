@@ -375,7 +375,7 @@ func (f *failingRecaptureExecutor) executeCtx(_ context.Context, args []string) 
 
 func TestDismissFeedbackSurveyModalReportsUnresolvedDigit(t *testing.T) {
 	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}}
-	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor, sleep: func(time.Duration) {}}
 
 	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err == nil {
 		t.Fatal("DismissFeedbackSurveyModalIfPresent error = nil after the post-digit capture failed, want an error so the nudge does not paste onto the digit")
@@ -428,7 +428,7 @@ func TestNudgeSessionDoesNotPasteOntoUnresolvedSurveyDigit(t *testing.T) {
 	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}}
 	cfg := DefaultConfig()
 	cfg.NudgeReadyTimeout = 10 * time.Millisecond
-	tm := &Tmux{cfg: cfg, exec: executor}
+	tm := &Tmux{cfg: cfg, exec: executor, sleep: func(time.Duration) {}}
 
 	if err := tm.NudgeSession("agent-pane", "hello"); err == nil {
 		t.Fatal("NudgeSession error = nil after the survey digit was left unresolved")
@@ -444,7 +444,7 @@ func TestNudgeSessionDeliversWhenSurveyPeekFails(t *testing.T) {
 	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{display: "agent-pane|0"}, captureFails: true}
 	cfg := DefaultConfig()
 	cfg.NudgeReadyTimeout = 10 * time.Millisecond
-	tm := &Tmux{cfg: cfg, exec: executor}
+	tm := &Tmux{cfg: cfg, exec: executor, sleep: func(time.Duration) {}}
 
 	_ = tm.NudgeSession("agent-pane", "hello")
 
