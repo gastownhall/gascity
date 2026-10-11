@@ -420,6 +420,11 @@ func (s *session) waitForOutput(needle string, timeout time.Duration) {
 }
 
 func (s *session) alive() bool {
+	select {
+	case <-s.done:
+		return false
+	default:
+	}
 	return s.cmd.ProcessState == nil && syscall.Kill(-s.cmd.Process.Pid, 0) == nil
 }
 
