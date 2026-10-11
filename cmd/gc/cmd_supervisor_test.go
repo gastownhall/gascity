@@ -4797,6 +4797,12 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 }
 
 func TestRunSupervisorFailsWhenAPIPortUnavailable(t *testing.T) {
+	oldProbeTimeout := supervisorHealthProbeTimeout
+	supervisorHealthProbeTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		supervisorHealthProbeTimeout = oldProbeTimeout
+	})
+
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
