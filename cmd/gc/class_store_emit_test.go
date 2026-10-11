@@ -1670,3 +1670,58 @@ func TestMainStoreEmissionWrapsOnlyPinnedEngines(t *testing.T) {
 		}
 	}
 }
+
+// plainCreateEngine is a bead engine with only the required store surface: no
+// storage-class create, which is the native Dolt engine's shape.
+type plainCreateEngine struct{ beads.Store }
+
+// mc-03yxh regression. On a single-store native Dolt city the session store is
+// the policy layer over the emitter over the engine (withMainStoreEmission).
+// The policy creates a session bead with its storage class, and finds
+// CreateWithStorage on the emitter, which carries it for every engine; the
+// native engine has none, and the emitter refused, so `gc session new` failed
+// with "creating with a storage class: *beads.NativeDoltStore does not
+// support it". It must take the plain create, carry the storage class on the
+// bead's flags as the policy does for such a store, and still announce it.
+func TestMainStoreSessionCreateOverAnEngineWithoutStorageCreate(t *testing.T) {
+	if reflect.TypeOf(&beads.NativeDoltStore{}).Implements(reflect.TypeOf((*beads.StorageCreateStore)(nil)).Elem()) {
+		t.Fatal("*beads.NativeDoltStore now has a storage-class create; this test models an engine without one, so point it at the shape that lacks it")
+	}
+	cityPath := t.TempDir()
+	cfg := &config.City{}
+	storage := effectiveBeadStorage(cfg, beadPolicySession)
+	if storage == "" {
+		t.Fatal("the session policy resolved no storage class; the create would not reach CreateWithStorage")
+	}
+	engine := plainCreateEngine{Store: beads.NewMemStore()}
+	// withMainStoreEmission's result over a native Dolt engine (pinned for the
+	// engine type by TestMainStoreEmissionWrapsOnlyPinnedEngines).
+	sess := wrapStoreWithBeadPolicies(&emittingClassStore{Store: engine, cityPath: cityPath}, cfg)
+
+	created, err := sess.Create(beads.Bead{
+		Title:    "adhoc",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"template": "worker", "session_name": "worker-adhoc", "state": "creating"},
+	})
+	if err != nil {
+		t.Fatalf("gc session new's create over an engine without a storage-class create: %v", err)
+	}
+	row, err := engine.Get(created.ID)
+	if err != nil {
+		t.Fatalf("the session bead did not land in the engine: %v", err)
+	}
+	want := applyBeadStorage(beads.Bead{}, storage)
+	if row.Ephemeral != want.Ephemeral || row.NoHistory != want.NoHistory {
+		t.Fatalf("landed with ephemeral=%v no_history=%v, want the session policy's %q (ephemeral=%v no_history=%v)", row.Ephemeral, row.NoHistory, storage, want.Ephemeral, want.NoHistory)
+	}
+	announced := 0
+	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+		if evt.Subject == created.ID && evt.Type == events.BeadCreated {
+			announced++
+		}
+	}
+	if announced != 1 {
+		t.Fatalf("the create appended %d bead.created row(s) for %s, want exactly 1", announced, created.ID)
+	}
+}
