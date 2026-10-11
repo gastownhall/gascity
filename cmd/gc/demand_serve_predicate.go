@@ -237,7 +237,7 @@ func beadHasUnmetPlainBlocksDep(store beads.Store, id string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if !beads.DependencySatisfied(blocker.Status, blocker.Metadata[beadmeta.WorkOutcomeMetadataKey]) {
+		if !beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata)) {
 			return true, nil
 		}
 	}
