@@ -113,13 +113,16 @@ func (r *rowFacts) restart() (intent, bool) {
 // create a crash interrupted launches again on its own bead (S7).
 func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	e, info := r.entry, r.row.Info
-	var patch session.MetadataPatch
+	var patch, kept session.MetadataPatch
 	if committed(info) && r.gone() {
 		var accrued bool
 		if patch, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
-		info = foldInfo(info, patch)
+		info, kept = foldInfo(info, patch), patch
+		if r.asleepStranded() {
+			kept, _ = deadRuntimePatch(r, false)
+		}
 	}
 	now := r.w.Now
 	if isFailedCreateSessionInfo(info) {
@@ -142,7 +145,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch}, true
+	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Kept: kept}, true
 }
 
 // startHealed is heal, an A6 row write, or the start the start arms (A17,
@@ -164,6 +167,11 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
 	it.Patch, it.Key = patch, heal.Key
+	if heal.Reason != decideDeadRuntimeHeal { // a dead runtime's heal is the start's own (startIntent's Kept)
+		kept := maps.Clone(heal.Patch)
+		maps.Copy(kept, it.Kept)
+		it.Kept = kept
+	}
 	switch {
 	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal

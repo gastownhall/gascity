@@ -1339,7 +1339,7 @@ func parityFixtures() []parityFixture {
 		// accrues #46 (the episode is a bead both copies compare). A seat's
 		// failure retries the next legacy tick but backs off in v2 (P4), so
 		// its classes are pinned against legacy's writers instead
-		// (TestAbandonMatchesLegacyPatches).
+		// (TestAbandonStepClasses, TestComposedUndoMatchesLegacyRestore).
 		{
 			Name: "a pending create whose start fails rolls back", Behaviors: []string{"START-031", "START-033"},
 			City: floor, StartErr: errors.New("boom"),

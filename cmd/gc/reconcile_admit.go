@@ -54,18 +54,24 @@ const (
 // createsInFlightCap bounds running creates (P4, C1); the rest are P3's
 // flat deadlines.
 const (
-	createsInFlightCap     = 8
-	startDeadlineSlack     = 10 * time.Second
+	createsInFlightCap = 8
+	startDeadlineSlack = 10 * time.Second
+	// startFailureSlack is the start's reserve past its commit slack for a
+	// start that did not commit: the failure Call (the screen peek, the #46
+	// accrual) and the abandon, its teardown and close (S3), which a Start
+	// timed out at startup_timeout must still reach.
+	startFailureSlack      = 20 * time.Second
 	providerEffectDeadline = 60 * time.Second
 	rowWriteDeadline       = 30 * time.Second
 )
 
 // deadline is the effect's deadline (P3), by class alone with no exception:
-// a start startup_timeout + 10s, a row write 30s, every other effect 60s.
+// a start startup_timeout + 30s (its commit's 10s and its abandon's 20s), a
+// row write 30s, every other effect 60s.
 func (k effectSpec) deadline(startupTimeout time.Duration) time.Duration {
 	switch k.class {
 	case capStarts:
-		return startupTimeout + startDeadlineSlack
+		return startupTimeout + startDeadlineSlack + startFailureSlack
 	case capRowWrites:
 		return rowWriteDeadline
 	}
@@ -114,6 +120,11 @@ type intent struct {
 	// Heal is the A6 heal a start carries into its PreWake (startHealed),
 	// written alone when the start is not admitted or refuses before it.
 	Heal *intent
+	// Kept is the part of a start's Patch a start that does not commit
+	// keeps: what S3's restore returns the row to (the heal, as legacy's
+	// tick writes it before its start; a stranded seat's death accrual
+	// alone, which keeps it committed).
+	Kept session.MetadataPatch
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests

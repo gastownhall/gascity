@@ -494,7 +494,7 @@ func TestAdmitProbeEffectsCappedAtProbeConcurrency(t *testing.T) {
 }
 
 // Kills a reintroduced special deadline (P3): every kind's deadline is its
-// class's, a start startup_timeout + 10s, a row write 30s, the rest 60s.
+// class's, a start startup_timeout + 30s, a row write 30s, the rest 60s.
 func TestIntentDeadlinesAreFlat(t *testing.T) {
 	rowWrites := []string{intentBaseline, intentDrainBegin, intentDrainCancel, intentDrainVoid, intentRowHeal, intentRowMetadata, intentSignal}
 	in := admitIn(50, 50)
@@ -508,7 +508,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 		want := providerEffectDeadline
 		switch {
 		case kind == intentStart:
-			want = 2*time.Minute + 10*time.Second
+			want = 2*time.Minute + 30*time.Second
 		case slices.Contains(rowWrites, kind):
 			want = 30 * time.Second
 		}
@@ -519,8 +519,8 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 	// A startup_timeout that is not positive reads as the 60s default.
 	for _, timeout := range []string{"0s", "-5s"} {
 		in.Cfg.Session.StartupTimeout = timeout
-		if res := admit(in, []intent{startOn(1, "", 0)}); res.Admitted[0].Deadline.Sub(admitT0) != 70*time.Second {
-			t.Errorf("startup_timeout %s: deadline +%v, want +70s", timeout, res.Admitted[0].Deadline.Sub(admitT0))
+		if res := admit(in, []intent{startOn(1, "", 0)}); res.Admitted[0].Deadline.Sub(admitT0) != 90*time.Second {
+			t.Errorf("startup_timeout %s: deadline +%v, want +90s", timeout, res.Admitted[0].Deadline.Sub(admitT0))
 		}
 	}
 }

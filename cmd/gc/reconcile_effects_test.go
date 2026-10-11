@@ -170,7 +170,7 @@ func withSpecs(t *testing.T, edit func(map[string]effectSpec)) {
 
 // Kills a per-kind exception to P3's deadlines in the executor: every kind,
 // submitted as the pass submits it, runs under exactly the deadline
-// admission gives its intent (a start startup_timeout + 10s, a row write
+// admission gives its intent (a start startup_timeout + 30s, a row write
 // 30s, every other effect 60s), and settles there.
 func TestDeadlinesHaveNoException(t *testing.T) {
 	clk := newFakePlannerClock(plannerT0)
@@ -193,7 +193,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 		want := providerEffectDeadline
 		switch effectSpecs[kind].class {
 		case capStarts:
-			want = startup + 10*time.Second
+			want = startup + startDeadlineSlack + startFailureSlack
 		case capRowWrites:
 			want = 30 * time.Second
 		}
@@ -208,7 +208,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 	for at, n := range armed {
 		waitTimersAt(t, clk, at, n)
 	}
-	clk.Advance(startup + 10*time.Second)
+	clk.Advance(startup + startDeadlineSlack + startFailureSlack)
 	for range kinds {
 		if s := receive(t, posted); s.Cause != causeDeadline {
 			t.Fatalf("settlement %+v, want every kind settled at its deadline", s)

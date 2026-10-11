@@ -274,7 +274,7 @@ func TestLaunchDeadlines(t *testing.T) {
 	k, leaf := launchKit(t, "asleep")
 	clk := k.p.Clock.(*fakePlannerClock)
 	leaf.onStart = func(ctx context.Context) {
-		clk.Advance(70*time.Second - startDeadlineSlack)
+		clk.Advance(70*time.Second - startDeadlineSlack - startFailureSlack)
 		select {
 		case <-ctx.Done():
 			if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {

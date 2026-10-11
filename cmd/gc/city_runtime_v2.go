@@ -300,7 +300,7 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 		cr.v2.exec.openStarts()
 		cr.v2.planner.resumeStarts()
 	}
-	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack); err != nil {
+	if err := cr.v2.exec.waitStarts(startup + startDeadlineSlack + startFailureSlack); err != nil {
 		return resume, err
 	}
 	return resume, ctx.Err()

@@ -629,3 +629,30 @@ func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// Kills a rollback that stops a foreign occupant outside C8.2(a), and an I4
+// that flags the stop C8.2(a) admits (the C5a2 review): a pending create
+// whose bead-scoped name another row's runtime holds is rolled back, the
+// occupant stopped by name, with no violation; the same occupant under a
+// configured named row's name is never stopped.
+func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
+	run := func(t *testing.T, row beads.Bead) *sim {
+		t.Helper()
+		s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+			s.sp.put(row.Metadata["session_name"], "gc-other", "1", "tok-other")
+			return []beads.Bead{row}, nil
+		}})
+		s.lag = false
+		for range 3 {
+			s.advance(simPatrol)
+			s.settle()
+		}
+		s.noViolations(t)
+		return s
+	}
+	started := plannerT0.Add(-time.Minute).Format(time.RFC3339)
+	s := run(t, poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "pending_create_claim", "true", "pending_create_started_at", started))
+	if b, _ := s.legs[0].backing.Get("gc-1"); b.Status != "closed" || len(s.sp.kills) != 1 {
+		t.Fatalf("bead-scoped: row %s kills %+v, want rolled back with the occupant stopped", b.Status, s.sp.kills)
+	}
+}

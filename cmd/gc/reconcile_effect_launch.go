@@ -211,9 +211,27 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: newPreWakeUndo(v.Row, v.Meta, patch)}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
+}
+
+// preWakeUndoOf is what a failed launch restores (S3) of the PreWake
+// patch wrote on v's row: the row as the part of its patch the start keeps
+// left it (intent.Kept: the heal it carries, as legacy's restore finds the
+// row its tick healed first; a stranded seat's death accrual alone, which
+// keeps it committed). A continuation reset the PreWake consumed stays
+// pending, so the next start rotates the continuation again.
+func preWakeUndoOf(v txView, patch session.MetadataPatch) preWakeUndo {
+	row, meta := v.Row, v.Meta
+	if len(v.It.Kept) > 0 {
+		row, meta = foldInfo(row, v.It.Kept), v.It.Kept.Apply(meta)
+	}
+	u := newPreWakeUndo(row, meta, patch)
+	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && (meta["continuation_reset_pending"] == "true" || patch["continuation_epoch"] != meta["continuation_epoch"]) {
+		u.restore["continuation_reset_pending"] = "true"
+	}
+	return u
 }
 
 // preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
@@ -296,7 +314,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	if !beginStart(ctx) {
 		return startOutcome{}, context.Cause(ctx) // the shutdown came first: never begin a start after it
 	}
-	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
+	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
 	in.ticket.verdict = verdictInconclusive

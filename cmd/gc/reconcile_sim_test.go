@@ -347,8 +347,10 @@ type sim struct {
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
-	writes   []simWrite
-	admitted []time.Time // admitted starts (I9)
+	// killsChecked is how many of the provider's kills I4 and I5 judged.
+	killsChecked int
+	writes       []simWrite
+	admitted     []time.Time // admitted starts (I9)
 	// stable is, by row ID, whether the pass that last admitted an effect
 	// for the row read it committed, its own runtime alive, and 30s past its
 	// wake: I15's view of A6's stability clear.

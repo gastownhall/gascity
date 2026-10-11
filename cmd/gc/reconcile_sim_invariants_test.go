@@ -129,10 +129,13 @@ func (s *sim) checkStarts() {
 // checkDestructive is I4 (I-fence) and I5 (I-attached) over v2's provider
 // kills: each hits its row's own runtime (O2 Current, or the own-runtime
 // exception's StaleSelf with epoch = generation) or the dead object the
-// corpse and start-recycle exceptions name, and never an attached one. The
+// corpse and start-recycle exceptions name, or a pending create's
+// bead-scoped name (C8.2(a)), and never an attached one. The
 // own-runtime exception to I5 is D1b's to model with the effects it covers.
 func (s *sim) checkDestructive() {
-	for _, k := range s.sp.kills {
+	kills := s.sp.kills[min(s.killsChecked, len(s.sp.kills)):] // each judged once, on the rows before its step
+	s.killsChecked = len(s.sp.kills)
+	for _, k := range kills {
 		if k.External || k.Hit == nil {
 			continue
 		}
@@ -142,6 +145,9 @@ func (s *sim) checkDestructive() {
 		row := s.rowNamed(k.Name)
 		switch {
 		case k.Method == "KillCorpseObject" && k.Hit.corpse, k.Method == "KillZombieObject" && k.Hit.zombie:
+		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name):
+			// C8.2(a): a pending create's rollback stops its bead-scoped name
+			// whoever runs under it (C3, S1's Foreign row), as legacy does.
 		case row.ID == "" || k.Hit.id != row.ID:
 			s.failf("I4 I-fence", "v2 %s on %s hit row %q's runtime, not its own", k.Method, k.Name, k.Hit.id)
 		case k.Hit.token != row.Metadata["instance_token"] && k.Hit.epoch != row.Metadata["generation"]:

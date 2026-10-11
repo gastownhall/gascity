@@ -226,6 +226,10 @@ func ownTeardown(v txView) (teardown, string) {
 // stopped whatever its identity, SESS-091); neither for nothing running, a
 // corpse (C8.8 counts it stopped) or another row's runtime (F3: rolled back
 // without a stop, a stale epoch included, S7); else the cause that holds.
+//
+// TODO(C5a3): the corpse a rollback counts stopped stays listed (legacy
+// stops the name); C5a3's corpse removal takes it, so a crash-looping pool
+// create's corpses do not pile up (§12.2 #45 does not cover them).
 func rollbackRuntime(row session.Info, rt *txRuntime) (stop bool, cause string) {
 	switch rt.Class {
 	case rtUnsupported:
