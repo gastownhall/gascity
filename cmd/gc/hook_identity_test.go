@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,18 +10,26 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // TestHookIdentityFallbackResolvesAsBefore runs the hooks that take the exact
 // identity with GC_SESSION_ID unset and stale. Each must take the legacy
 // resolution and say exactly what it says with the exact identity — the same
 // golden — and a message it sends must carry the same sender route.
+//
+// A GC_SESSION_ID naming a CLOSED session bead — an earlier incarnation that
+// held the same alias — is pinned by its own golden: the hook serves nothing
+// for it and says so (errHookSessionClosed), rather than falling back to the
+// alias the live session now holds.
 func TestHookIdentityFallbackResolvesAsBefore(t *testing.T) {
 	goldenDir, err := filepath.Abs(filepath.Join("testdata", "hook_budget"))
 	if err != nil {
 		t.Fatalf("golden dir: %v", err)
 	}
-	hookBudgetUpdateGolden = false
+	prevUpdate := hookBudgetUpdateGolden
+	hookBudgetUpdateGolden = os.Getenv(hookBudgetGoldenUpdateEnv) != ""
+	t.Cleanup(func() { hookBudgetUpdateGolden = prevUpdate })
 	scenarios := map[string]hookBudgetScenario{}
 	for _, sc := range hookBudgetScenarios() {
 		scenarios[sc.name] = sc
@@ -28,6 +37,7 @@ func TestHookIdentityFallbackResolvesAsBefore(t *testing.T) {
 	for _, name := range []string{
 		"mail check --inject/one mail",
 		"mail check --inject/auto-handoff",
+		"mail check --inject/priority window",
 		"nudge drain --inject/one nudge",
 		"nudge drain --inject/empty with usage stdin",
 		"handoff --auto",
@@ -40,21 +50,34 @@ func TestHookIdentityFallbackResolvesAsBefore(t *testing.T) {
 		var exactSender senderRoute
 		for _, variant := range []struct {
 			name      string
-			sessionID func(f hookBudgetFixture) string
+			sessionID func(t *testing.T, f hookBudgetFixture) string
+			// golden names the variant's own golden; empty shares the
+			// scenario's.
+			golden string
 		}{
-			{"exact", func(f hookBudgetFixture) string { return f.sessionID }},
-			{"unset", func(hookBudgetFixture) string { return "" }},
-			{"stale", func(hookBudgetFixture) string { return "tc-999" }},
+			{name: "exact", sessionID: func(_ *testing.T, f hookBudgetFixture) string { return f.sessionID }},
+			{name: "unset", sessionID: func(*testing.T, hookBudgetFixture) string { return "" }},
+			{name: "stale", sessionID: func(*testing.T, hookBudgetFixture) string { return "tc-999" }},
+			{name: "stale closed", sessionID: closedIncarnationSessionID, golden: sc.name + "/stale closed session"},
 		} {
 			t.Run(name+"/"+variant.name, func(t *testing.T) {
 				f := newHookBudgetFixture(t)
 				sc.seed(t, f)
-				t.Setenv("GC_SESSION_ID", variant.sessionID(f))
+				t.Setenv("GC_SESSION_ID", variant.sessionID(t, f))
 				run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return sc.run(t, f, stdout, stderr) })
 				if run.code != 0 {
 					t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
 				}
-				assertHookBudgetGolden(t, goldenDir, sc.name, run.stdout)
+				golden := sc.name
+				if variant.golden != "" {
+					golden = variant.golden
+				} else if variant.name != "exact" && hookBudgetUpdateGolden {
+					// A shared golden is written from the exact identity
+					// only; the fallbacks are compared against it.
+					hookBudgetUpdateGolden = false
+					t.Cleanup(func() { hookBudgetUpdateGolden = true })
+				}
+				assertHookBudgetGolden(t, goldenDir, golden, f, run)
 				sender, sent := lastSentMessageSender(t, f)
 				if !sent {
 					return
@@ -69,6 +92,31 @@ func TestHookIdentityFallbackResolvesAsBefore(t *testing.T) {
 			})
 		}
 	}
+}
+
+// closedIncarnationSessionID creates a closed session bead that held the
+// fixture session's alias — an earlier incarnation whose id a hook still
+// carries — and returns its id.
+func closedIncarnationSessionID(t *testing.T, f hookBudgetFixture) string {
+	t.Helper()
+	store, err := openCityStoreAt(f.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:    "earlier " + hookBudgetIdentity,
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"alias": hookBudgetIdentity, "session_name": hookBudgetIdentity + "-earlier"},
+	})
+	if err != nil {
+		t.Fatalf("Create earlier incarnation: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close earlier incarnation: %v", err)
+	}
+	resetHookBudgetProcessState(t)
+	return b.ID
 }
 
 // senderRoute is what a sent message records about its sender.
@@ -152,7 +200,7 @@ func TestClosedHookSessionIsNotServed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHookBudgetFixture(t)
-			f.sendMail(t, "human", hookBudgetIdentity, "status please")
+			f.sendMail(t, "status please")
 			f.autoHandoff(t)
 			handoffID := onlyAutoHandoffID(t, f)
 			f.queueNudge(t)

@@ -133,14 +133,15 @@ func resetHookBudgetProcessState(t *testing.T) {
 	cliStoreCache.mu.Unlock()
 }
 
-func (f hookBudgetFixture) sendMail(t *testing.T, from, to, subject string) {
+// sendMail sends the fixture session one message from human.
+func (f hookBudgetFixture) sendMail(t *testing.T, subject string) {
 	t.Helper()
 	mp, code := openCityMailProvider(io.Discard, "hook budget fixture")
 	if code != 0 {
 		t.Fatalf("openCityMailProvider = %d", code)
 	}
-	if _, err := mp.Send(from, to, subject, "body of "+subject); err != nil {
-		t.Fatalf("Send(%s -> %s): %v", from, to, err)
+	if _, err := mp.Send("human", hookBudgetIdentity, subject, "body of "+subject); err != nil {
+		t.Fatalf("Send(%q): %v", subject, err)
 	}
 	resetHookBudgetProcessState(t)
 }
@@ -279,18 +280,32 @@ func primeHook(t *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int 
 
 func hookBudgetScenarios() []hookBudgetScenario {
 	none := func(*testing.T, hookBudgetFixture) {}
-	oneMail := func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "human", hookBudgetIdentity, "status please") }
+	oneMail := func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "status please") }
 	handoff := func(t *testing.T, f hookBudgetFixture) { f.autoHandoff(t) }
+	// A priority:1 handoff sent before more ordinary mail than the injection
+	// window holds: the window keeps the handoff and the newest mail.
+	priorityWindow := func(t *testing.T, f hookBudgetFixture) {
+		f.autoHandoff(t)
+		for i := 1; i <= mailInjectMaxMessages+1; i++ {
+			f.sendMail(t, fmt.Sprintf("update %d", i))
+		}
+	}
+	handoffAndMail := func(t *testing.T, f hookBudgetFixture) {
+		f.autoHandoff(t)
+		f.sendMail(t, "status please")
+	}
 	return []hookBudgetScenario{
 		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
 		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
+		{name: "mail check --inject/priority window", seed: priorityWindow, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "update " + fmt.Sprint(mailInjectMaxMessages+1)},
 		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
 		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
 		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
 		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 12, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
+		{name: "prime --hook/auto-handoff and mail", seed: handoffAndMail, run: primeHook, ceiling: hookBudgetCeiling{Requests: 12, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
 		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, stdout, stderr)
 		}},
@@ -324,7 +339,7 @@ func TestHookRequestBudget(t *testing.T) {
 			if slices.ContainsFunc(run.ops, func(op beadstest.RecordedOp) bool { return op.Kind == beadstest.OpReady }) {
 				t.Errorf("recorded a Ready, which beadstest.WireModel prices at a 1-request floor; price Ready there before budgeting it")
 			}
-			assertHookBudgetGolden(t, goldenDir, sc.name, run.stdout)
+			assertHookBudgetGolden(t, goldenDir, sc.name, f, run)
 			if cost.Unkeyed != 0 {
 				t.Errorf("%d listing requests walk the whole ledger, want none", cost.Unkeyed)
 			}
@@ -463,14 +478,18 @@ func normalizeHookBudgetOutput(t *testing.T, stdout string) string {
 // environment.
 var hookBudgetUpdateGolden bool
 
-// assertHookBudgetGolden compares a scenario's normalized output with its
-// golden, so a change that lowers a hook's request count is shown to leave
-// what the hook says byte-identical.
-func assertHookBudgetGolden(t *testing.T, goldenDir, scenario, stdout string) {
+// assertHookBudgetGolden compares a scenario's normalized output — stdout,
+// then stderr when the hook wrote any — with its golden, so a change that
+// lowers a hook's request count is shown to leave what the hook says, to the
+// agent and to the operator, byte-identical.
+func assertHookBudgetGolden(t *testing.T, goldenDir, scenario string, f hookBudgetFixture, run hookBudgetRun) {
 	t.Helper()
 	name := strings.NewReplacer(" ", "_", "/", "__", "-", "").Replace(scenario)
 	path := filepath.Join(goldenDir, name+".golden")
-	got := normalizeHookBudgetOutput(t, stdout)
+	got := normalizeHookBudgetOutput(t, run.stdout)
+	if run.stderr != "" {
+		got += "--- stderr ---\n" + strings.ReplaceAll(run.stderr, f.cityDir, "<city>")
+	}
 	if hookBudgetUpdateGolden {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("MkdirAll: %v", err)
