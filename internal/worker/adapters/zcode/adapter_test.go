@@ -583,7 +583,7 @@ func TestIdleSeparatedPromptsStaySeparate(t *testing.T) {
 	h := newHarness(t, nil)
 	s := h.start()
 	s.send("first prompt")
-	time.Sleep(2500 * time.Millisecond)
+	s.waitForTurns(1)
 	s.send("second prompt")
 	s.waitForTurns(2)
 	if _, code := s.closeAndWait(); code != 0 {
