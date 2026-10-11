@@ -1371,7 +1371,20 @@ func TestRPCSnapshot_FallsBackToWSURLFileWhenEnvStale(t *testing.T) {
 	}
 }
 
+func setBridgeConnectRetryWindowForTest(t *testing.T, window, delay time.Duration) {
+	t.Helper()
+	oldWindow := bridgeConnectRetryWindow
+	oldDelay := bridgeConnectBaseDelay
+	bridgeConnectRetryWindow = window
+	bridgeConnectBaseDelay = delay
+	t.Cleanup(func() {
+		bridgeConnectRetryWindow = oldWindow
+		bridgeConnectBaseDelay = oldDelay
+	})
+}
+
 func TestStart_TransientBridgeFailureReturnsInitializing(t *testing.T) {
+	setBridgeConnectRetryWindowForTest(t, 25*time.Millisecond, 5*time.Millisecond)
 	oldDefaults := defaultWSURLCandidates
 	defaultWSURLCandidates = nil
 	t.Cleanup(func() {
@@ -1402,6 +1415,7 @@ func TestStart_TransientBridgeFailureReturnsInitializing(t *testing.T) {
 }
 
 func TestPeek_TransientBridgeFailureSoftDegrades(t *testing.T) {
+	setBridgeConnectRetryWindowForTest(t, 25*time.Millisecond, 5*time.Millisecond)
 	oldDefaults := defaultWSURLCandidates
 	defaultWSURLCandidates = nil
 	t.Cleanup(func() {

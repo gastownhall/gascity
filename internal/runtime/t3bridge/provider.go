@@ -48,9 +48,12 @@ var defaultWSURLCandidates = []string{
 	"ws://localhost:3773/ws",
 }
 
-const (
+var (
 	bridgeConnectRetryWindow = 8 * time.Second
 	bridgeConnectBaseDelay   = 100 * time.Millisecond
+)
+
+const (
 	bridgeConnectMaxDelay    = 1 * time.Second
 	bridgeHTTPTimeout        = 12 * time.Second
 	bridgeWSTimeout          = 3 * time.Second
