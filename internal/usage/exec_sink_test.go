@@ -50,7 +50,7 @@ func TestExecSinkRecordSurfacesScriptFailure(t *testing.T) {
 // per-fact timeout must bound Record even when the caller passes a long-lived
 // context, so a hung script returns a timeout error instead of stalling.
 func TestExecSinkRecordHangingScriptTimesOutPromptly(t *testing.T) {
-	s := NewExecSinkWithTimeout(writeSinkScript(t, "sleep 30"), 100*time.Millisecond)
+	s := NewExecSinkWithTimeout(writeSinkScript(t, "exec sleep 30"), 100*time.Millisecond)
 	start := time.Now()
 	err := s.Record(context.Background(), Fact{Kind: KindModel, RunID: "r1"})
 	elapsed := time.Since(start)
