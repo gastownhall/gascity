@@ -1,8 +1,10 @@
 package beadmail
 
 import (
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -61,6 +63,32 @@ func (in *Inbox) Unread() []mail.Message {
 	}
 	sortMessagesByArrival(messages)
 	return messages
+}
+
+// ArchiveInjectedAutoHandoffsFromInbox is [Provider.ArchiveInjectedAutoHandoffs]
+// over the rows inbox already read: of the injected ids, the auto-handoff mail
+// that opted into archive-after-inject is marked read and closed without being
+// read again. An id the inbox did not read is left alone — it was not injected
+// from this inbox.
+func (p *Provider) ArchiveInjectedAutoHandoffsFromInbox(inbox *Inbox, ids []string) error {
+	if inbox == nil {
+		return nil
+	}
+	rows := make(map[string]beads.Bead, len(inbox.rows))
+	for _, b := range inbox.rows {
+		rows[b.ID] = b
+	}
+	var errs []error
+	for _, id := range ids {
+		b, ok := rows[strings.TrimSpace(id)]
+		if !ok || !isInjectedAutoHandoff(b) {
+			continue
+		}
+		if err := p.archiveInjectedAutoHandoff(b.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // sortMessagesByArrival orders messages oldest first, ties by id.

@@ -204,3 +204,81 @@ func TestPinnedSenderIgnoresOtherAddresses(t *testing.T) {
 		t.Fatal("a closed pinned session answered for its alias without resolution")
 	}
 }
+
+// writeCountingStore counts the writes an archive makes.
+type writeCountingStore struct {
+	*readCountingStore
+	updates, setMetadata, closes int
+}
+
+func (s *writeCountingStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updates++
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *writeCountingStore) SetMetadata(id, key, value string) error {
+	s.setMetadata++
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
+func (s *writeCountingStore) Close(id string) error {
+	s.closes++
+	return s.MemStore.Close(id)
+}
+
+// TestArchiveFromInboxRetiresWithoutRereading pins the archive from inbox
+// rows: an injected auto-handoff is marked read, stamped and closed with one
+// update and one close and no read of the row the inbox already holds, while
+// ordinary mail and ids the inbox did not read are left alone.
+func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
+	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
+	p := New(store)
+	handoff, err := p.SendHandoff(mail.HandoffIntent{
+		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	ordinary, err := p.Send("human", "sky", "", "ordinary")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	elsewhere, err := p.SendHandoff(mail.HandoffIntent{
+		From: "human", To: "other", Subject: "not this inbox", ThreadID: "t2",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	inbox, err := p.InboxForRoutes([]string{"sky"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	store.reset()
+	store.updates, store.setMetadata, store.closes = 0, 0, 0
+
+	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID, ordinary.ID, elsewhere.ID}); err != nil {
+		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
+	}
+	if store.gets != 0 || store.updates != 1 || store.setMetadata != 0 || store.closes != 1 {
+		t.Fatalf("archive made %d gets, %d updates, %d metadata writes, %d closes; want 0, 1, 0, 1",
+			store.gets, store.updates, store.setMetadata, store.closes)
+	}
+	b, err := store.MemStore.Get(handoff.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "closed" || !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
+		t.Fatalf("archived handoff = status %q labels %v metadata %v", b.Status, b.Labels, b.Metadata)
+	}
+	for _, id := range []string{ordinary.ID, elsewhere.ID} {
+		other, err := store.MemStore.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if other.Status != "open" || hasLabel(other.Labels, "read") {
+			t.Fatalf("%s was archived: status %q labels %v", id, other.Status, other.Labels)
+		}
+	}
+}

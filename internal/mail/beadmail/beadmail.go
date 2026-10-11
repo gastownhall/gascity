@@ -575,32 +575,44 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 			errs = append(errs, fmt.Errorf("loading %s: %w", id, err))
 			continue
 		}
-		if b.Type != messageBeadType ||
-			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
-			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
+		if !isInjectedAutoHandoff(b) {
 			continue
 		}
-		// Mark read (label + metadata) so a later SessionStart does not re-inject
-		// it and the read-gated TTL sweep can later reclaim it.
-		if err := p.store.Update(id, beads.UpdateOpts{
-			Labels:   []string{"read"},
-			Metadata: map[string]string{mail.ReadMetadataKey: "true"},
-		}); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("marking %s read: %w", id, err))
-			continue
-		}
-		// Stamp the retention marker then close, mirroring SweepReadMessagesBefore
-		// so isRemovedMessageBead keeps the closed handoff addressable (recoverable)
-		// until PurgeReadMessageWisps reclaims it — never a hard delete here.
-		if err := p.store.SetMetadata(id, "close_reason", RetentionSweepCloseReason); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("stamping %s close_reason: %w", id, err))
-			continue
-		}
-		if err := p.store.Close(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+		if err := p.archiveInjectedAutoHandoff(id); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// isInjectedAutoHandoff reports whether b is auto-handoff mail that opted into
+// being archived once injected.
+func isInjectedAutoHandoff(b beads.Bead) bool {
+	return b.Type == messageBeadType &&
+		hasLabel(b.Labels, mail.AutoHandoffLabel) &&
+		hasLabel(b.Labels, mail.ArchiveAfterInjectLabel)
+}
+
+// archiveInjectedAutoHandoff marks one injected handoff read and closes it,
+// retain-addressable. One update carries the read label, mail.read (so a later
+// SessionStart does not re-inject it and the read-gated TTL sweep can reclaim
+// it) and the retention close_reason — mirroring SweepReadMessagesBefore, so
+// isRemovedMessageBead keeps the closed handoff addressable (recoverable) until
+// PurgeReadMessageWisps reclaims it. Never a hard delete.
+func (p *Provider) archiveInjectedAutoHandoff(id string) error {
+	if err := p.store.Update(id, beads.UpdateOpts{
+		Labels: []string{"read"},
+		Metadata: map[string]string{
+			mail.ReadMetadataKey: "true",
+			"close_reason":       RetentionSweepCloseReason,
+		},
+	}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("marking %s read: %w", id, err)
+	}
+	if err := p.store.Close(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("archiving %s: %w", id, err)
+	}
+	return nil
 }
 
 func archiveExactMatches(value, exact string, insensitive bool) bool {

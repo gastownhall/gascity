@@ -739,21 +739,23 @@ type mailRouteInboxReader interface {
 
 // unreadMailForTarget returns the target's unread mail, oldest first. A target
 // resolved from its own session bead carries its whole route set, and a
-// provider that reads a route set as given answers it with one read; any other
-// target or provider is asked recipient by recipient.
-func unreadMailForTarget(mp mail.Provider, target resolvedMailTarget) ([]mail.Message, error) {
+// provider that reads a route set as given answers it with one read, returned
+// as the inbox the mail came from; any other target or provider is asked
+// recipient by recipient, and the inbox is nil.
+func unreadMailForTarget(mp mail.Provider, target resolvedMailTarget) ([]mail.Message, *beadmail.Inbox, error) {
 	if reader, ok := mp.(mailRouteInboxReader); ok && len(target.routes) > 0 {
 		inbox, err := reader.InboxForRoutes(target.routes)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return inbox.Unread(), nil
+		return inbox.Unread(), inbox, nil
 	}
-	return collectMailMessages(mp.Check, target.recipients)
+	messages, err := collectMailMessages(mp.Check, target.recipients)
+	return messages, nil, err
 }
 
 func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat string, stdout, stderr io.Writer) int {
-	messages, err := unreadMailForTarget(mp, target)
+	messages, inbox, err := unreadMailForTarget(mp, target)
 	if err != nil {
 		if inject {
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -772,8 +774,12 @@ func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, in
 			// Archive the SAME messages that were injected: select the same
 			// window formatInjectOutput displays so the archived set matches
 			// (a priority:1 handoff that floats into the window is injected
-			// AND archived, never injected-but-not-archived).
-			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
+			// AND archived, never injected-but-not-archived) — unless the
+			// managing gc hook run would discard this output before the
+			// archive finished.
+			if hookDeadlineAllowsArchive("gc mail check", stderr) {
+				archiveInjectedAutoHandoffMessagesFrom(mp, inbox, selectMailInjectWindow(messages), stderr)
+			}
 		}
 		return 0 // --inject always exits 0
 	}
@@ -790,16 +796,32 @@ type injectedAutoHandoffArchiver interface {
 	ArchiveInjectedAutoHandoffs([]string) error
 }
 
+// inboxAutoHandoffArchiver is the optional capability of archiving injected
+// auto-handoff mail from the rows an inbox read already holds
+// (beadmail.Provider.ArchiveInjectedAutoHandoffsFromInbox).
+type inboxAutoHandoffArchiver interface {
+	ArchiveInjectedAutoHandoffsFromInbox(*beadmail.Inbox, []string) error
+}
+
 func archiveInjectedAutoHandoffMessages(mp mail.Provider, messages []mail.Message, stderr io.Writer) {
-	archiver, ok := mp.(injectedAutoHandoffArchiver)
-	if !ok {
-		return
-	}
+	archiveInjectedAutoHandoffMessagesFrom(mp, nil, messages, stderr)
+}
+
+// archiveInjectedAutoHandoffMessagesFrom archives the injected auto-handoff
+// messages. Given the inbox they were read from, a provider that can archives
+// from its rows without reading them again.
+func archiveInjectedAutoHandoffMessagesFrom(mp mail.Provider, inbox *beadmail.Inbox, messages []mail.Message, stderr io.Writer) {
 	ids := make([]string, 0, len(messages))
 	for _, msg := range messages {
 		ids = append(ids, msg.ID)
 	}
-	if err := archiver.ArchiveInjectedAutoHandoffs(ids); err != nil {
+	var err error
+	if archiver, ok := mp.(inboxAutoHandoffArchiver); ok && inbox != nil {
+		err = archiver.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids)
+	} else if archiver, ok := mp.(injectedAutoHandoffArchiver); ok {
+		err = archiver.ArchiveInjectedAutoHandoffs(ids)
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "gc mail check: archiving injected auto handoff mail: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 }
@@ -1907,10 +1929,18 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	// issuing one per call site (ga-q6ct Layer 3).
 	idCache := &mailIdentitySessionCache{}
 	if store != nil {
-		validRecipients, err = listLiveSessionMailboxesCached(sessStore, idCache)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+		if all {
+			// A broadcast is addressed to every live mailbox, so it needs them all.
+			validRecipients, err = listLiveSessionMailboxesCached(sessStore, idCache)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		} else {
+			// One recipient is valid exactly when it resolves below, which
+			// admits it; enumerating every live session first validated
+			// nothing more.
+			validRecipients = map[string]bool{"human": true}
 		}
 	}
 

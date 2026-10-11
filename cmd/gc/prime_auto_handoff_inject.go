@@ -185,7 +185,11 @@ func sessionStartAutoHandoffInjectionWithStore(store beads.Store, cityPath strin
 	return primeHookContextInjection{
 		text: formatInjectOutput(messages),
 		afterDelivery: func() {
-			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
+			// Unless the managing gc hook run would discard the delivered
+			// output before the archive finished (hook_deadline.go).
+			if hookDeadlineAllowsArchive("gc prime", stderr) {
+				archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages), stderr)
+			}
 		},
 	}, ids, ordinaryMailProvider
 }
