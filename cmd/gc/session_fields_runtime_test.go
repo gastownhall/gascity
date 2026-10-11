@@ -212,7 +212,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator session key", "session_key", []string{"internal/session/manager.go:Manager.PersistSessionKey"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.PersistSessionKey(id, "key-2")) }},
-		{"operator wake", "churn_count held_until quarantined_until sleep_intent wait_hold wake_attempts wake_refused_event_at wake_request wake_requested_at", []string{"internal/session/wait_store.go:Store.wakeSessionFromBead"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator wake", "churn_count wake_attempts wake_refused_event_at wake_request wake_requested_at", []string{"internal/session/wait_store.go:Store.wakeSessionFromBead"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			_, err := sessionFrontDoor(rec).WakeSession(id, now, session.WakeOpts{})
 			must(t, err)
 		}},
@@ -259,11 +259,17 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			if got := strings.Join(recordedKeys(rec.keys), " "); got != st.want {
 				t.Errorf("wrote %q, want %q", got, st.want)
 			}
+			// A flow that writes the whole disposition class writes it through
+			// its one encoder (R7), the site the registry declares the class at.
+			sites := st.sites
+			if wholeDispositionClass(rec.keys) {
+				sites = append(slices.Clone(sites), "internal/session/disposition.go:Disposition.Encode")
+			}
 			for k := range rec.keys {
 				if f, ok := session.LookupField(k); !ok {
 					t.Errorf("wrote %s, which the session field registry does not have", k)
-				} else if !slices.ContainsFunc(st.sites, func(site string) bool { return declared[site][f.Key] }) {
-					t.Errorf("wrote %s, which the registry declares at none of %v", k, st.sites)
+				} else if !slices.ContainsFunc(sites, func(site string) bool { return declared[site][f.Key] }) {
+					t.Errorf("wrote %s, which the registry declares at none of %v", k, sites)
 				}
 			}
 		})
@@ -380,6 +386,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				if _, err := writeSessionKillFence(m, id, now); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"cmd/gc/cmd_session_kill_fence.go:killSleepPatch": {
+			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour)},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := m.SetMetadataBatch(id, killSleepPatch(fieldBead(t, m, id).Metadata, now)); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -536,4 +553,15 @@ func fieldInfo(t *testing.T, s beads.Store, id string) session.Info {
 		t.Fatal(err)
 	}
 	return info
+}
+
+// wholeDispositionClass reports whether keys hold every key of the
+// disposition class, as only its encoder writes them.
+func wholeDispositionClass(keys map[string]string) bool {
+	for k := range (session.Disposition{}).Encode() {
+		if _, ok := keys[k]; !ok {
+			return false
+		}
+	}
+	return true
 }

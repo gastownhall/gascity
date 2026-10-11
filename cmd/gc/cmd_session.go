@@ -1743,8 +1743,8 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
 		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend: the operator
-			// hold (session.OperatorSuspendPatch), which the reconciler drains.
-			if err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
+			// hold (the disposition's Suspend cell), which the reconciler drains.
+			if _, err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -2539,12 +2539,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	case infoErr == nil:
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
-		patch["synced_at"] = now.Format(time.RFC3339)
-		for k, v := range session.ClearWakeRequestPatch() {
-			patch[k] = v
-		}
-		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
+		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
+			return killSleepPatch(b.Metadata, now), true
+		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	}

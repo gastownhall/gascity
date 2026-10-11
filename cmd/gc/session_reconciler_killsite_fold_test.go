@@ -36,7 +36,7 @@ func (s *sleepWriteFailingStore) SetMetadataBatch(id string, kvs map[string]stri
 }
 
 // Update fails a sleep write the same way: the kill sites write their sleep
-// through the fenced ApplyKeepingUserHold, which lands as an Update.
+// through the fenced ApplySleep, which lands as an Update.
 func (s *sleepWriteFailingStore) Update(id string, opts beads.UpdateOpts) error {
 	if _, isSleep := opts.Metadata["slept_at"]; isSleep && s.failsLeft != 0 {
 		if s.failsLeft > 0 {

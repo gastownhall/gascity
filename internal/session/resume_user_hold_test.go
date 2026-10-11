@@ -203,22 +203,34 @@ func TestLiveResumeConsumesUserHold(t *testing.T) {
 // a row another resumer already consumed at the same generation and token is
 // converged.
 func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
+	later := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	set := func(p MetadataPatch) func(beads.Store, string) error {
+		return func(store beads.Store, id string) error { return store.SetMetadataBatch(id, p) }
+	}
 	for name, tc := range map[string]struct {
-		race    MetadataPatch
-		wantErr bool
+		race     func(beads.Store, string) error
+		wantErr  bool
+		wantHeld bool
 	}{
-		"newer suspend":     {race: MetadataPatch{"suspended_at": "2026-10-09T11:30:00Z"}, wantErr: true},
-		"kill":              {race: MetadataPatch{"generation": "4"}, wantErr: true},
-		"already consumed":  {race: consumeUserHoldPatch()},
-		"active but waited": {race: MetadataPatch{"state": string(StateActive), "wait_hold": "w"}, wantErr: true},
-		"state healed only": {race: MetadataPatch{"state": string(StateAwake)}},
+		"newer suspend": {race: func(store beads.Store, id string) error {
+			_, err := NewStore(beads.SessionStore{Store: store}).OperatorSuspend(id, time.Now().Add(time.Second))
+			return err
+		}, wantErr: true, wantHeld: true},
+		"kill":               {race: set(MetadataPatch{"generation": "4"}), wantErr: true, wantHeld: true},
+		"quarantine":         {race: set(MetadataPatch{"quarantined_until": later}), wantErr: true, wantHeld: true},
+		"held_until moved":   {race: set(MetadataPatch{"held_until": later}), wantErr: true, wantHeld: true},
+		"intent moved":       {race: set(MetadataPatch{"sleep_intent": ""}), wantErr: true},
+		"draining at commit": {race: set(MetadataPatch{"state": string(StateDraining)}), wantErr: true, wantHeld: true},
+		"already consumed":   {race: set(consumeUserHoldPatch())},
+		"active but waited":  {race: set(MetadataPatch{"state": string(StateActive), "wait_hold": "w"}), wantErr: true, wantHeld: true},
+		"state healed only":  {race: set(MetadataPatch{"state": string(StateAwake)})},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
 			b := userHeldRow(t, store)
 			sp := &startHookProvider{Fake: runtime.NewFake()}
 			sp.hook = func() {
-				if err := store.SetMetadataBatch(b.ID, tc.race); err != nil {
+				if err := tc.race(store, b.ID); err != nil {
 					t.Error(err)
 				}
 			}
@@ -230,10 +242,29 @@ func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
 			if !sp.IsRunning("s-held") || sp.CountCalls("Stop", "s-held") != 0 {
 				t.Fatalf("running=%v stops=%d, want the launched runtime left running", sp.IsRunning("s-held"), sp.CountCalls("Stop", "s-held"))
 			}
-			if held := heldKeys(t, store, b.ID)["sleep_intent"] == string(SleepReasonUserHold); held != tc.wantErr {
-				t.Fatalf("hold kept = %v, want %v", held, tc.wantErr)
+			if held := heldKeys(t, store, b.ID)["sleep_intent"] == string(SleepReasonUserHold); held != tc.wantHeld {
+				t.Fatalf("hold kept = %v, want %v", held, tc.wantHeld)
 			}
 		})
+	}
+}
+
+// TestConsumeClearsTheOperatorsSleepReason: a consume clears the drained
+// suspend's sleep_reason=user-hold, so v2's operator-dormant stop (D3) never
+// takes the session an operator just resumed for dormant.
+func TestConsumeClearsTheOperatorsSleepReason(t *testing.T) {
+	store := beads.NewMemStore()
+	b := userHeldRow(t, store)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_reason": string(SleepReasonUserHold)}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := newTestManager(t, store, runtime.NewFake())
+	if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get(b.ID)
+	if got.Metadata["sleep_reason"] != "" || DecodeDisposition(got.Metadata).OperatorDormant(time.Now()) {
+		t.Fatalf("after the consume sleep_reason=%q (operator dormant %v), want cleared", got.Metadata["sleep_reason"], DecodeDisposition(got.Metadata).OperatorDormant(time.Now()))
 	}
 }
 
@@ -264,4 +295,14 @@ func TestLiveResumeConsumeDefersOnABusyLease(t *testing.T) {
 	if heldKeys(t, store, info.ID)["sleep_intent"] != "" {
 		t.Fatal("the retried attach did not consume the hold")
 	}
+}
+
+// consumeUserHoldPatch is what a consume writes over an operator's suspend
+// with no other hold: the class unheld, and the resumed runtime's lifecycle.
+func consumeUserHoldPatch() MetadataPatch {
+	patch := consumeUserHoldLife(Disposition{}, Disposition{}, Info{})
+	for k, v := range (Disposition{}).Encode() {
+		patch[k] = v
+	}
+	return patch
 }

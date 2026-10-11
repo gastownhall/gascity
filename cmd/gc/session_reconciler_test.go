@@ -4587,8 +4587,8 @@ func (s *failSetMetadataBatchStore) SetMetadataBatch(string, map[string]string) 
 	return nil
 }
 
-// Update fails too: the drain-ack finalize writes through the fenced
-// ApplyKeepingUserHold, which lands as an Update.
+// Update fails too: a drain-ack finalize that completes a sleep writes
+// through the fenced ApplySleep, which lands as an Update.
 func (s *failSetMetadataBatchStore) Update(id string, opts beads.UpdateOpts) error {
 	if s.err != nil && len(opts.Metadata) > 0 {
 		return s.err

@@ -111,6 +111,9 @@ type intent struct {
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
 	Event *events.Event
+	// Heal is the A6 heal a start carries into its PreWake (startHealed),
+	// written alone when the start is not admitted or refuses before it.
+	Heal *intent
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests
@@ -230,6 +233,9 @@ func admit(in admitInput, intents []intent) admitResult {
 	for _, it := range a.order(intents) {
 		if it.Cause = a.admitOne(&it); it.Cause != "" {
 			res.Deferred = append(res.Deferred, it)
+			if heal, ok := a.healInstead(it); ok {
+				res.Admitted = append(res.Admitted, heal)
+			}
 			continue
 		}
 		res.Admitted = append(res.Admitted, it)
@@ -344,6 +350,18 @@ func (a *admission) admitOne(it *intent) string {
 	a.running[spec.class]++
 	it.Deadline = a.in.Now.Add(spec.deadline(a.startup))
 	return ""
+}
+
+// healInstead is the heal a deferred start carries (intent.Heal), admitted
+// in its stead as the row write it is.
+func (a *admission) healInstead(start intent) (intent, bool) {
+	if start.Heal == nil || start.Cause == causeRowRepeated {
+		return intent{}, false
+	}
+	heal := *start.Heal
+	delete(a.seen, heal.Key)
+	heal.Cause = a.admitOne(&heal)
+	return heal, heal.Cause == ""
 }
 
 // createCause is why a create may not be admitted, or "": the create cap,

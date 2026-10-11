@@ -15,7 +15,7 @@
 # at runtime. Use GC_DOCKER_HOME_MOUNT or your own volume mounts to
 # provide them. Never bake credentials into the image.
 
-FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 ARG CLAUDE_CODE_VERSION=2.1.101
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -284,7 +285,8 @@ func TestSimStabilityClearsAcrossTime(t *testing.T) {
 // Kills the detached-at marker (v5.8 A6 item 7; SESS-533/535/536) lost or
 // stuck across time, on an interactive row under a sleep policy: a detach
 // stamps the pass time, an attach clears it, the next detach stamps its own
-// time, and the runtime's death clears it in the dead-runtime heal's one CAS.
+// time, and the runtime's death clears it in the same-pass restart's PreWake
+// CAS, which carries the dead-runtime heal.
 func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), workFor("gc-1"))
 	s.cfg.Agents[0].SleepAfterIdle = "5m"
@@ -309,8 +311,8 @@ func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 			t.Fatalf("at %s: detached_at %q, want %q", s.clk.Now().Sub(plannerT0), got, want)
 		}
 	}
-	if m := s.gc1(); m["state"] != "asleep" {
-		t.Fatalf("row %v, want the dead runtime healed asleep", m)
+	if m := s.gc1(); m["state"] != "awake" || m["generation"] != "2" {
+		t.Fatalf("row %v, want the wanted row restarted in the pass its runtime died", m)
 	}
 	s.noViolations(t)
 }
@@ -319,8 +321,8 @@ func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 // or named rows: a pool row AL1 wants asleep (quarantined, its work waiting)
 // whose runtime dies heals to asleep with runtime-missing and its
 // continuation reset, which A21's pool-slot close can free. A heartbeat-held
-// row waits for A17 while its hold runs, and heals once the timer heal has
-// cleared the expired hold.
+// one heals alike: A17 would respawn it through its hold, but its quarantine
+// holds the respawn.
 func TestSimDeadRuntimeHealFreesAnUnwantedRow(t *testing.T) {
 	for _, held := range []bool{false, true} {
 		t.Run(fmt.Sprintf("held %t", held), func(t *testing.T) { deadRuntimeHealAcrossTime(t, held) })
@@ -339,7 +341,7 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 	s.sp.mu.Unlock()
 	s.advance(simPatrol)
 	s.settle()
-	if got := s.gc1()["state"]; held != (got == "active") {
+	if got := s.gc1()["state"]; got != "asleep" {
 		t.Fatalf("held %t: state %q after the runtime died", held, got)
 	}
 	s.advance(2 * time.Minute)
@@ -479,4 +481,92 @@ func TestSimTxDecidesAgainInsideTheEffect(t *testing.T) {
 			s.noViolations(t)
 		})
 	}
+}
+
+// Kills a pool seat stranded by its young death (staging J23): AL1 never
+// wakes a persistent pool's asleep seat that has no work assigned (A21's
+// pool-slot close replaces it, C5c1), so a death that accrues churn
+// restarts the seat in place in the pass that records it, for a singleton
+// pool and for a pool at its max serving routed work, with no seat created
+// beside it.
+func TestSimYoungDeathRestartsAPoolSeatInPlace(t *testing.T) {
+	ids := []string{"gc-s", "gc-1", "gc-2"}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+		s.cfg.Agents = append(s.cfg.Agents, config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)})
+		var rows []beads.Bead
+		for i, id := range ids {
+			template, slot := "worker", i
+			if id == "gc-s" {
+				template, slot = "solo", 1
+			}
+			row := poolRow(id, template, slot, "active", "instance_token", "tok-"+id, "session_key", "k-"+id, "last_woke_at", rowAt(-2*time.Minute))
+			s.sp.put(row.Metadata["session_name"], id, "1", "tok-"+id)
+			work := beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": template}}
+			rows = append(rows, row, work)
+		}
+		return rows, nil
+	}})
+	s.lag = false
+	s.advance(time.Second)
+	s.sp.mu.Lock()
+	for _, id := range ids {
+		s.sp.drop("s-" + id)
+	}
+	s.sp.mu.Unlock()
+	s.advance(simPatrol)
+	s.settle()
+	s.settle()
+	for _, id := range ids {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := b.Metadata; m["state"] != "awake" || m["churn_count"] != "1" || !s.livePane(b) {
+			t.Errorf("%s: row %v, want it restarted in place with its churn recorded", id, m)
+		}
+	}
+	if rows, _ := s.legs[0].backing.List(beads.ListQuery{Label: session.LabelSession}); len(rows) != len(ids) {
+		t.Errorf("%d session rows, want the %d seats and none beside them", len(rows), len(ids))
+	}
+	s.noViolations(t)
+}
+
+// Kills a deferred stranded death reclassified by a later pass (review J1,
+// the budget shape): three seats rapid-crash together with one wake per
+// pass (and room for their row writes); each records a wake failure, as
+// legacy records it in the tick it sees it, and is restarted in turn.
+func TestSimDeferredStrandedDeathsRecordOnce(t *testing.T) {
+	ids := []string{"gc-1", "gc-2", "gc-3"}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		one := 1
+		s.cfg.Daemon.MaxWakesPerTick, s.cfg.Daemon.ProbeConcurrency = &one, intPtr(4)
+		var rows []beads.Bead
+		for i, id := range ids {
+			row := poolRow(id, "worker", i+1, "active", "instance_token", "tok-"+id, "session_key", "k-"+id, "last_woke_at", plannerT0.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", "1")
+			s.sp.put(row.Metadata["session_name"], id, "1", "tok-"+id)
+			rows = append(rows, row, beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+		}
+		return rows, nil
+	}})
+	s.lag = false
+	s.sp.mu.Lock()
+	for _, id := range ids {
+		s.sp.drop("s-" + id)
+	}
+	s.sp.mu.Unlock()
+	for range len(ids) { // inside 30s of the last restart, before its stability clear
+		s.advance(simPatrol)
+		s.settle()
+	}
+	for _, id := range ids {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := b.Metadata; m["wake_attempts"] != "2" || m["churn_count"] != "" || !s.livePane(b) {
+			t.Errorf("%s: wake_attempts %q churn_count %q live %v, want the rapid crash recorded once and the seat restarted", id, m["wake_attempts"], m["churn_count"], s.livePane(b))
+		}
+	}
+	s.noViolations(t)
 }

@@ -8,7 +8,8 @@
     "reconciler.session.skip_unknown_state/skipped": 1
   },
   "divergences_by_family": {
-    "deferred arm": 4,
+    "deferred arm": 3,
+    "harness gap": 1,
     "unexplained": 2,
     "v5 §12.2": 1
   }

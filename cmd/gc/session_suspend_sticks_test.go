@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 
 // mc-esqo7: an operator's suspend of a session holding started work sticks
 // across legacy ticks. Every operator suspend writes the user hold
-// (session.OperatorSuspendPatch), and a drain the suspend began completes
+// (the disposition's Suspend cell), and a drain the suspend began completes
 // without clearing sleep_intent=user-hold, so the far-future held_until never
 // reads as a heartbeat hold that legacy's crash recovery restarts through.
 
@@ -72,7 +73,7 @@ func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 
 	t.Run("managed, drain completes by timeout", func(t *testing.T) {
 		e, work, name := runningSeatWithWork(t)
-		if err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
+		if _, err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
 			t.Fatalf("OperatorSuspend: %v", err)
 		}
 		e.tick(t, []beads.Bead{work}, withReadyAssignedFlags([]bool{true})) // begins the user-hold drain
@@ -86,7 +87,7 @@ func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 
 	t.Run("managed, drain-ack completes with assigned work", func(t *testing.T) {
 		e, work, name := runningSeatWithWork(t)
-		if err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
+		if _, err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
 			t.Fatalf("OperatorSuspend: %v", err)
 		}
 		// The agent acked the user-hold drain and its runtime stopped: the
@@ -140,7 +141,7 @@ func TestHeldPoolSeatKeepsItsSlotAndWork(t *testing.T) {
 				t.Fatal("seat was not woken (test premise)")
 			}
 			e.advance(30 * time.Minute)
-			if err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
+			if _, err := sessionFrontDoor(e.mem).OperatorSuspend(e.seat.ID, e.clk.Now()); err != nil {
 				t.Fatal(err)
 			}
 			starts := e.sp.CountCalls("Start", name)
@@ -167,7 +168,7 @@ func TestDrainAckFinalizeKeepsAHeldSeatOpen(t *testing.T) {
 		b := env.createSessionBead("worker", "worker")
 		front := sessionFrontDoor(env.store)
 		if held {
-			if err := front.OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+			if _, err := front.OperatorSuspend(b.ID, env.clk.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -218,19 +219,110 @@ func assertDrainedUserHold(t *testing.T, row beads.Bead, sleepReason string) {
 // suspend is not, before or after its drain completes.
 func TestHeartbeatHeldExcludesOperatorSuspend(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-	suspended := session.Info{}.ApplyPatch(session.OperatorSuspendPatch(now))
+	mem := beads.NewMemStore()
+	b, err := mem.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"state": "active"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := session.NewStore(beads.SessionStore{Store: mem})
+	if _, err := front.OperatorSuspend(b.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	suspended, err := front.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drained := func(reason string) session.Info {
+		t.Helper()
+		if _, err := front.ApplySleep(b.ID, session.CompleteDrainPatch(now, reason, false)); err != nil {
+			t.Fatal(err)
+		}
+		info, err := front.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
 	for name, tc := range map[string]struct {
 		info session.Info
 		want bool
 	}{
 		"heartbeat":                  {info: session.Info{HeldUntil: now.Add(time.Hour).Format(time.RFC3339)}, want: true},
 		"suspended":                  {info: suspended},
-		"suspend drained by timeout": {info: suspended.ApplyPatch(session.KeepUserHold(suspended, session.CompleteDrainPatch(now, "user-hold", false)))},
-		"suspend drain-acked":        {info: suspended.ApplyPatch(session.KeepUserHold(suspended, session.CompleteDrainPatch(now, "idle", false)))},
+		"suspend drained by timeout": {info: drained("user-hold")},
+		"suspend drain-acked":        {info: drained("idle")},
 	} {
 		if got := heartbeatHeld(tc.info, now); got != tc.want {
 			t.Errorf("%s: heartbeatHeld = %v, want %v", name, got, tc.want)
 		}
+	}
+}
+
+// TestBareDrainAckKeepsTheIdleStop: an idle drain the agent acks with no
+// assigned work left writes the ack alone (state=drained) and moves no hold,
+// so the idle stop's intent stays for the next pass to record the idle sleep;
+// clearing it (the Sleep cell) left sleep_reason=drained, and the row woke in
+// the same tick (the timeline's "idle, then sleep, then the next pass").
+func TestBareDrainAckKeepsTheIdleStop(t *testing.T) {
+	e, work, name := runningSeatWithWork(t)
+	if err := e.mem.Close(work.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mem.SetMetadataBatch(e.seat.ID, session.DrainAckStopPendingPatch(e.clk.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mem.SetMetadata(e.seat.ID, "sleep_intent", "idle-stop-pending"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := sessionFrontDoor(e.mem).Get(e.seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+	m := e.reload(t, e.seat.ID).Metadata
+	if m["state"] != string(session.StateDrained) || m["sleep_intent"] != "idle-stop-pending" || res.folded == nil || res.folded.SleepIntent != "idle-stop-pending" {
+		t.Fatalf("drain-ack: state=%q intent=%q, fold %+v; want drained with the idle stop's intent kept", m["state"], m["sleep_intent"], res.folded)
+	}
+	acked, err := sessionFrontDoor(e.mem).Get(e.seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fold := recoverPendingIdleSleepInfo(acked, sessionFrontDoor(e.mem), false, e.clk); fold == nil {
+		t.Fatal("the next pass recorded no idle sleep")
+	}
+	if m := e.reload(t, e.seat.ID).Metadata; m["sleep_reason"] != string(session.SleepReasonIdle) || m["sleep_intent"] != "" {
+		t.Fatalf("after recovery: sleep_reason=%q intent=%q, want idle with the intent spent", m["sleep_reason"], m["sleep_intent"])
+	}
+}
+
+// TestBareDrainAckRefusesARowClosedSince: the bare drain-ack is fenced on a
+// fresh read, so a row another observer closed after the tick's snapshot
+// takes no state=drained, and the tick folds nothing.
+func TestBareDrainAckRefusesARowClosedSince(t *testing.T) {
+	e, work, name := runningSeatWithWork(t)
+	if err := e.mem.Close(work.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.sp.Stop(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mem.SetMetadataBatch(e.seat.ID, session.DrainAckStopPendingPatch(e.clk.Now())); err != nil {
+		t.Fatal(err)
+	}
+	info, err := sessionFrontDoor(e.mem).Get(e.seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mem.Close(e.seat.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := e.reload(t, e.seat.ID).Metadata["state"]
+	res := finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+	if got := e.reload(t, e.seat.ID).Metadata["state"]; got != before || res.folded != nil {
+		t.Fatalf("drain-ack on a row closed since: state %q -> %q, fold %+v; want no write and no fold", before, got, res.folded)
 	}
 }
 
@@ -249,7 +341,7 @@ func TestWaitAndHeartbeatKeepAUserHold(t *testing.T) {
 		}
 		front := sessionFrontDoor(store)
 		if held {
-			if err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
+			if _, err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -312,7 +404,7 @@ func TestSnapshotSleepsKeepAUserHoldThatLandedSince(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := front.OperatorSuspend(b.ID, now); err != nil {
+		if _, err := front.OperatorSuspend(b.ID, now); err != nil {
 			t.Fatal(err)
 		}
 		folded := sleep(front, snap)
@@ -339,7 +431,7 @@ func TestIdleStopPendingClearKeepsAUserHold(t *testing.T) {
 		front := sessionFrontDoor(store)
 		snap, _ := front.Get(b.ID)
 		if suspended {
-			if err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
+			if _, err := front.OperatorSuspend(b.ID, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -364,7 +456,7 @@ func TestLegacyStartSkipsAUserHeldRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap, _ := sessionFrontDoor(store).Get(b.ID)
-	if err := sessionFrontDoor(store).OperatorSuspend(b.ID, time.Now()); err != nil {
+	if _, err := sessionFrontDoor(store).OperatorSuspend(b.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := store.Get(b.ID)
@@ -375,5 +467,48 @@ func TestLegacyStartSkipsAUserHeldRow(t *testing.T) {
 	}
 	if after, _ := store.Get(b.ID); after.Metadata["state"] != before.Metadata["state"] || after.Metadata["generation"] != before.Metadata["generation"] {
 		t.Fatalf("row changed: state %q -> %q, generation %q -> %q", before.Metadata["state"], after.Metadata["state"], before.Metadata["generation"], after.Metadata["generation"])
+	}
+}
+
+// TestIdleStopNeverRunsOverAHold: the idle stop's intent is written on a
+// fresh read and never over an operator's suspend or a wait (the IdleStopBegin
+// cell), even when the tick's snapshot predates the hold; on an unheld row it
+// is written and folded as before.
+func TestIdleStopNeverRunsOverAHold(t *testing.T) {
+	for name, hold := range map[string]func(front *session.Store, id string) error{
+		"unheld": func(*session.Store, string) error { return nil },
+		"suspend": func(front *session.Store, id string) error {
+			_, err := front.OperatorSuspend(id, time.Now())
+			return err
+		},
+		"wait": setSessionWaitHold,
+	} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": "worker", "template": "worker", "state": "active",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		front := sessionFrontDoor(store)
+		snap, err := front.Get(b.ID) // the tick's snapshot, from before the hold
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hold(front, b.ID); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := store.Get(b.ID)
+		fold := markIdleSleepPendingInfo(snap, front)
+		after, _ := store.Get(b.ID)
+		if name == "unheld" {
+			if fold["sleep_intent"] != "idle-stop-pending" || after.Metadata["sleep_intent"] != "idle-stop-pending" {
+				t.Errorf("unheld: fold %v, stored intent %q; want the idle stop's intent", fold, after.Metadata["sleep_intent"])
+			}
+			continue
+		}
+		if fold != nil || !maps.Equal(after.Metadata, before.Metadata) {
+			t.Errorf("%s: fold %v, row %v -> %v; want no write over the hold", name, fold, before.Metadata, after.Metadata)
+		}
 	}
 }
