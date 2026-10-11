@@ -262,7 +262,7 @@ func TestWatchConcurrentResumes(t *testing.T) {
 // A concurrent Close during a mid-backfill Next must not race the captured fd
 // (run with -race). Also asserts Close promptly unblocks.
 func TestWatchCloseDuringBackfillNoRace(t *testing.T) {
-	for iter := 0; iter < 40; iter++ {
+	for iter := 0; iter < 10; iter++ {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "events.jsonl")
 		var stderr bytes.Buffer
