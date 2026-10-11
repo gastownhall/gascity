@@ -116,7 +116,8 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister, na
 // expandAgentChecked is expandAgent that also returns the session-listing
 // error that left an unlimited pool without its running instances, so a
 // caller can report "could not list sessions" instead of mistaking it for
-// "no sessions".
+// "no sessions". A template's own named session comes from config, so its
+// row is returned even alongside that error.
 func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLister, named []config.NamedSession) ([]expandedAgent, error) {
 	maxSess := a.EffectiveMaxActiveSessions()
 
@@ -137,14 +138,7 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 	if isUnlimited && sp != nil {
 		instances, err := discoverUnlimitedPoolChecked(a, poolName, cityName, sessTmpl, sp)
 		if maxSess == nil && isOwnNamedSession(a, named) {
-			instances = append([]expandedAgent{{
-				qualifiedName: poolName,
-				rig:           a.Dir,
-				pool:          poolName,
-				suspended:     a.Suspended,
-				provider:      a.Provider,
-				description:   a.Description,
-			}}, instances...)
+			instances = append([]expandedAgent{configuredPoolRow(a)}, instances...)
 		}
 		return instances, err
 	}
@@ -171,9 +165,10 @@ func expandAgentChecked(a config.Agent, cityName, sessTmpl string, sp sessionLis
 	return result, nil
 }
 
-// configuredPoolRow is the identity of a multi-session agent itself, used to
-// list an on-demand pool that has no live session: its qualified name is both
-// the row name and the pool name.
+// configuredPoolRow is the identity of a multi-session agent itself: its
+// qualified name is both the row name and the pool name. It lists an
+// on-demand pool that has no live session, and a template's own named
+// session beside the instances discovered for it.
 func configuredPoolRow(a config.Agent) expandedAgent {
 	qn := a.QualifiedName()
 	return expandedAgent{
