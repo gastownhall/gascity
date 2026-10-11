@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The hook request budget: how many beads requests each session-side hook
@@ -187,6 +188,53 @@ func (f hookBudgetFixture) activeStep(t *testing.T) {
 	resetHookBudgetProcessState(t)
 }
 
+// predecessorMail gives the fixture session two earlier aliases, each the
+// current alias of one closed session that itself carries a session name and
+// an alias history, and sends one message to the second predecessor's id. The
+// session inbox then joins more routes than one identity carries, so its one
+// listing names more assignees than a small fan-out would push. Each earlier
+// alias is resolved as a mailbox address, whose exact-id probe misses
+// (session.Store.ResolveMailboxAddress), so the scenario's GetMisses ceiling
+// is two per alias.
+func (f hookBudgetFixture) predecessorMail(t *testing.T) {
+	t.Helper()
+	store, err := openCityStoreAt(f.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if err := store.SetMetadata(f.sessionID, "alias_history", "older-probe,old-probe"); err != nil {
+		t.Fatalf("SetMetadata(alias_history): %v", err)
+	}
+	var lastID string
+	for _, alias := range []string{"old-probe", "older-probe"} {
+		pred, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":         alias,
+				"session_name":  "runtime-" + alias,
+				"alias_history": "first-" + alias,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(predecessor %s): %v", alias, err)
+		}
+		if err := store.Close(pred.ID); err != nil {
+			t.Fatalf("Close(predecessor %s): %v", alias, err)
+		}
+		lastID = pred.ID
+	}
+	resetHookBudgetProcessState(t)
+	mp, code := openCityMailProvider(io.Discard, "hook budget fixture")
+	if code != 0 {
+		t.Fatalf("openCityMailProvider = %d", code)
+	}
+	if _, err := mp.Send("human", lastID, "for my predecessor", "inherited mail"); err != nil {
+		t.Fatalf("Send(predecessor): %v", err)
+	}
+	resetHookBudgetProcessState(t)
+}
+
 // hookBudgetRun is what one recorded command did to its ledger.
 type hookBudgetRun struct {
 	opens  int
@@ -299,6 +347,7 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
 		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
 		{name: "mail check --inject/priority window", seed: priorityWindow, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "update " + fmt.Sprint(mailInjectMaxMessages+1)},
+		{name: "mail check --inject/closed predecessors", seed: func(t *testing.T, f hookBudgetFixture) { f.predecessorMail(t) }, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 1, SessionGets: 1, GetMisses: 4}, wantStdout: "for my predecessor"},
 		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
 		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},

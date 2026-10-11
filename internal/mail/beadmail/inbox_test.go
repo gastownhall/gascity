@@ -629,3 +629,58 @@ func TestInboxAllAndCountsMatchTheProvider(t *testing.T) {
 			total, unread, len(inbox.All()), len(inbox.Unread()))
 	}
 }
+
+// planRecordingStore records the message listings that reach the store.
+type planRecordingStore struct {
+	*readCountingStore
+	messageQueries []beads.ListQuery
+}
+
+func (s *planRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == "message" {
+		s.messageQueries = append(s.messageQueries, query)
+	}
+	return s.readCountingStore.List(query)
+}
+
+// TestInboxForSessionWithPredecessorsStaysKeyed pins that a session inbox
+// joining two closed predecessors' routes — more routes than one identity
+// carries — still reads the mailbox by keyed requests on the native store
+// (beads.NativeListPlan), never by one request that walks the whole ledger.
+func TestInboxForSessionWithPredecessorsStaysKeyed(t *testing.T) {
+	store, _, current := newSuccessionFixture(t)
+	if err := store.SetMetadata(current().ID, "alias_history", "older-sky,old-sky"); err != nil {
+		t.Fatalf("SetMetadata(alias_history): %v", err)
+	}
+	recording := &planRecordingStore{readCountingStore: store}
+	p := New(recording)
+	var preds []string
+	for _, alias := range []string{"old-sky", "older-sky"} {
+		preds = append(preds, createSessionBead(t, store, map[string]string{
+			"alias": alias, "session_name": "runtime-" + alias, "alias_history": "first-" + alias,
+		}, true))
+	}
+	ids := sendTo(t, p, append([]string{"sky"}, preds...)...)
+
+	recording.messageQueries = nil
+	inbox, err := p.InboxForSession(current())
+	if err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	assertInboxHolds(t, inbox, ids, append([]string{"sky"}, preds...), nil)
+	if got := len(inbox.Routes()); got <= 8 {
+		t.Fatalf("inbox joins %d routes; the fixture must exceed one identity's routes", got)
+	}
+	if len(recording.messageQueries) != 1 {
+		t.Fatalf("read the mailbox with %d listings, want 1", len(recording.messageQueries))
+	}
+	plan := beads.NativeListPlan(recording.messageQueries[0])
+	for _, req := range plan {
+		if !beads.NativeListRequestKeyed(req) {
+			t.Fatalf("the inbox listing plans an unkeyed request on the native store: %+v", recording.messageQueries[0])
+		}
+	}
+	if len(plan) != len(inbox.Routes()) {
+		t.Fatalf("native plan has %d requests, want one per route (%d)", len(plan), len(inbox.Routes()))
+	}
+}
