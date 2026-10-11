@@ -14,6 +14,7 @@ go_library(
         "create_options.go",
         "decided.go",
         "disposition.go",
+        "disposition_patch.go",
         "disposition_store.go",
         "facts.go",
         "fields.go",

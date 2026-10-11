@@ -558,7 +558,7 @@ func fieldInfo(t *testing.T, s beads.Store, id string) session.Info {
 // wholeDispositionClass reports whether keys hold every key of the
 // disposition class, as only its encoder writes them.
 func wholeDispositionClass(keys map[string]string) bool {
-	for k := range (session.Disposition{}).Encode() {
+	for k := range (session.Disposition{}).Encode().Fold() {
 		if _, ok := keys[k]; !ok {
 			return false
 		}

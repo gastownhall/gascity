@@ -30,7 +30,7 @@ const (
 // transient, never a hold.
 const sleepIntentIdleStopPending SleepReason = "idle-stop-pending"
 
-// DispositionBit names a timer present but unparseable.
+// DispositionBit names a key present but unreadable.
 type DispositionBit uint8
 
 const (
@@ -38,7 +38,18 @@ const (
 	UnknownHeldUntil DispositionBit = 1 << iota
 	// UnknownQuarantine is an unparseable quarantined_until.
 	UnknownQuarantine
+	// UnknownIntent is a sleep_intent no cell writes. It holds nothing, and
+	// its text stands until a cell that clears the intent (a wake, a kill,
+	// a start, a retire) or writes one of its own.
+	UnknownIntent
+	// UnknownSince is an unparseable suspended_at, which stands until a cell
+	// that clears the stamp.
+	UnknownSince
 )
+
+// unreadableTimers are the bits of a timer, which a reader takes as held: no
+// one can tell when it ends.
+const unreadableTimers = UnknownHeldUntil | UnknownQuarantine
 
 // dispositionKeys are the class's five keys, in the order Disposition.raw
 // keeps their text.
@@ -68,7 +79,7 @@ type Disposition struct {
 	// Reason is the row's sleep_reason when it is an operator's (killed,
 	// user-hold, city-stop). Decoded only: the lifecycle writes it.
 	Reason SleepReason
-	// Unknown are timers present but unparseable.
+	// Unknown are keys present but unreadable.
 	Unknown DispositionBit
 	// raw is the decoded row's text for each class key (dispositionKeys), so
 	// Encode rewrites a key only when its meaning moves: an unknown intent,
@@ -92,8 +103,17 @@ func DecodeDisposition(meta map[string]string) Disposition {
 	}
 	d.IdleStop = intent == sleepIntentIdleStopPending
 	d.WaitIntent = intent == SleepReasonWaitHold
+	if intent != "" && intent != SleepReasonUserHold && !d.IdleStop && !d.WaitIntent {
+		d.Unknown |= UnknownIntent
+	}
 	d.Wait = strings.TrimSpace(meta["wait_hold"]) != ""
-	d.Since = parseDispositionTime(meta["suspended_at"])
+	if raw := strings.TrimSpace(meta["suspended_at"]); raw != "" {
+		if t, err := time.Parse(time.RFC3339, raw); err != nil {
+			d.Unknown |= UnknownSince
+		} else {
+			d.Since = t
+		}
+	}
 	if raw := strings.TrimSpace(meta["held_until"]); raw != "" {
 		if t, err := time.Parse(time.RFC3339, raw); err != nil {
 			d.Unknown |= UnknownHeldUntil
@@ -126,11 +146,6 @@ func DispositionOfInfo(info Info) Disposition {
 	})
 }
 
-func parseDispositionTime(raw string) time.Time {
-	t, _ := time.Parse(time.RFC3339, strings.TrimSpace(raw))
-	return t
-}
-
 func formatDispositionTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -138,8 +153,8 @@ func formatDispositionTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// unreadableTimer is canon's value for a timer d cannot read: it equals
-// itself, so a move that leaves the timer keeps its text.
+// unreadableTimer is canon's value for a key d cannot read: it equals
+// itself, so a move that leaves the key keeps its text.
 const unreadableTimer = "\x00unreadable"
 
 // canon is d's meaning for each class key, in today's values: an operator
@@ -162,6 +177,8 @@ func (d Disposition) canon() [len(dispositionKeys)]string {
 		c[1] = string(sleepIntentIdleStopPending)
 	case d.WaitIntent:
 		c[1] = string(SleepReasonWaitHold)
+	case d.Unknown&UnknownIntent != 0:
+		c[1] = unreadableTimer
 	}
 	if d.Wait {
 		c[2] = "true"
@@ -171,7 +188,11 @@ func (d Disposition) canon() [len(dispositionKeys)]string {
 	} else {
 		c[3] = formatDispositionTime(d.Quarantine)
 	}
-	c[4] = formatDispositionTime(d.Since)
+	if d.Unknown&UnknownSince != 0 {
+		c[4] = unreadableTimer
+	} else {
+		c[4] = formatDispositionTime(d.Since)
+	}
 	return c
 }
 
@@ -180,7 +201,7 @@ func (d Disposition) canon() [len(dispositionKeys)]string {
 // Encode(Decode(row)) is the row and a rollback build reads what it writes;
 // a key that moved takes today's value (canon). The lifecycle keys (state,
 // sleep_reason) are the caller's.
-func (d Disposition) Encode() MetadataPatch {
+func (d Disposition) Encode() DispositionPatch {
 	var base Disposition
 	if d.raw != base.raw {
 		base = DecodeDisposition(d.rawMeta())
@@ -194,20 +215,20 @@ func (d Disposition) Encode() MetadataPatch {
 			patch[k] = now[i]
 		}
 	}
-	return patch
+	return DispositionPatch{patch}
 }
 
 // Changed is the part of Encode that differs from the row d was decoded
 // from: what a write of d must change, and all a write over a store without
 // conditional writes may touch.
-func (d Disposition) Changed() MetadataPatch {
-	patch := d.Encode()
+func (d Disposition) Changed() DispositionPatch {
+	patch := d.Encode().kv
 	for i, k := range dispositionKeys {
 		if patch[k] == d.raw[i] {
 			delete(patch, k)
 		}
 	}
-	return patch
+	return DispositionPatch{patch}
 }
 
 func (d Disposition) rawMeta() map[string]string {
@@ -230,7 +251,7 @@ func (d Disposition) SuppressesWake(now time.Time) bool {
 // blocks, since an unreadable hold may be an operator's (O6). It is
 // HoldSet.BlocksConsume over the same row.
 func (d Disposition) BlocksConsume(now time.Time) bool {
-	return d.SuppressesWake(now) || d.Unknown != 0
+	return d.SuppressesWake(now) || d.Unknown&unreadableTimers != 0
 }
 
 // RefusesPreWake reports a hold that refuses the controller's PreWake (C5a1,
@@ -262,7 +283,7 @@ const MaxHeartbeatDuration = 12 * time.Hour
 // operator hold whose intent a blind write cleared is not one. A bare
 // wait_hold beside it does not stop it.
 func (d Disposition) HeartbeatHeld(now time.Time) bool {
-	return d.Heartbeat.After(now) && !d.Heartbeat.After(now.Add(MaxHeartbeatDuration+time.Hour)) && strings.TrimSpace(d.Encode()["sleep_intent"]) == ""
+	return d.Heartbeat.After(now) && !d.Heartbeat.After(now.Add(MaxHeartbeatDuration+time.Hour)) && strings.TrimSpace(d.Encode().Get("sleep_intent")) == ""
 }
 
 // KeepsSlot reports a row whose slot no free or close may take: an
@@ -378,6 +399,7 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 		if d.Operator == OperatorSuspended {
 			d.Unknown &^= UnknownHeldUntil
 		}
+		d.Unknown &^= UnknownIntent | UnknownSince
 		d.Operator, d.Until, d.Since, d.IdleStop, d.WaitIntent = OperatorNone, time.Time{}, time.Time{}, false, false
 	case EvResume:
 		switch {
@@ -407,6 +429,7 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 		if d.Operator == OperatorSuspended {
 			return refuse("a suspended row never starts")
 		}
+		d.Unknown &^= UnknownIntent | UnknownSince
 		d.Operator, d.Since, d.IdleStop, d.WaitIntent = OperatorNone, time.Time{}, false, false
 	case EvIdleStopBegin:
 		if d.Operator != OperatorNone || d.WaitIntent {

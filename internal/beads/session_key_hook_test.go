@@ -2,6 +2,7 @@ package beads_test
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -34,14 +35,29 @@ func TestStoreWriteVerbsReportSessionKeys(t *testing.T) {
 func exerciseSessionKeyHook(t *testing.T, s beads.Store) {
 	t.Helper()
 	var got []string
+	var writes []map[string]string // the write hook's patches: updates only
 	beads.SetSessionKeyHook(func(key string) { got = append(got, key) })
 	defer beads.SetSessionKeyHook(nil)
+	beads.SetSessionWriteHook(func(kvs map[string]string) { writes = append(writes, maps.Clone(kvs)) })
+	defer beads.SetSessionWriteHook(nil)
 	verb := func(name, key string, run func() error) {
 		t.Helper()
-		got = nil
+		got, writes = nil, nil
 		mustDo(t, run())
 		if !slices.Contains(got, key) || slices.ContainsFunc(got, func(k string) bool { return strings.HasPrefix(k, "w_") }) {
 			t.Errorf("%s reported %v, want %s and no work-bead key", name, got, key)
+		}
+		seen := slices.ContainsFunc(writes, func(kvs map[string]string) bool { _, ok := kvs[key]; return ok })
+		work := slices.ContainsFunc(writes, func(kvs map[string]string) bool {
+			for k := range kvs {
+				if strings.HasPrefix(k, "w_") {
+					return true
+				}
+			}
+			return false
+		})
+		if create := strings.Contains(name, "Create"); seen == create || work {
+			t.Errorf("%s: write hook saw %v; want the session update's patch (none for a create) and no work bead's", name, writes)
 		}
 	}
 	mk := func(b beads.Bead) beads.Bead {
@@ -125,5 +141,30 @@ func mustDo(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Kills a store that reads a row to learn its type only for the key hook: with
+// the write hook alone installed, every backend's update of a session bead
+// still reaches it. The native conformance double reports each update twice:
+// once from the store verb (by ID) and once from the MemStore it stores in.
+func TestSessionWriteHookAloneSeesUpdates(t *testing.T) {
+	for name, tc := range map[string]struct {
+		s       beads.Store
+		perEach int
+	}{
+		"MemStore":        {beads.NewAtomicCloseMemStore(), 1},
+		"NativeDoltStore": {beads.NewNativeDoltStoreForConformance(), 2},
+	} {
+		var writes []map[string]string
+		beads.SetSessionWriteHook(func(kvs map[string]string) { writes = append(writes, maps.Clone(kvs)) })
+		b, err := tc.s.Create(beads.Bead{Title: "s", Type: "session"})
+		mustDo(t, err)
+		mustDo(t, tc.s.SetMetadataBatch(b.ID, map[string]string{"k": "v"}))
+		mustDo(t, tc.s.Update(b.ID, beads.UpdateOpts{Metadata: map[string]string{"k2": "v"}}))
+		beads.SetSessionWriteHook(nil)
+		if len(writes) != 2*tc.perEach || writes[0]["k"] != "v" || writes[len(writes)-1]["k2"] != "v" {
+			t.Errorf("%s: write hook alone saw %v, want each update %d time(s)", name, writes, tc.perEach)
+		}
 	}
 }

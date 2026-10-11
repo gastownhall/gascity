@@ -258,3 +258,57 @@ func TestSuspendRollbackOnlyWhileTheStampIsItsOwn(t *testing.T) {
 		t.Fatalf("rollback of an unwritten suspend = %v", got)
 	}
 }
+
+// TestClearingCellsMoveUnreadableIntentAndStamp (C15/C20): an unrecognized
+// sleep_intent and an unparseable suspended_at stand through a move that
+// leaves them (a sleep), and the cells that clear the intent and the stamp
+// (an operator's wake, a kill, the controller's start, a retire) write both
+// empty through ApplyDisposition.
+func TestClearingCellsMoveUnreadableIntentAndStamp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		by    ActorKind
+		ev    DispEventKind
+		clear bool
+	}{
+		{"sleep", ActorController, EvSleep, false},
+		{"operator wake", ActorOperator, EvWake, true},
+		{"kill", ActorOperator, EvKill, true},
+		{"prewake", ActorController, EvPreWake, true},
+		{"retire", ActorController, EvRetire, true},
+	} {
+		store, front, id := dispositionRow(t)
+		if err := store.SetMetadataBatch(id, map[string]string{"sleep_intent": "someday", "suspended_at": "yesterday"}); err != nil {
+			t.Fatal(err)
+		}
+		w, err := front.ApplyDisposition(freshDecision(t, front, id), tc.by, DispEvent{Kind: tc.ev}, nil, dispT0)
+		if err != nil || w.Result != CommitLanded {
+			t.Fatalf("%s: ApplyDisposition = %+v, %v; want landed", tc.name, w, err)
+		}
+		m := mustGet(t, store, id).Metadata
+		if tc.clear && (m["sleep_intent"] != "" || m["suspended_at"] != "") {
+			t.Errorf("%s: sleep_intent=%q suspended_at=%q, want both cleared", tc.name, m["sleep_intent"], m["suspended_at"])
+		}
+		if !tc.clear && (m["sleep_intent"] != "someday" || m["suspended_at"] != "yesterday") {
+			t.Errorf("%s: sleep_intent=%q suspended_at=%q, want both kept", tc.name, m["sleep_intent"], m["suspended_at"])
+		}
+	}
+}
+
+// TestUnreadableIntentAndStampHoldNothing: an unrecognized sleep_intent and
+// an unparseable suspended_at are no hold and block no consume, unlike an
+// unreadable timer.
+func TestUnreadableIntentAndStampHoldNothing(t *testing.T) {
+	d := DecodeDisposition(map[string]string{"sleep_intent": "someday", "suspended_at": "yesterday"})
+	if d.Unknown != UnknownIntent|UnknownSince || d.SuppressesWake(dispT0) || d.BlocksConsume(dispT0) || d.Operator != OperatorNone {
+		t.Fatalf("disposition %+v: want the two unknown bits and no hold", d)
+	}
+	if got := d.Encode().Fold(); got["sleep_intent"] != "someday" || got["suspended_at"] != "yesterday" {
+		t.Fatalf("Encode = %v, want the row's text kept", got)
+	}
+	for _, intent := range []string{"", "user-hold", "wait-hold", "idle-stop-pending"} {
+		if d := DecodeDisposition(map[string]string{"sleep_intent": intent, "suspended_at": dispT0.Format(time.RFC3339)}); d.Unknown != 0 || !d.Since.Equal(dispT0) {
+			t.Errorf("intent %q with a valid stamp decodes %+v, want no unknown bit", intent, d)
+		}
+	}
+}

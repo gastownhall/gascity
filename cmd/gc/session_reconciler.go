@@ -7007,9 +7007,7 @@ func beginIdleRespawnDrainIfIdle(
 		// clear it here (the IdleStopEnd cell), so the drain's basis is the
 		// row the tick leaves.
 		if ended, err := sessionpkg.DispositionOfInfo(info).Apply(sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopEnd}, sessionpkg.State(info.MetadataState), time.Time{}); err == nil {
-			for k, v := range ended.Changed() {
-				patch[k] = v
-			}
+			ended.Changed().Into(patch)
 		}
 	}
 	if sessFront == nil {

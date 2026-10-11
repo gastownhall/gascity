@@ -106,10 +106,10 @@ func MoveDisposition(meta map[string]string, fresh Info, by ActorKind, ev DispEv
 	if err != nil {
 		return nil, from, err
 	}
-	patch := to.Changed()
+	patch := to.Changed().Into(nil)
 	if life != nil {
 		for k, v := range life(from, to, fresh) {
-			if _, class := to.Encode()[k]; class {
+			if to.Encode().Has(k) {
 				return nil, from, fmt.Errorf("session: a disposition move's lifecycle writes the class key %q", k)
 			}
 			patch[k] = v
@@ -184,6 +184,6 @@ func (s *Store) ApplySleep(id string, patch MetadataPatch) (MetadataPatch, error
 	}
 	fold := make(MetadataPatch, len(w.Wrote)+len(dispositionKeys))
 	maps.Copy(fold, w.Wrote)
-	maps.Copy(fold, w.To.Encode())
+	maps.Copy(fold, w.To.Encode().Fold())
 	return fold, nil
 }

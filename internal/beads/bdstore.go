@@ -1351,7 +1351,7 @@ func (b optionalBool) ptr() *bool {
 
 // Create persists a new bead via bd create.
 func (s *BdStore) Create(b Bead) (Bead, error) {
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 	return s.CreateWithStorage(b, StorageDefault)
 }
 

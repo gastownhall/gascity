@@ -119,7 +119,7 @@ func cloneBead(b Bead) Bead {
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	noteSessionKeys(b, b.Metadata)
+	noteSessionCreate(b)
 
 	explicit := strings.TrimSpace(b.ID)
 	if m.HonorExplicitIDs && explicit != "" {

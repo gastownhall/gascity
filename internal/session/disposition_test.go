@@ -109,7 +109,7 @@ var actorNames = map[ActorKind]string{
 // render is d as one golden token: its encoded keys, sorted, empty ones left
 // out, with times relative to dispT0.
 func (d Disposition) render() string {
-	enc := d.Encode()
+	enc := d.Encode().Fold()
 	if d.Operator == OperatorSuspendedSoft {
 		enc["state"] = string(StateSuspended)
 	}
@@ -223,7 +223,7 @@ func TestDispositionEveryEventHasACell(t *testing.T) {
 // encodedRow is the row Encode writes d onto: its five keys, and the state an
 // auto-suspended row carries.
 func encodedRow(d Disposition) map[string]string {
-	meta := map[string]string(d.Encode())
+	meta := map[string]string(d.Encode().Fold())
 	meta["state"] = string(StateAsleep)
 	if d.Operator == OperatorSuspendedSoft {
 		meta["state"] = string(StateSuspended)
@@ -265,7 +265,7 @@ func (d Disposition) sameAs(o Disposition) bool {
 // keys, so a write of it replaces the class whole.
 func TestDispositionEncodeWritesTheWholeClass(t *testing.T) {
 	for _, s := range dispSeeds() {
-		enc := s.d.Encode()
+		enc := s.d.Encode().Fold()
 		for _, k := range []string{"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at"} {
 			if _, ok := enc[k]; !ok {
 				t.Errorf("%s: Encode leaves out %s", s.name, k)
@@ -353,13 +353,13 @@ func TestDispositionHeartbeatHeldMatchesSESS602(t *testing.T) {
 func TestDispositionEncodeIsLossless(t *testing.T) {
 	check := func(meta map[string]string) {
 		d := DecodeDisposition(meta)
-		enc := d.Encode()
+		enc := d.Encode().Fold()
 		for _, k := range dispositionKeys {
 			if enc[k] != meta[k] {
 				t.Errorf("%v: Encode rewrites %s %q -> %q", meta, k, meta[k], enc[k])
 			}
 		}
-		if changed := d.Changed(); len(changed) != 0 {
+		if changed := d.Changed().Fold(); len(changed) != 0 {
 			t.Errorf("%v: an unmoved disposition changes %v", meta, changed)
 		}
 	}
@@ -385,7 +385,7 @@ func TestDispositionChangedIsTheMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := moved.Changed(); len(got) != 1 || got["held_until"] != dispT0.Add(time.Hour).Format(time.RFC3339) {
+	if got := moved.Changed().Fold(); len(got) != 1 || got["held_until"] != dispT0.Add(time.Hour).Format(time.RFC3339) {
 		t.Fatalf("a heartbeat on a bare wait changes %v, want held_until alone", got)
 	}
 }
