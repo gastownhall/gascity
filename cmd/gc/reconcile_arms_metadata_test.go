@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -111,7 +112,7 @@ func TestIdentityPatch(t *testing.T) {
 		}
 	}
 	taken := identityPatch(id, info, false, errors.New("held"), rebaseline, "T")
-	if taken[poolAliasConflictMetadataKey] != "worker-2" || taken[poolAliasConflictCountMetadataKey] != "3" || taken["alias"] != "" || taken["agent_name"] != "" {
+	if cleared, ok := taken["alias"]; taken[poolAliasConflictMetadataKey] != "worker-2" || taken[poolAliasConflictCountMetadataKey] != "3" || !ok || cleared != "" {
 		t.Fatalf("conflict: patch %v, want the conflict recorded, the wrong alias cleared and no guarded key", taken)
 	}
 	if _, ok := taken["agent_name"]; ok {
@@ -124,5 +125,62 @@ func TestIdentityPatch(t *testing.T) {
 	}
 	if blocked := identityPatch(id, recorded, true, nil, rebaseline, "T"); !maps.Equal(blocked, session.MetadataPatch{"session_origin": "ephemeral", "synced_at": "T"}) {
 		t.Fatalf("blocked: patch %v, want the plain keys alone", blocked)
+	}
+}
+
+// Kills A7 winning a row it never writes (C7d-1 review must-fix 1): a
+// desired canonical singleton whose metadata is converged but whose title
+// and agent label are its slot's: the arm proposes the verb, whose step
+// writes the title and label deltas with synced_at; applied, the arm
+// proposes nothing.
+func TestRowMetadataTitleOnlyWrites(t *testing.T) {
+	cfg := identityCity()
+	row := sessionRow("gc-1", "template", "solo", "state", "asleep", "pool_managed", "true", "session_origin", "ephemeral",
+		"session_name", "s-gc-1", "agent_name", "solo", "alias", "solo", "generation", "1")
+	row.Title, row.Labels = "solo-1", append(row.Labels, "agent:solo-1")
+	w, a := rowWorld(t, row)
+	k := rowKeyOf("gc-1")
+	info := w.Census.Rows[k].Info
+	w.Env = &reconcileEnv{Cfg: cfg}
+	w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: TemplateParams{TemplateName: "solo", InstanceName: "solo", Alias: "solo"}}}}
+	a.Snapshot.Entries[k].InDesired = true
+	it, _ := decideRow(w, a, k)
+	step := rowMetadataStep(txView{It: it, World: w, Alloc: a, Row: info, Now: gatherNow}, aliasCheck{}, nil)
+	if it.Kind != intentRowMetadata || step.Write["synced_at"] == "" || step.Title == nil || *step.Title != "solo" || !slices.Equal(step.AddLabels, []string{"agent:solo"}) {
+		t.Fatalf("decideRow %q, step %+v: want the verb writing the title and label with synced_at", it.Kind, step)
+	}
+	info.Title = *step.Title
+	info.Labels = append(slices.DeleteFunc(slices.Clone(info.Labels), func(l string) bool { return slices.Contains(step.RemoveLabels, l) }), step.AddLabels...)
+	w.Census.Rows[k] = newCensusRow(k, foldInfo(info, step.Write))
+	if it, _ := decideRow(w, a, k); it.Kind == intentRowMetadata {
+		t.Fatalf("decideRow = %q after the write, want A7 converged", it.Reason)
+	}
+}
+
+// Kills A7's persistent refusal winning the row (C7d-1 review should-fix
+// 4): after the alias lock or an unguarded label write refused it, until
+// its backoff has run out twice over, A7 writes neither the alias nor the
+// title and labels, so a row with nothing else to write yields its pass;
+// then it retries.
+func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
+	cfg := identityCity()
+	row := sessionRow("gc-1", "template", "solo", "state", "asleep", "pool_managed", "true", "session_origin", "ephemeral",
+		"session_name", "s-gc-1", "agent_name", "solo", "alias", "solo-old", "generation", "1")
+	row.Title = "solo-1"
+	w, a := rowWorld(t, row)
+	k := rowKeyOf("gc-1")
+	info := w.Census.Rows[k].Info
+	w.Env = &reconcileEnv{Cfg: cfg}
+	w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: TemplateParams{TemplateName: "solo", InstanceName: "solo", Alias: "solo"}}}}
+	a.Snapshot.Entries[k].InDesired = true
+	for _, cause := range []string{causeAliasLock, causeLabelsUnguarded} {
+		w.Backoff = map[string]backoffRecord{rowBackoffKey(k): {Consecutive: 1, Until: gatherNow.Add(5 * time.Second), Cause: cause}}
+		if it, _ := decideRow(w, a, k); it.Kind == intentRowMetadata {
+			t.Fatalf("%s, inside twice its backoff: decideRow = %q, want A7 deferred", cause, it.Reason)
+		}
+		w.Backoff[rowBackoffKey(k)] = backoffRecord{Consecutive: 1, Until: gatherNow.Add(-vetoBackoff(1)), Cause: cause}
+		if it, _ := decideRow(w, a, k); it.Kind != intentRowMetadata || it.AliasLock != "solo" {
+			t.Fatalf("%s, its backoff run out twice: decideRow = (%q, lock %q), want A7 retrying under the solo lock", cause, it.Reason, it.AliasLock)
+		}
 	}
 }

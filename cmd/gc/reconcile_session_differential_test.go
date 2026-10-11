@@ -106,6 +106,10 @@ type parityEntry struct {
 // parityAccepted are CONTRACT v5 §12.2's items the fixtures show; the rest
 // come with the arms that own them (#6 with A3, #15-#17 with A21).
 var parityAccepted = map[string]parityEntry{
+	"§12.2#51 a7-lag": {
+		"CONTRACT v5 §12.2 #51 (A7; C7d)", "legacy refreshes a row's identity every tick, beside its heals and under a live kill fence; v2's A7 writes it when it decides the row, a pass later when an earlier arm (an A6 heal) takes the row's first pass, or once A2's kill fence lets the row through, so its write, the synced_at it stamps and its runtime alias sync land later",
+		[]string{"synced_at", "alias", "alias_history", "labels", "pool_slot", "agent_name"},
+	},
 	"§12.2#37 current-bead-lag": {
 		"CONTRACT v5 §12.2 #37 (A6; mc-d4atw)", "v2 stamps currently_processing_bead_id one pass after legacy: A6 decides on the pass's read and stamps only rows AL1 wants awake, so a row whose quarantine just cleared is stamped a pass later",
 		[]string{session.CurrentBeadIDKey},
@@ -163,7 +167,6 @@ var parityFindings = map[string]parityEntry{
 		"BEHAVIORS SESS-601/585 (A20 idle begin, AL1 stage 6b); C6a2 replay finding (owner to rule)", "legacy idle-sleeps a live row its probe reads idle past sleep_after_idle (its drain, latch, signal and stop in one tick); v2's AL1 suppresses a live row only on a known I3 activity fact (configSleepSuppressed), and no observer sets LastActivityKnown, so v2 never decides the idle sleep of a live non-interactive or always-named session (AL1's idle stage covers on-demand and pool rows from detached_at), and A20's idle begin and latch do not fire there (C6a2b)",
 		[]string{"detached_at", "drain_at", "last_woke_at", "sleep_reason", "slept_at", "state"},
 	},
-	"a7-lag":            {"C7d (ruling wanted: §12.2 or match)", "legacy refreshes a row's identity every tick, beside its heals and under a live kill fence; v2's A7 writes it when it decides the row, a pass later when an earlier arm (an A6 heal) takes the row's first pass, or once A2's kill fence lets the row through, so its write, the synced_at it stamps and its runtime alias sync land later", []string{"synced_at", "alias", "alias_history", "labels", "pool_slot", "agent_name"}},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
@@ -224,7 +227,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
 	intentAdopt: regexp.MustCompile(`\bS1 adopt\b`),
 	// A7's row-metadata verb (C7d) owns the M1 verb's rows.
-	intentRowMetadata: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`),
+	intentRowMetadata:  regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`),
+	intentRuntimeAlias: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`), // SESS-716's runtime alias sync
 	// A8's baseline (C7c) owns the M2 builder's rows.
 	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
 }
@@ -1812,7 +1816,7 @@ func TestIdlePaceHoldsOnlyIdleProbes(t *testing.T) {
 	}
 	f := parityFixture{
 		City:     cfg,
-		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
+		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine", "alias", "chat", "agent_name", "chat", "session_origin", "named")}, // its identity converged: A7 has nothing to write
 		Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 	}
 	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)

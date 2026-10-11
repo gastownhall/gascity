@@ -168,6 +168,19 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = healRec.keys
 		}},
+		{"v2 A7 row-metadata effect", "agent_name alias alias_history configured_named_identity configured_named_session core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v6:x", "alias", "stale",
+				poolAliasConflictMetadataKey, "stale", poolAliasConflictCountMetadataKey, "1", poolAliasConflictAtMetadataKey, rowAt(-time.Hour),
+				namedSessionIdentityMetadata, "old", namedSessionMetadataKey, "true")
+			c.w.Env = &reconcileEnv{Cfg: workerCity(3)}
+			c.w.Templates.entries = map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2}}}
+			c.a.Snapshot.Entries[c.k].InDesired = true
+			a7Rec := newSessionKeyRecorder(c.store)
+			if it, st := c.run(t, nil, a7Rec); it.Kind != intentRowMetadata || st.Outcome != settledLanded {
+				t.Fatalf("A7 settled %+v for %+v", st, it)
+			}
+			rec.keys = a7Rec.keys
+		}},
 		{"v2 A8 baseline effect", "core_hash_breakdown live_hash started_config_hash started_launch_hash started_live_hash started_provision_hash", []string{"cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v5:core")
 			baseRec := newSessionKeyRecorder(c.store)

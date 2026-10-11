@@ -19,8 +19,9 @@ import (
 
 // Row-metadata decide reasons.
 const (
-	decideRowIdentity = "row-metadata:identity"
-	decideRowAlias    = "row-metadata:alias" // the identity with alias work under the lock
+	decideRowIdentity  = "row-metadata:identity"
+	decideRowAlias     = "row-metadata:alias" // the identity with alias work under the lock
+	decideRuntimeAlias = "runtime-alias"      // a written alias's runtime sync
 )
 
 // rowIdentity is a desired row's identity decision: the keys to write, the
@@ -184,7 +185,7 @@ func identityPatch(id rowIdentity, info session.Info, blocked bool, aliasErr err
 			out["alias"] = ""
 		}
 	}
-	if len(out) > 0 {
+	if len(out) > 0 || id.Title != nil || len(id.Add)+len(id.Remove) > 0 { // a title or label delta writes too
 		out["synced_at"] = nowRFC
 	}
 	return out
@@ -195,15 +196,19 @@ func aliasConflictRecorded(info session.Info, alias string) bool {
 	return strings.TrimSpace(info.PoolAliasConflict) == alias && strings.TrimSpace(info.PoolAliasConflictCount) != ""
 }
 
-// aliasFree reports that no other census row carries alias: a recorded
-// conflict's retry trigger (v5 M1).
-func aliasFree(c *sessionCensus, k rowKey, alias string) bool {
-	for key, row := range c.Rows {
-		if key.ID != k.ID && strings.TrimSpace(row.Info.Alias) == alias {
-			return false
+// aliasTaken reports id's alias held against row k on the census, by the
+// live check's rule (session.AliasConflictInfo: another row's session name,
+// alias or concrete identity, or a configured named session's reservation)
+// over k's leg: a recorded conflict is retried only once it reads free (v5
+// M1).
+func (w *World) aliasTaken(k rowKey, id rowIdentity, info session.Info) bool {
+	rows := make([]session.Info, 0, len(w.Census.Rows))
+	for key, row := range w.Census.Rows {
+		if key.Leg == k.Leg {
+			rows = append(rows, row.Info)
 		}
 	}
-	return true
+	return session.AliasConflictInfo(rows, w.Env.Cfg, id.Alias, info.ID, id.Owner, &info) != nil
 }
 
 // rowIdentityOf is the identity decision on row k, read as info: the
@@ -215,32 +220,52 @@ func (w *World) rowIdentityOf(k rowKey, info session.Info) (id rowIdentity, bloc
 		return rowIdentity{}, false, "", false
 	}
 	id = desiredRowIdentity(w.Env.Cfg, res.TP, info)
-	blocked = id.AliasWork && aliasConflictRecorded(info, id.Alias) && !aliasFree(w.Census, k, id.Alias)
+	blocked = id.AliasWork && aliasConflictRecorded(info, id.Alias) && w.aliasTaken(k, id, info)
+	if w.a7Deferred(k) { // the plain keys alone, as legacy's unlocked batch
+		blocked, id.Title, id.Add, id.Remove = id.AliasWork, nil, nil, nil
+	}
 	if id.AliasWork && !blocked {
 		lock = cmp.Or(id.Alias, strings.TrimSpace(info.Alias))
 	}
 	return id, blocked, lock, true
 }
 
+// a7Deferred reports A7's alias, title and label work deferred on row k:
+// its last refusal was A7's own persistent one (the alias lock, or labels
+// the store cannot guard), and its backoff has not run out twice over, so
+// between A7's retries the row's other arms take its passes (on a lock
+// error legacy writes the unlocked batch and goes on).
+func (w *World) a7Deferred(k rowKey) bool {
+	rec := w.Backoff[rowBackoffKey(k)]
+	return (rec.Cause == causeAliasLock || rec.Cause == causeLabelsUnguarded) && rec.Until.Add(vetoBackoff(rec.Consecutive)).After(w.Now)
+}
+
 // armRowMetadata is A7: a desired row whose identity is not converged gets
 // the row-metadata verb (not in a suspended city, whose legacy refreshes
-// nothing), taking the alias lock when its alias work needs
-// it (intent.AliasLock). A row A7 changes starts on the next pass, its
-// identity written ("metadata not converged → A7 first").
+// nothing), taking the alias lock when its alias work needs it
+// (intent.AliasLock); the verb's step decides by the same patch, so a
+// proposal always has a write. A row A7 changes starts on the next pass,
+// its identity written ("metadata not converged → A7 first"). Once
+// converged, a row whose alias A7 wrote gets its runtime synced.
 func armRowMetadata(r *rowFacts) (intent, bool) {
 	if r.entry == nil || !r.entry.InDesired || r.w.CitySuspended { // a suspended city's legacy builds no desired state
 		return intent{}, false
 	}
 	id, blocked, lock, ok := r.w.rowIdentityOf(r.k, r.row.Info)
-	if !ok || lock == "" && len(identityPatch(id, r.row.Info, blocked, nil, nil, "")) == 0 && id.Title == nil && len(id.Add)+len(id.Remove) == 0 {
+	switch {
+	case !ok:
 		return intent{}, false
+	case lock != "" || len(identityPatch(id, r.row.Info, blocked, nil, nil, "")) > 0:
+		reason := decideRowIdentity
+		if lock != "" {
+			reason = decideRowAlias
+		}
+		it, _ := r.heal(intentRowMetadata, reason, nil)
+		it.AliasLock = lock
+		return it, true
+	case r.w.AliasOwed[r.k]:
+		r.rests |= restRuntime // the sync reads the runtime fresh
+		return r.heal(intentRuntimeAlias, decideRuntimeAlias, nil)
 	}
-	reason := decideRowIdentity
-	if lock != "" {
-		reason = decideRowAlias
-	}
-	r.rests |= restRuntime // the verb reads the runtime fresh, for the runtime alias
-	it, _ := r.heal(intentRowMetadata, reason, nil)
-	it.AliasLock = lock
-	return it, true
+	return intent{}, false
 }

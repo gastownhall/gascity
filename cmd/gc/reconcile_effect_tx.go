@@ -434,6 +434,9 @@ type effectFacts struct {
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
 	Quarantined string
+	// AliasOwed is the row whose landed alias write owes its runtime the
+	// alias (A7's runtime-alias sync, M1).
+	AliasOwed *rowKey
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -443,7 +446,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == ""
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -452,6 +455,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Work = cmp.Or(g.Work, f.Work)
 	f.Noted = cmp.Or(g.Noted, f.Noted)
 	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
+	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -653,6 +657,8 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			continue // a newer write owns the row: read it again
 		case errors.Is(err, errNoConditionalWriter):
 			return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, true
+		case errors.As(err, new(*beads.ConditionalUpdateFieldUnsupportedError)):
+			return settlement{Outcome: settledRefused, Cause: causeLabelsUnguarded, Err: err}, true
 		case err != nil:
 			return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, true
 		case wrote:

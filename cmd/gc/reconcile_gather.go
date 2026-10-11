@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -89,6 +90,7 @@ type World struct {
 	Boot        bootState
 	Paused      bool            // starts paused for a provider swap (P7)
 	SoftReload  *softReloadView // the open soft reload this pass read, for A8 (M2)
+	AliasOwed   map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -140,7 +142,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view(), AliasOwed: maps.Clone(p.aliasOwed)}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()

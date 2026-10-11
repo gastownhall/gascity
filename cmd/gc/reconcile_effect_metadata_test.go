@@ -88,9 +88,12 @@ func TestSimRowMetadataAliasLockErrorWritesNothing(t *testing.T) {
 }
 
 // Kills the runtime alias synced to a runtime that is not the row's, or
-// not synced to one that is (v5 M1; SESS-716): an alias written on a row
-// whose runtime reads Current is set on that runtime; the same runtime read
-// fresh as another incarnation's (its token not the row's) is not.
+// not synced to one that is, and provider I/O under the alias lock (v5 M1;
+// SESS-716; C7d-1 review should-fix 3 and 5): the alias write holds the
+// city alias lock across its read and write alone, then its own effect
+// syncs the alias to the row's runtime when that reads Current, once; the
+// same runtime read fresh as another incarnation's (its token not the
+// row's) is not synced, and the debt is paid either way.
 func TestSimRowMetadataSyncsRuntimeAliasOnCurrentOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -99,29 +102,139 @@ func TestSimRowMetadataSyncsRuntimeAliasOnCurrentOnly(t *testing.T) {
 	}{{"current", "", true}, {"another incarnation", "tok-0", false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			reread := simOpts{specs: func(m map[string]effectSpec) {
-				spec := m[intentRowMetadata]
-				spec.sections = []section{called(0, probed(aliasAvailability, func(v txView, chk aliasCheck, err error) txStep {
+				spec := m[intentRuntimeAlias]
+				spec.sections = []section{called(0, section{Decide: func(v txView) txStep {
 					if tc.token != "" && v.RT != nil {
 						rt := *v.RT
 						rt.Identity.Token = tc.token
 						v.RT = &rt
 					}
-					return rowMetadataStep(v, chk, err)
-				}), syncRuntimeAlias)}
-				m[intentRowMetadata] = spec
+					return runtimeAliasStep(v)
+				}}, syncRuntimeAlias)}
+				m[intentRuntimeAlias] = spec
 			}}
 			s := bossSim(t, reread, []string{"gc-1"}, bossRow("state", "active", "last_woke_at", rowAt(-time.Hour)))
-			s.settle()
-			if m := s.gc1(); m["alias"] != "boss" {
-				t.Fatalf("gc-1 %v, want the alias written", m)
+			saved := withCityAliasLock
+			t.Cleanup(func() { withCityAliasLock = saved })
+			underLock := 0
+			withCityAliasLock = func(city, alias string, fn func() error) error {
+				return saved(city, alias, func() error {
+					before := len(s.sp.Calls)
+					err := fn()
+					underLock += len(s.sp.Calls) - before
+					return err
+				})
 			}
-			got := slices.ContainsFunc(s.sp.Calls, func(c runtime.Call) bool {
-				return c.Method == "SetMeta" && c.Name == "s-gc-1" && c.Key == "GC_ALIAS" && c.Value == "boss"
-			})
-			if got != tc.want {
-				t.Fatalf("runtime alias synced %v, want %v (calls %v)", got, tc.want, s.sp.Calls)
+			synced := func() int {
+				return len(slices.DeleteFunc(slices.Clone(s.sp.Calls), func(c runtime.Call) bool {
+					return c.Method != "SetMeta" || c.Name != "s-gc-1" || c.Key != "GC_ALIAS" || c.Value != "boss"
+				}))
+			}
+			s.settle()
+			if m := s.gc1(); m["alias"] != "boss" || synced() != 0 || underLock != 0 {
+				t.Fatalf("after the write: gc-1 %v, %d syncs, %d provider calls under the alias lock; want the alias, no sync yet, none", m, synced(), underLock)
+			}
+			for range 2 {
+				s.settle()
+			}
+			if got := synced(); got != map[bool]int{true: 1, false: 0}[tc.want] {
+				t.Fatalf("runtime alias synced %d times, want synced %v once at most (calls %v)", got, tc.want, s.sp.Calls)
+			}
+			if rec := s.p.out.record.Load(); slices.ContainsFunc(rec.Admitted, func(it intent) bool { return it.Kind == intentRuntimeAlias }) {
+				t.Fatal("the paid sync was proposed again")
 			}
 			s.noViolations(t)
 		})
 	}
+}
+
+// startsWithin runs up to n patrols, each a pass whose effects but gc-1's
+// start are released, and reports whether gc-1's start was admitted and
+// how many of those passes admitted its row-metadata verb.
+func startsWithin(s *sim, n int) (started bool, a7 int) {
+	for i := 0; i < n && !started; i++ {
+		s.advance(simPatrol)
+		s.inventory()
+		s.pass()
+		for _, it := range s.p.out.record.Load().Admitted {
+			switch {
+			case it.Key.ID != "gc-1":
+			case it.Kind == intentStart:
+				started = true
+			case it.Kind == intentRowMetadata:
+				a7++
+			}
+		}
+		for j := 0; j < len(s.parked); {
+			if e := s.parked[j]; e.it.Key.ID == "gc-1" && e.it.Kind == intentStart {
+				j++
+				continue
+			}
+			s.release(j)
+		}
+	}
+	return started, a7
+}
+
+// Kills a conflict the census cannot see starving the row (C7d-1 review
+// must-fix 2): a wanted named row whose alias another row holds as its
+// session name records the conflict once, then starts with its alias
+// deferred.
+func TestSimRowMetadataConflictBySessionNameDefersTheAlias(t *testing.T) {
+	holder := sessionRow("gc-9", "template", "worker", "state", "asleep", "session_name", "boss", "generation", "1", "session_origin", "manual")
+	s := bossSim(t, simOpts{}, nil, bossRow("configured_named_mode", "always"), holder)
+	s.cfg.NamedSessions[0].Mode = "always"
+	started, a7 := startsWithin(s, 6)
+	if m := s.gc1(); !started || a7 != 1 || m[poolAliasConflictMetadataKey] != "boss" || m["alias"] != "" {
+		t.Fatalf("started %v after %d row-metadata passes, gc-1 %v: want the conflict recorded once, then the start with no alias", started, a7, m)
+	}
+	s.noViolations(t)
+}
+
+// Kills a persistent refusal winning the row every pass (C7d-1 review
+// should-fix 4): a city alias lock that never comes refuses A7's alias
+// work, which then defers, so the wanted row starts without its alias.
+func TestSimRowMetadataLockErrorDefersTheAlias(t *testing.T) {
+	saved := withCityAliasLock
+	t.Cleanup(func() { withCityAliasLock = saved })
+	withCityAliasLock = func(string, string, func() error) error { return errors.New("lock unavailable") }
+	s := bossSim(t, simOpts{}, nil, bossRow("configured_named_mode", "always"))
+	s.cfg.NamedSessions[0].Mode = "always"
+	if started, a7 := startsWithin(s, 6); !started || a7 == 0 || s.gc1()["alias"] != "" {
+		t.Fatalf("started %v after %d row-metadata passes, gc-1 %v: want the alias deferred and the row started", started, a7, s.gc1())
+	}
+	s.noViolations(t)
+}
+
+// Kills the write guard dropped (C7d-1 review F11): a row whose alias
+// conflict is recorded and held gets the verb for a plain key alone, with
+// no lock; an operator's clear of the conflict count landing between the
+// pass and the verb gives the fresh row alias work, under a lock the verb
+// does not hold, so it refuses and writes nothing.
+func TestSimRowMetadataRefusesALockTheFreshRowDoesNotTake(t *testing.T) {
+	recorded := []string{"session_origin", "", poolAliasConflictMetadataKey, "boss", poolAliasConflictCountMetadataKey, "1"}
+	s := bossSim(t, simOpts{}, nil, bossRow(recorded...), sessionRow("gc-9", "template", "worker", "state", "asleep", "session_name", "s-gc-9", "generation", "1", "session_origin", "manual", "alias", "boss"))
+	s.inventory()
+	s.pass()
+	var e *simEffect
+	for _, p := range s.parked {
+		if p.it.Key.ID == "gc-1" {
+			e = p
+		}
+	}
+	if e == nil || e.it.Kind != intentRowMetadata || e.it.AliasLock != "" {
+		t.Fatalf("parked %d effects, want gc-1's verb with no lock", len(s.parked))
+	}
+	b, _ := s.legs[0].backing.Get("gc-1")
+	s.outside("operator", s.legs[0], b, func(l *simLeg, b beads.Bead) {
+		s.setMeta(l, b.ID, poolAliasConflictCountMetadataKey, "") // the count alone: the row's resolution stands
+	})
+	for len(s.parked) > 0 {
+		s.release(0)
+	}
+	s.audit("v2")
+	if m := s.gc1(); m["session_origin"] != "" || m[poolAliasConflictCountMetadataKey] != "" || m["synced_at"] != "" {
+		t.Fatalf("gc-1 %v: want the verb refused, none of its keys written", m)
+	}
+	s.noViolations(t)
 }

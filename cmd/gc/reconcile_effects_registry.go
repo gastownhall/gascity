@@ -106,8 +106,9 @@ var effectSpecs = map[string]effectSpec{
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentClose:           {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentRowMetadata:     {class: capRowWrites, needs: needs{Runtime: true, Lease: true}, caps: capReadStores | capProviderStart, around: aliasLockAround, sections: rowMetadataSections}, // A7 (C7d)
-	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                                                               // A8 (C7c)
-	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                                                               // A6
-	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                                                                        // A6
+	intentRowMetadata:     {class: capRowWrites, caps: capReadStores, around: aliasLockAround, sections: rowMetadataSections},                    // A7 (C7d): a row write, lease-free
+	intentRuntimeAlias:    {class: capProbing, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart, sections: runtimeAliasSections}, // A7 (C7d)
+	intentBaseline:        {class: capRowWrites, sections: baselineSections},                                                                     // A8 (C7c)
+	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                                                                     // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections},                                              // A6
 }

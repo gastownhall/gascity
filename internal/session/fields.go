@@ -191,9 +191,13 @@ func with(fields []Field, asClear bool, site Site, keys ...string) []Field {
 	return fields
 }
 
-// fields is the registry, grouped by class, then the writers of v2's create
-// (C1) and named reopen effects, which stamp a row's whole starting state.
-var fields = withObserved(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
+// fields is the registry, grouped by class, then v2's writers: A7's
+// identity (M1), A8's baseline (M2), and the create (C1) and named reopen
+// effects, which stamp a row's whole starting state.
+var fields = withObserved(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
+	"template", "session_origin", "pool_managed", "pool_slot", "agent_name", "dependency_only", NamedSessionMetadataKey,
+	NamedSessionIdentityMetadata, NamedSessionModeMetadata, "alias", "alias_history", "pool_alias_conflict", "pool_alias_conflict_count",
+	"pool_alias_conflict_at", "synced_at"), false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
 	"started_config_hash", "started_provision_hash", "started_launch_hash", "core_hash_breakdown", "started_live_hash", "live_hash"), false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
 	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
