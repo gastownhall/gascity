@@ -42,7 +42,7 @@ type startConfig struct {
 	CopyFiles          []copyEntry       `json:"copy_files,omitempty"`
 	// WorkDirExclude lists work_dir-relative patterns for controller-local
 	// state a runtime that copies work_dir elsewhere must leave behind.
-	// See [citylayout.WorkDirExportExcludes] for the pattern grammar.
+	// See [citylayout.MatchWorkDirExclude] for the pattern grammar.
 	WorkDirExclude []string `json:"work_dir_exclude,omitempty"`
 }
 

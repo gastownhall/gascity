@@ -1,62 +1,33 @@
 package citylayout
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// matchExportExclude is the reference implementation of the
-// work_dir_exclude pattern grammar documented on [WorkDirExportExcludes]:
-// patterns and paths are slash-separated and relative to the work dir, a
-// segment of exactly "**" matches zero or more whole segments, every other
-// segment is a [path.Match] glob confined to one segment, and a path is
-// excluded when it or any directory above it matches.
-func matchExportExclude(t *testing.T, pattern, rel string) bool {
-	t.Helper()
-	pat := strings.Split(pattern, "/")
-	segs := strings.Split(rel, "/")
-	for n := 1; n <= len(segs); n++ {
-		if matchSegments(t, pat, segs[:n]) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchSegments(t *testing.T, pat, segs []string) bool {
-	t.Helper()
-	if len(pat) == 0 {
-		return len(segs) == 0
-	}
-	if pat[0] == "**" {
-		for i := 0; i <= len(segs); i++ {
-			if matchSegments(t, pat[1:], segs[i:]) {
-				return true
-			}
-		}
-		return false
-	}
-	if len(segs) == 0 {
-		return false
-	}
-	ok, err := path.Match(pat[0], segs[0])
-	if err != nil {
-		t.Fatalf("pattern segment %q: %v", pat[0], err)
-	}
-	return ok && matchSegments(t, pat[1:], segs[1:])
-}
-
 func excludedByDefault(t *testing.T, rel string) bool {
 	t.Helper()
-	for _, p := range defaultWorkDirExportExcludes {
-		if matchExportExclude(t, p, rel) {
-			return true
-		}
+	got, err := WorkDirExportExcluded(defaultWorkDirExportExcludes, rel)
+	if err != nil {
+		t.Fatalf("WorkDirExportExcluded(%q): %v", rel, err)
 	}
-	return false
+	return got
+}
+
+func matchExportExclude(t *testing.T, pattern, rel string) bool {
+	t.Helper()
+	got, err := MatchWorkDirExclude(pattern, rel)
+	if err != nil {
+		t.Fatalf("MatchWorkDirExclude(%q, %q): %v", pattern, rel, err)
+	}
+	return got
 }
 
 func TestDefaultWorkDirExportExcludesArePortablePatterns(t *testing.T) {
@@ -135,6 +106,34 @@ func TestDefaultWorkDirExportExcludesDenyControllerState(t *testing.T) {
 		".beads/backup/2026.sql",
 		"rigs/app/.beads/dolt/app/.dolt/noms/x",
 		"rigs/app/.beads/proxy.secret",
+		".beads/doltlite/hq.db",
+		".beads/doltlite/hq.db-wal",
+		".beads/doltlite/hq.db-shm",
+		"rigs/app/.beads/doltlite/app.db",
+		".gc/sessions/s-1/start-stderr.log",
+		".gc/sessions/s-1/nudge-unconfirmed.log",
+		".gc/transcripts/acp/s-1/1.jsonl",
+		".gc/gate-slots/slot-1",
+		".beads/dolt.20260101T000000.corrupt.backup/hq/.dolt/noms/x",
+		".beads/dolt-backups/success/1/x",
+		".gc/beads.json",
+		"rigs/app/.gc/beads.json",
+		".gc/jsonl-archive/2026-01.jsonl",
+		".gc/jsonl-export-state.json",
+		".gc/mcp-adopted/claude/settings.json",
+		".gc/emergency/spool/1.json",
+		".beads/ownership-handoff.json",
+		".beads/dolt-handoff-L1.yaml",
+		".beads/export-state/x.json",
+		".beads/export-state.json",
+		".beads/dolt-pprof/cpu.pprof",
+		".beads/sync-state.json",
+		".beads/push-state.json",
+		".beads/last-touched",
+		".beads/.local_version",
+		".beads/last_pull",
+		".beads/.exclusive-lock",
+		".beads/db.sqlite",
 	} {
 		if !excludedByDefault(t, rel) {
 			t.Errorf("%s should be excluded from the work-dir export", rel)
@@ -164,7 +163,10 @@ func TestDefaultWorkDirExportExcludesKeepDeploymentArtifacts(t *testing.T) {
 		".beads/http_target.json",
 		".beads/redirect",
 		"rigs/app/.beads/metadata.json",
+		"rigs/app/.beads/config.yaml",
+		"rigs/app/.gc/settings.json",
 		"src/main.go",
+		"src/.gc/beads.json.go",
 	} {
 		if excludedByDefault(t, rel) {
 			t.Errorf("%s is needed by sessions and must not be excluded", rel)
@@ -239,5 +241,298 @@ func TestMatchExportExcludeGrammar(t *testing.T) {
 		if got := matchExportExclude(t, tc.pattern, tc.rel); got != tc.want {
 			t.Errorf("match(%q, %q) = %v, want %v", tc.pattern, tc.rel, got, tc.want)
 		}
+	}
+}
+
+// soleMatchProbes pins every default pattern to a path that pattern alone
+// excludes, so deleting or narrowing any single pattern fails a test even when
+// broader patterns overlap it. A pattern starting with "**/" must be pinned
+// by a nested path, so pinning it to the work-dir root also fails.
+var soleMatchProbes = map[string]string{
+	".gc/runtime/**":                   ".gc/runtime/suspension-state.json",
+	".gc/services/**":                  ".gc/services/github-intake/secrets/token",
+	".gc/sessions/**":                  ".gc/sessions/s-1/start-stderr.log",
+	".gc/transcripts/**":               ".gc/transcripts/acp/s-1/1.jsonl",
+	".gc/session-name-locks/**":        ".gc/session-name-locks/a",
+	".gc/gate-slots/**":                ".gc/gate-slots/slot-1",
+	".gc/secrets/**":                   ".gc/secrets/s-1.key",
+	".gc/controller.token":             ".gc/controller.token",
+	".gc/credentials.toml":             ".gc/credentials.toml",
+	".gc/**/*.sock":                    ".gc/controller.sock",
+	".gc/**/*.pid":                     ".gc/controller.pid",
+	".gc/*.lock":                       ".gc/controller.lock",
+	".gc/events.jsonl*":                ".gc/events.jsonl",
+	".gc/usage.jsonl*":                 ".gc/usage.jsonl",
+	".gc/nudges/**":                    ".gc/nudges/state.json",
+	".gc/store/**":                     ".gc/store/sessions.db",
+	".gc/storage/**":                   ".gc/storage/ref/.beads/metadata.json",
+	".gc/infra/**":                     ".gc/infra/x/config.yaml",
+	".gc/dolt-data/**":                 ".gc/dolt-data/hq/.dolt/noms/x",
+	".gc/session-mcp/**":               ".gc/session-mcp/s-1.json",
+	".gc/supervisor/**":                ".gc/supervisor/publications.json",
+	".gc/worktrees/**":                 ".gc/worktrees/rig/agent/main.go",
+	".gc/storage-served-binding.json":  ".gc/storage-served-binding.json",
+	".gc/storage-infra-cleared.json":   ".gc/storage-infra-cleared.json",
+	".gc/mcp-adopted/**":               ".gc/mcp-adopted/claude/settings.json",
+	".gc/emergency/**":                 ".gc/emergency/spool/1.json",
+	".gc/jsonl-archive/**":             ".gc/jsonl-archive/2026-01.jsonl",
+	".gc/jsonl-export-state.json":      ".gc/jsonl-export-state.json",
+	"**/.gc/beads.json":                "rigs/app/.gc/beads.json",
+	"**/.beads/dolt/**":                "rigs/app/.beads/dolt/app/.dolt/noms/x",
+	"**/.beads/doltlite/**":            "rigs/app/.beads/doltlite/app.db",
+	"**/.beads/embeddeddolt/**":        "rigs/app/.beads/embeddeddolt/app/.dolt/noms/x",
+	"**/.beads/dolt-backups/**":        "rigs/app/.beads/dolt-backups/current/x",
+	"**/.beads/*.corrupt.backup/**":    "rigs/app/.beads/dolt.1.corrupt.backup/x",
+	"**/.beads/backup/**":              "rigs/app/.beads/backup/2026.sql",
+	"**/.beads/export-state*":          "rigs/app/.beads/export-state/x.json",
+	"**/.beads/dolt-pprof/**":          "rigs/app/.beads/dolt-pprof/cpu.pprof",
+	"**/.beads/*.db*":                  "rigs/app/.beads/beads.db",
+	"**/.beads/db.sqlite":              "rigs/app/.beads/db.sqlite",
+	"**/.beads/*.sqlite3*":             "rigs/app/.beads/ephemeral.sqlite3",
+	"**/.beads/*.lock":                 "rigs/app/.beads/.sync.lock",
+	"**/.beads/.exclusive-lock":        "rigs/app/.beads/.exclusive-lock",
+	"**/.beads/dolt-server*":           "rigs/app/.beads/dolt-server.port",
+	"**/.beads/proxy*":                 "rigs/app/.beads/proxy.secret",
+	"**/.beads/proxied*":               "rigs/app/.beads/proxieddb/x",
+	"**/.beads/daemon.*":               "rigs/app/.beads/daemon.log",
+	"**/.beads/bd.sock*":               "rigs/app/.beads/bd.sock",
+	"**/.beads/.env":                   "rigs/app/.beads/.env",
+	"**/.beads/.beads-credential-key":  "rigs/app/.beads/.beads-credential-key",
+	"**/.beads/sync-state.json":        "rigs/app/.beads/sync-state.json",
+	"**/.beads/push-state.json":        "rigs/app/.beads/push-state.json",
+	"**/.beads/last-touched":           "rigs/app/.beads/last-touched",
+	"**/.beads/.local_version":         "rigs/app/.beads/.local_version",
+	"**/.beads/last_pull":              "rigs/app/.beads/last_pull",
+	"**/.beads/ownership-handoff.json": "rigs/app/.beads/ownership-handoff.json",
+	"**/.beads/dolt-handoff-*":         "rigs/app/.beads/dolt-handoff-L1.yaml",
+}
+
+func TestEveryDefaultExcludeHasASoleMatchProbe(t *testing.T) {
+	inDefault := map[string]bool{}
+	for _, p := range defaultWorkDirExportExcludes {
+		inDefault[p] = true
+		probe, ok := soleMatchProbes[p]
+		if !ok {
+			t.Errorf("pattern %q has no sole-match probe in soleMatchProbes", p)
+			continue
+		}
+		for _, other := range defaultWorkDirExportExcludes {
+			if got := matchExportExclude(t, other, probe); got != (other == p) {
+				t.Errorf("probe %q: match(%q) = %v, want %v", probe, other, got, other == p)
+			}
+		}
+		if rooted, ok := strings.CutPrefix(p, "**/"); ok && matchExportExclude(t, rooted, probe) {
+			t.Errorf("probe %q for %q is not nested, so pinning the pattern to the work-dir root would go unnoticed", probe, p)
+		}
+	}
+	for p := range soleMatchProbes {
+		if !inDefault[p] {
+			t.Errorf("soleMatchProbes names %q, which is not a default pattern", p)
+		}
+	}
+}
+
+// exportKeptRuntimeRoots lists the .gc/ roots citylayout names that sessions
+// read at start, so they ship with the work dir.
+var exportKeptRuntimeRoots = map[string]string{
+	SystemRoot:        "bundled system packs a session's gc loads with city.toml",
+	SystemPacksRoot:   "bundled system packs a session's gc loads with city.toml",
+	CacheRoot:         "fetched pack sources a session's gc loads with city.toml",
+	CachePacksRoot:    "fetched pack sources a session's gc loads with city.toml",
+	CacheIncludesRoot: "fetched include sources a session's gc loads with city.toml",
+}
+
+// TestEveryCitylayoutRuntimeRootIsClassified scans this package's source for
+// every .gc/ path it names, as a constant or as a RuntimePath(...) call with
+// literal segments, and requires each to be excluded from the work-dir export
+// or kept on purpose in exportKeptRuntimeRoots. New orchestrator state added
+// here has to be classified instead of shipping to remote sandboxes silently.
+func TestEveryCitylayoutRuntimeRootIsClassified(t *testing.T) {
+	roots := citylayoutRuntimeRoots(t)
+	for _, want := range []string{".gc/sessions", ".gc/transcripts/acp", ".gc/services", ".gc/cache"} {
+		if !roots[want] {
+			t.Fatalf("source scan found %v, missing %q; the scanner no longer sees citylayout's roots", roots, want)
+		}
+	}
+	for root := range roots {
+		if _, kept := exportKeptRuntimeRoots[root]; kept {
+			if excludedByDefault(t, root+"/x") {
+				t.Errorf("%s is on the keep list but the default excludes drop it", root)
+			}
+			continue
+		}
+		if !excludedByDefault(t, root) {
+			t.Errorf("%s is neither excluded from the work-dir export nor on exportKeptRuntimeRoots", root)
+		}
+	}
+}
+
+func citylayoutRuntimeRoots(t *testing.T) map[string]bool {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var parsed []*ast.File
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		parsed = append(parsed, f)
+	}
+	if len(parsed) == 0 {
+		t.Fatal("no citylayout sources found to scan")
+	}
+	consts := map[string]ast.Expr{}
+	for _, f := range parsed {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, name := range vs.Names {
+					if i < len(vs.Values) {
+						consts[name.Name] = vs.Values[i]
+					}
+				}
+			}
+		}
+	}
+	var eval func(ast.Expr) (string, bool)
+	eval = func(e ast.Expr) (string, bool) {
+		switch v := e.(type) {
+		case *ast.BasicLit:
+			if v.Kind != token.STRING {
+				return "", false
+			}
+			s, err := strconv.Unquote(v.Value)
+			return s, err == nil
+		case *ast.Ident:
+			if c, ok := consts[v.Name]; ok {
+				return eval(c)
+			}
+		case *ast.BinaryExpr:
+			if v.Op == token.ADD {
+				l, lok := eval(v.X)
+				r, rok := eval(v.Y)
+				return l + r, lok && rok
+			}
+		}
+		return "", false
+	}
+	roots := map[string]bool{}
+	for _, c := range consts {
+		if s, ok := eval(c); ok && strings.HasPrefix(s, RuntimeRoot+"/") {
+			roots[s] = true
+		}
+	}
+	for _, f := range parsed {
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fn, ok := call.Fun.(*ast.Ident)
+			if !ok || fn.Name != "RuntimePath" || len(call.Args) < 2 || call.Ellipsis.IsValid() {
+				return true
+			}
+			segs := []string{RuntimeRoot}
+			for _, a := range call.Args[1:] {
+				s, ok := eval(a)
+				if !ok {
+					return true
+				}
+				segs = append(segs, s)
+			}
+			roots[path.Join(segs...)] = true
+			return true
+		})
+	}
+	return roots
+}
+
+func TestWorkDirExportExcludedRejectsBadPattern(t *testing.T) {
+	if _, err := WorkDirExportExcluded([]string{"[unclosed"}, "x"); err == nil {
+		t.Fatal("WorkDirExportExcluded accepted a malformed pattern")
+	}
+}
+
+func TestWorkDirExportEntries(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{
+		".gc/controller.token",
+		".gc/settings.json",
+		".gc/sessions/s-1/start-stderr.log",
+		".beads/doltlite/hq.db",
+		".beads/metadata.json",
+		"src/main.go",
+	} {
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, ".gc"), filepath.Join(dir, "gc-link")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := WorkDirExportEntries(dir)
+	if err != nil {
+		t.Fatalf("WorkDirExportEntries: %v", err)
+	}
+	want := []string{
+		".beads",
+		".beads/metadata.json",
+		".gc",
+		".gc/settings.json",
+		"empty",
+		"gc-link",
+		"src",
+		"src/main.go",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("WorkDirExportEntries =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestWorkDirExportEntriesWithoutRuntimeStateListsEverything(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := WorkDirExportEntries(dir)
+	if err != nil {
+		t.Fatalf("WorkDirExportEntries: %v", err)
+	}
+	if len(got) != 1 || got[0] != "events.jsonl" {
+		t.Fatalf("WorkDirExportEntries = %v, want [events.jsonl]", got)
+	}
+}
+
+func TestWorkDirExportEntriesErrors(t *testing.T) {
+	if _, err := WorkDirExportEntries(""); err == nil {
+		t.Error("empty work dir: want error")
+	}
+	if _, err := WorkDirExportEntries(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing work dir: want error")
+	}
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WorkDirExportEntries(file); err == nil {
+		t.Error("file work dir: want error")
 	}
 }

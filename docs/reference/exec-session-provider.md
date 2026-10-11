@@ -321,16 +321,40 @@ hints or ignore them:
   session (e.g. `kubectl exec -i -- sh < script`). For local providers,
   run directly via `sh -c`. Non-fatal like `session_setup`.
 
+Fields that are **not** included in the JSON (gc-internal, not part of
+the exec protocol):
+
+- `emits_permission_warning` — bypass-permissions dialog handling
+- `fingerprint_extra` — config change detection metadata
+
+`ready_prompt_prefix` and `ready_delay_ms` are sent, but readiness polling
+(via `peek` after `start` returns) and the fixed delay remain the
+*caller's* responsibility; a script may ignore them. Session setup
+commands are the *script's* responsibility — they run on the target
+filesystem, not the orchestrator.
+
 ### Work-dir export exclusions
 
 - **`work_dir_exclude`** — array of patterns, relative to `work_dir`,
   naming orchestrator-local state that must not leave the orchestrator
-  host. gc sends it only when `work_dir` holds a `.gc/` runtime root or a
-  `.beads/` directory, which is the case for a city-scoped agent with no
-  `dir` or `work_dir`, whose work dir is the city root. A script that
-  copies, archives, or syncs `work_dir` into another filesystem (a remote
-  sandbox, a container image) must skip every matching path. A script that
-  runs the agent in place on the orchestrator's filesystem ignores it.
+  host. gc sends it whenever `work_dir` holds a `.gc/` runtime root or a
+  `.beads/` directory: a city-scoped agent with no `dir` or `work_dir`
+  (whose work dir is the city root), a rig root, or a worktree carrying a
+  `.gc/` directory. A script that copies, archives, or syncs `work_dir`
+  into another filesystem (a remote sandbox, a container image) must skip
+  every matching path. A script that runs the agent in place on the
+  orchestrator's filesystem ignores it.
+
+The list is a floor, not the complete set. A script must skip every
+matching path and may skip more. A script that carries its own built-in
+denylist applies the union of that list and `work_dir_exclude`; it never
+replaces its list with gc's, so a gap on either side cannot widen what
+leaves the host.
+
+Rather than implement the grammar below, a script can ask the `gc` binary
+for the entries that survive it: `gc runtime workdir-export --null
+"$WORK_DIR"` prints them NUL-terminated, directories included, for a
+non-recursive consumer such as `tar --null --no-recursion -T -`.
 
 Pattern grammar:
 
@@ -340,18 +364,29 @@ Pattern grammar:
   `*` matches any run of characters except `/`, leading dots included.
 - A path is excluded when it, or any directory above it, matches. A
   trailing `/**` spells out that a whole subtree stays behind.
+- This is not gitignore, rsync, or tar `--exclude` syntax. A pattern with
+  no `/` matches only at the work-dir root, and `.gc/**/*.sock` matches
+  `.gc/controller.sock` because `**` may match zero segments. Translating
+  patterns into another tool's syntax is error-prone; prefer
+  `gc runtime workdir-export`.
 
 The list covers secrets and credentials (`.gc/services/**`,
 `.gc/secrets/**`, `.gc/controller.token`, `.gc/credentials.toml`,
-`.beads/.env`, `.beads/.beads-credential-key`, `.beads/proxy.secret`), the
-event and usage logs, the nudge queue, sockets, locks and pid files,
-relocated class stores, managed Dolt and SQLite ledger data, orchestrator
-runtime state, and other sessions' worktrees. Copying any of it gives the
-session a stale, private fork of state the orchestrator owns. Deployment
-artifacts the session reads at start are never listed: `.gc/settings.json`,
-`.gc/site.toml`, `.gc/cache/`, `.gc/system/`, `.gc/scripts/`, the prompt
-and skill snapshots under `.gc/tmp/`, `.beads/metadata.json`,
-`.beads/config.yaml`, and `.beads/http_target.json`.
+`.gc/mcp-adopted/**`, `.beads/.env`, `.beads/.beads-credential-key`,
+`.beads/proxy.secret`), the event and usage logs, the nudge queue,
+per-session diagnostics under `.gc/sessions/` and ACP transcripts under
+`.gc/transcripts/`, sockets, locks and pid files, relocated class stores,
+every ledger store and copy of one in any scope (`.beads/dolt/`,
+`.beads/doltlite/`, `.beads/embeddeddolt/`, SQLite files, bd backups and
+corrupt-store backups, the file provider's `.gc/beads.json`, the legacy
+JSONL archive), bd server, proxy and sync state, orchestrator runtime
+state, and other sessions' worktrees. Copying any of it gives the session a
+stale, private fork of state the orchestrator owns, or hands it secrets it
+must not hold. Deployment artifacts the session reads at start are never
+listed: `.gc/settings.json`, `.gc/site.toml`, `.gc/cache/` and
+`.gc/system/` (pid and socket files aside), `.gc/scripts/`, the prompt and
+skill snapshots under `.gc/tmp/`, `.beads/metadata.json`,
+`.beads/config.yaml`, `.beads/http_target.json`, and `.beads/redirect`.
 
 `.gc/site.toml` ships because session-side `gc` commands load it with
 `city.toml`: it carries the workspace name and bead prefix as well as rig
@@ -360,19 +395,6 @@ relocates the work dir remaps them as it remaps the `GC_*` path variables.
 
 The field is additive. A script that predates it ignores the unknown key
 and keeps copying the whole work dir.
-
-Fields that are **not** included in the JSON (gc-internal, not part of
-the exec protocol):
-
-- `ready_prompt_prefix` — prompt prefix for readiness detection (gc polls
-  via `peek` after `start` returns)
-- `ready_delay_ms` — fixed delay fallback (gc sleeps after `start` returns)
-- `emits_permission_warning` — bypass-permissions dialog handling
-- `fingerprint_extra` — config change detection metadata
-
-The distinction: readiness polling and delay are the *caller's*
-responsibility. Session setup commands are the *script's* responsibility
-— they run on the target filesystem, not the orchestrator.
 
 ### Conventions
 

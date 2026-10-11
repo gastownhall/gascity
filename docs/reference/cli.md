@@ -3864,8 +3864,10 @@ These commands read and write session metadata to coordinate lifecycle
 events (drain, restart) between agents and the controller. They are
 designed to be called from within running agent sessions, not by humans.
 
-The exception is "gc runtime check", which validates a Runtime Provider
-Protocol executable — run by humans and runtime-pack CIs.
+The exceptions are "gc runtime check" and "gc runtime conformance", which
+validate a Runtime Provider Protocol executable — run by humans and
+runtime-pack CIs — and "gc runtime workdir-export", which runtime packs call
+to list the work-dir entries they may copy off the orchestrator host.
 
 ```
 gc runtime
@@ -3881,6 +3883,7 @@ gc runtime
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (returns immediately) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
+| [gc runtime workdir-export](#gc-runtime-workdir-export) | List the work-dir entries a runtime may copy off the orchestrator host |
 
 ## gc runtime check
 
@@ -4064,6 +4067,34 @@ gc runtime undrain <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+
+## gc runtime workdir-export
+
+List the entries of a session work dir that a runtime may copy into another
+filesystem (a remote sandbox, a container image).
+
+Orchestrator-local state named by the work_dir_exclude start-config field
+(secrets, the event log, the nudge queue, ledger stores, sockets, other
+sessions' worktrees) is left out; an excluded directory is pruned with
+everything below it. Paths are relative to &lt;work_dir&gt;, slash-separated, in
+lexical order, one per line (NUL-terminated with --null).
+
+Directories are listed as well as their contents so empty directories
+survive, and symlinks are listed, never followed. Feed the list to a tool
+without recursion, for example:
+
+  gc runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+
+The protocol contract is docs/reference/exec-session-provider.md.
+
+```
+gc runtime workdir-export <work_dir> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-0`, `--null` | bool |  | terminate entries with NUL instead of newline |
 
 ## gc service
 
