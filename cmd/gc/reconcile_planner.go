@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -230,6 +231,21 @@ func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalled
 		out[id] = r
 	}
 	return out
+}
+
+// aliasOwedFor forgets the owed runtime-alias syncs of rows a complete c
+// holds closed, and returns the pass's copy.
+func (p *planner) aliasOwedFor(c *sessionCensus) map[rowKey]bool {
+	if len(p.aliasOwed) == 0 {
+		return nil
+	}
+	complete, ok := c.complete()
+	for k := range p.aliasOwed {
+		if ok && complete.Closed(k) {
+			delete(p.aliasOwed, k)
+		}
+	}
+	return maps.Clone(p.aliasOwed)
 }
 
 // pauseStarts and resumeStarts bracket a provider swap; the pass reads

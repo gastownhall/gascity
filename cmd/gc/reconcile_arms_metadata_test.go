@@ -184,3 +184,26 @@ func TestRowMetadataDefersAfterItsPersistentRefusal(t *testing.T) {
 		}
 	}
 }
+
+// Kills the census retry trigger reading other legs (the C7d-1 review's
+// G05): the live check reads the sessions store alone, so a row on a rig
+// leg carrying the alias does not hold it; one on the row's own leg does.
+func TestAliasTakenReadsTheRowsLeg(t *testing.T) {
+	cfg := identityCity()
+	holder := sessionRow("gc-9", "template", "worker", "state", "asleep", "session_name", "s-gc-9", "alias", "lead")
+	for _, tc := range []struct {
+		name  string
+		legs  []classStoreCandidate
+		taken bool
+	}{
+		{"on the row's leg", censusLegs(rowLeg, censusStore(holder)), true},
+		{"on another leg", censusLegs(rowLeg, censusStore(), "rig-a", censusStore(holder)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &World{Census: readCensus(t, gatherNow, tc.legs), Env: &reconcileEnv{Cfg: cfg}}
+			if got := w.aliasTaken(rowKey{Leg: rowLeg, ID: "gc-1"}, rowIdentity{Alias: "lead"}, session.Info{ID: "gc-1"}); got != tc.taken {
+				t.Fatalf("aliasTaken = %v, want %v", got, tc.taken)
+			}
+		})
+	}
+}

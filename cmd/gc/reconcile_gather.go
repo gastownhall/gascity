@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -148,7 +147,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view(), AliasOwed: maps.Clone(p.aliasOwed)}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()
@@ -174,6 +173,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.AliasOwed = p.aliasOwedFor(w.Census)
 	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
