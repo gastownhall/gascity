@@ -590,6 +590,12 @@ type InventoryEntry struct {
 	// tmux the count includes gc's own hidden attach client, so a session gc
 	// is briefly attached to reads attached.
 	AttachedKnown, Attached bool
+	// ActivityKnown and LastActivity report the session's last I/O activity
+	// as [Provider.GetLastActivity] reads it (on tmux the latest
+	// #{window_activity} over its panes, less a gc poke), read in the same
+	// batch. LastActivity is meaningless unless ActivityKnown.
+	ActivityKnown bool
+	LastActivity  time.Time
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec

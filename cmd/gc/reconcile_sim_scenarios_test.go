@@ -672,8 +672,8 @@ func TestSimR43IdentityBeforeRebaseline(t *testing.T) {
 // Kills a rollback that stops a foreign occupant outside C8.2(a), and an I4
 // that flags the stop C8.2(a) admits (the C5a2 review): a pending create
 // whose bead-scoped name another row's runtime holds is rolled back, the
-// occupant stopped by name, with no violation; the same occupant under a
-// configured named row's name is never stopped.
+// occupant stopped by name, with no violation. (A Foreign runtime under any
+// other name is rolled back without a stop: TestRollbackRuntime.)
 func TestSimRollbackStopsABeadScopedNameOnly(t *testing.T) {
 	run := func(t *testing.T, row beads.Bead) *sim {
 		t.Helper()

@@ -170,7 +170,8 @@ func (p *simProvider) RuntimeInventory(context.Context) (map[string]runtime.Inve
 	out := make(map[string]runtime.InventoryEntry, len(p.rts))
 	for name, rt := range p.rts {
 		inc := fmt.Sprintf("$%d:%d:%d", rt.object, rt.created, rt.object+1000)
-		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached}
+		at := p.Activity[name] // the embedded fake's, as tmux's batched read carries it
+		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at}
 	}
 	return out, nil
 }

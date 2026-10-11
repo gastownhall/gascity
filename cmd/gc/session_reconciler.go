@@ -909,7 +909,13 @@ func finalizeDrainAckStoppedSession(
 	}
 	evidence := sw // the read the assigned-work event names its bead from
 	// A row an operator holds keeps its seat: never closed as drained.
-	if closeIfUnassigned && !hasAssignedWork && sessionpkg.HoldsInfo(info, clk.Now()).In&sessionpkg.HoldUser == 0 {
+	facts := finalizeFacts{
+		Now: clk.Now().UTC(), CloseIfUnassigned: closeIfUnassigned, HasWork: hasAssignedWork,
+		OperatorHeld: sessionpkg.HoldsInfo(info, clk.Now()).In&sessionpkg.HoldUser != 0,
+		FreshWake:    info.WakeMode == "fresh", RestartRequested: info.RestartRequested == "true",
+	}
+	choice := finalizePatch(facts)
+	if choice.CloseSeat {
 		if closeSessionBeadIfReachableStoreUnassigned(store, sw, info, "drained", clk.Now().UTC(), stderr, true) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
@@ -960,29 +966,22 @@ func finalizeDrainAckStoppedSession(
 		}
 		if assignedAfterCloseGate {
 			hasAssignedWork = true
+			facts.HasWork = true
+			choice = finalizePatch(facts)
 		}
 	}
-	batch := sessionpkg.AcknowledgeDrainPatch(clk.Now().UTC(), info.WakeMode == "fresh")
-	if hasAssignedWork {
-		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), string(sessionpkg.SleepReasonIdle), info.WakeMode == "fresh")
-	}
-	// A drain-ack that completes a restart-request cycle (gc session reset →
-	// agent drain-ack) must also consume restart_requested. The drain-ack
-	// branch handles the stop and continues before the restart-requested
-	// branch runs, so nothing else clears the flag; if it survives in the
-	// store, a later cache-reconcile re-emission resurrects it and the
-	// controller honors it as a fresh restart request — a phantom second
-	// restart that rotates session_key and destroys resume continuity (#2574).
-	if info.RestartRequested == "true" {
-		batch["restart_requested"] = ""
-	}
+	// finalizePatch clears restart_requested: a drain-ack that completes a
+	// restart-request cycle (gc session reset → agent drain-ack) must
+	// consume it, or a later cache-reconcile re-emission resurrects it as a
+	// phantom second restart that rotates session_key (#2574).
+	batch := choice.Patch
 	// Decided from the tick's snapshot, so written on a fresh read. A drain
 	// that keeps assigned work completes as a sleep: the disposition's Sleep
 	// cell (ApplySleep). A bare drain-ack is no disposition move, so an idle
 	// stop's intent stays for the next pass's idle sleep
 	// (recoverPendingIdleSleepInfo): ApplyLifecycle.
 	write := sessionFrontDoor(store).ApplyLifecycle
-	if hasAssignedWork {
+	if choice.AsSleep {
 		write = sessionFrontDoor(store).ApplySleep
 	}
 	written, err := write(info.ID, batch)

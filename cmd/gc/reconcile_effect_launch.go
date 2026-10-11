@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
@@ -211,7 +210,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch)}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch, len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
 }
@@ -220,15 +219,16 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 // patch wrote on v's row: the row as the part of its patch the start keeps
 // left it (intent.Kept: the heal it carries, as legacy's restore finds the
 // row its tick healed first; a stranded seat's death accrual alone, which
-// keeps it committed). A continuation reset the PreWake consumed stays
-// pending, so the next start rotates the continuation again.
-func preWakeUndoOf(v txView, patch session.MetadataPatch) preWakeUndo {
+// keeps it committed). A stale key's reset the PreWake consumed (staleKey)
+// stays pending, so the next start rotates the continuation again; any other
+// epoch bump is restored as legacy restores it.
+func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWakeUndo {
 	row, meta := v.Row, v.Meta
 	if len(v.It.Kept) > 0 {
 		row, meta = foldInfo(row, v.It.Kept), v.It.Kept.Apply(meta)
 	}
 	u := newPreWakeUndo(row, meta, patch)
-	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && (meta["continuation_reset_pending"] == "true" || patch["continuation_epoch"] != meta["continuation_epoch"]) {
+	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && staleKey {
 		u.restore["continuation_reset_pending"] = "true"
 	}
 	return u
@@ -350,13 +350,20 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 // cleanupFailedStart), so a start such a shutdown canceled mid-launch would
 // kill its own runtime and the next boot would relaunch it under a new token
 // instead of adopting it (§12.2 #4, START-024; staging J35 A/B). The lease
-// watch, taken on the result, still ends the start on a lost lease. Its
-// caller bounds the Start by the effect's deadline; the executor's closed
-// write latch keeps a start that finishes during shutdown from writing.
-// release stops the relay.
+// watch, taken on the result, still ends the start on a lost lease, and
+// the effect's deadline, armed on the result, ends it on time. The
+// executor's closed write latch keeps a start that finishes during shutdown
+// from writing. release stops the relay and the deadline.
 func outlivesShutdown(ctx context.Context) (context.Context, func()) {
 	g := &startGate{parent: ctx}
-	detached, cancel := context.WithCancelCause(context.WithValue(parentDeadline{context.WithoutCancel(ctx), ctx}, startGateKey{}, g))
+	// The effect's deadline is armed again on the detached context, so it
+	// holds after the relay has spent itself on a preserve-sessions shutdown.
+	base := context.WithoutCancel(ctx)
+	var stopDeadline context.CancelFunc = func() {}
+	if d, ok := ctx.Deadline(); ok {
+		base, stopDeadline = context.WithDeadline(base, d)
+	}
+	detached, cancel := context.WithCancelCause(context.WithValue(base, startGateKey{}, g))
 	g.cancel = cancel
 	unrelay := context.AfterFunc(ctx, func() {
 		g.mu.Lock()
@@ -365,17 +372,8 @@ func outlivesShutdown(ctx context.Context) (context.Context, func()) {
 			cancel(cause)
 		}
 	})
-	return detached, func() { unrelay(); cancel(context.Canceled) }
+	return detached, func() { unrelay(); cancel(context.Canceled); stopDeadline() }
 }
-
-// parentDeadline reports its parent's deadline, which the relay enforces,
-// so a lease watch taken on it never outlives the effect (Watch).
-type parentDeadline struct {
-	context.Context
-	parent context.Context
-}
-
-func (d parentDeadline) Deadline() (time.Time, bool) { return d.parent.Deadline() }
 
 // startGate is outlivesShutdown's record of whether the Start began.
 type startGate struct {
