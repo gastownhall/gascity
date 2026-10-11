@@ -744,7 +744,7 @@ func TestDrainAckReleaseBudgetLogTextIsUnchanged(t *testing.T) {
 	work := beads.NewMemStore()
 	var stderr bytes.Buffer
 
-	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), -time.Second, &stderr)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", servingCity("worker"), work, nil), drainAckSessionBead(), -time.Second, &stderr)
 
 	want := "session beads: held-claim release for draining session sess-1 ran out of its -1s budget; remaining legs are left to the dead-assignee sweep\n"
 	if stderr.String() != want {
@@ -756,16 +756,18 @@ func TestDrainAckReleaseBudgetLogTextIsUnchanged(t *testing.T) {
 // whatever routing it carried (none here), unlike the killed seat's release.
 func TestDrainAckReleaseStampsNoFallbackRoute(t *testing.T) {
 	work := beads.NewMemStore()
-	held := mustCreateDrainAckBead(t, work, beads.Bead{Title: "unrouted claim", Type: "task"}, "in_progress", "worker-1")
+	held := mustCreateDrainAckBead(t, work, beads.Bead{Title: "claim with no route", Type: "task"}, "in_progress", "worker-1")
 
-	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, work, nil), drainAckSessionBead(), time.Minute, io.Discard)
+	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", servingCity("worker"), work, nil), drainAckSessionBead(), time.Minute, io.Discard)
 
 	got, err := work.Get(held.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Assignee != "" || got.Metadata[beadmeta.RunTargetMetadataKey] != "" {
-		t.Fatalf("drain-ack release: assignee=%q %s=%q, want released with no route stamped", got.Assignee, beadmeta.RunTargetMetadataKey, got.Metadata[beadmeta.RunTargetMetadataKey])
+	// With no route of its own and none stamped, no lane would serve it: it
+	// stays assigned (work_release.go) rather than taking the seat's route.
+	if got.Assignee != "worker-1" || got.Metadata[beadmeta.RunTargetMetadataKey] != "" {
+		t.Fatalf("drain-ack release: assignee=%q %s=%q, want kept with no route stamped", got.Assignee, beadmeta.RunTargetMetadataKey, got.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 }
 
@@ -893,8 +895,8 @@ func TestDrainAckReleaseKeepsItsIdentitySet(t *testing.T) {
 	if alias := stableAssignmentAliasForConfig(sessionBead, cfg); alias != "ada" {
 		t.Fatalf("fixture alias = %q, want the stable namepool alias ada", alias)
 	}
-	underName := mustCreateDrainAckBead(t, work, beads.Bead{Title: "held under session_name", Type: "task"}, "in_progress", "worker-1")
-	underAlias := mustCreateDrainAckBead(t, work, beads.Bead{Title: "held under alias", Type: "task"}, "in_progress", "ada")
+	underName := mustCreateDrainAckBead(t, work, beads.Bead{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}, Title: "held under session_name", Type: "task"}, "in_progress", "worker-1")
+	underAlias := mustCreateDrainAckBead(t, work, beads.Bead{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}, Title: "held under alias", Type: "task"}, "in_progress", "ada")
 
 	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", cfg, work, nil), sessionBead, time.Minute, io.Discard)
 

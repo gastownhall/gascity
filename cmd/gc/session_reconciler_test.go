@@ -2801,6 +2801,7 @@ func TestReconcileSessionBeads_DrainAckZombieOpenSiblingEmitsEvent(t *testing.T)
 // onto the same still-open step every ~20s.
 func TestReconcileSessionBeads_DrainAckOwnDrainStepClosesWithoutEvent(t *testing.T) {
 	env := newReconcilerTestEnv(t)
+	env.cfg = servingCity("worker") // the lane the released drain step falls back to
 	fake := events.NewFake()
 	env.rec = fake
 

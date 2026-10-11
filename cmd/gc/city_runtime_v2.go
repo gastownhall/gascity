@@ -119,6 +119,7 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 		safeTick: cr.safeTick,
 		rec:      cr.rec,
 		stderr:   cr.stderr,
+		stranded: cr.strandedClaimAlerter(),
 	}
 }
 

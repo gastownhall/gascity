@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"io"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -29,6 +31,27 @@ func testWorkLegs(cityPath string, cfg *config.City, store beads.Store, rigs map
 func workLegsPlan(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store) (storeref.ResolvedPlan, error) {
 	l := workLegsFromCensus(cityPath, cfg, cityWorkLeg{store: work}, rigs)
 	return l.plan, l.unusable()
+}
+
+// servingCity is a city whose configured agents serve routes: a claim
+// routed to one of them is released, any other is kept (work_release.go).
+func servingCity(routes ...string) *config.City {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	for _, r := range routes {
+		a := config.Agent{Name: r, StartCommand: "true"}
+		if dir, name, ok := strings.Cut(r, "/"); ok {
+			a.Dir, a.Name = dir, name
+		}
+		cfg.Agents = append(cfg.Agents, a)
+	}
+	return cfg
+}
+
+// servingRigsCity is a copy of cfg with agents serving routes added.
+func servingRigsCity(cfg *config.City, routes ...string) *config.City {
+	c := *cfg
+	c.Agents = append(slices.Clone(cfg.Agents), servingCity(routes...).Agents...)
+	return &c
 }
 
 // testSeatWork is a tick's SeatWork over testWorkLegs.

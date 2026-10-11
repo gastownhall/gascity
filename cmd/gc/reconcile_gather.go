@@ -314,6 +314,7 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	}
 	if e.WorkStore != nil {
 		k1.WorkStore = e.WorkStore()
+		k1.WorkLegs = workLegsFromCensus(e.CityPath, env.Cfg, cityWorkLegOf(beads.WorkStore{Store: k1.WorkStore}), rigs)
 	}
 	return k1, nil
 }

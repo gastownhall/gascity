@@ -10,6 +10,9 @@
 //     wraps) outside that file;
 //   - a reference to a mint function (a call, a function value, an alias)
 //     outside its reviewed sites, and a reviewed site that no longer mints;
+//   - the same for a release primitive (a function or method that clears a
+//     work claim's assignee): only ReleaseClaims' body and the primitives'
+//     own layering may name one;
 //   - a beads.WorkStore built from a beads.SessionStore, by literal or
 //     conversion;
 //   - a type, other than the two polarity scopes, that implements the scope
@@ -37,6 +40,7 @@ type Config struct {
 	Guarded      []string                     // type names whose fields only DefiningFile sets
 	GuardedReads map[string][]string          // type name → fields only DefiningFile reads
 	Mints        map[string]map[string]string // mint function → site ("Func" or "Recv.Method") → why its store is the work store
+	Releases     map[string]map[string]string // release primitive ("Func" or "Recv.Method") → site → why it may release
 	Scope        string                       // the scope interface
 	ScopeImpls   []string                     // the only types that may implement it
 	WorkStore    string                       // "importpath.Name" of the work-class handle
@@ -85,10 +89,18 @@ func run(pass *analysis.Pass, cfg Config) error {
 			}
 		}
 	}
-	mints := map[types.Object]string{}
-	for name := range cfg.Mints {
-		if obj := scope.Lookup(name); obj != nil {
-			mints[obj] = name
+	// sited are the mint functions and release primitives: each may be named
+	// only at its reviewed sites.
+	type sitedFunc struct {
+		name, kind string
+		sites      map[string]string
+	}
+	sited := map[types.Object]sitedFunc{}
+	for kind, table := range map[string]map[string]map[string]string{"mint": cfg.Mints, "release": cfg.Releases} {
+		for name, sites := range table {
+			if obj := lookupFunc(pass.Pkg, name); obj != nil {
+				sited[obj] = sitedFunc{name: name, kind: kind, sites: sites}
+			}
 		}
 	}
 	isGuarded := func(t types.Type) bool {
@@ -200,15 +212,15 @@ func run(pass *analysis.Pass, cfg Config) error {
 					fieldWrite(v.X)
 				}
 			case *ast.Ident:
-				mint, ok := mints[pass.TypesInfo.Uses[v]]
+				f, ok := sited[pass.TypesInfo.Uses[v]]
 				if !ok {
 					break
 				}
 				site := enclosing(stack)
-				if _, ok := cfg.Mints[mint][site]; !ok {
-					pass.Reportf(v.Pos(), "%s referenced in %s, which is not a reviewed mint site", mint, orPackageLevel(site))
+				if _, ok := f.sites[site]; !ok {
+					pass.Reportf(v.Pos(), "%s referenced in %s, which is not a reviewed %s site", f.name, orPackageLevel(site), f.kind)
 				} else {
-					used[mint+"\x00"+site] = true
+					used[f.name+"\x00"+site] = true
 				}
 			}
 			return true
@@ -218,16 +230,16 @@ func run(pass *analysis.Pass, cfg Config) error {
 		return nil // a test-only pass
 	}
 	var stale []string
-	for mint, sites := range cfg.Mints {
-		for site := range sites {
-			if !used[mint+"\x00"+site] {
-				stale = append(stale, site+" ("+mint+")")
+	for _, f := range sited {
+		for site := range f.sites {
+			if !used[f.name+"\x00"+site] {
+				stale = append(stale, f.kind+" site "+site+" ("+f.name+")")
 			}
 		}
 	}
 	sort.Strings(stale)
 	for _, s := range stale {
-		pass.Reportf(source.Package, "reviewed mint site %s mints nothing: drop it", s)
+		pass.Reportf(source.Package, "reviewed %s names nothing: drop it", s)
 	}
 	checkScope(pass, cfg)
 	return nil
@@ -267,6 +279,20 @@ func checkScope(pass *analysis.Pass, cfg Config) {
 			pass.Reportf(id.Pos(), "%s implements %s: only %s may", tn.Name(), cfg.Scope, strings.Join(cfg.ScopeImpls, " and "))
 		}
 	}
+}
+
+// lookupFunc is pkg's function name, or its method "Recv.Method".
+func lookupFunc(pkg *types.Package, name string) types.Object {
+	recv, method, isMethod := strings.Cut(name, ".")
+	if !isMethod {
+		return pkg.Scope().Lookup(name)
+	}
+	tn, ok := pkg.Scope().Lookup(recv).(*types.TypeName)
+	if !ok {
+		return nil
+	}
+	obj, _, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, method)
+	return obj
 }
 
 // enclosing is the innermost function declaration on stack, "Func" or

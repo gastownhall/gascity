@@ -129,4 +129,5 @@ func (l *externalReadsLane) orphanRelease(_ context.Context, env externalReadsEn
 		fmt.Fprintf(l.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck // best-effort stderr
 	}
 	emitDeadAssigneeReopenedEvents(l.events, s.AssignedWork, released, l.now())
+	detectStrandedClaims(env.WorkLegs, env.CityStore, s.OpenSessions, l.stranded, l.now())
 }

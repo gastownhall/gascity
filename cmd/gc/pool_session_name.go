@@ -8,6 +8,7 @@ import (
 	"log"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -365,14 +366,10 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
-		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		// The verb's route guard is the one this sweep's pre-filter lacks:
+		// an expanded workflow root's run_target is no lane (NEW-5).
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
+			logDeadAssigneeKeep(wb.ID, assignee, out.Why[wb.ID])
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -385,6 +382,23 @@ func releaseOrphanedPoolAssignments(
 		})
 	}
 	return released
+}
+
+// deadAssigneeKeeps is the last logged keep reason by bead, so a claim the
+// sweep keeps every tick (a detached probe alive, an unserved route) logs
+// once per reason, not per tick.
+var deadAssigneeKeeps sync.Map
+
+// logDeadAssigneeKeep logs why the dead-assignee sweep kept id, when the
+// reason changed since the last log.
+func logDeadAssigneeKeep(id, assignee, why string) {
+	if why == "" {
+		return
+	}
+	if last, ok := deadAssigneeKeeps.Swap(id, why); ok && last == why {
+		return
+	}
+	log.Printf("releaseOrphanedPoolAssignments: kept %q of dead assignee %q: %s", id, assignee, why)
 }
 
 // releaseConfirmedOrphanSessionWork releases the pool-routed work still held by
@@ -442,23 +456,9 @@ func releaseConfirmedOrphanSessionWork(
 	}
 
 	var released []releasedPoolAssignment
+	seat := releaseSeatOfInfo(info)
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		if _, ok := identifiers[assignee]; !ok {
-			continue
-		}
-		template := routedToOrLegacyWorkflowTarget(wb)
-		if template == "" {
-			continue
-		}
-		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+		if _, ok := identifiers[strings.TrimSpace(wb.Assignee)]; !ok {
 			continue
 		}
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
@@ -468,17 +468,9 @@ func releaseConfirmedOrphanSessionWork(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, seat, cfg, ReleaseOpts{}); len(out.Released) > 0 {
+			released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
-			continue
-		}
-		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
 }

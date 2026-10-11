@@ -1833,7 +1833,14 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		var cfgErr error
+		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		if cfg == nil {
+			// Without the config no claim's route can be judged, so the close
+			// could release none of them: refuse rather than strand them all.
+			fmt.Fprintf(stderr, "gc session close: city config did not load (%v); refusing to close: its claims could not be released\n", cfgErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
@@ -1895,8 +1902,14 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// The session bead lives in the sessions-class store (sessStore), which on a
 	// split city is not the work store the sweep leads with; the claim
 	// back-channel must be cleared where the session bead actually is.
+	// A routeless claim takes the seat's own route, as every controller-side
+	// retirement gives it; a claim no lane serves stays on the closed row and
+	// raises session.stranded_claims, which the controller's detector repeats.
 	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
-	unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, "", stderr)
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	if cityErr == nil {
+		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
+	}
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
