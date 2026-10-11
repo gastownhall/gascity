@@ -149,7 +149,7 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    shard_count = 6,
+    shard_count = 10,
     deps = [
         "//internal/bazeltest",
         "//internal/config",
