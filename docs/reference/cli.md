@@ -1141,6 +1141,15 @@ Scan open convoys and auto-close any where all child issues are resolved.
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
+The check skips a suspended rig's store, naming the rig on stderr, and
+checks its convoys once the rig resumes. A store it cannot open or list,
+or a convoy it cannot read or close, is named on stderr and the check
+goes on with the rest, then exits 1. The exception is a city whose
+convoys moved to a class binding: if the binding cannot be read, the
+check closes nothing and exits 1. A convoy that changed or disappeared
+after the check listed it is left for the next run and does not fail
+the check.
+
 ```
 gc convoy check [flags]
 ```

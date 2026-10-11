@@ -141,6 +141,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other agent-to-client request, such as `fs/read_text_file`, now gets
   JSON-RPC `-32601` instead of hanging the turn (#6598).
 
+- **The core pack now runs `gc convoy check` every hour.** The new
+  `convoy-autoclose-backstop` order closes any open convoy whose members are
+  all closed and that is not labeled `owned`, catching closes the controller
+  never acted on (made while it was down, before its autoclose sweep
+  shipped, or in a store it does not cache). Its first run in an existing
+  city can close many old convoys at once, each with a `convoy.closed`
+  event. Label a convoy `owned` to keep it open, or turn the order off with
+  `[orders] skip = ["convoy-autoclose-backstop"]` or an
+  `[[orders.overrides]]` entry for it with `enabled = false`; the same
+  entry's `interval` and `timeout` retune it (keep the timeout shorter than
+  the interval). `gc convoy check` itself now skips suspended rigs (naming
+  them on stderr), re-reads each convoy before closing it, goes on past a
+  store it cannot open or list and a convoy it cannot read or close, and
+  exits 1 when any convoy or store went unchecked; a convoy that changed or
+  disappeared after the list is left for the next run and does not fail the
+  check. Before, it stopped at the first error and skipped a store it could
+  not open without saying so (#6614).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's

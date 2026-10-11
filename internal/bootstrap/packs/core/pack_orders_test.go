@@ -388,7 +388,8 @@ func TestCoreEscalationScriptContract(t *testing.T) {
 
 // TestConvoyAutocloseBackstopOrder pins the shape of the bundled backstop
 // order: a city-scoped, idempotent cooldown exec of `gc convoy check`, so the
-// scan runs once per city rather than once per importing rig.
+// scan runs once per city rather than once per importing rig, with a timeout
+// a full walk fits in and an interval longer than that timeout.
 func TestConvoyAutocloseBackstopOrder(t *testing.T) {
 	const file = "convoy-autoclose-backstop.toml"
 	o := readOrder(t, file)
@@ -415,5 +416,21 @@ func TestConvoyAutocloseBackstopOrder(t *testing.T) {
 	}
 	if !o.Idempotent {
 		t.Error("idempotent = false, want true")
+	}
+	// A full walk outlasts the 300s exec default, and the interval must stay
+	// longer than the timeout: the cooldown counts from when a run starts, and
+	// an idempotent order dispatches past a timed-out single-flight gate.
+	if o.Interval != "1h" {
+		t.Errorf("interval = %q, want %q", o.Interval, "1h")
+	}
+	if o.Timeout != "30m" {
+		t.Errorf("timeout = %q, want %q", o.Timeout, "30m")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatalf("interval %q is not a valid duration: %v", o.Interval, err)
+	}
+	if timeout := o.TimeoutOrDefault(); timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s, so a run still going could overlap the next", timeout, interval)
 	}
 }
