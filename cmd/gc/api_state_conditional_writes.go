@@ -55,6 +55,11 @@ func (cs *controllerState) ConditionalWritesStatus() *api.StatusConditionalWrite
 		stores["rig/"+name] = store
 	}
 	cs.mu.RUnlock()
+	// The relocated classes' binding engine is written once at construction
+	// and read without the lock, as preflightConditionalWrites reads it.
+	for _, store := range cs.storageRoutes.distinctEngines() {
+		stores["binding/"+cs.storageRoutes.binding] = store
+	}
 
 	incapable := false
 	ids := make([]string, 0, len(stores))
