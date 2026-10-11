@@ -95,7 +95,7 @@ func TestCopyDirForProvider_MissingSrcDir(t *testing.T) {
 	dst := t.TempDir()
 
 	// Missing source should be a no-op.
-	if err := CopyDirForProvider("/nonexistent", dst, "claude", io.Discard); err != nil {
+	if err := CopyDirForProvider(filepath.Join(t.TempDir(), "nonexistent"), dst, "claude", io.Discard); err != nil {
 		t.Fatalf("expected no-op for missing src, got: %v", err)
 	}
 }

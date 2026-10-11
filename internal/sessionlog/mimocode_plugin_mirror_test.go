@@ -67,7 +67,13 @@ func TestMimoCodePluginMirrorsTranscriptByDefault(t *testing.T) {
 		t.Fatalf("read embedded MiMo Code plugin: %v", err)
 	}
 
+	ambientHome := os.Getenv("HOME")
 	home := t.TempDir()
+	if ambientHome != "" {
+		if _, err := os.Stat(filepath.Join(ambientHome, ".nvm")); err == nil {
+			_ = os.Symlink(filepath.Join(ambientHome, ".nvm"), filepath.Join(home, ".nvm"))
+		}
+	}
 	t.Setenv("HOME", home)
 	workDir := filepath.Join(home, "project")
 	if err := os.MkdirAll(workDir, 0o755); err != nil {

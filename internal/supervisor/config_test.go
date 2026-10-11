@@ -10,7 +10,7 @@ import (
 )
 
 func TestLoadConfigMissing(t *testing.T) {
-	cfg, err := LoadConfig("/nonexistent/supervisor.toml")
+	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "nonexistent", "supervisor.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
