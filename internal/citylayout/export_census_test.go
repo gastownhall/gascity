@@ -50,8 +50,9 @@ var gcEntryInLiteral = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.-])(\.gc/([A-Za-z0-
 // string literal, as consecutive ".gc" (or RuntimeRoot) and "<name>"
 // arguments to a call such as filepath.Join, or as RuntimePath(root,
 // "<name>", ...). Each entry must be excluded from the work-dir export or kept
-// on purpose in exportKeptRepoRuntimeEntries, so orchestrator state added
-// anywhere in the module cannot ship to remote sandboxes silently.
+// on purpose in exportKeptRepoRuntimeEntries. The guard covers every
+// top-level .gc/ entry the module's Go source names; it cannot see a path
+// that config places, such as a relocated SQLite binding root.
 func TestEveryRepoRuntimeEntryIsClassified(t *testing.T) {
 	entries := repoRuntimeEntries(t)
 	for _, want := range []string{"agents", "scope-ownership.json", "dispatch-wake", "events.jsonl", "sessions"} {

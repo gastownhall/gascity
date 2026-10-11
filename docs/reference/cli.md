@@ -4085,14 +4085,29 @@ that recurses into listed entries still copies nothing excluded. Symlinks
 are listed, never followed; copy them as links.
 
 Scripts must use --null, which terminates entries with NUL. The default
-newline-terminated output is for reading: it fails, printing nothing, when an
-entry contains a newline or carriage return or starts with "-", because a
-line-based consumer would misread it. Run the gc that produced the start
-config (its env.GC_BIN) and check its exit status, for example:
+newline-terminated output is for humans only: no byte filter makes it safe
+for a consumer that splits on blanks or quotes, such as xargs. As a backstop
+it fails, printing nothing, when an entry contains a newline, a carriage
+return, or a backslash (GNU tar -T reads "\057" as "/"), or starts with "-".
+Run the gc that produced the start config (its env.GC_BIN) and check its
+exit status, for example:
 
   set -o pipefail
   "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
     tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+
+GNU tar reads a --null list verbatim only from 1.30; bsdtar always does.
+Older GNU tar unquotes backslash escapes even with --null, so a crafted
+file name can make it archive .gc/controller.token or a file above the
+work dir. Where GNU tar may predate 1.30, use the form below: 1.29 reads
+the list verbatim with it, and older releases reject its options, which
+fails the pipeline. bsdtar rejects those options, so keep the form above
+there.
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
 
 The protocol contract is docs/reference/exec-session-provider.md.
 

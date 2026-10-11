@@ -8,9 +8,6 @@ import (
 	"strings"
 )
 
-// BeadsRoot is the per-scope beads directory (city root or rig root).
-const BeadsRoot = ".beads"
-
 // defaultWorkDirExportExcludes lists orchestrator-local state that a runtime
 // must not copy out of a session's work dir. Deployment artifacts sessions
 // read at start (.gc/settings.json, .gc/site.toml, .gc/cache, .gc/system,
@@ -38,7 +35,8 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/credentials.json",
 	".gc/mcp-adopted/**",
 
-	// Sockets, pid files, and locks.
+	// Sockets, pid files, and locks. Lock files are matched only directly
+	// under .gc/, because pack sources under .gc/cache ship their packs.lock.
 	".gc/**/*.sock",
 	".gc/**/*.pid",
 	".gc/*.lock",
@@ -68,6 +66,12 @@ var defaultWorkDirExportExcludes = []string{
 	"**/.gc/beads.json.bak",
 	".gc/jsonl-archive/**",
 	".gc/jsonl-export-state.json",
+
+	// SQLite ledger stores, matched by file name (WAL and SHM included)
+	// wherever they sit: the legacy .gc/beads.sqlite, copies of a store, and
+	// a binding root config places inside the work dir. The list cannot see
+	// where a binding root is, only what its store file is called.
+	"**/beads.sqlite*",
 
 	// bd stores, backups, and copies of them, in every scope.
 	"**/.beads/dolt/**",

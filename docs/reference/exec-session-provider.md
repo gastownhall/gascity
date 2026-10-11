@@ -364,9 +364,25 @@ set -o pipefail
 - Check its exit status (`set -o pipefail` in a pipeline). On failure it
   prints nothing to stdout, and an unchecked pipeline archives an empty work
   dir.
-- Use `--null`. The default newline-terminated output is for reading: it
-  refuses, printing nothing, any entry that contains a newline or carriage
-  return or starts with `-`, because a line-based consumer would misread it.
+- Use `--null`. The default newline-terminated output is for humans only:
+  no byte filter makes it safe for a consumer that splits on blanks or
+  quotes, such as `xargs`. As a backstop it refuses, printing nothing, any
+  entry that contains a newline, a carriage return, or a backslash (GNU
+  `tar -T` reads `\057` as `/`), or that starts with `-`.
+- GNU tar reads a `--null` list verbatim only from 1.30; bsdtar always
+  does. Older GNU tar unquotes backslash escapes even with `--null`, so a
+  crafted file name can make it archive `.gc/controller.token` or a file
+  above the work dir. Where GNU tar may predate 1.30, use the form below:
+  1.29 reads the list verbatim with it, and older releases reject its
+  options, which fails the pipeline. bsdtar rejects those options, so keep
+  the form above there.
+
+  ```sh
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+    tar -C "$WORK_DIR" --null --verbatim-files-from --no-unquote \
+      --no-recursion -T - -czf -
+  ```
 - The output lists every surviving file and symlink, plus every surviving
   directory that is empty on disk. A non-empty directory is never listed, so
   a consumer that recurses into listed entries still copies nothing
@@ -399,20 +415,33 @@ The list covers secrets and credentials (`.gc/services/**`,
 `.gc/credentials.json`, `.gc/mcp-adopted/**`, `.beads/.env`, `.beads/.beads-credential-key`,
 `.beads/proxy.secret`), the event and usage logs, the nudge queue,
 per-session diagnostics under `.gc/sessions/` and ACP transcripts under
-`.gc/transcripts/`, sockets, locks and pid files, relocated class stores,
-every ledger store and copy of one in any scope (`.beads/dolt/`,
-`.beads/doltlite/`, `.beads/embeddeddolt/`, SQLite files, bd backups and
-corrupt-store backups, the file provider's `.gc/beads.json` and its
-`.bak`, the legacy JSONL archive), bd server, proxy and sync state, the
-provider-lifecycle journal `.gc/scope-ownership.json`, orchestrator runtime
-state, and other agents' work dirs under `.gc/worktrees/` and
-`.gc/agents/`. Copying any of it gives the session a
+`.gc/transcripts/`, sockets, locks and pid files, the stores under
+`.gc/store/` (the default SQLite binding root), `.gc/storage/`,
+`.gc/infra/` and `.gc/dolt-data/`, bd's stores and their backups in any
+scope (`.beads/dolt/`, `.beads/doltlite/`, `.beads/embeddeddolt/`, its
+SQLite files, bd backups and corrupt-store backups), the file provider's
+`.gc/beads.json` and its `.bak` in any scope, the legacy JSONL archive,
+every file named `beads.sqlite*` wherever it sits, bd server, proxy and
+sync state, the provider-lifecycle journal `.gc/scope-ownership.json`,
+orchestrator runtime state, and other agents' work dirs under
+`.gc/worktrees/` and `.gc/agents/`. Copying any of it gives the session a
 stale, private fork of state the orchestrator owns, or hands it secrets it
-must not hold. Deployment artifacts the session reads at start are never
-listed: `.gc/settings.json`, `.gc/site.toml`, `.gc/cache/` and
-`.gc/system/` (pid and socket files aside), `.gc/scripts/`, the prompt and
-skill snapshots under `.gc/tmp/`, `.beads/metadata.json`,
+must not hold. Files the session needs are never listed:
+`.gc/settings.json`, `.gc/site.toml`, `.gc/cache/` and `.gc/system/` (pid
+and socket files aside), `.gc/scripts/`, the prompt and skill snapshots
+under `.gc/tmp/`, the staged prompts under `.gc/synth/`, the MCP
+projections under `.gc/mcp-managed/`, the step and iteration artifacts
+agents read and write under `.gc/molecules/` and `.gc/artifacts/`, the
+`.gc/file-beads-layout` marker, `.beads/metadata.json`,
 `.beads/config.yaml`, `.beads/http_target.json`, and `.beads/redirect`.
+
+The list is fixed and matches paths by name. It does not read the city's
+configuration: when a SQLite storage binding's `path` moves its root to a
+path inside the work dir that the list does not name, only that root's
+`beads.sqlite*` files match, and a script for such a city adds the root to
+its own denylist. Matching names also cannot stop a process on the
+orchestrator host from copying or hard-linking excluded content to a path
+the list keeps.
 
 `.gc/site.toml` ships because session-side `gc` commands load it with
 `city.toml`: it carries the workspace name and bead prefix as well as rig

@@ -141,6 +141,11 @@ func TestDefaultWorkDirExportExcludesDenyControllerState(t *testing.T) {
 		".beads/last_pull",
 		".beads/.exclusive-lock",
 		".beads/db.sqlite",
+		".gc/beads.sqlite",
+		".gc/beads.sqlite-shm",
+		".gc/backups/2026-10-01/beads.sqlite",
+		"var/store/graph/beads.sqlite-wal",
+		"rigs/app/var/store/beads.sqlite",
 	} {
 		if !excludedByDefault(t, rel) {
 			t.Errorf("%s should be excluded from the work-dir export", rel)
@@ -256,6 +261,7 @@ var soleMatchProbes = map[string]string{
 	".gc/emergency/**":                 ".gc/emergency/spool/1.json",
 	".gc/jsonl-archive/**":             ".gc/jsonl-archive/2026-01.jsonl",
 	".gc/jsonl-export-state.json":      ".gc/jsonl-export-state.json",
+	"**/beads.sqlite*":                 ".gc/backups/2026-10-01/beads.sqlite-wal",
 	"**/.gc/beads.json":                "rigs/app/.gc/beads.json",
 	"**/.gc/beads.json.bak":            "rigs/app/.gc/beads.json.bak",
 	"**/.beads/dolt/**":                "rigs/app/.beads/dolt/app/.dolt/noms/x",

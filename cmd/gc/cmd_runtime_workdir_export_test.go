@@ -84,8 +84,13 @@ func runWorkdirExport(t *testing.T, args ...string) (stdout, stderr string, err 
 
 // TestRuntimeWorkdirExportNewlineModeFailsClosed covers names a line-based
 // consumer would misread: an embedded newline that forges the line
-// ".gc/controller.token", a carriage return, and a leading dash tar's
-// default file-list mode parses as an option.
+// ".gc/controller.token", a carriage return, a leading dash tar's default
+// file-list mode parses as an option, and backslash escapes GNU tar -T
+// unquotes, which turn one file's name into the path of the real token or of
+// a file above the work dir. Refusing them is a backstop for human use, not
+// what makes the output safe for scripts: only --null does that, and only
+// for a consumer that reads the list verbatim (GNU tar from 1.30, or from
+// 1.29 with --verbatim-files-from --no-unquote; bsdtar always).
 func TestRuntimeWorkdirExportNewlineModeFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name, rel string
@@ -94,6 +99,9 @@ func TestRuntimeWorkdirExportNewlineModeFailsClosed(t *testing.T) {
 		{"nested newline", "rigs/app/x\n.gc/controller.token"},
 		{"carriage return", "src\r.gc/controller.token"},
 		{"leading dash", "-Cx/f"},
+		{"escaped slash", `.gc\057controller.token`},
+		{"escaped parent", `..\057..\057x`},
+		{"nested backslash", `rigs/app/a\b`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := writeWorkDirExportFixture(t, ".gc/controller.token", "src/main.go", tc.rel)
