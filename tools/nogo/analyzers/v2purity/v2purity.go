@@ -8,6 +8,10 @@
 //     a struct field marked //gc:pure (a section's Decide), every argument
 //     a function marked //gc:pure-param passes for that parameter, and
 //     every function literal of a variable marked //gc:pure.
+//   - A //gc:stored-param parameter is a store, not a call: its argument is
+//     deferred where it is passed, and reached only through a read of a
+//     struct field the function stores the parameter in (a section's Probe
+//     and Call, which the typed constructors probed and called take).
 //   - Reach is static and conservative. It follows calls and references:
 //     a function named as a value, a package variable read (its
 //     initializer and every assignment to it), a concrete method, and an
@@ -159,6 +163,7 @@ type graph struct {
 	deferred map[ast.Node]bool         // stored in a field: reached through a read of it
 	roots    []types.Object
 	params   map[*types.Func][]int // //gc:pure-param parameter indexes
+	storedPs map[*types.Func][]int // //gc:stored-param parameter indexes
 	scope    []*types.TypeName     // named types in scope, for interface calls
 	impls    map[*types.Func][]impl
 	names    map[string]bool        // the exempt methods of other packages reach reached, by name
@@ -169,7 +174,7 @@ type graph struct {
 func (c Config) build(pass *analysis.Pass, rules bool) *graph {
 	g := &graph{
 		c: c, pass: pass, rules: rules, nodes: map[types.Object]*node{}, exempt: map[types.Object]ast.Node{},
-		deferred: map[ast.Node]bool{}, params: map[*types.Func][]int{}, impls: map[*types.Func][]impl{},
+		deferred: map[ast.Node]bool{}, params: map[*types.Func][]int{}, storedPs: map[*types.Func][]int{}, impls: map[*types.Func][]impl{},
 		pureFlds: map[*types.Var]bool{}, names: map[string]bool{},
 	}
 	var files []*ast.File
@@ -205,6 +210,15 @@ func (g *graph) addFunc(d *ast.FuncDecl) {
 			if sig.Params().At(i).Name() == p {
 				g.params[fn] = append(g.params[fn], i)
 				g.root(sig.Params().At(i), fn.Name()+"("+p+")")
+			}
+		}
+	}
+	for _, p := range directives(d.Doc, "//gc:stored-param ") {
+		sig := fn.Type().(*types.Signature)
+		for i := range sig.Params().Len() {
+			if sig.Params().At(i).Name() == p {
+				g.storedPs[fn] = append(g.storedPs[fn], i)
+				g.node(sig.Params().At(i), fn.Name()+"("+p+")")
 			}
 		}
 	}
@@ -337,6 +351,16 @@ func (g *graph) collect(n ast.Node) bool {
 				g.nodes[p].bodies = append(g.nodes[p].bodies, n.Args[i])
 			}
 		}
+		_, exempt := g.c.Exempt[fn.Origin().FullName()] // an exempt body is never entered: its stored params never read
+		for _, i := range g.storedPs[fn.Origin()] {
+			if i < len(n.Args) {
+				p := fn.Origin().Type().(*types.Signature).Params().At(i)
+				g.nodes[p].bodies = append(g.nodes[p].bodies, n.Args[i])
+				if g.storable(n.Args[i]) && !exempt {
+					g.deferred[n.Args[i]] = true
+				}
+			}
+		}
 	}
 	return true
 }
@@ -367,7 +391,15 @@ func (g *graph) store(f *types.Var, e ast.Expr) {
 	switch e := ast.Unparen(e).(type) {
 	case *ast.FuncLit:
 	case *ast.Ident, *ast.SelectorExpr:
-		if _, ok := g.pass.TypesInfo.Uses[ident(e)].(*types.Func); !ok {
+		obj := g.pass.TypesInfo.Uses[ident(e)]
+		if v, ok := obj.(*types.Var); ok && g.storedParam(v) {
+			// The field holds what the parameter's arguments are: reached
+			// through a read of the field.
+			g.deferred[e] = true
+			g.node(f, f.Name()).links = append(g.node(f, f.Name()).links, v)
+			return
+		}
+		if _, ok := obj.(*types.Func); !ok {
 			g.unfollowable(f, e)
 			return
 		}
@@ -396,6 +428,18 @@ func (g *graph) store(f *types.Var, e ast.Expr) {
 	}
 	g.deferred[e] = true
 	g.node(f, f.Name()).bodies = append(g.node(f, f.Name()).bodies, e)
+}
+
+// storedParam reports v, a //gc:stored-param parameter.
+func (g *graph) storedParam(v *types.Var) bool {
+	for fn, idx := range g.storedPs {
+		for _, i := range idx {
+			if fn.Type().(*types.Signature).Params().At(i) == v {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // unfollowable fails closed on e, a value v2purity cannot follow, stored in
@@ -446,14 +490,23 @@ type edge struct {
 func (g *graph) edges(body ast.Node, visit func(edge)) {
 	info := g.pass.TypesInfo
 	skip := map[*ast.Ident]bool{}
+	written := map[*ast.SelectorExpr]bool{} // a field an assignment writes: no read of it
 	ast.Inspect(body, func(n ast.Node) bool {
 		if n != body && g.deferred[n] {
 			return false
 		}
 		switch n := n.(type) {
+		case *ast.AssignStmt:
+			if n.Tok == token.ASSIGN {
+				for _, lhs := range n.Lhs {
+					if sel, ok := ast.Unparen(lhs).(*ast.SelectorExpr); ok {
+						written[sel] = true
+					}
+				}
+			}
 		case *ast.SelectorExpr:
 			sel := info.Selections[n]
-			if sel == nil {
+			if sel == nil || written[n] && sel.Kind() == types.FieldVal {
 				return true
 			}
 			switch sel.Kind() {
@@ -518,6 +571,10 @@ func (g *graph) ref(obj types.Object, pos token.Pos, visit func(edge)) {
 			visit(edge{pos: pos, target: fn.FullName() + ", which reaches " + r.Target + " (via " + r.Path + ")"})
 		}
 	case *types.Var:
+		if g.nodes[o] != nil && g.storedParam(o) { // a stored parameter used: its arguments
+			visit(edge{pos: pos, obj: o})
+			return
+		}
 		if o.Pkg() == nil || o.Parent() != o.Pkg().Scope() {
 			return
 		}
@@ -876,6 +933,8 @@ func typeutilCallee(info *types.Info, call *ast.CallExpr) types.Object {
 		return info.Uses[fun.Sel]
 	case *ast.IndexExpr:
 		return info.Uses[ident(fun.X)]
+	case *ast.IndexListExpr:
+		return info.Uses[ident(fun.X)]
 	}
 	return nil
 }
@@ -937,4 +996,25 @@ func funcName(d *ast.FuncDecl) string {
 		return id.Name + "." + d.Name.Name
 	}
 	return d.Name.Name
+}
+
+// storable reports e, an argument a //gc:stored-param defers: a function
+// literal, a named function, or another stored parameter. Anything else is
+// evaluated where it is passed.
+func (g *graph) storable(e ast.Expr) bool {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.FuncLit:
+		return true
+	case *ast.Ident, *ast.SelectorExpr:
+		if sel, ok := e.(*ast.SelectorExpr); ok && g.pass.TypesInfo.Selections[sel] != nil {
+			return false // a method value: its receiver is evaluated here
+		}
+		switch obj := g.pass.TypesInfo.Uses[ident(e)].(type) {
+		case *types.Func:
+			return true
+		case *types.Var:
+			return g.storedParam(obj)
+		}
+	}
+	return false
 }
