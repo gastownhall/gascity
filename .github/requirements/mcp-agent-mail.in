@@ -6,11 +6,12 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # injection and path traversal advisories reported by the image gate, plus
 # CVE-2026-78676 (CRITICAL, remote code execution); < 3.1.60 adds
 # CVE-2026-87817 (HIGH, remote code execution) and CVE-2026-87819 (HIGH,
-# regular-expression denial of service). Pinning the floor ensures the
-# resolver picks the patched version even if mcp-agent-mail's transitive
-# constraint allows older. Drop this line once mcp-agent-mail upstream pins
-# GitPython>=3.1.60 itself.
-gitpython>=3.1.60
+# regular-expression denial of service); <= 3.1.61 adds GHSA-59cr-6r3x-644w
+# (MEDIUM, submodule update path traversal writes outside the repository).
+# Pinning the floor ensures the resolver picks the patched version even if
+# mcp-agent-mail's transitive constraint allows older. Drop this line once
+# mcp-agent-mail upstream pins GitPython>=3.1.62 itself.
+gitpython>=3.1.62
 
 # Security floor: CVE-2026-69244 affects aiohttp < 3.14.3. Keep this explicit
 # until mcp-agent-mail's transitive requirements carry the fixed release.
