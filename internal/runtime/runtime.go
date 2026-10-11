@@ -488,15 +488,30 @@ type IdleProbeBudgetProvider interface {
 // idleness for interactive TUIs whose coarse activity clock (last pane
 // output) cannot distinguish an idle-but-repainting TUI from a working one —
 // a TUI that continuously repaints its status line keeps the activity clock
-// perpetually fresh even while genuinely idle.
+// perpetually fresh even while genuinely idle. The pool execution backstop
+// uses its busy reading the other way, to keep a stale activity clock from
+// counting a session that is still working as quiet.
 //
-// idle reports whether the session currently looks idle. A non-nil err means
-// the observation could not be made (the caller must not treat the session as
-// idle on error); a session that has gone away is reported as an error, not as
-// idle.
+// idle reports whether the session currently looks idle; idle=false with a nil
+// err is the provider's busy reading. What that proves is provider-specific:
+// for ACP a prompt response is outstanding, while a pane scan found an
+// active-processing indicator string in its capture, usually the live
+// indicator but possibly a stale frame or transcript text.
+// [ErrIdleIndeterminate] means the observation was made but matched neither a
+// ready prompt nor a busy indicator, so it says neither idle nor busy. Any
+// other non-nil err means the observation could not be made (the caller must
+// not treat the session as idle on error); a session that has gone away is
+// reported as an error, not as idle.
 type IdleSnapshotProvider interface {
 	SnapshotIdle(name string) (idle bool, err error)
 }
+
+// ErrIdleIndeterminate reports that an [IdleSnapshotProvider] observation saw
+// neither a ready prompt nor an active-processing indicator: the prompt may be
+// scrolled away, covered by an alternate screen, or overwritten by a broadcast
+// message. It is not evidence of a running turn; callers fall back to the
+// signal they would use without a snapshot.
+var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard

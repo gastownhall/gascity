@@ -2760,6 +2760,9 @@ func (t *Tmux) submitVerifyEligible(target string) bool {
 // Adding a family here is a promise about its busy indicator: a provider whose
 // indicator is unreadable would report every delivery as unconfirmed and burn
 // the queue's attempts re-pasting messages that already landed.
+//
+// Listing a family also widens BusyIndicatorReadable, so callers that wait out
+// a (false, nil) SnapshotIdle begin waiting on that family's indicator.
 var submitVerifyEligibleFamilies = []string{"claude", "codex"}
 
 func submitVerifyEligibleFamily(family string) bool {
@@ -2769,6 +2772,20 @@ func submitVerifyEligibleFamily(family string) bool {
 		}
 	}
 	return false
+}
+
+// BusyIndicatorReadable reports whether family is one whose busy reading from
+// the pane scan behind SnapshotIdle callers may act on: the families listed in
+// submitVerifyEligibleFamilies. For those families a (false, nil) snapshot
+// means the capture contains a busy-indicator string, usually the live
+// indicator but possibly a stale frame or transcript text; a pane showing
+// neither that nor a ready prompt is [runtime.ErrIdleIndeterminate], not busy.
+// The list is policy, not a property of the scan, which does not tell
+// families apart: paneContainsBusyIndicator also matches Gemini's cancel and
+// shell-tool strings. Callers must not treat an unlisted family's (false, nil)
+// snapshot as busy.
+func BusyIndicatorReadable(family string) bool {
+	return submitVerifyEligibleFamily(family)
 }
 
 // nudgeSubmitKeySequence resolves target's declared submit key sequence (see
@@ -4598,15 +4615,27 @@ func (t *Tmux) resolveIdlePromptPrefix(session string) string {
 
 // snapshotPaneIdleWithPrefix is the pure pane scan behind idle detection: it
 // captures the pane once and reports whether it shows promptPrefix with no
-// active-processing indicator. A capture error is returned verbatim so callers
-// can distinguish a session that has gone away (ErrSessionNotFound /
-// ErrNoServer) from a transient read failure.
+// active-processing indicator. A busy-indicator string anywhere in the capture
+// is the scan's only busy reading, (false, nil): usually the live indicator,
+// though a stale frame or transcript text that contains one reads the same. A
+// capture showing neither an indicator string nor the prompt returns
+// [runtime.ErrIdleIndeterminate]: the prompt may be scrolled away, covered by
+// an alternate screen, or overwritten by a broadcast message, so its absence is
+// not evidence of work. A capture error is returned verbatim so callers can
+// distinguish a session that has gone away (ErrSessionNotFound / ErrNoServer)
+// from a transient read failure.
 func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
 	lines, err := t.CapturePaneLines(session, promptObservationLines)
 	if err != nil {
 		return false, err
 	}
-	return PaneShowsIdlePrompt(lines, promptPrefix), nil
+	if paneContainsBusyIndicator(lines) {
+		return false, nil
+	}
+	if PaneShowsIdlePrompt(lines, promptPrefix) {
+		return true, nil
+	}
+	return false, runtime.ErrIdleIndeterminate
 }
 
 // PaneShowsIdlePrompt is the pure scan behind tmux idle detection: it reports
@@ -4646,8 +4675,10 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 // SnapshotIdle reports whether the named session is at an idle interactive
 // boundary right now — a ready prompt with no active-processing indicator — in
 // a single non-blocking observation. It implements
-// [runtime.IdleSnapshotProvider]. A session that has gone away is reported as
-// an error, not as idle.
+// [runtime.IdleSnapshotProvider]: (false, nil) means the capture contains a
+// busy-indicator string (see snapshotPaneIdleWithPrefix), and a pane showing
+// neither that nor the ready prompt returns [runtime.ErrIdleIndeterminate]. A
+// session that has gone away is reported as an error, not as idle.
 func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 	return t.snapshotPaneIdle(session)
 }
