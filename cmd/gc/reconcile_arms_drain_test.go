@@ -163,6 +163,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
 	info := censusRowOf(t, drainRow()).Info
 	current := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(tp, info))
+	live := runtime.LiveFingerprint(sessionCoreConfigForHashInfo(tp, info)) // A8 leaves a stored live hash alone
 	resolved := func(w *World) {
 		w.Env = &reconcileEnv{Cfg: cfg}
 		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
@@ -171,7 +172,8 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: true}}
 	}
 	pending := func(e *selectionEntry) { e.WakeReasons = []WakeReason{WakePending} }
-	deferred := []string{"attached_config_drift_deferred_key", "stale:" + current, "attached_config_drift_deferred_at", rowAt(-time.Minute)}
+	stale := runtime.FingerprintVersion + ":stale" // a real drift, never a version artifact (A8)
+	deferred := []string{"attached_config_drift_deferred_key", stale + ":" + current, "attached_config_drift_deferred_at", rowAt(-time.Minute)}
 	for _, c := range []struct {
 		name   string
 		hash   string
@@ -180,15 +182,15 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		world  []func(*World)
 		cancel bool
 	}{
-		{name: "drift persists", hash: "stale", world: []func(*World){resolved}},
+		{name: "drift persists", hash: stale, world: []func(*World){resolved}},
 		{name: "template unresolved", hash: current},
 		{name: "drift resolved", hash: current, world: []func(*World){resolved}, cancel: true},
-		{name: "attached", hash: "stale", world: []func(*World){resolved, attached}, cancel: true},
-		{name: "recently attached-deferred", hash: "stale", extra: deferred, world: []func(*World){resolved}, cancel: true},
-		{name: "pending interaction", hash: "stale", entry: pending, world: []func(*World){resolved}, cancel: true},
+		{name: "attached", hash: stale, world: []func(*World){resolved, attached}, cancel: true},
+		{name: "recently attached-deferred", hash: stale, extra: deferred, world: []func(*World){resolved}, cancel: true},
+		{name: "pending interaction", hash: stale, entry: pending, world: []func(*World){resolved}, cancel: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash}, c.extra)
+			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash, "started_live_hash", live}, c.extra)
 			it, _ := decideDrain(t, meta, c.entry, c.world...)
 			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Reason != decideStopActive) {
 				t.Fatalf("%+v, want cancel=%v", it, c.cancel)

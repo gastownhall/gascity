@@ -576,6 +576,7 @@ var (
 // legacy's outcome on a fixture appends an entry naming its ruling and the
 // new digest; the last entry per fixture is the one in force.
 var timelineGoldenRulings = []goldenRuling{
+	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
@@ -786,7 +787,7 @@ func TestTimelineGoldenNeedsARuling(t *testing.T) {
 // §3.6, each group's own: the stability clears and accrual, then the idle
 // and drain timers, then the operator verbs.
 func timelineFixtures() []timelineFixture {
-	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline())
+	return slices.Concat(stabilityTimeline(), idleTimeline(), operatorTimeline(), baselineTimeline())
 }
 
 func tlAt(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
@@ -871,6 +872,29 @@ func tlStarted(subject, cause string) map[string]string {
 // awake state legacy's next tick heals its active to (§12.2 #39).
 func tlRestarted() map[string]string {
 	return map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears", "row:gc-1:state": "§12.2#39 commit-writes-awake"}
+}
+
+// baselineTimeline is A8 (v5 M2) through time, staging J13's shape: a live
+// seat with its work, whose stored hashes a cutover finds under the previous
+// fingerprint version, is rebaselined in place with no drain and no restart
+// (SESS-551, Gate R R18); its live hash, cleared, is backfilled (SESS-563),
+// and, rewritten to the previous version, rebaselined (SESS-564).
+func baselineTimeline() []timelineFixture {
+	stable := func() *config.City {
+		cfg := tlCity()
+		cfg.Agents[0].MaxActiveSessions, cfg.Agents[0].MinActiveSessions = intPtr(1), intPtr(0)
+		return cfg
+	}
+	row := tlRow("gc-1", 1, time.Hour)
+	row.Metadata["alias"], row.Metadata["agent_name"] = "worker", "worker"
+	set := func(kv ...string) func(tw twin) { return func(tw twin) { tw.set("gc-1", kv...) } }
+	return []timelineFixture{tlFixture("a cutover finds v5 hashes on a live seat", stable,
+		[]parityRow{row}, tlClaim("in_progress", "worker"), []simRuntime{tlLive("gc-1")},
+		[]parityStep{
+			{Name: "v5 hashes at the cutover", Op: set("started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}")},
+			{Name: "the live hash cleared", Advance: time.Minute, Op: set("started_live_hash", "", "live_hash", "")},
+			{Name: "a v5 live hash", Advance: time.Minute, Op: set("started_live_hash", "v5:live")},
+		}, tlMerged(tlPol("gc-1"), tlIdent()), nil)}
 }
 
 // stabilityTimeline is SESS-537..540 through time, on a pool of one whose

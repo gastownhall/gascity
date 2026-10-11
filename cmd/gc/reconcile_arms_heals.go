@@ -363,9 +363,8 @@ func asleepHealPatch(info session.Info) session.MetadataPatch {
 	if isNamedSessionInfo(info) && namedSessionModeInfo(info) == "always" {
 		return patch
 	}
-	for _, key := range []string{"session_key", "started_config_hash", session.PrimedAtMetadataKey, session.PrimingAttemptedAtMetadataKey, session.PromptHashMetadataKey} {
-		patch[key] = ""
-	}
+	patch["session_key"] = ""
+	maps.Copy(patch, clearBaseline())
 	patch["continuation_reset_pending"] = "true"
 	return patch
 }

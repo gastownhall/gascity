@@ -100,7 +100,7 @@ var effectSpecs = map[string]effectSpec{
 	intentClose:           {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentRowMetadata:     {class: capRowWrites},
-	intentBaseline:        {class: capRowWrites},
+	intentBaseline:        {class: capRowWrites, sections: rowWriteSections},                        // A8 (C7c)
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                        // A6
 	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections}, // A6
 }

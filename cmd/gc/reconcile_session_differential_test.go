@@ -223,6 +223,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// PreWake rows; S1's adopt owns no row yet.
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
 	intentAdopt: regexp.MustCompile(`\bS1 adopt\b`),
+	// A8's baseline (C7c) owns the M2 builder's rows.
+	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
 }
 
 var parityArmRef = regexp.MustCompile(`\bA(\d{1,2})\b`)
@@ -1285,6 +1287,17 @@ func parityFixtures() []parityFixture {
 			Name: "a seat whose user hold expired resumes for its work", Behaviors: []string{"SESS-009"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "held_until", at(-time.Hour), "sleep_reason", "user-hold")}, Work: assigned,
 			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
+		},
+		// A8's version rebaseline of an asleep named row (C7c), as legacy's
+		// asleep named drift block does; a live seat's is the timeline's.
+		{
+			Name: "an asleep named row's v5 hash is rebaselined", Behaviors: []string{"SESS-567"}, City: func() *config.City {
+				cfg := chat(false)()
+				cfg.NamedSessions[0].Mode = "on_demand"
+				return cfg
+			},
+			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "configured_named_mode", "on_demand", "started_config_hash", "v5:core")},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
 		},
 		// A10's rollback (C5a2's effect): legacy rolls an undesired pending
 		// create back past its deadline; v2's arm waits for the effect.
