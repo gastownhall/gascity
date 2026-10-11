@@ -358,6 +358,7 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
 	"internal/session/holds.go:holdMeta":                                      "read model, not a write",
+	"internal/session/disposition.go:DispositionOfInfo":                       "read model, not a write",
 	"internal/session/resume_user_hold.go:consumeUserHoldPatch":               "patch builder (operator resume consumes a user hold)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:AcknowledgeDrainPatch":          "patch builder",
