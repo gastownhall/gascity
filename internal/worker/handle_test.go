@@ -997,6 +997,7 @@ func TestSessionHandleNudgeWaitIdleLiveOnlyDoesNotResumeStoppedSession(t *testin
 }
 
 func TestSessionHandlePendingRespondAndBlockedState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileCodexTmuxCLI,
 		Template: "probe",
