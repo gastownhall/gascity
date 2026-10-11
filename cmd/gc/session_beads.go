@@ -3314,6 +3314,15 @@ func reapStaleSessionBeads(
 		if sp.IsRunning(sn) {
 			continue
 		}
+		// A claimless creating row with PreWake's in-flight marker
+		// (last_woke_at; the commit moves the row out of creating, a refused
+		// start's restore clears it) is a start that has not committed: in
+		// flight, or abandoned by a crashed controller, which the reconciler
+		// relaunches with a fresh token however long it was down (CONTRACT
+		// S7). Closing it lost the operator's session (mc-5a1ma, J35 D).
+		if !info.PendingCreateClaim && strings.TrimSpace(info.LastWokeAt) != "" {
+			continue
+		}
 		// Startup grace: don't reap beads younger than the creating-state
 		// timeout. Use the latest known start boundary, not just CreatedAt,
 		// because a long-lived bead may have been woken moments ago.
@@ -3354,6 +3363,11 @@ func reapStaleSessionBeads(
 			if now.Sub(startedAt) < grace {
 				continue
 			}
+		}
+		// A live holder of the runtime lease is mid-start: its commit or
+		// rollback settles the row, not the reap (§12.5).
+		if startHolderLive(store, cityPath, info) {
+			continue
 		}
 		// A bead-scoped pool row may only close once its runtime is confirmed
 		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9). IsRunning=false is not

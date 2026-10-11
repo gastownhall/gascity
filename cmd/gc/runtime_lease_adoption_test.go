@@ -661,3 +661,93 @@ func TestLaunchDriftRelaunchFallsBackOnANonBusyLeaseError(t *testing.T) {
 		t.Fatalf("relaunch on a closed row = (%v, %v), relaunches %d, stderr %q; want the full-restart fallback", ok, batch, env.sp.CountCalls("Relaunch", "worker"), env.stderr.String())
 	}
 }
+
+// TestStartInFlightOnlyWhileItsHolderLives: a row PreWake left creating with
+// a fresh last_woke_at reads start_in_flight only while a live holder has
+// its runtime lease, on this host or on another (an unexpired record). A
+// record that expired with no live flock is reclaimable: the pass relaunches
+// the start under its own lease (mc-5a1ma, CONTRACT §12.5).
+func TestStartInFlightOnlyWhileItsHolderLives(t *testing.T) {
+	now := time.Now().UTC()
+	remote := func(expires time.Time) map[string]string {
+		return map[string]string{
+			sessionpkg.RuntimeLeaseHolderKey: "host-b/7/n", sessionpkg.RuntimeLeaseEpochKey: "3", sessionpkg.RuntimeLeaseTTLKey: "120",
+			sessionpkg.RuntimeLeaseExpiresKey: expires.Format(time.RFC3339), sessionpkg.RuntimeLeaseFlockKey: "another-boot/1/2/0123",
+		}
+	}
+	for _, c := range []struct {
+		name      string
+		record    map[string]string
+		holdHere  bool
+		wantStart bool
+	}{
+		{"a live holder on this host", nil, true, false},
+		{"another host's unexpired record", remote(now.Add(time.Minute)), false, false},
+		{"another host's expired record", remote(now.Add(-time.Second)), false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.clk.Time = now
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			env.addDesired("worker", "worker", false)
+			row := env.createSessionBead("worker", "worker")
+			woke := now.Add(-10 * time.Second).Format(time.RFC3339)
+			env.setSessionMetadata(&row, map[string]string{
+				"state": "creating", "session_origin": "manual", "last_woke_at": woke, "pending_create_started_at": woke,
+				"generation": "2", "instance_token": "tok-prewake",
+			})
+			if c.record != nil {
+				env.setSessionMetadata(&row, c.record)
+			}
+			if c.holdHere {
+				held, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(env.store), sessionpkg.RuntimeLeaseRequest{
+					City: env.city, Name: "worker", ID: row.ID, TTL: 2 * time.Minute,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer held.Release()
+			}
+			woken := env.reconcile([]beads.Bead{mustGetBead(t, env.store, row.ID)})
+			meta := mustGetBead(t, env.store, row.ID).Metadata
+			if c.wantStart {
+				if woken != 1 || meta["instance_token"] == "tok-prewake" || meta["generation"] != "3" {
+					t.Fatalf("woken %d, row %v; want the start relaunched under a fresh token\nstderr %q", woken, meta, env.stderr.String())
+				}
+				return
+			}
+			if woken != 0 || strings.Contains(env.stderr.String(), "op=start") || meta["instance_token"] != "tok-prewake" {
+				t.Fatalf("woken %d, row %v, stderr %q; want start_in_flight: no start attempted, not even one the lease defers", woken, meta, env.stderr.String())
+			}
+		})
+	}
+}
+
+// TestReapStaleSessionBeadsSparesALiveHoldersStart: a stuck-creating row past
+// its grace is reaped only once no live holder has its runtime lease: a live
+// holder's commit or rollback settles the row (mc-5a1ma, §12.5).
+func TestReapStaleSessionBeadsSparesALiveHoldersStart(t *testing.T) {
+	store, sp, city := beads.NewMemStore(), runtime.NewFake(), t.TempDir()
+	row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "worker", "state": "creating", "pending_create_claim": "true",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock.Fake{Time: row.CreatedAt.Add(stalePendingCreateTimeout + time.Minute)}
+	if err := store.SetMetadata(row.ID, "last_woke_at", row.CreatedAt.UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	held, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(store), sessionpkg.RuntimeLeaseRequest{City: city, Name: "worker", ID: row.ID, TTL: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	if n := reapStaleSessionBeads(city, store, sp, newDrainTracker(), nil, clk, &log); n != 0 {
+		t.Fatalf("reaped %d under a live holder's lease, want 0", n)
+	}
+	held.Release()
+	if n := reapStaleSessionBeads(city, store, sp, newDrainTracker(), nil, clk, &log); n != 1 {
+		t.Fatalf("reaped %d once the holder is gone, want the stale row reaped; log %q", n, log.String())
+	}
+}
