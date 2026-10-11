@@ -2620,6 +2620,12 @@ func TestRegistryPollDeviceToken(t *testing.T) {
 // access token once the registry approves. This covers gc pack registry login
 // --device above the registryPollDeviceToken helper unit test.
 func TestRegistryDeviceLoginCompletesAfterPending(t *testing.T) {
+	oldPollInterval := registryDevicePollInterval
+	registryDevicePollInterval = func(int) time.Duration { return 10 * time.Millisecond }
+	t.Cleanup(func() {
+		registryDevicePollInterval = oldPollInterval
+	})
+
 	var mu sync.Mutex
 	var codeRequests, tokenRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
