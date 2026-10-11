@@ -310,3 +310,211 @@ func TestInboxUnreadAutoHandoffsMatchesCheckAutoHandoffs(t *testing.T) {
 		t.Fatalf("UnreadAutoHandoffs = %v, want CheckAutoHandoffs' %v (3 handoffs)", messageIDs(got), messageIDs(want))
 	}
 }
+
+// newSuccessionFixture seeds the session S that hooks read for — alias "sky",
+// session name "runtime-sky", alias history "old-sky" — and returns the store,
+// a provider over it, and a function that projects S's current Info.
+func newSuccessionFixture(t *testing.T) (*readCountingStore, *Provider, func() session.Info) {
+	t.Helper()
+	store := &readCountingStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+	s, err := store.Create(beads.Bead{
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"alias": "sky", "alias_history": "old-sky", "session_name": "runtime-sky"},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	return store, p, func() session.Info {
+		t.Helper()
+		info, _, err := session.ResolveSessionRecordByExactID(store.MemStore, s.ID)
+		if err != nil {
+			t.Fatalf("ResolveSessionRecordByExactID: %v", err)
+		}
+		return info
+	}
+}
+
+// createSessionBead creates a session bead carrying metadata, closed when
+// closed is set, and returns its id.
+func createSessionBead(t *testing.T, store *readCountingStore, metadata map[string]string, closed bool) string {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: metadata})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if closed {
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("Close session: %v", err)
+		}
+	}
+	return b.ID
+}
+
+// sendTo sends one message to each address and returns the ids by address.
+func sendTo(t *testing.T, p *Provider, addresses ...string) map[string]string {
+	t.Helper()
+	ids := make(map[string]string, len(addresses))
+	for _, to := range addresses {
+		m, err := p.Send("human", to, "", "for "+to)
+		if err != nil {
+			t.Fatalf("Send(%q): %v", to, err)
+		}
+		ids[to] = m.ID
+	}
+	return ids
+}
+
+// TestInboxForSessionSuccession pins the session inbox's definition against
+// the per-address expansion it replaces, case by case, for the alias a
+// session held before (its alias history):
+//
+//   - held now by another LIVE session: that session's mailbox is its own, so
+//     none of its routes join (the per-address expansion leaked them);
+//   - held by exactly one CLOSED session, the predecessor: its routes join, so
+//     mail a sender routed to the predecessor's id or runtime name is not lost;
+//   - claimed by two closed sessions: ambiguous, so neither's routes join.
+//
+// In every case the alias itself stays one of the session's routes.
+func TestInboxForSessionSuccession(t *testing.T) {
+	t.Run("history alias held by a live session", func(t *testing.T) {
+		store, p, current := newSuccessionFixture(t)
+		other := createSessionBead(t, store, map[string]string{"alias": "old-sky", "session_name": "runtime-other"}, false)
+		ids := sendTo(t, p, "sky", "old-sky", other, "runtime-other")
+		inbox, err := p.InboxForSession(current())
+		if err != nil {
+			t.Fatalf("InboxForSession: %v", err)
+		}
+		assertInboxHolds(t, inbox, ids, []string{"sky", "old-sky"}, []string{other, "runtime-other"})
+	})
+	t.Run("history alias held by a closed predecessor", func(t *testing.T) {
+		store, p, current := newSuccessionFixture(t)
+		predecessor := createSessionBead(t, store, map[string]string{"alias": "old-sky", "session_name": "runtime-pred"}, true)
+		ids := sendTo(t, p, "sky", "old-sky", predecessor, "runtime-pred")
+		inbox, err := p.InboxForSession(current())
+		if err != nil {
+			t.Fatalf("InboxForSession: %v", err)
+		}
+		assertInboxHolds(t, inbox, ids, []string{"sky", "old-sky", predecessor, "runtime-pred"}, nil)
+
+		// The per-address expansion delivers the same mail here.
+		var legacy []mail.Message
+		for _, address := range session.MailboxAddressesFromInfo(current()) {
+			got, err := p.Check(address)
+			if err != nil {
+				t.Fatalf("Check(%q): %v", address, err)
+			}
+			legacy = append(legacy, got...)
+		}
+		for _, to := range []string{predecessor, "runtime-pred"} {
+			if !slices.Contains(messageIDs(legacy), ids[to]) {
+				t.Fatalf("the per-address expansion did not deliver mail for %q; the fixture does not pin succession", to)
+			}
+		}
+	})
+	t.Run("history alias claimed by two closed sessions", func(t *testing.T) {
+		store, p, current := newSuccessionFixture(t)
+		first := createSessionBead(t, store, map[string]string{"alias": "old-sky", "session_name": "runtime-first"}, true)
+		second := createSessionBead(t, store, map[string]string{"alias": "old-sky", "session_name": "runtime-second"}, true)
+		ids := sendTo(t, p, "sky", "old-sky", first, "runtime-first", second, "runtime-second")
+		inbox, err := p.InboxForSession(current())
+		if err != nil {
+			t.Fatalf("InboxForSession: %v", err)
+		}
+		assertInboxHolds(t, inbox, ids, []string{"sky", "old-sky"}, []string{first, "runtime-first", second, "runtime-second"})
+	})
+}
+
+// assertInboxHolds checks that the inbox's unread mail carries the message
+// sent to each address in want and none sent to an address in absent.
+func assertInboxHolds(t *testing.T, inbox *Inbox, ids map[string]string, want, absent []string) {
+	t.Helper()
+	got := messageIDs(inbox.Unread())
+	for _, to := range want {
+		if !slices.Contains(got, ids[to]) {
+			t.Errorf("inbox lacks the mail for %q (routes %v)", to, inbox.Routes())
+		}
+	}
+	for _, to := range absent {
+		if slices.Contains(got, ids[to]) {
+			t.Errorf("inbox holds the mail for %q, another mailbox's (routes %v)", to, inbox.Routes())
+		}
+	}
+}
+
+// TestInboxForSessionReadBudget pins what defining the inbox costs: a session
+// with no alias history reads no session at all, and each alias it held reads
+// sessions only by keyed lookups — never a listing of every session.
+func TestInboxForSessionReadBudget(t *testing.T) {
+	store, p, current := newSuccessionFixture(t)
+	info := current()
+	info.AliasHistory = nil
+	store.reset()
+	if _, err := p.InboxForSession(info); err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	if store.gets != 0 || store.sessionLists != 0 || store.messageLists != 1 {
+		t.Fatalf("no history: %d gets, %d session lists, %d message lists; want 0, 0, 1", store.gets, store.sessionLists, store.messageLists)
+	}
+
+	recording := &keyedListStore{readCountingStore: store}
+	p = New(recording)
+	recording.reset()
+	if _, err := p.InboxForSession(current()); err != nil {
+		t.Fatalf("InboxForSession: %v", err)
+	}
+	if recording.unkeyed != 0 {
+		t.Fatalf("%d session listings carried no address key", recording.unkeyed)
+	}
+	if recording.gets+recording.sessionLists > 6 || recording.messageLists != 1 {
+		t.Fatalf("one history alias: %d gets, %d session lists, %d message lists; want at most 6 session reads and 1 message list",
+			recording.gets, recording.sessionLists, recording.messageLists)
+	}
+}
+
+// keyedListStore counts session listings that carry no alias or session_name
+// key — a listing of every session.
+type keyedListStore struct {
+	*readCountingStore
+	unkeyed int
+}
+
+func (s *keyedListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type != "message" && query.Metadata["alias"] == "" && query.Metadata["session_name"] == "" {
+		s.unkeyed++
+	}
+	return s.readCountingStore.List(query)
+}
+
+// TestPinnedSenderWinsASessionNameCollision pins what a pin persists when
+// another live session's session name is the pinned session's alias: the
+// command proved the sender is the pinned session, so the send records that
+// session — where resolving the alias as an address would pick the other one.
+func TestPinnedSenderWinsASessionNameCollision(t *testing.T) {
+	store, p, current := newSuccessionFixture(t)
+	info := current()
+	other := createSessionBead(t, store, map[string]string{"alias": "elsewhere", "session_name": "sky"}, false)
+
+	unpinned, err := p.Send("sky", "human", "", "unpinned")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if b, _ := store.MemStore.Get(unpinned.ID); b.Metadata[fromSessionIDMetadataKey] != other {
+		t.Fatalf("unpinned send from %q recorded session %q; the fixture expects resolution to pick the colliding %s",
+			"sky", b.Metadata[fromSessionIDMetadataKey], other)
+	}
+
+	p.PinSender(info)
+	pinned, err := p.Send("sky", "human", "", "pinned")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.MemStore.Get(pinned.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != info.ID {
+		t.Fatalf("pinned send recorded session %q, want the pinned %s", b.Metadata[fromSessionIDMetadataKey], info.ID)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // TestHookRunExportsItsDeadline pins that gc hook run hands its child the
@@ -178,7 +179,7 @@ func TestInboxArchiveRetiresExactlyTheInjectedWindow(t *testing.T) {
 		ids = append(ids, seed("windowed handoff", mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel))
 		target := resolvedMailTarget{display: "mayor", recipients: []string{"mayor"}}
 		if withRoutes {
-			target.routes = []string{"mayor"}
+			target.session = &session.Info{ID: "mayor"}
 		}
 		var stdout, stderr bytes.Buffer
 		if code := doMailCheckTargetWithFormat(mp, target, true, "", &stdout, &stderr); code != 0 {

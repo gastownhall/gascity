@@ -85,8 +85,8 @@ func resolveExactSessionInfo(sessStore beads.Store, identifier string) (session.
 }
 
 // mailTargetFromSessionInfo is the mailbox of a resolved session: its
-// addresses for display and per-recipient providers, and its full route set
-// for an inbox read that takes the routes as given.
+// addresses for display and per-recipient providers, and the session itself
+// for an inbox read that defines the mailbox from it.
 func mailTargetFromSessionInfo(info session.Info, identifier string) (resolvedMailTarget, error) {
 	addresses := session.MailboxAddressesFromInfo(info)
 	if len(addresses) == 0 {
@@ -95,7 +95,7 @@ func mailTargetFromSessionInfo(info session.Info, identifier string) (resolvedMa
 	return resolvedMailTarget{
 		display:    addresses[0],
 		recipients: addresses,
-		routes:     session.RecipientRoutesFromInfo(info),
+		session:    &info,
 	}, nil
 }
 

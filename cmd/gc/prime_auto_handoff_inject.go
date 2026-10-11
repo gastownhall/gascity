@@ -133,10 +133,11 @@ func primeUnreadMailMessages(mp mail.Provider) []mail.Message {
 
 // primeUnreadMailMessagesFromInbox is primeUnreadMailMessages reusing the
 // session's own inbox when the caller read it through the same bead-backed
-// provider. Each identity candidate that is one of the inbox's routes is
-// answered by it — expanding a session's own address arrives at exactly its
-// route set — and any other candidate is checked as before. Without an inbox,
-// or with a provider that does not read route sets, every candidate is checked.
+// provider. The inbox is the session's whole mailbox
+// (beadmail.Provider.InboxForSession), so each identity candidate that is one
+// of its routes is answered by it, and any other candidate is checked as
+// before. Without an inbox, or with a provider that does not read session
+// inboxes, every candidate is checked.
 func primeUnreadMailMessagesFromInbox(mp mail.Provider, inbox *beadmail.Inbox) []mail.Message {
 	if mp == nil {
 		mp, _ = openCityMailProvider(io.Discard, "gc prime")
@@ -146,7 +147,7 @@ func primeUnreadMailMessagesFromInbox(mp mail.Provider, inbox *beadmail.Inbox) [
 	}
 	candidates := defaultMailIdentityCandidates()
 	var fromInbox []mail.Message
-	if _, reads := mp.(mailRouteInboxReader); reads && inbox != nil {
+	if _, reads := mp.(mailSessionInboxReader); reads && inbox != nil {
 		routes := make(map[string]bool)
 		for _, route := range inbox.Routes() {
 			routes[route] = true
@@ -235,8 +236,8 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 		return startMail
 	}
 	var messages []mail.Message
-	if len(target.routes) > 0 {
-		inbox, inboxErr := mp.InboxForRoutes(target.routes)
+	if target.session != nil {
+		inbox, inboxErr := mp.InboxForSession(*target.session)
 		if inboxErr != nil {
 			fmt.Fprintf(stderr, "gc prime: checking auto-handoff mail: %v\n", inboxErr) //nolint:errcheck // best-effort hook diagnostics
 			return startMail

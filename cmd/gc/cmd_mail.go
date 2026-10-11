@@ -731,20 +731,35 @@ func doMailCheckTarget(mp mail.Provider, target resolvedMailTarget, inject bool,
 	return doMailCheckTargetWithFormat(mp, target, inject, "", stdout, stderr)
 }
 
-// mailRouteInboxReader is the optional mail-provider capability of reading a
-// mailbox for a route set taken as given (beadmail.Provider.InboxForRoutes).
-type mailRouteInboxReader interface {
-	InboxForRoutes(routes []string) (*beadmail.Inbox, error)
+// mailSessionInboxReader is the optional mail-provider capability of reading a
+// session's own mailbox in one listing (beadmail.Provider.InboxForSession).
+type mailSessionInboxReader interface {
+	InboxForSession(info session.Info) (*beadmail.Inbox, error)
+}
+
+// sessionInboxForTarget reads the mailbox of a target resolved from its own
+// session bead in one listing, when mp can; ok is false for any other target or
+// provider. Every self-read — mail check, its injection, SessionStart mail and
+// mail inbox — answers from this one inbox definition, so they agree.
+func sessionInboxForTarget(mp any, target resolvedMailTarget) (inbox *beadmail.Inbox, ok bool, err error) {
+	reader, reads := mp.(mailSessionInboxReader)
+	if !reads || target.session == nil {
+		return nil, false, nil
+	}
+	inbox, err = reader.InboxForSession(*target.session)
+	if err != nil {
+		return nil, true, err
+	}
+	return inbox, true, nil
 }
 
 // unreadMailForTarget returns the target's unread mail, oldest first. A target
-// resolved from its own session bead carries its whole route set, and a
-// provider that reads a route set as given answers it with one read, returned
-// as the inbox the mail came from; any other target or provider is asked
-// recipient by recipient, and the inbox is nil.
+// resolved from its own session bead is read as one inbox (sessionInboxForTarget),
+// returned as the inbox the mail came from; any other target or provider is
+// asked recipient by recipient, and the inbox is nil.
 func unreadMailForTarget(mp mail.Provider, target resolvedMailTarget) ([]mail.Message, *beadmail.Inbox, error) {
-	if reader, ok := mp.(mailRouteInboxReader); ok && len(target.routes) > 0 {
-		inbox, err := reader.InboxForRoutes(target.routes)
+	inbox, ok, err := sessionInboxForTarget(mp, target)
+	if ok {
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1202,11 +1217,11 @@ func listLiveSessionMailboxesCached(sessStore beads.Store, cache *mailIdentitySe
 type resolvedMailTarget struct {
 	display    string
 	recipients []string
-	// routes is the mailbox's whole route set when the target was resolved
-	// from its own session bead (mailTargetFromSessionInfo). An inbox read can
-	// take it as given instead of expanding each recipient again; it is empty
-	// when the target was resolved by name.
-	routes []string
+	// session is the session bead the target was resolved from by its own id
+	// (mailTargetFromSessionInfo); nil when the target was resolved by name. An
+	// inbox read takes the session's mailbox from it (sessionInboxForTarget)
+	// instead of expanding each recipient again.
+	session *session.Info
 }
 
 // mailIdentitySessionCache memoizes a single gc:session enumeration so that
@@ -2231,7 +2246,14 @@ func doMailInboxTarget(mp mailInboxReader, target resolvedMailTarget, stdout, st
 }
 
 func doMailInboxTargetWithJSON(mp mailInboxReader, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
-	messages, err := collectMailMessages(mp.Inbox, target.recipients)
+	var messages []mail.Message
+	inbox, ok, err := sessionInboxForTarget(mp, target)
+	switch {
+	case ok && err == nil:
+		messages = inbox.Unread()
+	case !ok:
+		messages, err = collectMailMessages(mp.Inbox, target.recipients)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail inbox: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

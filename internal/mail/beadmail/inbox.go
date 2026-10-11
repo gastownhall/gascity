@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // Inbox is one read of the open message rows addressed to a known set of
@@ -20,10 +21,9 @@ type Inbox struct {
 
 // InboxForRoutes reads the open message rows addressed to exactly routes, in
 // one listing. Unlike [Provider.Check], it does not expand the routes: the
-// caller already holds the mailbox's whole route set — for a session, the
-// [session.RecipientRoutesFromInfo] of its own bead, which is what expanding
-// each of its addresses one by one arrives at. Empty routes are refused rather
-// than read as "every mailbox".
+// caller already holds the route set it means. A session's own mailbox is read
+// with [Provider.InboxForSession], which defines that set. Empty routes are
+// refused rather than read as "every mailbox".
 func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 	var cleaned []string
 	for _, route := range routes {
@@ -44,6 +44,87 @@ func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 		rows = append(rows, b)
 	}
 	return &Inbox{routes: cleaned, rows: rows}, nil
+}
+
+// InboxForSession reads one session's own mailbox in one message listing. It
+// is the inbox every self-read — a hook's mail check and its SessionStart
+// mail, and `gc mail inbox` — answers from, so they all see the same mail.
+//
+// The mailbox is the session's own routes ([session.RecipientRoutesFromInfo]:
+// id, alias, session name and alias history) and, for each alias the session
+// held before, the routes of its closed predecessor: the one closed session
+// that holds that alias as a current address, when no live session claims it.
+// Mail routed to that predecessor's id or runtime name is the session's to
+// read; it was addressed to the alias the session now inherits. Two rules keep
+// other mailboxes out, as delivery does: a live session claiming the alias
+// owns its own routes, so they never join; and an alias two closed sessions
+// claim is ambiguous, so neither's routes join. The alias itself is always a
+// route.
+//
+// A session with no alias history reads no session at all. Each alias it held
+// costs at most two keyed mailbox resolutions (live, then closed —
+// [session.AddressDirectory.ResolveMailboxAddress]), never a listing of every
+// session.
+func (p *Provider) InboxForSession(info session.Info) (*Inbox, error) {
+	routes, err := p.sessionInboxRoutes(info)
+	if err != nil {
+		return nil, err
+	}
+	return p.InboxForRoutes(routes)
+}
+
+// sessionInboxRoutes is the route set InboxForSession reads.
+func (p *Provider) sessionInboxRoutes(info session.Info) ([]string, error) {
+	routes := session.RecipientRoutesFromInfo(info)
+	if p.sessions == nil {
+		return routes, nil
+	}
+	current := []string{info.ID, info.Alias, info.SessionNameMetadata}
+	for _, alias := range info.AliasHistory {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || containsRecipientRoute(current, alias) {
+			continue
+		}
+		predecessor, ok, err := p.closedPredecessor(alias, info.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		for _, route := range session.RecipientRoutesFromInfo(predecessor) {
+			routes = appendRecipientRoute(routes, route)
+		}
+	}
+	return routes, nil
+}
+
+// closedPredecessor resolves the closed session that owns alias as a mailbox
+// address, when exactly one does and no live session — other than self —
+// claims it.
+func (p *Provider) closedPredecessor(alias, self string) (session.Info, bool, error) {
+	_, err := p.sessions.ResolveMailboxAddress(alias, false)
+	switch {
+	case err == nil:
+		// A live claimant owns the alias now; it is no predecessor's.
+		return session.Info{}, false, nil
+	case errors.Is(err, session.ErrAmbiguous):
+		return session.Info{}, false, nil
+	case !errors.Is(err, session.ErrSessionNotFound):
+		return session.Info{}, false, fmt.Errorf("beadmail inbox: resolving the live owner of alias %q: %w", alias, err)
+	}
+	closed, err := p.sessions.ResolveMailboxAddress(alias, true)
+	switch {
+	case err == nil:
+		if closed.ID == self {
+			return session.Info{}, false, nil
+		}
+		return closed, true, nil
+	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, session.ErrSessionNotFound):
+		return session.Info{}, false, nil
+	default:
+		return session.Info{}, false, fmt.Errorf("beadmail inbox: resolving the closed owner of alias %q: %w", alias, err)
+	}
 }
 
 // Routes returns the mailbox routes the inbox was read for.

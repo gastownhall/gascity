@@ -41,9 +41,9 @@ func TestPrimeUnreadMailFromInboxMatchesPerCandidateCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}
-	inbox, err := p.InboxForRoutes(session.RecipientRoutesFromInfo(info))
+	inbox, err := p.InboxForSession(info)
 	if err != nil {
-		t.Fatalf("InboxForRoutes: %v", err)
+		t.Fatalf("InboxForSession: %v", err)
 	}
 	got := primeUnreadMailMessagesFromInbox(p, inbox)
 	ids := func(messages []mail.Message) []string {

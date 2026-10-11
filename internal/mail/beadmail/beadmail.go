@@ -284,11 +284,15 @@ func (p *Provider) createMessageBead(title, body, from, to string, labels []stri
 }
 
 // PinSender records the calling session, which the command has already
-// resolved from its own bead. A send whose sender names that session takes its
-// sender route from it rather than resolving the address again: by bead id
-// always, and by current alias or session name while the session is open —
-// exactly the addresses [session.AddressDirectory.ResolveAddress] would
-// resolve to it.
+// resolved from its own bead. A send whose sender names that session — by bead
+// id always, and by current alias or session name while the session is open —
+// takes its sender route from it rather than resolving the address again.
+//
+// The pin is the proven sender, so it wins where resolving would not agree: a
+// sender address that another live session also claims (its session name equal
+// to the pinned session's alias, say) records the pinned session, where
+// [session.AddressDirectory.ResolveAddress] could pick the other one. Any other
+// sender — a historical alias included — still resolves.
 func (p *Provider) PinSender(info session.Info) {
 	pinned := info
 	p.sender = &pinned
