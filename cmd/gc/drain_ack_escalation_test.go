@@ -364,11 +364,11 @@ func TestEscalationNeverClosesTheBeadItself(t *testing.T) {
 // and health patrol that the wedge is already starving.
 func TestEscalationDoesNotBlockTheReconcileTick(t *testing.T) {
 	e := newEscalationEnv(t)
-	drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 3*time.Second, 50*time.Millisecond
+	drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 150*time.Millisecond, 10*time.Millisecond
 
 	elapsed := e.finalizeOnTick()
 
-	if elapsed > time.Second {
+	if elapsed >= 100*time.Millisecond {
 		t.Errorf("synchronous tick took %v; the kill and its confirm-dead loop must run off-tick", elapsed)
 	}
 }
