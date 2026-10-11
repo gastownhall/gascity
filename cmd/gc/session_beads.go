@@ -2864,6 +2864,7 @@ func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, s
 //
 // Returns the number of beads reaped.
 func reapStaleSessionBeads(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
@@ -2968,10 +2969,9 @@ func reapStaleSessionBeads(
 		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
 			continue
 		}
-		// A stuck-creating row holds no claims (see above), so the cascade reads
-		// only the session store: hotfix/1.5.1's reap is handed neither the city
-		// path nor the rigs.
-		if closeBead(store, workLegs{}, info.ID, "stale-session", now.UTC(), stderr) {
+		// A stuck-creating row holds no claims (see above), so the cascade's
+		// leg set is the city's without the rigs this reap is never handed.
+		if closeBead(store, workLegs{cityPath: cityPath}, info.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}

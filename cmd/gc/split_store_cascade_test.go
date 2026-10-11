@@ -12,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -176,6 +178,108 @@ func TestSplitStoreCascade_CloseInATickReadsOnlyTheTickIndex(t *testing.T) {
 						t.Fatalf("leg %p was listed %d times for %s, want %d (the index's list, plus the step's release fence)", leg, got, status, want)
 					}
 				}
+			}
+		})
+	}
+}
+
+// The startup step's sweeps close through one seat work index, as a tick's
+// session phases do: on either shape, two dead-runtime corpses and a
+// stuck-creating row close on one list of every leg per status, the demand
+// build runs under that index, and the index is gone when the step ends.
+// hotfix/1.5.1: main runs these sweeps as session phases under runTickPhases'
+// install; here startupReconcile installs it, and the stale reap hands its
+// cascade the city path so the cascade finds it.
+func TestSplitStoreCascade_StartupClosesReadOnlyTheStartupIndex(t *testing.T) {
+	for _, shape := range workShapes {
+		t.Run(shape, func(t *testing.T) {
+			cityPath := t.TempDir()
+			old := time.Now().Add(-time.Hour)
+			row := func(id, name string, state session.State) beads.Bead {
+				return beads.Bead{
+					ID: id, Title: "worker", Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel}, CreatedAt: old,
+					Metadata: map[string]string{"session_name": name, "template": "worker", "state": string(state)},
+				}
+			}
+			sessions := &killRaceStore{Store: beads.NewMemStoreFrom(3, []beads.Bead{
+				row("gc-1", "kill-town--worker-1", session.StateActive),
+				row("gc-2", "kill-town--worker-2", session.StateActive),
+				row("gc-3", "kill-town--worker-3", session.StateCreating),
+			}, nil)}
+			work := sessions
+			var routes *storageRoutes
+			if shape == "split" {
+				work = &killRaceStore{Store: beads.NewMemStore()}
+				routes = splitRoutes(sessions)
+			}
+			registerWorkShapeWith(t, cityPath, shape, sessions, work)
+			sp := newDeadRuntimeArtifactProvider()
+			for _, name := range []string{"kill-town--worker-1", "kill-town--worker-2"} {
+				sp.visible[name], sp.dead[name] = true, true
+			}
+			cr := &CityRuntime{
+				cityPath:            cityPath,
+				cityName:            "kill-town",
+				cfg:                 &config.City{},
+				sp:                  sp,
+				standaloneCityStore: work,
+				storageRoutes:       routes,
+				wg:                  fixedWispGC{},
+				rec:                 events.Discard,
+				logPrefix:           "test",
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+			}
+			var built *seatWorkIndex
+			cr.buildFn = func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+				built = seatWorkIndexFor(cityPath, sessions)
+				return DesiredStateResult{State: map[string]TemplateParams{}}
+			}
+
+			// The index reads its legs concurrently.
+			var mu sync.Mutex
+			type legStatus struct {
+				store  *killRaceStore
+				status string
+			}
+			legLists := map[legStatus]int{}
+			watch := func(s *killRaceStore) func(beads.ListQuery, []beads.Bead) {
+				return func(q beads.ListQuery, _ []beads.Bead) {
+					if q.Live && q.TierMode == beads.TierBoth && q.Type == "" && q.Label == "" && len(q.IDs) == 0 && q.Assignee == "" && len(q.Assignees) == 0 {
+						mu.Lock()
+						legLists[legStatus{s, q.Status}]++
+						mu.Unlock()
+					}
+				}
+			}
+			sessions.afterList, work.afterList = watch(sessions), watch(work)
+
+			if !cr.startupReconcile(context.Background()) {
+				t.Fatal("the startup step did not complete")
+			}
+			sessions.afterList, work.afterList = nil, nil
+
+			for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+				if got, _ := sessions.Get(id); got.Status != "closed" {
+					t.Fatalf("row %s status = %q, want closed by the startup sweeps", id, got.Status)
+				}
+			}
+			legs := []*killRaceStore{work}
+			if shape == "split" {
+				legs = append(legs, sessions)
+			}
+			for _, leg := range legs {
+				for _, status := range seatWorkStatuses {
+					if got := legLists[legStatus{leg, status}]; got != 1 {
+						t.Fatalf("leg %p was listed %d times for %s, want 1 (the startup index's list)", leg, got, status)
+					}
+				}
+			}
+			if built == nil {
+				t.Fatal("the demand build ran without the startup index")
+			}
+			if seatWorkIndexFor(cityPath, sessions) != nil {
+				t.Fatal("the startup index outlived the step")
 			}
 		})
 	}

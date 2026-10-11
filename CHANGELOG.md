@@ -52,10 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under an old alias is left to the orphan sweep), fencing each release on the
   row's status and assignee (#7487).
 - **A claim made after a tick's read stops the close.** Before a gate-decided
-  close, and before an idle-timeout kill, gc re-reads the seat's claims (live
-  on local stores, from the cache on the work store and bd rigs) and keeps the
-  seat when it finds one; a close that releases anyway releases the late claim
-  too (#7525).
+  close, and before an idle-timeout kill, gc re-reads the seat's claims and
+  keeps the seat when it finds one; a close that releases anyway releases the
+  late claim too. The re-read is live on local stores and answers from the
+  cache only on the work store and bd rigs: when the cache cannot answer, the
+  close or kill goes ahead on the tick's read, and a late claim there stays on
+  the seat (#7525).
 - **`gc bd show <id>` works again on a refused split city whose binding holds
   migrated beads.** The by-id relic refusal now applies per id: only an id the
   class binding holds, or that the migration's copy manifest records

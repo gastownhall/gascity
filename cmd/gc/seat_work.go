@@ -238,8 +238,8 @@ var (
 // (tests, one-shot callers) gets none.
 //
 // An index already installed for the city stays: the controller installs one
-// for its whole tick (runTickPhases), and the reconcile pass inside it shares
-// that read.
+// for its whole tick (CityRuntime.tick) and startup step (startupReconcile),
+// and the reconcile pass inside either shares that read.
 func installSeatWorkIndex(cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store) func() {
 	leading = unwrapClassStore(leading)
 	if _, ok := registeredResidencyEntry(cityPath); !ok || leading == nil || seatWorkIndexFor(cityPath, leading) != nil {

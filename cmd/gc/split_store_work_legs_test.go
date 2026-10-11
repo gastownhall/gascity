@@ -489,6 +489,34 @@ func TestCityRuntimeTick_SharesOneSeatWorkIndexAcrossSessionPhases(t *testing.T)
 	}
 }
 
+// An install inside an installed index's span, the reconcile pass inside a tick
+// or the startup step, keeps the outer index: the pass shares the outer read,
+// and its removal leaves the outer index to the phases after it.
+func TestSeatWorkIndex_NestedInstallKeepsTheOuterIndex(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{}
+	work := beads.NewMemStore()
+	registerWorkShapeWith(t, cityPath, "single", work, work)
+
+	removeOuter := installSeatWorkIndex(cityPath, cfg, work, nil)
+	outer := seatWorkIndexFor(cityPath, work)
+	if outer == nil {
+		t.Fatal("no outer index installed")
+	}
+	removeInner := installSeatWorkIndex(cityPath, cfg, work, nil)
+	if got := seatWorkIndexFor(cityPath, work); got != outer {
+		t.Fatalf("index inside the nested install = %p, want the outer index %p", got, outer)
+	}
+	removeInner()
+	if got := seatWorkIndexFor(cityPath, work); got != outer {
+		t.Fatalf("index after the nested removal = %p, want the outer index %p", got, outer)
+	}
+	removeOuter()
+	if got := seatWorkIndexFor(cityPath, work); got != nil {
+		t.Fatalf("index after the outer removal = %p, want none", got)
+	}
+}
+
 // A dark work leg fails every gate the index serves closed, exactly as the
 // live probes do: no gate may answer "no work" over a leg it could not read.
 func TestSeatWorkIndex_DarkLegFailsEveryGateClosed(t *testing.T) {
