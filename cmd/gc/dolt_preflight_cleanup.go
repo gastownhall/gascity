@@ -18,6 +18,9 @@ var managedDoltPreflightCleanupFn = preflightManagedDoltCleanup
 
 const (
 	managedDoltProcTimeout = 1500 * time.Millisecond
+)
+
+var (
 	managedDoltLsofTimeout = 3 * time.Second
 )
 

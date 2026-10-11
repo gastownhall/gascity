@@ -61,6 +61,12 @@ func TestFileOpenedByAnyProcessWithoutLsofReturnsClosedOrUnknown(t *testing.T) {
 }
 
 func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
+	oldTimeout := managedDoltLsofTimeout
+	managedDoltLsofTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		managedDoltLsofTimeout = oldTimeout
+	})
+
 	path := filepath.Join(t.TempDir(), "LOCK")
 	if err := os.WriteFile(path, []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -85,7 +91,7 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("fake lsof did not run: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 4*time.Second {
+	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("fileOpenedByAnyProcess() took %s, want bounded timeout", elapsed)
 	}
 }
