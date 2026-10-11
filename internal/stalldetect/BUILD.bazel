@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "stalldetect",
+    srcs = [
+        "format.go",
+        "stalldetect.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/stalldetect",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/events",
+    ],
+)
+
+go_test(
+    name = "stalldetect_test",
+    srcs = [
+        "format_test.go",
+        "stalldetect_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":stalldetect"],
+    deps = [
+        "//internal/beads",
+        "//internal/events",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
