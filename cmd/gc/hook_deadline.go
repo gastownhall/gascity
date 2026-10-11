@@ -17,16 +17,19 @@ import (
 // agent never sees the handoff, and it is already marked read and closed. So
 // gc hook run hands the child its deadline, and a child skips a destructive
 // post-injection step when too little time is left to finish it and exit. The
-// skipped mail stays unread and the next hook delivers it again — the
-// at-least-once posture the nudge queue already has.
+// skipped mail stays unread and the next hook delivers it again. An injecting
+// nudge drain is gated the same way: its ack of the nudges it wrote is the
+// destructive step, so with too little time left it releases its claims
+// instead, and the next drain delivers them again. Either way a hook cut
+// short delivers twice rather than never.
 
 // hookDeadlineEnv names the absolute time (RFC 3339, UTC) by which a child of
 // gc hook run must have exited for its output to be kept.
 const hookDeadlineEnv = "GC_HOOK_DEADLINE"
 
 // hookDeadlineArchiveMarginMax caps the time an injecting hook must have left
-// to archive what it injected and exit: a close-with-metadata write and the
-// process exit, against a slow remote ledger.
+// to retire what it injected and exit: the archive's or the nudge ack's
+// writes and the process exit, against a slow remote ledger.
 const hookDeadlineArchiveMarginMax = 3 * time.Second
 
 // hookProcessStart is when this process started, the start of the time gc
@@ -103,6 +106,23 @@ func hookDeadlineAllowsArchive(cmdName, what string, stderr io.Writer) bool {
 	}
 	if !ok {
 		fmt.Fprintf(stderr, "%s: hook deadline too close to archive %s; it stays unread and the next hook delivers it again\n", cmdName, what) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
+}
+
+// hookDeadlineAllowsNudgeAck reports whether an injecting nudge drain has time
+// to ack the nudges it just wrote, described by what, and exit before the
+// deadline gc hook run handed it. When it does not, it says so on stderr: the
+// caller releases the claims instead, so the nudges are delivered again.
+func hookDeadlineAllowsNudgeAck(what string, stderr io.Writer) bool {
+	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge drain: %v; releasing %s for redelivery\n", err, what) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	if !ok {
+		fmt.Fprintf(stderr, "gc nudge drain: hook deadline too close to ack %s; releasing it for redelivery by the next drain\n", what) //nolint:errcheck // best-effort stderr
 		return false
 	}
 	return true

@@ -346,3 +346,42 @@ func TestInboxArchiveRetiresExactlyTheInjectedWindow(t *testing.T) {
 		t.Fatalf("the handoff inside the window was not archived: %v", perRecipient)
 	}
 }
+
+// TestNudgeDrainInjectAcksOnlyWhenTheHookCanFinish pins the nudge half of the
+// hook deadline: gc hook run discards the child's output when it overruns, so
+// an injecting drain acks the nudges it wrote only while the margin remains.
+// Past it, the claims are released back to pending — the next drain delivers
+// them again — and the release is reported, never a silent ack of output that
+// may be thrown away.
+func TestNudgeDrainInjectAcksOnlyWhenTheHookCanFinish(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		deadlineIn  time.Duration
+		wantPending int
+	}{
+		{name: "ample time acks", deadlineIn: time.Hour, wantPending: 0},
+		{name: "deadline close releases", deadlineIn: time.Second, wantPending: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookBudgetFixture(t)
+			f.queueNudge(t)
+			setHookProcessStart(t, time.Now().Add(-time.Minute))
+			t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(tc.deadlineIn)))
+			run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return nudgeDrainInject(t, f, stdout, stderr) })
+			if run.code != 0 || !strings.Contains(run.stdout, "review queued work") {
+				t.Fatalf("exit %d, nudge not injected; stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+			}
+			pending, inFlight, dead, err := listQueuedNudges(f.cityDir, hookBudgetIdentity, time.Now())
+			if err != nil {
+				t.Fatalf("listQueuedNudges: %v", err)
+			}
+			if len(pending) != tc.wantPending || len(inFlight) != 0 || len(dead) != 0 {
+				t.Fatalf("queue after drain = %d pending, %d in flight, %d dead; want %d, 0, 0",
+					len(pending), len(inFlight), len(dead), tc.wantPending)
+			}
+			if warned := strings.Contains(run.stderr, "deadline"); warned != (tc.wantPending > 0) {
+				t.Fatalf("deadline warning = %v, want %v; stderr=%q", warned, tc.wantPending > 0, run.stderr)
+			}
+		})
+	}
+}
