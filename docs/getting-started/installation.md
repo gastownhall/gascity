@@ -19,7 +19,8 @@ managers). Choose source when you need unreleased changes or plan to contribute.
 ## Prerequisites
 
 Gas City requires a small set of runtime tools. Homebrew installs all of them
-for you; the other methods require manual installation.
+for you except the tested `bd` prerelease, which comes from the release assets
+in the table below; the other methods require manual installation.
 
 | Tool | Required | Min version | macOS | Linux | Notes |
 |------|----------|-------------|-------|-------|-------|
