@@ -199,12 +199,12 @@ var parityFindings = map[string]parityEntry{
 // not yet registered. The key's arm ("A18") or kind must stay unregistered.
 var parityUnported = map[string]parityEntry{
 	"C7b2 drift-restart": {
-		"C7b2 (A14's named restart in place, SESS-557)", "legacy kills a drifted named row's runtime and restarts it in place in the tick (ConfigDriftResetPatch, the start and its commit); v2's A14 proposes the restart, which has no effect until C7b2",
+		"C7b2 (A14's named restart in place, SESS-557)", "legacy kills a drifted named row's runtime and restarts it in place in the tick (ConfigDriftResetPatch, the start and its commit); v2's A14 leaves the row alone until C7b2 brings the restart with its effect",
 		append([]string{"continuation_epoch", "generation", "state_reason", "creation_complete_at", "awake_started_at", "last_woke_at", "primed_at", "prompt_hash", "started_config_hash"}, parityStartKeys...),
 	},
-	"C7b2 live-apply": {"C7b2 (A14's live RunLive, SESS-565)", "legacy runs a live drift's session_live again (RunLive) and records the live hashes and session.updated; v2's A14 proposes it, which has no effect until C7b2", []string{"started_live_hash", "live_hash"}},
+	"C7b2 live-apply": {"C7b2 (A14's live RunLive, SESS-565)", "legacy runs a live drift's session_live again (RunLive) and records the live hashes and session.updated; v2's A14 leaves the row alone until C7b2 brings RunLive with its effect", []string{"started_live_hash", "live_hash"}},
 	"C7b2 drift-repair": {
-		"C7b2 (A14's asleep named repair, SESS-566/568)", "legacy repairs an asleep named row's drift (resetConfiguredNamedSessionForConfigDriftInfo: the baseline cleared, the key rotated or cleared, the continuation reset); v2's A14 proposes the repair, which has no effect until C7b2",
+		"C7b2 (A14's asleep named repair, SESS-566/568)", "legacy repairs an asleep named row's drift (resetConfiguredNamedSessionForConfigDriftInfo: the baseline cleared, the key rotated or cleared, the continuation reset); v2's A14 leaves the row alone until C7b2 brings the repair with its effect",
 		[]string{"started_config_hash", "started_live_hash", "live_hash", "session_key", "continuation_reset_pending", "restart_requested"},
 	},
 	// Unported with no fixture, since neither twin reads a provider-health
@@ -1444,9 +1444,9 @@ func parityFixtures() []parityFixture {
 			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
 		},
 		// A wanted asleep named row whose start a gate holds (a quarantine)
-		// is rebaselined too: A8 leaves only a row its start commits this
-		// pass, so a later drift repair (C7b) never takes a v5 hash for a
-		// drift and rotates its key.
+		// is rebaselined too, as legacy's asleep named branch does: A8
+		// leaves only a row the start arms start this pass, whose commit
+		// writes the baseline.
 		{
 			Name: "a wanted asleep named row its start holds is rebaselined", Behaviors: []string{"SESS-567"}, City: chat(false),
 			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "started_config_hash", "v5:core", "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
@@ -1476,8 +1476,9 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{awake("started_config_hash", drifted)}, Work: assigned, Runtimes: []simRuntime{live}, Explain: map[string]string{"row:gc-1:currently_processing_bead_id": "drift-deferral-skips"},
 		},
 		// A named row's drift: a pinned one is never restarted, only its
-		// deferral stamped (SESS-555); another restarts in place (SESS-557),
-		// and an asleep one is repaired (SESS-566/568), both C7b2's effects.
+		// deferral stamped (SESS-555); another restarts in place (SESS-557)
+		// and an asleep one is repaired (SESS-566/568), both C7b2's, which
+		// A14 leaves alone until then.
 		{
 			Name: "a pinned named row's drift is deferred", Behaviors: []string{"SESS-555"}, City: chat(false),
 			Rows: []parityRow{onDemand("configured_named_mode", "always", "started_config_hash", drifted, "pin_awake", "true")}, Runtimes: []simRuntime{chatLive}, Explain: map[string]string{"row:gc-c:*sync": "A7 row-metadata"},

@@ -37,8 +37,14 @@ func armBaseline(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	cfg, core, ok := r.w.coreHash(info)
-	if !ok || r.startsThisPass() {
+	if !ok {
 		return intent{}, false
+	}
+	propose := func(reason string, patch session.MetadataPatch) (intent, bool) { // a row the start arms start this pass is its commit's
+		if r.startsThisPass() {
+			return intent{}, false
+		}
+		return r.heal(intentBaseline, reason, patch)
 	}
 	switch storedLive, live := info.StartedLiveHash, runtime.LiveFingerprint(cfg); {
 	case stored != core && runtime.IsLegacyOrMismatchedVersion(stored): // the rebaseline, below
@@ -47,15 +53,15 @@ func armBaseline(r *rowFacts) (intent, bool) {
 		if req, ok := activeStop(r.row); ok && req.Reason == drainConfigDrift && req.Phase == stopRequested {
 			maps.Copy(patch, stopCancelPatch())
 		}
-		return r.heal(intentBaseline, r.w.SoftReload.Reason, patch)
+		return propose(r.w.SoftReload.Reason, patch)
 	case stored != core || e.Liveness != livenessAlive || storedLive == live:
 		return intent{}, false
 	case storedLive == "" && len(cfg.SessionLive) == 0:
-		return r.heal(intentBaseline, decideBaselineLive, baselinePatch(cfg, baselineLiveBackfill))
+		return propose(decideBaselineLive, baselinePatch(cfg, baselineLiveBackfill))
 	case !runtime.IsLegacyOrMismatchedVersion(storedLive):
 		return intent{}, false // live drift: A14's RunLive (C7b)
 	} // otherwise a legacy or mismatched live hash: the rebaseline
-	return r.heal(intentBaseline, decideBaselineVersion, baselinePatch(cfg, baselineVersionArtifact))
+	return propose(decideBaselineVersion, baselinePatch(cfg, baselineVersionArtifact))
 }
 
 // coreHash is the row's hash config and core fingerprint under this

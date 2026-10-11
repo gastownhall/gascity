@@ -13,12 +13,12 @@ import (
 // Kills A14 out of legacy's order or reaching past it (SESS-550..562, 565,
 // 566/568): an attached (or attach-unknown) drift stamps its deferral,
 // throttled; a recent attached deferral, a pending interaction and open work
-// wait; a pinned named row stamps and never restarts, another named row
-// restarts in place or relaunches (C7b2's kinds); a launch-only drift
-// relaunches only on a provider that can; otherwise the drain begins, once
-// no stop request is active. A resolved drift clears its deferral keys, a
-// live drift proposes its RunLive, an asleep named drift its repair, and a
-// missing stored hash or an undesired row never drifts.
+// wait; a pinned named row stamps and never restarts; another named row, a
+// launch-only drift a provider can relaunch, a live drift and an asleep
+// named drift are C7b2's, which A14 leaves alone; otherwise the drain
+// begins, once no stop request is active. A resolved drift clears its
+// deferral keys, and a missing stored hash or an undesired row never
+// drifts.
 func TestDecideRowConfigDrift(t *testing.T) {
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
 	base := censusRowOf(t, drainRow()).Info
@@ -35,7 +35,6 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		pending, work    bool
 		relaunch         bool
 		alive, undesired bool
-		arm              bool // decided by A14 alone: another arm takes the row first
 		wantKind         string
 		wantReason       string
 	}{
@@ -47,30 +46,23 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "a stale attached deferral drains", meta: []string{"started_config_hash", stale, "attached_config_drift_deferred_key", key, "attached_config_drift_deferred_at", rowAt(-6 * time.Minute)}, alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "a pinned named row stamps", meta: append([]string{"started_config_hash", stale, "pin_awake", "true"}, named...), alive: true, wantKind: intentRowHeal, wantReason: decideDriftPinned},
 		{name: "a stamped pinned named row waits", meta: append([]string{"started_config_hash", stale, "pin_awake", "true", "config_drift_deferred_key", key, "config_drift_deferred_at", rowAt(-time.Hour)}, named...), alive: true},
-		{name: "a named row restarts in place", meta: append([]string{"started_config_hash", stale}, named...), alive: true, wantKind: intentDriftRestart, wantReason: decideDriftRestart},
-		{name: "a named launch-only drift relaunches", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
+		{name: "a named row's restart is C7b2's", meta: append([]string{"started_config_hash", stale}, named...), alive: true},
+		{name: "a named launch-only drift's relaunch is C7b2's", meta: slices.Concat([]string{"started_config_hash", stale}, launchOnly, named), alive: true, relaunch: true},
 		{name: "a pending interaction waits", meta: []string{"started_config_hash", stale}, alive: true, pending: true},
 		{name: "open work waits", meta: []string{"started_config_hash", stale}, alive: true, work: true},
-		{name: "a launch-only drift relaunches", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true, wantKind: intentDriftRelaunch, wantReason: decideDriftRelaunch},
+		{name: "a launch-only drift's relaunch is C7b2's", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, relaunch: true},
 		{name: "a launch-only drift no provider can relaunch drains", meta: append([]string{"started_config_hash", stale}, launchOnly...), alive: true, wantKind: intentDrainBegin, wantReason: decideDrainBegin + drainConfigDrift},
 		{name: "an active stop request holds the drain", meta: append([]string{"started_config_hash", stale}, intentAt(drainIdle, "3")...), alive: true},
 		{name: "a resolved drift clears its deferral keys", meta: []string{"started_config_hash", core, "started_live_hash", live, "attached_config_drift_deferred_key", key}, alive: true, wantKind: intentRowHeal, wantReason: decideDriftResolved},
 		{name: "a converged row", meta: []string{"started_config_hash", core, "started_live_hash", live}, alive: true},
-		{name: "a live drift runs session_live", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true, wantKind: intentLiveApply, wantReason: decideLiveApply},
-		{name: "an asleep named drift is repaired", meta: append([]string{"state", "asleep", "started_config_hash", stale}, named...), wantKind: intentDriftRepair, wantReason: decideDriftRepair},
-		{name: "a suspended named drift is repaired", meta: append([]string{"state", "suspended", "started_config_hash", stale}, named...), wantKind: intentDriftRepair, wantReason: decideDriftRepair},
-		{name: "a creating named drift waits for its restart", meta: append([]string{"state", "creating", "started_config_hash", stale}, named...), arm: true},
-		{name: "a start-pending named drift waits for its restart", meta: append([]string{"state", "start-pending", "started_config_hash", stale}, named...), arm: true},
+		{name: "a live drift's RunLive is C7b2's", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true},
+		{name: "an asleep named drift's repair is C7b2's", meta: append([]string{"state", "asleep", "started_config_hash", stale}, named...)},
 		{name: "an asleep pool row's drift is no named repair", meta: []string{"state", "asleep", "started_config_hash", stale}},
 		{name: "no stored hash never drifts", meta: []string{"started_live_hash", live}, alive: true},
 		{name: "an undesired row", meta: []string{"started_config_hash", stale}, alive: true, undesired: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			decide := decideDrain
-			if tc.arm {
-				decide = decideArm(armConfigDrift)
-			}
-			it, _ := decide(t, tc.meta, func(e *selectionEntry) {
+			it, _ := decideDrain(t, tc.meta, func(e *selectionEntry) {
 				e.InDesired, e.Desired = !tc.undesired, desireKeep
 				if !tc.alive {
 					e.Liveness = livenessGone
@@ -91,8 +83,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: tc.attached, Uncertain: tc.unsure}}
 			})
-			drift := slices.Contains([]string{intentDriftRestart, intentDriftRelaunch, intentDriftRepair, intentLiveApply}, it.Kind) ||
-				slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift}, it.Reason)
+			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift}, it.Reason)
 			if tc.wantKind == "" && drift || tc.wantKind != "" && (it.Kind != tc.wantKind || it.Reason != tc.wantReason) { // another arm may take a row A14 leaves
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}
@@ -120,7 +111,8 @@ func TestDecideRowConfigDrift(t *testing.T) {
 
 // Kills an execution-stalled request lost, applied to another incarnation,
 // or begun over a stop already requested (NUDGE-022, A16): C8's request for
-// the row's generation begins the execution-stalled drain on a live row.
+// the row's generation, compared as integers (an empty one reads 0, as
+// legacy's), begins the execution-stalled drain on a live row.
 func TestDecideRowExecutionStalled(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -130,6 +122,7 @@ func TestDecideRowExecutionStalled(t *testing.T) {
 		want  bool
 	}{
 		{"its generation", "3", nil, true, true},
+		{"an empty generation on a row at generation 0", "", []string{"generation", ""}, true, true},
 		{"another generation", "2", nil, true, false},
 		{"a stop already requested", "3", intentAt(drainIdle, "3"), true, false},
 		{"not alive", "3", nil, false, false},
