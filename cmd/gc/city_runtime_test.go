@@ -888,45 +888,147 @@ type blindListProvider struct{ *runtime.Fake }
 
 func (blindListProvider) ListRunning(string) ([]string, error) { return nil, nil }
 
-func TestCityRuntimeShutdownStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
-	store := beads.NewMemStore()
-	for _, md := range []map[string]string{
-		{"session_name": "probe-1", "template": "probe", "state": "active"},
-		{"session_name": "idler-adhoc-1", "template": "idler", "state": "awake"},
-		{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
-		{"session_name": "idler-draining", "template": "idler", "state": "draining"},
-	} {
-		if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
+// blindProbeProvider is a blindListProvider that can fail chosen names' stop
+// and liveness probe, and stop chosen names when interrupted (an agent that
+// exits on Ctrl-C). A failed probe reads "not running" through the bool
+// IsRunning, as an exec pack's failed is-running does, and fails the
+// error-bearing liveness observation.
+type blindProbeProvider struct {
+	blindListProvider
+	stopErr         map[string]error
+	probeErr        map[string]error
+	exitOnInterrupt map[string]bool
+}
+
+func (p blindProbeProvider) Stop(name string) error {
+	if err := p.stopErr[name]; err != nil {
+		return err
 	}
+	return p.Fake.Stop(name)
+}
+
+func (p blindProbeProvider) IsRunning(name string) bool {
+	if p.probeErr[name] != nil {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func (p blindProbeProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	if err := p.probeErr[name]; err != nil {
+		return runtime.Liveness{}, err
+	}
+	running := p.Fake.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+func (p blindProbeProvider) Interrupt(name string) error {
+	if err := p.Fake.Interrupt(name); err != nil {
+		return err
+	}
+	if p.exitOnInterrupt[name] {
+		return p.Fake.Stop(name)
+	}
+	return nil
+}
+
+func TestCityRuntimeShutdownStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
+	// The default shutdown_timeout is non-zero, which takes the interrupt,
+	// wait, kill path; 0s kills at once. Both must stop the same sessions.
+	for _, timeout := range []string{"0s", "1s"} {
+		t.Run("shutdown_timeout="+timeout, func(t *testing.T) {
+			store := beads.NewMemStore()
+			for _, md := range []map[string]string{
+				{"session_name": "probe-1", "template": "probe", "state": "active"},
+				{"session_name": "idler-adhoc-1", "template": "idler", "state": "awake"},
+				{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+				{"session_name": "idler-draining", "template": "idler", "state": "draining"},
+				{"session_name": "idler-unknown", "template": "idler", "state": "awake"},
+				{"session_name": "idler-starting", "template": "idler", "state": "creating"},
+			} {
+				if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+			}
+			fake := runtime.NewFake()
+			for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining", "idler-unknown", "idler-starting", "not-ours"} {
+				if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
+					t.Fatalf("Start %s: %v", name, err)
+				}
+			}
+			sp := blindProbeProvider{
+				blindListProvider: blindListProvider{fake},
+				probeErr:          map[string]error{"idler-unknown": errors.New("is-running: transport error")},
+			}
+			var stdout, stderr lockedBuffer
+			cr := &CityRuntime{
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Daemon:    config.DaemonConfig{ShutdownTimeout: timeout},
+				},
+				sp:                  sp,
+				rec:                 events.Discard,
+				standaloneCityStore: store,
+				stdout:              &stdout,
+				stderr:              &stderr,
+			}
+
+			cr.shutdown()
+
+			// idler-unknown's probe fails: unknown is not absent, so it is
+			// stopped as well.
+			for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining", "idler-unknown"} {
+				if fake.IsRunning(name) {
+					t.Errorf("%s still running after shutdown: a running session of the city the runtime could not list must be stopped; stdout = %q, stderr = %q", name, stdout.String(), stderr.String())
+				}
+			}
+			if !fake.IsRunning("not-ours") {
+				t.Error("not-ours was stopped: shutdown must only add sessions the city's store records")
+			}
+			if !fake.IsRunning("idler-starting") {
+				t.Error("idler-starting was stopped: a session recorded creating is its start's to finish")
+			}
+			// None of the idler agents exits on an interrupt: none may be
+			// reported as having exited gracefully. (probe-1's interrupt wave
+			// stops it outright, outcome stopped_pool_managed.)
+			for _, name := range []string{"idler-adhoc-1", "idler-draining"} {
+				if strings.Contains(stdout.String(), "Agent '"+name+"' exited gracefully") {
+					t.Errorf("shutdown reported a graceful exit %s did not make; stdout = %q", name, stdout.String())
+				}
+			}
+		})
+	}
+}
+
+// gracefulStopAll must not read a name the runtime inventory cannot list as
+// exited: it waits out the grace window for it by a per-name probe, reports
+// only a real exit as graceful, and stops a survivor through the worker
+// boundary.
+func TestGracefulStopAllReadsUnlistedSessionsPerName(t *testing.T) {
 	fake := runtime.NewFake()
-	for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining", "not-ours"} {
+	for _, name := range []string{"exits", "lingers"} {
 		if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatalf("Start %s: %v", name, err)
 		}
 	}
-	cr := &CityRuntime{
-		cfg: &config.City{
-			Workspace: config.Workspace{Name: "test-city"},
-			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
-		},
-		sp:                  blindListProvider{fake},
-		rec:                 events.Discard,
-		standaloneCityStore: store,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-	}
+	sp := blindProbeProvider{blindListProvider: blindListProvider{fake}, exitOnInterrupt: map[string]bool{"exits": true}}
+	var stdout, stderr lockedBuffer
+	const grace = time.Second
+	began := time.Now()
+	gracefulStopAll([]string{"exits", "lingers"}, sp, grace, events.Discard, &config.City{}, beads.SessionStore{Store: beads.NewMemStore()}, &stdout, &stderr)
+	elapsed := time.Since(began)
 
-	cr.shutdown()
-
-	for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining"} {
-		if fake.IsRunning(name) {
-			t.Errorf("%s still running after shutdown: a running session of the city the runtime could not list must be stopped", name)
-		}
+	if elapsed < grace {
+		t.Errorf("gracefulStopAll returned after %s, want the full %s grace window for an agent that has not exited", elapsed, grace)
 	}
-	if !fake.IsRunning("not-ours") {
-		t.Error("not-ours was stopped: shutdown must only add sessions the city's store records")
+	if fake.IsRunning("lingers") || fake.IsRunning("exits") {
+		t.Fatalf("a session survived gracefulStopAll; stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Agent 'exits' exited gracefully") {
+		t.Errorf("the agent that exited on its interrupt is not reported as exited gracefully; stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Agent 'lingers' exited gracefully") {
+		t.Errorf("the agent that ignored its interrupt is reported as exited gracefully; stdout = %q", stdout.String())
 	}
 }
 

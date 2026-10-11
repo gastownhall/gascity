@@ -1041,6 +1041,12 @@ func gracefulStopAllWithForceSignal(
 	for _, target := range targets {
 		targetByName[target.name] = target
 	}
+	// A name the runtime inventory does not list but a per-name probe does not
+	// rule out is one the list cannot see (an exec pack whose list-running is
+	// unsupported answers an empty inventory). Read its liveness per name below:
+	// trusting the list would read it as exited at once, cut the grace window
+	// short and stop it outside the worker boundary as "exited gracefully".
+	unlisted := unlistedSessionSet(sp, names)
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
 	// This is intentionally flat: interrupts are a best-effort graceful hint,
@@ -1064,7 +1070,7 @@ func gracefulStopAllWithForceSignal(
 		}
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
-			allExited = len(runningSet) == 0
+			allExited = len(runningSet) == 0 && namesObservedExited(sp, unlisted)
 		} else {
 			for _, name := range names {
 				// An unknown state is not an exit: keep waiting out the grace
@@ -1096,7 +1102,7 @@ func gracefulStopAllWithForceSignal(
 	for _, name := range names {
 		running := false
 		var observeErr error
-		if listed {
+		if listed && !unlisted[name] {
 			running = runningSet[name]
 		} else {
 			running, observeErr = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
@@ -1153,6 +1159,43 @@ func gracefulStopAllWithForceSignal(
 
 func stopForceRequested(forceStopRequested func() bool) bool {
 	return forceStopRequested != nil && forceStopRequested()
+}
+
+// unlistedSessionSet returns the names that a complete runtime inventory does
+// not list but that a per-name probe reports running or cannot rule out. Nil
+// when the inventory is incomplete (every name is then read per name anyway)
+// or lists every name.
+func unlistedSessionSet(sp runtime.Provider, names []string) map[string]bool {
+	runningSet, ok := runningSessionSet(sp, names)
+	if !ok {
+		return nil
+	}
+	var unlisted map[string]bool
+	for _, name := range names {
+		if runningSet[name] {
+			continue
+		}
+		if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name); err == nil && !running {
+			continue
+		}
+		if unlisted == nil {
+			unlisted = make(map[string]bool)
+		}
+		unlisted[name] = true
+	}
+	return unlisted
+}
+
+// namesObservedExited reports whether a per-name probe sees every name
+// exited. An unknown state is not an exit.
+func namesObservedExited(sp runtime.Provider, names map[string]bool) bool {
+	for name := range names {
+		running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+		if err != nil || running {
+			return false
+		}
+	}
+	return true
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {

@@ -431,7 +431,8 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// but only if the runtime can list them. One that cannot (an exec pack whose
 	// list-running is unsupported reads as an empty inventory) would leave them
 	// running past the stop, with no controller left to reap them. Also stop the
-	// city's own recorded sessions that the runtime confirms are running.
+	// city's own recorded sessions that a per-name probe reports running or
+	// cannot rule out (doStopWithoutSuccess withholds success for an unknown).
 	for _, sn := range appendStoreRecordedRunning(nil, sessionFrontDoor(sessStore), sp, stderr) {
 		if !desired[sn] {
 			sessionNames = append(sessionNames, sn)
@@ -449,7 +450,16 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// A start the controller died in leaves its row creating, a state the stop
 	// sweep's suspend refuses (it is the start's own), so its runtime would
 	// outlive the stop. With no controller left, stop those first.
-	creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, stdout, stderr)
+	// A start in flight is left to that start: keep it out of the sweep (whose
+	// stop would kill it under its starter) and in desired (so the orphan sweep
+	// does not stop it either).
+	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, stdout, stderr)
+	if len(inFlight) > 0 {
+		sessionNames = slices.DeleteFunc(sessionNames, func(sn string) bool { return inFlight[strings.TrimSpace(sn)] })
+		for sn := range inFlight {
+			desired[sn] = true
+		}
+	}
 
 	code := doStopWithoutSuccess(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 	if creatingLeft && code == 0 {
@@ -498,39 +508,59 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 // until it commits the start, so a free flock means the process that wrote the
 // row died mid-start (a controller crash). The stop sweep's suspend refuses a
 // creating row, so without this its runtime outlives the stop. The row is left
-// as it is, for the reconciler to resolve on the next start. A runtime whose
-// flock is held is a start in flight: it is left to that start, reported, and
-// the answer is true so the stop is not confirmed.
-func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp runtime.Provider, stdout, stderr io.Writer) (left bool) {
+// as it is, for the reconciler to resolve on the next start.
+//
+// A runtime whose flock is held is a start in flight: it is reported and
+// returned in inFlight, for the caller to keep out of the rest of the stop.
+// left is true when any creating runtime is not known stopped (a start in
+// flight, a failed liveness probe, a failed stop), so the stop is not
+// confirmed.
+func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp runtime.Provider, stdout, stderr io.Writer) (inFlight map[string]bool, left bool) {
 	if !filepath.IsAbs(cityPath) || !sessFront.Backed() || sp == nil {
-		return false
+		return nil, false
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return false
+		return nil, false
 	}
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionName)
-		if name == "" || sessionMetadataStateInfo(info) != "creating" || !sp.IsRunning(name) {
+		if name == "" || sessionMetadataStateInfo(info) != "creating" {
+			continue
+		}
+		running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc stop: observing session %s left creating: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			left = true
+			continue
+		}
+		if !running {
 			continue
 		}
 		_, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: session %s is starting; leaving it to its start: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			if inFlight == nil {
+				inFlight = make(map[string]bool)
+			}
+			inFlight[name] = true
 			left = true
 			continue
 		}
+		// StopForCleanup already absorbs a real "session gone" answer; any
+		// error it returns is a failed stop, even one whose text reads like
+		// "not found" (an exec script's "sh: kubectl: not found").
 		err = runtime.StopForCleanup(sp, name)
 		release()
-		if err != nil && !runtime.IsSessionGone(err) {
+		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: stopping session %s left creating by an interrupted start: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			left = true
 			continue
 		}
 		fmt.Fprintf(stdout, "Stopped session '%s' left creating by an interrupted start\n", name) //nolint:errcheck // best-effort stdout
 	}
-	return left
+	return inFlight, left
 }
 
 // openCityStoreForStop opens the store the full stop flow reads sessions

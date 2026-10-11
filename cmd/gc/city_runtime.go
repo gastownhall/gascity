@@ -4994,7 +4994,8 @@ func (cr *CityRuntime) shutdown() {
 		// A runtime that cannot enumerate its fleet (an exec pack whose list-running
 		// is unsupported answers an empty inventory) would otherwise leave every
 		// session this city started running past the stop. Also stop the city's
-		// open sessions that the runtime confirms are running.
+		// open sessions that a per-name probe reports running or cannot rule out
+		// (gracefulStopAll reads those per name, not from the blind list).
 		running = appendStoreRecordedRunning(running, sessionFrontDoor(store.Store), cr.sp, cr.stderr)
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
 		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
@@ -5034,16 +5035,17 @@ func (cr *CityRuntime) shutdown() {
 }
 
 // appendStoreRecordedRunning returns running plus the names of the city's open
-// (not closed) sessions that the provider reports running and running does not
-// already hold. Shutdown stops only what it lists; for a provider whose
-// ListRunning cannot see the fleet this is the city's own record of what it
-// started. The recorded state is not trusted to say what is up: a session
-// caught draining, or one recorded asleep whose sandbox survived, is as running
-// as an awake one, so the provider's IsRunning decides. (A session still
-// creating is its async start's to finish: shutdown waits for those first, and
-// the worker boundary does not stop a start in flight. A standalone stop reaps
-// one whose start died with its controller: stopInterruptedStartsForStop.) A
-// store read error leaves running unchanged.
+// (not closed) sessions that running does not already hold and that the
+// provider reports running or cannot rule out. Shutdown stops only what it
+// lists; for a provider whose ListRunning cannot see the fleet this is the
+// city's own record of what it started. The recorded state is not trusted to
+// say what is up: a session caught draining, or one recorded asleep whose
+// sandbox survived, is as running as an awake one, so a per-name probe
+// decides, and a probe that fails keeps the name (unknown is not absent; the
+// stop reports it as unknown). A session recorded creating is skipped: it is
+// its start's to finish (shutdown waits for async starts first, and a
+// standalone stop reaps one whose start died with its controller in
+// stopInterruptedStartsForStop). A store read error leaves running unchanged.
 func appendStoreRecordedRunning(running []string, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
 	if !sessFront.Backed() || sp == nil {
 		return running
@@ -5059,11 +5061,11 @@ func appendStoreRecordedRunning(running []string, sessFront *sessionpkg.Store, s
 	}
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionName)
-		if name == "" || seen[name] {
+		if name == "" || seen[name] || sessionMetadataStateInfo(info) == "creating" {
 			continue
 		}
 		seen[name] = true
-		if sp.IsRunning(name) {
+		if alive, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name); err != nil || alive {
 			running = append(running, name)
 		}
 	}
