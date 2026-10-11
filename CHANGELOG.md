@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **Releasing a dead session's claim no longer erases a newer claim on the
+  same bead.** With `[beads].conditional_writes` at `auto` or `require` on a
+  capable store, the retired-session and orphaned-pool release paths clear the
+  assignment and affinity metadata in one write guarded by the snapshot's
+  revision, so a successor that re-claimed the bead after the controller's
+  `List` (even under a reused assignee name) is left alone. A revision conflict
+  is reported and the next tick decides again; `require` refuses a store
+  without the capability, `auto` degrades to the legacy release, and `off`
+  (the builtin default) is unchanged. Snapshots without a revision (native-store
+  list rows) keep the legacy status-and-assignee fence. Hand-backport of #7384.
 
 ## [1.5.0] - 2026-10-05
 
