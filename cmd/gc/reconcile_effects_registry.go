@@ -46,14 +46,16 @@ type effectReads struct {
 
 // heldCaps are a pass's capabilities. create is what the pass hands its
 // creates, raw stores included: a create's guarded row write is v5 R1's
-// exception 1 (§13). creates runs them. The planner sets both, the first on
-// its first admitted create (planner.submit).
+// exception 1 (§13). creates runs them. release is the closes' raw work
+// legs, for their releases and cascades. The planner sets them, create on
+// its first admitted create and release on its first close (planner.submit).
 type heldCaps struct {
 	create  *createPass
 	creates *createEffects
 	start   startCaps           // the breaker and its recorder; capsFor adds the provider and clock
 	episode startupHealthRecord // over the sessions store
 	retire  retiredCleanup      // over the sessions store
+	release *closeReleases
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -104,8 +106,8 @@ var effectSpecs = map[string]effectSpec{
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentClose:           {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround}, // A10 (C3)
+	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround}, // A21 (C5c1)
+	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},          // A10 (C3)
 	intentRowMetadata:     {class: capRowWrites},
 	intentBaseline:        {class: capRowWrites, sections: baselineSections},                        // A8 (C7c)
 	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                        // A6

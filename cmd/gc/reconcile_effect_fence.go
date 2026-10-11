@@ -38,7 +38,7 @@ func (t *tx) readFence(ctx context.Context) string {
 			return causeRouteUnknown
 		}
 	}
-	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect) })
+	t.view.Fence = readLegs(ctx, leaf, t.name, t.needs, t.view.Now, t.view.World.Now, func() *txWork { return t.p.readWork(t.expect, t.view.It.Kind) })
 	return ""
 }
 
@@ -71,14 +71,20 @@ func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, 
 	return f
 }
 
-func (p *effectPass) readWork(row session.Info) *txWork {
+func (p *effectPass) readWork(row session.Info, kind string) *txWork {
 	if p.reads.legs.unusable() != nil || p.World.Env == nil {
 		return &txWork{Err: errNoReadStore}
 	}
 	// One seat's read, live, over the pass's city work legs (NEW2-1: never
-	// the sessions store standing in for the work store).
-	sw := seatWorkFor(p.reads.legs, releaseScope(row, p.World.Env.Cfg))
-	has, err := sessionHasOpenAssignedWorkForReachableStore(sw, row)
+	// the sessions store standing in for the work store). A close ends a
+	// dead seat, which the narrow ReleaseScope gates, as legacy's close gate
+	// does; every other effect that reads L5 ends a live runtime (a drain
+	// begin), which the seat's RefuseScope gates (O4).
+	var scope workScope = releaseScope(row, p.World.Env.Cfg)
+	if kind != intentClose {
+		scope = refuseScope(row, p.World.Env.Cfg)
+	}
+	has, err := sessionHasOpenAssignedWorkInStores(seatWorkFor(p.reads.legs, scope), scope)
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 

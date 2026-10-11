@@ -183,6 +183,7 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 				<-release
 				return settlement{Outcome: settledLanded}
 			}
+			spec.around = nil // the close's precheck would end it before its body
 			specs[kind] = spec
 		}
 	})

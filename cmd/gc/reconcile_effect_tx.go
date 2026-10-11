@@ -52,6 +52,7 @@ const (
 	capProviderStart                  // the start's provider, endpoint breaker and clock (a Call's)
 	capEpisode                        // the #46 startup-health episode record (a Call's)
 	capRetire                         // the retired-session cleanup after a close (an around's)
+	capRelease                        // the close's raw work legs, for its release Call and its around's cascade
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -70,7 +71,8 @@ type txCaps struct {
 	episode startupHealthRecord // capEpisode
 	// by is the controller, as a Call's leasing helper (a Manager start or
 	// stop) is handed it, carrying the effect's lease (callWatched).
-	by session.Actor
+	by      session.Actor
+	release *closeReleases // capRelease
 }
 
 // startCaps are what the start's Calls hold to admit the endpoint ticket and
@@ -87,13 +89,15 @@ type startCaps struct {
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
 // reaches no row write and none of a Call's handles (provider start,
-// routing, release, kill); C5a1's endpoint gate may add Eligible here, never
-// Admit. A closed row's cleanup (capRetire) writes only its waits and
-// bindings.
+// routing, kill), but two after-close writers: the close's cascade
+// (capRelease), which writes only after its close landed, and a closed row's
+// cleanup (capRetire), which writes only its waits and bindings; C5a1's
+// endpoint gate may add Eligible here, never Admit.
 type aroundCaps struct {
-	it     intent
-	reads  effectReads     // capReadStores: read-only
-	retire *retiredCleanup // capRetire, on the pass's clock
+	it      intent
+	reads   effectReads     // capReadStores: read-only
+	release *closeReleases  // capRelease
+	retire  *retiredCleanup // capRetire, on the pass's clock
 }
 
 // capsFor is it's txCaps under grant.
@@ -111,6 +115,9 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capEpisode != 0 {
 		c.episode = p.held.episode
+	}
+	if grant&capRelease != 0 {
+		c.release = p.held.release
 	}
 	return c
 }
@@ -316,6 +323,10 @@ type section struct {
 	// which the effect lint covers; each set by one write, never read by the
 	// transaction.
 	probeDef, decideDef, callDef any
+	// when, set by calledWhen, decides from the concluded step's Pass
+	// whether the Call runs at all: a skipped Call is no write, so it passes
+	// no gate, opens no latch and runs no seam.
+	when func(pass any) bool
 }
 
 // probed is a section whose Probe, a bounded read under both locks after the
@@ -350,6 +361,9 @@ const (
 	// callStop stops one: the full premise holds after it, a start's
 	// before it included.
 	callStop
+	// callWork writes work beads (a release), not the runtime: the premise
+	// after it is the one before it.
+	callWork
 )
 
 // called is sec with a provider Call after it, run under the name lock with
@@ -366,6 +380,22 @@ func called[In, Out any](kind callKind, sec section, call func(context.Context, 
 		return call(ctx, c, typed)
 	}
 	sec.callDef = call
+	return sec
+}
+
+// calledWhen is called with an opt-in skip: the Call runs only when when
+// accepts the step's Pass (a corpse to remove, a release to make). By
+// default a section's Call always runs, and opens the latch like a write.
+// Both are stored:
+//
+//gc:stored-param call
+//gc:stored-param when
+func calledWhen[In, Out any](kind callKind, sec section, when func(In) bool, call func(context.Context, txCaps, In) (Out, error)) section {
+	sec = called(kind, sec, call)
+	sec.when = func(pass any) bool {
+		typed, ok := pass.(In)
+		return ok && when(typed)
+	}
 	return sec
 }
 
@@ -490,7 +520,7 @@ func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec, latch
 		return runSpec(ctx, p, it, spec, c)
 	}
 	ran := false
-	a := aroundCaps{it: it, reads: c.reads}
+	a := aroundCaps{it: it, reads: c.reads, release: c.release}
 	if spec.caps&capRetire != 0 {
 		r := p.held.retire
 		r.clock = p.Clock
@@ -603,7 +633,7 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		if end {
 			break
 		}
-		if t.view.prev, t.view.prevErr = nil, nil; sec.call == nil {
+		if t.view.prev, t.view.prevErr = nil, nil; sec.call == nil || sec.when != nil && !sec.when(t.pass) {
 			if t.last {
 				break
 			}

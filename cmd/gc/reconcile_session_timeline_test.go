@@ -1042,9 +1042,10 @@ func idleTimeline() []timelineFixture {
 			{Name: "idle past sleep_after_idle", Advance: 6 * time.Minute},
 		}, tlMerged(tlPol("gc-1"), tlIdent(), tlAliasMeta()), map[string]map[string]string{"seed": tlAliasSeed()})
 	// retired is legacy's drain of gc-1, acknowledged and stopped, and the
-	// pool slot's close; v2 leaves the drain to A20 and the close to A21.
+	// pool slot's close that follows it; v2 leaves the drain to A20, so its
+	// runtime stays up and A21 has nothing to close.
 	retired := map[string]string{
-		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*close": "A21 close", "row:gc-1:*sync": "A7 row-metadata",
+		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*sync": "A7 row-metadata",
 	}
 	retiring := map[string]string{
 		"provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop", "provider:Stop s-gc-1": "A4 drain-stop",
@@ -1226,13 +1227,15 @@ func operatorTimeline() []timelineFixture {
 		if blocked {
 			name = "kill a seat holding a dep-blocked claim"
 			work = append(work, parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}})
-			graced = tlMerged(tlIdent(), map[string]string{"row:gc-1:*close": "A21 killed-seat", "row:gc-1:*sync": "A7 row-metadata", "work:gw-1:assignee": "A21 killed-seat"})
+			graced = tlIdent() // legacy and v2 both close the killed seat (A21, B1)
 		}
 		f := tlFixture(name, tlCity, []parityRow{tlRow("gc-1", 1, time.Hour)}, work, []simRuntime{tlLive("gc-1")},
 			[]parityStep{
 				{Name: "kill", Op: func(tw twin) {
 					tw.patch("gc-1", session.KillPendingPatch(tw.now))
+					tw.sp.external = true // the operator's kill, not v2's
 					_ = tw.sp.Stop("s-gc-1")
+					tw.sp.external = false
 				}},
 				{Name: "past the kill grace", Advance: session.KillPendingGrace + time.Minute},
 			}, tlMerged(tlPol("gc-1"), tlAliasMeta()), map[string]map[string]string{"seed": tlAliasSeed(), "kill": tlIdent(), "past the kill grace": graced})

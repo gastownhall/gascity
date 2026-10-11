@@ -827,12 +827,16 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
 	if c := p.capsFor(intent{}, 0, nil); c.create != nil || c.creates != nil {
 		t.Fatal("caps without capCreate hold the create runner")
+	}
+	p.held.release = &closeReleases{}
+	if c := p.capsFor(intent{}, capReadStores, nil); c.release != nil {
+		t.Fatal("caps without capRelease hold the close's release handles")
 	}
 	if c := p.capsFor(intent{}, capCreate, nil); c.create == nil || c.creates == nil {
 		t.Fatal("capCreate does not reach the create runner")
@@ -844,6 +848,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 var effectCapGrants = map[string]caps{
 	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode | capRetire,
 	intentRollback: capProviderStart | capRetire,
+	intentClose:    capReadStores | capRelease,
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -1042,15 +1047,22 @@ func TestOnlyStagingCodeAssignsTheStagingSeam(t *testing.T) {
 
 // Kills a hook reaching handles its place forbids: around, outside every
 // lock, holds only these fields, and a Probe only the read-only stores; a
-// Call's handles (provider start, routing, release, kill) go on txCaps
-// alone.
+// Call's handles (provider start, routing, kill) go on txCaps alone. The one
+// write handle an around holds is the close's release (capRelease), for the
+// post-close cascade it runs only once its close landed (settlement.Closed),
+// as runTx's design names; only the close's spec grants it.
 func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
+	for kind, spec := range effectSpecs {
+		if spec.caps&capRelease != 0 && kind != intentClose {
+			t.Errorf("%s holds the close's release handles", kind)
+		}
+	}
 	// retire is a closed row's cleanup after its close (C3 step 5): its
 	// waits and bindings, never a session row.
-	allowed := map[string]bool{"it": true, "reads": true, "retire": true}
+	allowed := map[string]bool{"it": true, "reads": true, "release": true, "retire": true}
 	for i, ty := 0, reflect.TypeFor[aroundCaps](); i < ty.NumField(); i++ {
 		if f := ty.Field(i).Name; !allowed[f] {
 			t.Errorf("aroundCaps.%s: around runs outside every lock; a write or provider handle belongs to a Call", f)
@@ -1501,5 +1513,33 @@ func TestTxAbandonAndLast(t *testing.T) {
 	}}
 	if s := k.run(context.Background(), last); s.Outcome != settledLanded || !ran || k.meta("detached_at") != "" {
 		t.Fatalf("last: settlement %+v, call ran %v, detached %q; want landed, the Call run, b not", s, ran, k.meta("detached_at"))
+	}
+}
+
+// Kills a skipped Call that still runs, or still opens the latch: a
+// calledWhen section whose Pass it declines runs no Call and no seam, so an
+// abandonment after it settles failed, never ambiguous; a Pass it accepts
+// calls, gated like a write.
+func TestTxCalledWhenSkipsWithoutOpeningTheLatch(t *testing.T) {
+	k := newTxKit(t)
+	ran := 0
+	call := calledWhen(callStop, section{Decide: func(v txView) txStep {
+		return txStep{Pass: v.It.Reason == "go"}
+	}}, func(run bool) bool { return run }, func(context.Context, txCaps, bool) (struct{}, error) { ran++; return struct{}{}, nil })
+	var seams []txSeam
+	k.on(seamBeforeCall, func() { seams = append(seams, seamBeforeCall) })
+	latch := new(writeLatch)
+	after := section{Decide: func(txView) txStep {
+		latch.abandon() // the executor gives up after the skipped step
+		return txStep{Done: true}
+	}}
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{call, after}}, latch); ran != 0 || len(seams) != 0 || s.Outcome == settledAmbiguous || latch.begun() {
+		t.Fatalf("settlement %+v (called %d, seams %v, begun %t), want the Call skipped and the latch unopened", s, ran, seams, latch.begun())
+	}
+	it := k.it
+	it.Reason = "go"
+	latch = new(writeLatch)
+	if s := runTx(context.Background(), k.p, it, effectSpec{sections: []section{call}}, latch); ran != 1 || len(seams) != 1 || !latch.begun() || s.Outcome == settledFailed {
+		t.Fatalf("settlement %+v (called %d, seams %v, begun %t), want the Call run behind the latch", s, ran, seams, latch.begun())
 	}
 }

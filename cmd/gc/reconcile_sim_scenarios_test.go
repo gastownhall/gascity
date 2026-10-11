@@ -141,12 +141,19 @@ func TestSimR14PartialListingConcludesNoAbsence(t *testing.T) {
 }
 
 // Scenario R17 (INC-006; I10): an event replayed many times, and rescans,
-// mark the planner dirty and write nothing: no write loop.
+// mark the planner dirty and write nothing: no write loop. The city first
+// settles: the heal lands, then the freed slot's close (A21).
 func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 	s := scripted(t, nil, heldRow())
 	s.inventory()
 	s.pass()
 	s.release(0)
+	for range 3 {
+		s.pass()
+		for len(s.parked) > 0 {
+			s.release(0)
+		}
+	}
 	s.audit("v2")
 	ev := s.operator("gc-1", "held_until", s.rel(time.Hour))
 	for range 5 {
@@ -185,6 +192,9 @@ func TestSimR34R35ServerGone(t *testing.T) {
 			gone := s.liveness("gc-1") == livenessGone
 			if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
 				t.Errorf("cold boot %t, confirmed dead %t: gc-1 gone %t, boot inventory complete %t", coldBoot, confirmed, gone, s.p.boot.InventoryComplete)
+			}
+			for len(s.parked) > 0 { // a confirmed-gone row's close (A21) runs out
+				s.release(0)
 			}
 			s.audit("v2")
 			s.noViolations(t)

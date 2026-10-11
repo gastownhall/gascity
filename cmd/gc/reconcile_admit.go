@@ -125,6 +125,8 @@ type intent struct {
 	// tick writes it before its start; a stranded seat's death accrual
 	// alone, which keeps it committed).
 	Kept session.MetadataPatch
+	// Closing is a close's kind and kept assignees (A21).
+	Closing closeSpec
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests

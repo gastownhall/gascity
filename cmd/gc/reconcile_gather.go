@@ -121,6 +121,11 @@ type World struct {
 	// over: minted from the city work store, never the sessions store
 	// (NEW2-1). Effects reach them only as effectReads.
 	WorkLegs WorkLegs
+	// Phantoms are the rows that squat a configured name without being its
+	// canonical owner (SESS-080), each with the assignees its close keeps (the
+	// identity and its runtime name), which A21 reads. Resolving them writes
+	// diagnostics, which the pure decide may not (censusPhantoms).
+	Phantoms map[rowKey][]string
 	// fresh is one row's fresh runtime read, which the fresh accessors read
 	// in its pass's stead (withRuntime): set only inside an effect.
 	fresh *freshRow
@@ -166,6 +171,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
 	}
@@ -548,6 +554,23 @@ func (m *gatherMemo) sleepPolicies(cfg *config.City, env *reconcileEnv, rows []c
 			m.sleep[k] = policy
 		}
 		out[row.Key.ID] = policy
+	}
+	return out
+}
+
+// censusPhantoms is c's SESS-080 phantoms under cfg (World.Phantoms).
+func censusPhantoms(c *sessionCensus, cfg *config.City, cityName string) map[rowKey][]string {
+	out := map[rowKey][]string{}
+	for k, row := range c.Rows {
+		identity, ok := recyclableDeadConfiguredNamePhantomInfo(row.Info, cfg, cityName)
+		if !ok {
+			continue
+		}
+		keep := []string{identity}
+		if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
+			keep = append(keep, rn)
+		}
+		out[k] = keep
 	}
 	return out
 }

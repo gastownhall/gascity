@@ -186,7 +186,9 @@ var stopKeys = []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, 
 // checkWrite checks one row change v2 made:
 //   - I7 (I-legacy): it writes no session row state outside
 //     knownSessionStates, but the signaled projection (draining +
-//     stop-pending); a wait or nudge bead's state is its own;
+//     stop-pending) and a close's state, which is its close reason as legacy
+//     writes it (killed, quarantine, ...); a wait or nudge bead's state is
+//     its own;
 //   - I14 (I-STOP-1/2): a stop request names the row's current incarnation;
 //   - I15 (I-STOP-3/4): no request survives a v2 PreWake, and no write
 //     rewrites what an operator holds dormant (dormantChange);
@@ -200,7 +202,8 @@ func (s *sim) checkWrite(w simWrite) {
 	if w.Leg != simCityLeg {
 		s.failf("AL1 census-only", "v2 wrote %s, a census-only row", id)
 	}
-	if st := a["state"]; w.After.Type == sessionBeadType && st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
+	closes := w.After.Status == "closed" && w.Before.Status != "closed"
+	if st := a["state"]; w.After.Type == sessionBeadType && st != b["state"] && !closes && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
 		s.failf("I7 I-legacy", "v2 wrote state %q on %s", st, id)
 	}
 	if inc := a[session.DrainIntentIncarnationKey]; inc != "" && inc != b[session.DrainIntentIncarnationKey] && inc != a["generation"] {
@@ -216,7 +219,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !suspendKey[k]) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -225,6 +228,12 @@ func (s *sim) checkWrite(w simWrite) {
 		s.failf("I4 I-fence", "v2 wrote %s terminal (state %q) while its runtime has a live pane", id, a["state"])
 	}
 }
+
+// suspendKey are a suspend's keys, which an A21 close may end: CONTRACT
+// v5.7 A10 frees a wisp-tier row in a suspended state (MAINT-051's sweep), and
+// A21's orphan close ends a suspended row whose agent is gone. Its deliberate
+// holds (a kill fence, a hold timer, a quarantine) it never ends.
+var suspendKey = map[string]bool{"state": true, "suspended_at": true}
 
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
