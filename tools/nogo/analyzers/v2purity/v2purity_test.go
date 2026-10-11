@@ -97,7 +97,9 @@ func check(t *testing.T, name string, got []string, want string) {
 // package (every implementing type's method), a promoted or embedded
 // interface method, a generic type's method, a variable assigned in init, a
 // function field read (and not a data field), a //gc:pure field and
-// //gc:pure-param parameter as roots, and another package's rules.
+// //gc:pure-param parameter as roots, a //gc:stored-param argument reached
+// only through a read of a field it is stored in, a field an assignment
+// writes (no read of it), and another package's rules.
 func TestPurityRules(t *testing.T) {
 	impure := "\n\nfunc impure() int { return Now() }\n\nfunc clean() int { return 1 }\n"
 	for _, c := range []struct {
@@ -128,6 +130,10 @@ func TestPurityRules(t *testing.T) {
 		{"a field root", "type section struct {\n\t//gc:pure\n\tDecide func() int\n}\n\nvar secs = []section{{Decide: impure}}" + impure, cfg, "but section.Decide is //gc:pure"},
 		{"an unmarked field", "type section struct {\n\tDecide func() int\n}\n\nvar secs = []section{{Decide: impure}}" + impure, cfg, ""},
 		{"a pure parameter", "//gc:pure-param d\nfunc probed(d func() int) int { return 0 }\n\nvar x = probed(impure)" + impure, cfg, "but probed(d) is //gc:pure"},
+		{"a stored parameter whose field is not read", "type sec struct {\n\tclass int\n\tp     func() int\n\tdefs  []any\n}\n\n//gc:stored-param p\nfunc probed(p func() int) sec { return sec{class: 1, p: func() int { return p() }, defs: []any{p}} }\n\nvar secs = []sec{probed(impure)}\n\n" + "//gc:pure\nfunc decide() int { return secs[0].class }" + impure, cfg, ""},
+		{"a stored parameter whose field is read", "type sec struct {\n\tclass int\n\tp     func() int\n\tdefs  []any\n}\n\n//gc:stored-param p\nfunc probed(p func() int) sec { return sec{class: 1, p: func() int { return p() }, defs: []any{p}} }\n\nvar secs = []sec{probed(impure)}\n\n" + "//gc:pure\nfunc decide() int { return secs[0].p() }" + impure, cfg, "(via decide -> p -> probed(p) -> impure)"},
+		{"a stored parameter's other field read", "type sec struct {\n\tclass int\n\tp     func() int\n\tdefs  []any\n}\n\n//gc:stored-param p\nfunc probed(p func() int) sec { return sec{class: 1, p: func() int { return p() }, defs: []any{p}} }\n\nvar secs = []sec{probed(impure)}\n\n" + "//gc:pure\nfunc decide() int { return len(secs[0].defs) }" + impure, cfg, "(via decide -> defs -> probed(p) -> impure)"},
+		{"a field written, not read", "type box struct{ f func() int }\n\nvar b box\n\nfunc init() { b.f = impure }\n\n//gc:pure\nfunc decide() int { b.f = clean; return 1 }" + impure, cfg, ""},
 		{"a promoted embedded interface implementing the call", "type getter interface{ Get() int }\n\ntype wrap struct{ Store }\n\n//gc:pure\nfunc decide(g getter) int { return g.Get() }\n", cfg, "reaches example.com/p.Store.Get"},
 		{"a generic type implementing the call", "type getter interface{ get() int }\n\ntype box[T any] struct{ v T }\n\nfunc (box[T]) get() int { return Now() }\n\n//gc:pure\nfunc decide(g getter) int { return g.get() }\n", cfg, "box.get reaches example.com/p.Now"},
 		{"a registry filled by index", "var reg = map[int]func() int{}\n\nfunc init() { reg[1] = impure }\n\n//gc:pure\nfunc decide() int { return reg[1]() }" + impure, cfg, "(via decide -> reg -> impure)"},

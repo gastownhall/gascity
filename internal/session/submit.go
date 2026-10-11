@@ -55,7 +55,7 @@ type SubmissionCapabilities struct {
 // SubmitOutcome reports whether a submit was delivered now or queued.
 type SubmitOutcome struct {
 	Queued bool
-	// Deferred marks a queue the resume policy caused: the call may not start
+	// Deferred marks a queue the actor caused: the call may not start
 	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
 	Deferred bool
 }
@@ -85,25 +85,28 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 }
 
 // Submit delivers a user message according to the requested semantic intent.
-// A dormant session it may not resume under policy (CONTRACT v5.9 D8) gets
+// A dormant session it may not resume as its actor (CONTRACT v5.9 D8) gets
 // the message queued.
-func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, policy ResumePolicy) (SubmitOutcome, error) {
+func (m *Manager) Submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
 	switch intent {
 	case "", SubmitIntentDefault, SubmitIntentFollowUp, SubmitIntentInterruptNow:
 	default:
 		return SubmitOutcome{}, fmt.Errorf("invalid submit intent %q", intent)
 	}
-	return m.submit(ctx, id, message, resumeCommand, hints, intent, policy)
+	return m.submit(ctx, by, id, message, resumeCommand, hints, intent)
 }
 
-func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, policy ResumePolicy) (SubmitOutcome, error) {
+func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+	if err := m.checkActor(by); err != nil {
+		return SubmitOutcome{}, err
+	}
 	var outcome SubmitOutcome
 	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if m.queueByPolicy(b.Metadata, sessName, policy) {
+		if m.queueFor(b.Metadata, sessName, by) {
 			outcome.Queued, outcome.Deferred = true, true
 			return m.enqueueDeferredSubmitLocked(b, sessName, message)
 		}
@@ -113,7 +116,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-				outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
+				outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 				outcome.Deferred = outcome.Queued
 				return err
 			}
@@ -129,7 +132,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			if !supportsInterruptNowForMetadata(b.Metadata) {
 				return ErrInteractionUnsupported
 			}
-			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
+			return m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
 			if pendingConversationRestart(b) && !running {
@@ -154,7 +157,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return nil
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
-			outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming), policy)
+			outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
 			outcome.Deferred = outcome.Queued
 			return err
 		}
@@ -177,9 +180,9 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	).SupportsFollowUp
 }
 
-// interruptAndSubmitLocked runs after submit's policy check, so its sends
+// interruptAndSubmitLocked runs after submit's actor check, so its sends
 // do not queue.
-func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
+func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
 	// A row whose drain-ack stop is pending belongs to the controller's stop:
 	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
 	if drainAckStopPendingMetadata(b.Metadata) {
@@ -187,12 +190,12 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	}
 	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 	if !running {
-		_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
+		_, err := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 		return err
 	}
 	// Every interrupt may end in a stop and a restart: take the runtime lease
 	// before sending anything, and carry it to the restart (D8D-5).
-	ctx, release, err := m.leaseForRestartLocked(ctx, id, sessName)
+	by, release, err := m.leaseForRestartLocked(ctx, by, id, sessName)
 	if err != nil {
 		return err
 	}
@@ -212,12 +215,12 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			// Pi must be stopped before transcript truncation so it cannot race the
 			// write. If truncation fails, restart on the dirty transcript; the
 			// caller's retry will repeat this stop-and-discard sequence.
-			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints, policy); restartErr != nil {
+			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, by, id, b, sessName, resumeCommand, hints); restartErr != nil {
 				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
 			}
 			return err
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
@@ -229,13 +232,13 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints, policy)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return err
@@ -245,17 +248,17 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			return err
 		}
 	}
-	_, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
+	_, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
 	return err
 }
 
 // restartAndSendLocked replaces the runtime the interrupt just stopped. The
 // hold was decided before the stop, so the restart does not re-read it: the
 // dead runtime would make a heartbeat or unreadable hold refuse, losing the
-// session and the message. Only an operator's resume (policy) consumes a
-// user hold (restartPolicy).
-func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, restartPolicy(policy)); err != nil {
+// session and the message. Only an operator's resume consumes a user hold
+// (Actor.consumesHold).
+func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return err
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
@@ -518,8 +521,8 @@ func waitsForIdleAfterHardRestart(b beads.Bead) bool {
 
 // restoreAfterHardRestartFailureLocked restarts the runtime the interrupt
 // stopped; like restartAndSendLocked it does not re-read the hold.
-func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, restartPolicy(policy)); err != nil {
+func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return err
 	}
 	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -17,8 +18,12 @@ import (
 // assigned work on a latched one, and pool demand, unseen here, on a
 // non-interactive latch). A drained pool seat is refused pinned or not; an
 // asleep pool seat, pinned or not, is not refused but uncertain (it starts
-// only for pool demand). Kills each arm, a false refusal for a session the controller
-// starts, and a will_start claimed for a seat waiting on demand.
+// only for pool demand). Assigned work parked on a dispatch hold overrides the
+// latch only when it is in_progress, a claimed ownership fact that stays
+// hold-transparent (ga-5736js); held OPEN work is neither wake readiness nor
+// keep-awake work, so the latch still refuses. Kills each arm, a false refusal
+// for a session the controller starts, and a will_start claimed for a seat
+// waiting on demand.
 func TestWakeStartRefusal(t *testing.T) {
 	for name, tc := range map[string]struct {
 		agent     config.Agent
@@ -26,6 +31,7 @@ func TestWakeStartRefusal(t *testing.T) {
 		info      sessionpkg.Info
 		episode   bool
 		work      bool
+		heldWork  string // status of assigned work parked on hold:external; "" for none
 		want      string
 		uncertain bool
 	}{
@@ -52,6 +58,14 @@ func TestWakeStartRefusal(t *testing.T) {
 		"abandoned create":      {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker", MetadataState: "creating"}, want: "create never completed"},
 		"non-interactive latch": {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m", Attach: boolPtr(false)}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}},
 		"idle latch":            {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}, want: "idle sleep policy"},
+		"latch with held open work": {
+			agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"},
+			heldWork: "open", want: "idle sleep policy",
+		},
+		"latch with held in_progress work": {
+			agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"},
+			heldWork: "in_progress",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -61,6 +75,16 @@ func TestWakeStartRefusal(t *testing.T) {
 			}
 			if tc.work {
 				if _, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: "gc-1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.heldWork != "" {
+				held, err := store.Create(beads.Bead{Title: "parked", Type: "task", Assignee: "gc-1", Labels: []string{beadmeta.HoldExternalLabel}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// MemStore.Create always opens a bead, so the status under test is set after.
+				if err := store.Update(held.ID, beads.UpdateOpts{Status: &tc.heldWork}); err != nil {
 					t.Fatal(err)
 				}
 			}

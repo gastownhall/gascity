@@ -2978,7 +2978,10 @@ gc order show <name> [flags]
 Close stale delivered nudge beads and read mail beads.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
-closed. Read mail beads past --mail-ttl are closed. A budget cap of 50 closes
+closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
+opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
+mail beads past it are also closed, so mail nobody ever reads ages out instead
+of accumulating forever. A budget cap of 50 closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -2994,6 +2997,7 @@ gc order sweep-nudge-mail [flags]
 | `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
+| `--unread-mail-ttl` | duration | `0s` | min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled) |
 
 ## gc order sweep-tracking
 

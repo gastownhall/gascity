@@ -34,17 +34,18 @@ func reconcileIdleRespawnTestTickWithDrainOps(
 ) {
 	t.Helper()
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
-	reconcileSessionBeads(
-		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, dops, []beads.Bead{work}, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, dops, []beads.Bead{work}, nil, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 		withReadyAssignedFlags([]bool{ready}),
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 }
 
 func newIdleRespawnReconcilerTest(t *testing.T, workStatus string, detachedAgo time.Duration) (*reconcilerTestEnv, beads.Bead, beads.Bead) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
 		Agents:       []config.Agent{{Name: "worker"}},
@@ -161,6 +162,7 @@ func TestReconcileSessionBeads_IdleRespawnIsBoundedPerAssignedBead(t *testing.T)
 }
 
 func TestReconcileSessionBeads_IdleRespawnCancelsWhenActivityResumesBeforeAck(t *testing.T) {
+	testCity := t.TempDir()
 	clk := &clock.Fake{Time: time.Now().UTC()}
 	sp := runtime.NewFake()
 	name := "worker-1"
@@ -190,7 +192,7 @@ func TestReconcileSessionBeads_IdleRespawnCancelsWhenActivityResumesBeforeAck(t 
 	}
 	sp.SetActivity(name, clk.Now().Add(time.Second))
 
-	advanceSessionDrainsWithSessionsTraced("",
+	advanceSessionDrainsWithSessionsTraced(testCity,
 		dt,
 		sp,
 		nil,
