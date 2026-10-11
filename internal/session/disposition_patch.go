@@ -224,14 +224,16 @@ func checkDispositionWrite(id string, kvs map[string]string, writer func() (at s
 
 // dispositionWriter reads the stack of a store write: at is its first frames
 // past the plumbing, innermost first; fixture when the first is a _test.go
-// file's.
+// file's. A test's store adapter (a _test.go method named for a store write
+// verb: storeWriteMethod) is plumbing too, so a production writer that
+// writes through one is judged as the writer it is.
 func dispositionWriter() (at string, fixture bool) {
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(3, pcs)])
 	for {
 		f, more := frames.Next()
 		name := dispositionFuncName(f.Function)
-		if !plumbing(f.File) && !dispositionVerbs[name] {
+		if !plumbing(f.File) && !dispositionVerbs[name] && !storeWriteMethod(f.File, name) {
 			switch {
 			case at == "":
 				at = name
@@ -246,6 +248,24 @@ func dispositionWriter() (at string, fixture bool) {
 			return at, false
 		}
 	}
+}
+
+// storeWriteVerbs are beads.Store's write methods (and the conditional
+// writers' and the transaction's), by name.
+var storeWriteVerbs = map[string]bool{
+	"Create": true, "Update": true, "Close": true, "Reopen": true, "CloseAll": true, "SetMetadata": true, "SetMetadataBatch": true,
+	"UpdateIfMatch": true, "CloseWithMetadataIfMatch": true, "Tx": true,
+}
+
+// storeWriteMethod reports a _test.go method named for a store write verb: a
+// test's store adapter between a writer and the backend.
+func storeWriteMethod(file, name string) bool {
+	if !strings.HasSuffix(file, "_test.go") {
+		return false
+	}
+	i := strings.LastIndex(name, ".")
+	recv := name[:max(i, 0)]
+	return i > 0 && storeWriteVerbs[name[i+1:]] && strings.Contains(recv, ".")
 }
 
 // dispositionModule prefixes every function the guard names.

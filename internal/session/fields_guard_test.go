@@ -244,3 +244,25 @@ func TestUpdateRowFencedUnmintsALostWrite(t *testing.T) {
 		t.Errorf("the lost write left %d open mints", n)
 	}
 }
+
+// TestStoreWriteMethodIsPlumbing: a test's store adapter (a _test.go method
+// named for a store write verb) is plumbing, so a production writer behind
+// it is judged; a test function, a non-verb method and a production method
+// are not.
+func TestStoreWriteMethodIsPlumbing(t *testing.T) {
+	for _, tc := range []struct {
+		file, name string
+		want       bool
+	}{
+		{"cmd/gc/reconcile_sim_test.go", "cmd/gc.(*simLegBacking).CloseWithMetadataIfMatch", true},
+		{"cmd/gc/x_test.go", "cmd/gc.recordingStore.SetMetadataBatch", true},
+		{"cmd/gc/x_test.go", "cmd/gc.(*wrapped).UpdateIfMatch", true},
+		{"cmd/gc/x_test.go", "cmd/gc.TestUpdate", false},
+		{"cmd/gc/x_test.go", "cmd/gc.(*kit).run", false},
+		{"cmd/gc/class_store_emit.go", "cmd/gc.(*emittingClassStore).SetMetadataBatch", false},
+	} {
+		if got := storeWriteMethod(tc.file, tc.name); got != tc.want {
+			t.Errorf("storeWriteMethod(%q, %q) = %v, want %v", tc.file, tc.name, got, tc.want)
+		}
+	}
+}

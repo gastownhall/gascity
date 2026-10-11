@@ -877,7 +877,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	switch {
 	case step.Refuse != "":
 		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
-	case step.Fail != "" && len(step.Write) == 0 && len(step.Terminal) == 0:
+	case step.Fail != "" && len(step.Write) == 0 && step.Class.Len() == 0 && len(step.Terminal) == 0:
 		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}

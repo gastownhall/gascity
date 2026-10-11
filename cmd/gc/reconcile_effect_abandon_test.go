@@ -231,7 +231,7 @@ func failingLaunch(t *testing.T, err error, state string, meta ...string) *txKit
 // Kills an abandon that is not written, a start that settles as anything
 // but its failure, and a PreWake left on the row: a failed launch of an
 // asleep seat restores what the PreWake wrote, its incarnation bumped, and
-// accrues one wake failure.
+// accrues one wake failure, quarantining at the threshold.
 func TestFailedLaunchRestoresAndAccrues(t *testing.T) {
 	k := failingLaunch(t, errors.New("boom"), "asleep", "sleep_reason", "idle", "wake_attempts", "1")
 	s := k.runKind()
@@ -241,6 +241,13 @@ func TestFailedLaunchRestoresAndAccrues(t *testing.T) {
 	if k.meta("state") != "asleep" || k.meta("sleep_reason") != "idle" || k.meta("last_woke_at") != "" || k.meta("wake_attempts") != "2" || k.meta("generation") != "4" || k.meta("instance_token") == "tok" {
 		t.Fatalf("row state %q reason %q woke %q attempts %q generation %q token %q; want restored, accrued, the incarnation bumped",
 			k.meta("state"), k.meta("sleep_reason"), k.meta("last_woke_at"), k.meta("wake_attempts"), k.meta("generation"), k.meta("instance_token"))
+	}
+
+	// The fifth failure quarantines: the accrual's Quarantine cell writes
+	// quarantined_until beside its lifecycle.
+	fifth := failingLaunch(t, errors.New("boom"), "asleep", "sleep_reason", "idle", "wake_attempts", "4")
+	if fifth.runKind(); fifth.meta("wake_attempts") != "5" || fifth.meta("sleep_reason") != "quarantine" || fifth.meta("quarantined_until") == "" {
+		t.Fatalf("the fifth failure: attempts %q reason %q quarantined_until %q; want it quarantined", fifth.meta("wake_attempts"), fifth.meta("sleep_reason"), fifth.meta("quarantined_until"))
 	}
 
 	relaunch := failingLaunch(t, errors.New("boom"), "creating")
@@ -278,6 +285,24 @@ func TestCapacityRefusalRestoresThePreWake(t *testing.T) {
 	// (UndoDisposition).
 	if got := k.meta("sleep_intent"); got != "idle-stop-pending" {
 		t.Fatalf("sleep_intent %q after the refusal, want the PreWake's clear undone", got)
+	}
+
+	// A dead row whose idle stop was pending restarts over A6's idle sleep
+	// (SESS-532): the refusal restores the healed row, so the Sleep cell's
+	// clear of the intent is Kept, not undone.
+	k, _ = launchKit(t, "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), "sleep_intent", "idle-stop-pending")
+	row = k.p.World.Census.Rows[k.it.Key]
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	e := &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}
+	it, ok := (&rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: e}).startIntent(decideStart)
+	if !ok || it.Kind != intentStart {
+		t.Fatalf("startIntent = (%+v, %v), want a start", it, ok)
+	}
+	it.Key, it.Deadline, it.Endpoint = k.it.Key, k.it.Deadline, endpointKey("provider:test-agent")
+	k.it, k.sp.nextStart = it, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity)
+	k.p.held.start.capacity = newEndpointCapacityGuard(func() time.Time { return now })
+	if s := k.runKind(); s.Cause != causeCapacity || k.meta("state") != "asleep" || k.meta("sleep_reason") != "idle" || k.meta("sleep_intent") != "" {
+		t.Fatalf("a dead idle row: settlement %+v, state %q reason %q intent %q; want capacity, asleep idle, the Sleep cell's clear kept", s, k.meta("state"), k.meta("sleep_reason"), k.meta("sleep_intent"))
 	}
 }
 
