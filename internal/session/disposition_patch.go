@@ -251,14 +251,19 @@ func dispositionWriter() (at string, fixture bool) {
 }
 
 // storeWriteVerbs are beads.Store's write methods (and the conditional
-// writers' and the transaction's), by name.
+// writers', the storage-class create's and the transaction's), by name.
 var storeWriteVerbs = map[string]bool{
 	"Create": true, "Update": true, "Close": true, "Reopen": true, "CloseAll": true, "SetMetadata": true, "SetMetadataBatch": true,
 	"UpdateIfMatch": true, "CloseWithMetadataIfMatch": true, "Tx": true,
+	"CompareAndSetMetadataKey": true, "CreateWithStorage": true, "UpdateIfAssignment": true,
 }
 
 // storeWriteMethod reports a _test.go method named for a store write verb: a
-// test's store adapter between a writer and the backend.
+// test's store adapter between a writer and the backend. The guard looks past
+// one to the writer that called it, so an adapter must delegate directly: a
+// write it makes of its own (a race it injects, a fixture it seeds) belongs
+// in a method not named for a verb (TestApplyDispositionFencesItsWrite's
+// landRace), where the guard reads it as the fixture's.
 func storeWriteMethod(file, name string) bool {
 	if !strings.HasSuffix(file, "_test.go") {
 		return false
