@@ -262,7 +262,7 @@ func drainSignalGrace(w *World, reason string) time.Duration {
 // activity since). A row with no resolved policy never begins, as legacy's
 // zero policy. A legacy idle-stop-pending mark is the proof already.
 func idleProof(w *World, info session.Info, reason string) (allowed, probe bool) {
-	if reason != drainIdle || strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+	if reason != drainIdle || session.DispositionOfInfo(info).IdleStop {
 		return true, false
 	}
 	policy := w.SleepPolicies[info.ID]
@@ -295,14 +295,16 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		return armSignal(r, req)
 	}
 	e, info := r.entry, r.row.Info
-	// TODO(R7): key on an operator's suspend or kill, not on
-	// Disposition.OperatorDormant, which also counts heartbeat, quarantine,
-	// wait and timer holds as dormant, under which legacy drains (D1 rule 2).
-	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) || session.HoldsInfo(info, r.w.Now).In&session.HoldUser != 0 {
+	// An operator's suspend is the operator's own stop (legacy's user-hold
+	// drain, C6a2's operator-suspend skip); an operator's kill in flight is
+	// too, and its fence writes the row asleep, which claims no live runtime.
+	// No other hold (a wait, a timer: OperatorDormant) stops a live runtime
+	// here.
+	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	if e.Desired == desireWake && strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+	if e.Desired == desireWake && session.DispositionOfInfo(info).IdleStop {
 		// The idle stop's end is the disposition's IdleStopEnd cell.
 		class := session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvIdleStopEnd}, r.w.Now)
 		return intent{Kind: intentRowHeal, Reason: decideIdleStopClear, Basis: basis, Patch: session.MetadataPatch{}, Class: class}, true

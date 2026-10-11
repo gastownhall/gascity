@@ -182,7 +182,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 	if heal {
 		patch = asleepHealPatch(info)
 	}
-	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+	if session.DispositionOfInfo(info).IdleStop {
 		// SESS-532: an idle stop was pending, so the death is the idle
 		// sleep it asked for, which accrues nothing. Legacy heals the state
 		// first (its continuation reset), then writes SleepPatch(idle) over
@@ -241,31 +241,16 @@ func heartbeatHeld(info session.Info, now time.Time) bool {
 // effect proves it again fresh. Without it a runtime started outside the
 // controller on an asleep row (`gc session attach`) stays orphaned, as S1
 // reads the shape as Noop. Unlike legacy, a row an operator holds dormant is
-// never woken (I15, I-STOP-3/4; operatorDormant): its runtime is the
+// never woken (I15, I-STOP-3/4; Disposition.OperatorDormant): its runtime is the
 // operator-dormant stop path's (C5a3's lost-commit stop, C6b2). That covers a
 // `gc session kill` that lands between a PreWake and its provider Start,
 // before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || operatorDormant(info, r.w.Now) || !r.freshOwnAlive() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || session.DispositionOfInfo(info).OperatorDormant(r.w.Now) || !r.freshOwnAlive() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
-}
-
-// operatorDormant reports an asleep row an operator holds dormant: a kill
-// fence, a sleep an operator owns (killed, user-hold, city-stop), a user-hold
-// sleep intent (a suspend), a wait hold, or a live hold or quarantine. The
-// timers are trimmed here: metadataTimeInFuture, which legacy shares, does
-// not trim, and a padded timer must not read as no hold.
-func operatorDormant(info session.Info, now time.Time) bool {
-	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
-	case session.SleepReasonKilled, session.SleepReasonUserHold, session.SleepReasonCityStop:
-		return true
-	}
-	return session.IsKillPendingInfo(info, now) || strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) ||
-		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) ||
-		metadataTimeInFuture(strings.TrimSpace(info.QuarantinedUntil), now)
 }
 
 // armStabilityClear is SESS-539/540 (clearWakeFailures, clearChurn; v5.8

@@ -1037,6 +1037,8 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 		{"A17 through a heartbeat hold", decideHeartbeatRespawn, []string{"held_until", soon}, true},
 		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
 		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
+		{"A17 over a live quarantine", decideHeartbeatRespawn, []string{"held_until", soon, "quarantined_until", soon}, false},
+		{"A17 over a soft suspend", decideHeartbeatRespawn, []string{"held_until", soon, "state", "suspended"}, false},
 	} {
 		k, _ := launchKit(t, "asleep", c.meta...)
 		k.it.Reason = c.reason

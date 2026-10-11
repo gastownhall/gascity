@@ -239,8 +239,7 @@ var suspendKey = map[string]bool{"state": true, "suspended_at": true}
 // suspend's key and no deliberate hold is in force or unreadable (§12.2 #27).
 // A held suspended row is never closed.
 func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
-	h := session.Holds(b.Metadata, t)
-	return suspendKey[k] && (h.In|h.Unknown)&(session.HoldUser|session.HoldWait|session.HoldTimer|session.HoldQuarantine) == 0
+	return suspendKey[k] && !session.DecodeDisposition(b.Metadata).HoldsDeliberately(t)
 }
 
 // dormantChange returns a key a v2 write changed on b that an operator owns

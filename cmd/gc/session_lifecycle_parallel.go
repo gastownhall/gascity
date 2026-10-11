@@ -1029,7 +1029,7 @@ func prepareStartCandidateForCity(
 			}
 			// An operator's suspend that landed since the snapshot wins: the
 			// controller never starts a row the operator holds.
-			if sessionpkg.HoldsInfo(current, clk.Now()).In&sessionpkg.HoldUser != 0 {
+			if sessionpkg.DispositionOfInfo(current).KeepsSlot() {
 				return errStartUserHeld
 			}
 			// preWakeCommit persists its PreWakePatch through the front door and returns

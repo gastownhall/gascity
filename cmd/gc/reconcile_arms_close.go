@@ -121,15 +121,9 @@ func (r *rowFacts) freshClosable() bool {
 // a user hold, a wait hold, or a future or unreadable held_until or
 // quarantined_until. A21 keeps its slot until the hold ends, stricter than
 // legacy's MAINT-051 sweep, which closes it whatever holds it (§12.2 #27,
-// v5.7 A10).
-//
-// TODO(R7): Disposition's KeepsSlot answers this from the hold kernel.
+// v5.7 A10): Disposition.HoldsDeliberately.
 func deliberatelyHeldPoolRow(info session.Info, now time.Time) bool {
-	if !isPoolManagedSessionInfo(info) {
-		return false
-	}
-	h := session.HoldsInfo(info, now)
-	return (h.In|h.Unknown)&(session.HoldUser|session.HoldWait|session.HoldTimer|session.HoldQuarantine) != 0
+	return isPoolManagedSessionInfo(info) && session.DispositionOfInfo(info).HoldsDeliberately(now)
 }
 
 // strandedMarker reads the stranded marker (SESS-624). held: it is still

@@ -68,8 +68,8 @@ func armRollback(r *rowFacts) (intent, bool) {
 // not wake because an agent heartbeat holds it (held_until with no intent),
 // whose runtime is gone or dead and which still has assigned work, is
 // restarted through its hold; its PreWake exempts that hold for this intent
-// alone. The start gates still apply.
-// TODO(R7): Disposition tells the heartbeat hold apart.
+// alone. The start gates still apply. The disposition tells the heartbeat
+// hold apart (heartbeatHeld: Disposition.HeartbeatHeld).
 func armHeartbeatRespawn(r *rowFacts) (intent, bool) {
 	e := r.entry
 	if e == nil || e.Desired == desireWake || e.Desired == desireDrain || e.AssignedWork == nil || !e.Liveness.startCandidate() || !heartbeatHeld(r.row.Info, r.w.Now) {
@@ -130,7 +130,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	if isFailedCreateSessionInfo(info) {
 		return intent{Reason: decideStartFailedCreate}, true
 	}
-	if until, ok := parseRFC3339Metadata(info.QuarantinedUntil); ok && now.Before(until) {
+	if until := session.DispositionOfInfo(info).Quarantine; until.After(now) {
 		r.after(requeueUntil(now, until))
 		return intent{Reason: decideStartQuarantine}, true
 	}

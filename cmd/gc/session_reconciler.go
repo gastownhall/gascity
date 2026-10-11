@@ -911,7 +911,7 @@ func finalizeDrainAckStoppedSession(
 	// A row an operator holds keeps its seat: never closed as drained.
 	facts := finalizeFacts{
 		Now: clk.Now().UTC(), CloseIfUnassigned: closeIfUnassigned, HasWork: hasAssignedWork,
-		OperatorHeld: sessionpkg.HoldsInfo(info, clk.Now()).In&sessionpkg.HoldUser != 0,
+		OperatorHeld: sessionpkg.DispositionOfInfo(info).KeepsSlot(),
 		FreshWake:    info.WakeMode == "fresh", RestartRequested: info.RestartRequested == "true",
 	}
 	choice := finalizePatch(facts)
@@ -2946,7 +2946,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// A user-hold ack whose row no longer carries the hold is
 					// stale: an operator's resume consumed the hold after the
 					// drain began. Clear it and leave the runtime up.
-					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id], clk.Now()) {
+					if reconcilerOwnedAck && userHoldDrainReleased(ackReason, infoByID[id]) {
 						_ = clearReconcilerDrainAckMetadata(sp, name)
 						_ = dops.clearDrain(name)
 						if dt != nil {

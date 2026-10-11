@@ -367,7 +367,6 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_reconcile.go:providerTerminalErrorPatch":                  "patch builder (C5a2's abandon)",
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
-	"internal/session/holds.go:holdMeta":                                      "read model, not a write",
 	"internal/session/disposition.go:dispositionMeta":                         "read model, not a write",
 	"internal/session/resume_user_hold.go:consumeUserHoldLife":                "patch builder (operator resume consumes a user hold)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",
