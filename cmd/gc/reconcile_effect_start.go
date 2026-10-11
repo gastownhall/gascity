@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -96,7 +97,9 @@ var errTemplateUnresolved = errors.New("v2 start: the row's template is unresolv
 // transcript state (S-1) through the read-only stores, with legacy's task
 // work dir resolver over the pass's assigned work: it writes nothing.
 func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, transcript sessTranscriptState) (*preparedStart, error) {
-	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(w.CityPath, w.Env.Cfg, r.city, servingRigStores(w.Env.Cfg, r.rigs, w.SuspendedRigPaths))}
+	// The claimed-work probe reads the seat's work through the city work
+	// legs (NEW2-1), never the sessions store.
+	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg)))}
 	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), sources, &transcript)
 	return prepared, err
 }
@@ -120,7 +123,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		res, ok := v.World.Templates.lookup(v.Row)
 		switch cause := runtimeCause(v.Row, v.RT); {
 		case !ok || res.Err != nil:
-			return txStep{Refuse: causeTemplate, Err: res.Err}
+			return healInstead(v, txStep{Refuse: causeTemplate, Err: res.Err})
 		case cause == causeNotPresent && !adopt:
 			return txStep{Pass: launchRow{w: v.World, row: v.Row, tp: res.TP, agent: res.Agent}}
 		case cause != "":
@@ -133,8 +136,23 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case prepared == nil:
 			return txStep{Fail: causePrepare, Err: prepErr}
 		}
-		return txStep{Write: startCommitPatch(prepared, v.Row, v.Now), Done: true, Facts: noted}
+		return txStep{Write: startCommit(prepared, v.Row, v.Now), Done: true, Facts: noted}
 	}
+}
+
+// healInstead is refuse, a start's refusal before its PreWake, or the A6
+// heal the start carries (intent.Heal) written alone while its fresh read
+// still finds the runtime absent, on which every such heal rests.
+func healInstead(v txView, refuse txStep) txStep {
+	heal := v.It.Heal
+	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
+		return refuse
+	}
+	step := txStep{Write: heal.Patch, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
+	if heal.Event != nil {
+		step.Facts.Events = append(step.Facts.Events, *heal.Event)
+	}
+	return step
 }
 
 // runtimeCause is S1's table's refusal for row's fresh runtime read rt, ""
@@ -162,6 +180,17 @@ func runtimeCause(row session.Info, rt *txRuntime) string {
 		return causeOccupied
 	}
 	return causeAttribution
+}
+
+// startCommit is startCommitPatch writing the state legacy's next tick
+// heals a started row to: awake where it writes active, its state_reason
+// kept (every canonical reader reads both as active).
+func startCommit(prepared *preparedStart, row session.Info, now time.Time) session.MetadataPatch {
+	patch := startCommitPatch(prepared, row, now)
+	if patch["state"] == string(session.StateActive) {
+		patch["state"] = string(session.StateAwake)
+	}
+	return patch
 }
 
 // creating reports a row in the creating state: S1's uncommitted intent.

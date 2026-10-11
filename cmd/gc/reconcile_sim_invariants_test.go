@@ -129,10 +129,13 @@ func (s *sim) checkStarts() {
 // checkDestructive is I4 (I-fence) and I5 (I-attached) over v2's provider
 // kills: each hits its row's own runtime (O2 Current, or the own-runtime
 // exception's StaleSelf with epoch = generation) or the dead object the
-// corpse and start-recycle exceptions name, and never an attached one. The
+// corpse and start-recycle exceptions name, or a pending create's
+// bead-scoped name (C8.2(a)), and never an attached one. The
 // own-runtime exception to I5 is D1b's to model with the effects it covers.
 func (s *sim) checkDestructive() {
-	for _, k := range s.sp.kills {
+	kills := s.sp.kills[min(s.killsChecked, len(s.sp.kills)):] // each judged once, on the rows before its step
+	s.killsChecked = len(s.sp.kills)
+	for _, k := range kills {
 		if k.External || k.Hit == nil {
 			continue
 		}
@@ -142,6 +145,9 @@ func (s *sim) checkDestructive() {
 		row := s.rowNamed(k.Name)
 		switch {
 		case k.Method == "KillCorpseObject" && k.Hit.corpse, k.Method == "KillZombieObject" && k.Hit.zombie:
+		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name):
+			// C8.2(a): a pending create's rollback stops its bead-scoped name
+			// whoever runs under it (C3, S1's Foreign row), as legacy does.
 		case row.ID == "" || k.Hit.id != row.ID:
 			s.failf("I4 I-fence", "v2 %s on %s hit row %q's runtime, not its own", k.Method, k.Name, k.Hit.id)
 		case k.Hit.token != row.Metadata["instance_token"] && k.Hit.epoch != row.Metadata["generation"]:
@@ -178,8 +184,11 @@ func (s *sim) checkTokens() {
 var stopKeys = []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
 
 // checkWrite checks one row change v2 made:
-//   - I7 (I-legacy): it writes no state outside knownSessionStates, but the
-//     signaled projection (draining + stop-pending);
+//   - I7 (I-legacy): it writes no session row state outside
+//     knownSessionStates, but the signaled projection (draining +
+//     stop-pending) and a close's state, which is its close reason as legacy
+//     writes it (killed, quarantine, ...); a wait or nudge bead's state is
+//     its own;
 //   - I14 (I-STOP-1/2): a stop request names the row's current incarnation;
 //   - I15 (I-STOP-3/4): no request survives a v2 PreWake, and no write
 //     rewrites what an operator holds dormant (dormantChange);
@@ -193,7 +202,8 @@ func (s *sim) checkWrite(w simWrite) {
 	if w.Leg != simCityLeg {
 		s.failf("AL1 census-only", "v2 wrote %s, a census-only row", id)
 	}
-	if st := a["state"]; st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
+	closes := w.After.Status == "closed" && w.Before.Status != "closed"
+	if st := a["state"]; w.After.Type == sessionBeadType && st != b["state"] && !closes && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
 		s.failf("I7 I-legacy", "v2 wrote state %q on %s", st, id)
 	}
 	if inc := a[session.DrainIntentIncarnationKey]; inc != "" && inc != b[session.DrainIntentIncarnationKey] && inc != a["generation"] {
@@ -209,7 +219,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -219,23 +229,40 @@ func (s *sim) checkWrite(w simWrite) {
 	}
 }
 
+// suspendKey are a suspend's keys, which an A21 close may end: CONTRACT
+// v5.7 A10 frees a wisp-tier row in a suspended state (MAINT-051's sweep), and
+// A21's orphan close ends a suspended row whose agent is gone. Its deliberate
+// holds (a kill fence, a hold timer, a quarantine) it never ends.
+var suspendKey = map[string]bool{"state": true, "suspended_at": true}
+
+// closeEndsSuspend reports whether a close may change k on b at t: k is a
+// suspend's key and no deliberate hold is in force or unreadable (§12.2 #27).
+// A held suspended row is never closed.
+func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
+	h := session.Holds(b.Metadata, t)
+	return suspendKey[k] && (h.In|h.Unknown)&(session.HoldUser|session.HoldWait|session.HoldTimer|session.HoldQuarantine) == 0
+}
+
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
 // timer and sleep reason, though A6's stability clear may clear the
 // quarantine's timer on a row its pass read stable (v5.8, SESS-539; stable,
-// sim.stable); no dormant row is woken or given a stop request, though one it
-// holds may be cleared.
+// sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
+// 2: killed, suspended, or sleep_intent=user-hold) is never given a stop
+// request, though one it holds may be cleared; a hold or quarantine alone
+// is not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
 	reason := session.SleepReason(m["sleep_reason"])
 	var owned []string
+	dormant := strings.TrimSpace(m["sleep_intent"]) == string(session.SleepReasonUserHold)
 	if session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], t) {
-		owned = append(owned, "state", "state_reason", "sleep_reason", "slept_at")
+		owned, dormant = append(owned, "state", "state_reason", "sleep_reason", "slept_at"), true
 	}
 	if m["state"] == string(session.StateSuspended) {
-		owned = append(owned, "state", "suspended_at")
+		owned, dormant = append(owned, "state", "suspended_at"), true
 	}
 	if until("held_until") {
 		owned = append(owned, "held_until")
@@ -252,20 +279,20 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if len(owned) == 0 && !quarantined {
-		return ""
-	}
 	for _, k := range owned {
 		if a[k] != m[k] {
 			return k
 		}
 	}
 	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
-		if a[k] != m[k] && a[k] != "" {
+		if dormant && a[k] != m[k] && a[k] != "" {
 			return k
 		}
 	}
-	if a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
+	// An agent heartbeat's hold (held_until with no intent) does not hold
+	// A17's respawn (v5.9i): waking a row it alone holds is no violation.
+	heartbeat := len(owned) == 1 && owned[0] == "held_until" && !quarantined && strings.TrimSpace(m["sleep_intent"]) == ""
+	if (dormant || quarantined || len(owned) > 0) && !heartbeat && a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
 		return "state"
 	}
 	return ""
@@ -476,6 +503,71 @@ func TestSimChecksBite(t *testing.T) {
 			s.check()
 			if !slices.ContainsFunc(s.failures, func(f string) bool { return strings.HasPrefix(f, c.inv) }) {
 				t.Errorf("the check reported %q, want an %sviolation", s.failures, c.inv)
+			}
+		})
+	}
+}
+
+// Kills an I15 checker whose dormant set strays from D1 rule 2: a stop
+// request on a held or quarantined row is no violation; on a user-hold,
+// suspended or killed row it is. Waking any of them is (the C6a2 review's
+// must-fix: any operator-owned row woken is a violation).
+func TestDormantChangeFollowsRule2(t *testing.T) {
+	at := plannerT0
+	soon := at.Add(time.Minute).Format(time.RFC3339)
+	for _, c := range []struct {
+		name    string
+		meta    map[string]string
+		dormant bool
+	}{
+		{"held", map[string]string{"held_until": soon, "sleep_reason": "user-hold"}, false},
+		{"quarantined", map[string]string{"quarantined_until": soon, "sleep_reason": "quarantine"}, false},
+		{"user-hold", map[string]string{"sleep_intent": "user-hold"}, true},
+		{"suspended", map[string]string{"state": "suspended"}, true},
+		{"killed", map[string]string{"state": "asleep", "state_reason": session.KillPendingReason, "sleep_reason": "killed", "slept_at": at.Format(time.RFC3339)}, true},
+	} {
+		after := maps.Clone(c.meta)
+		after[session.DrainIntentReasonKey] = "orphaned"
+		if got := dormantChange(beads.Bead{Metadata: c.meta}, after, at, false); (got != "") != c.dormant {
+			t.Errorf("%s: dormantChange = %q, want a violation %v", c.name, got, c.dormant)
+		}
+		woken := maps.Clone(c.meta)
+		woken["state"] = "active"
+		if got := dormantChange(beads.Bead{Metadata: c.meta}, woken, at, false); got == "" {
+			t.Errorf("%s: a wake is no violation", c.name)
+		}
+	}
+}
+
+// I15's close relaxation ends a bare suspend and nothing an operator holds
+// (§12.2 #27): a held suspended row is never closed.
+func TestCloseEndsSuspend(t *testing.T) {
+	now := gatherNow
+	later, bad := now.Add(time.Hour).Format(time.RFC3339), "soon"
+	for _, tc := range []struct {
+		name string
+		meta []string
+		want bool
+	}{
+		{"a bare suspend", nil, true},
+		{"a user hold", []string{"sleep_intent", "user-hold"}, false},
+		{"a hold timer", []string{"held_until", later}, false},
+		{"an unreadable hold timer", []string{"held_until", bad}, false},
+		{"a quarantine", []string{"quarantined_until", later}, false},
+		{"a wait hold", []string{"wait_hold", "true"}, false},
+		{"an expired hold timer", []string{"held_until", now.Add(-time.Hour).Format(time.RFC3339)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := map[string]string{"state": string(session.StateSuspended), "suspended_at": now.Add(-time.Hour).Format(time.RFC3339)}
+			for i := 0; i+1 < len(tc.meta); i += 2 {
+				m[tc.meta[i]] = tc.meta[i+1]
+			}
+			after := maps.Clone(m)
+			maps.Copy(after, session.ClosePatch(now, "orphaned"))
+			b := beads.Bead{ID: "gc-1", Status: "open", Metadata: m}
+			k := dormantChange(b, after, now, false)
+			if got := k != "" && closeEndsSuspend(b, k, now); got != tc.want {
+				t.Fatalf("change %q exempted = %t, want %t", k, got, tc.want)
 			}
 		})
 	}

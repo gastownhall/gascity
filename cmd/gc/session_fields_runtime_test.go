@@ -140,7 +140,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			b := env.createSessionBead("worker", "worker")
 			must(t, rec.SetMetadataBatch(b.ID, session.DrainAckStopPendingPatch(env.clk.Now().UTC())))
 			rec.reset()
-			finalizeDrainAckStoppedSession(env.city, env.cfg, rec, nil, env.sessionInfo(b.ID), "worker", false,
+			finalizeDrainAckStoppedSession(env.cfg, rec, testSeatWork(env.city, env.cfg, rec, nil), env.sessionInfo(b.ID), "worker", false,
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 		}},
 		{"v2 named create", "agent_name alias canonical_instance_name command configured_named_identity configured_named_mode configured_named_session continuation_epoch generation instance_token live_hash pending_create_claim pending_create_started_at session_name session_origin state synced_at template work_dir", []string{"cmd/gc/allocator_create_named.go:createEffects.writeNamed"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -167,6 +167,14 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 				t.Fatalf("v2 heal settled %+v", st)
 			}
 			rec.keys = healRec.keys
+		}},
+		{"v2 A8 baseline effect", "core_hash_breakdown live_hash started_config_hash started_launch_hash started_live_hash started_provision_hash", []string{"cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v5:core")
+			baseRec := newSessionKeyRecorder(c.store)
+			if it, st := c.run(t, nil, baseRec); it.Kind != intentBaseline || st.Outcome != settledLanded {
+				t.Fatalf("A8 settled %+v for %+v", st, it)
+			}
+			rec.keys = baseRec.keys
 		}},
 		{"waits, claim markers and the circuit breaker", "continuation_claim_nudge_at continuation_claim_nudge_count continuation_claim_nudge_generation continuation_claim_nudge_root continuation_claim_nudge_store_ref continuation_claim_nudge_work execution_claim_nudge_at execution_claim_nudge_count execution_claim_nudge_root execution_claim_nudge_store_ref execution_claim_nudge_work session_circuit_last_observed session_circuit_last_progress session_circuit_last_restart session_circuit_open_restart_count session_circuit_opened_at session_circuit_progress_signature session_circuit_reset_generation session_circuit_restarts session_circuit_state sleep_intent wait_hold wait_lookup_capped_at wait_lookup_capped_label wait_lookup_capped_limit wait_lookup_capped_source", []string{"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced", "cmd/gc/cmd_wait.go:doSessionWait", "internal/session/waits.go:StampWaitLookupCapMetadata", "cmd/gc/idle_nudge.go:writeContinuationClaimMarker", "cmd/gc/execution_backstop.go:writeExecutionClaimMarker", "cmd/gc/session_circuit_breaker.go:sessionCircuitBreaker.metadataLocked"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			id := fieldRow(t, rec.MemStore, "state", "active", "wait_hold", "true", "sleep_intent", "wait-hold")
@@ -212,7 +220,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator session key", "session_key", []string{"internal/session/manager.go:Manager.PersistSessionKey"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.PersistSessionKey(id, "key-2")) }},
-		{"operator wake", "churn_count held_until quarantined_until sleep_intent wait_hold wake_attempts wake_refused_event_at wake_request wake_requested_at", []string{"internal/session/wait_store.go:Store.wakeSessionFromBead"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator wake", "churn_count wake_attempts wake_refused_event_at wake_request wake_requested_at", []string{"internal/session/wait_store.go:Store.wakeSessionFromBead"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			_, err := sessionFrontDoor(rec).WakeSession(id, now, session.WakeOpts{})
 			must(t, err)
 		}},
@@ -259,11 +267,17 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			if got := strings.Join(recordedKeys(rec.keys), " "); got != st.want {
 				t.Errorf("wrote %q, want %q", got, st.want)
 			}
+			// A flow that writes the whole disposition class writes it through
+			// its one encoder (R7), the site the registry declares the class at.
+			sites := st.sites
+			if wholeDispositionClass(rec.keys) {
+				sites = append(slices.Clone(sites), "internal/session/disposition.go:Disposition.Encode")
+			}
 			for k := range rec.keys {
 				if f, ok := session.LookupField(k); !ok {
 					t.Errorf("wrote %s, which the session field registry does not have", k)
-				} else if !slices.ContainsFunc(st.sites, func(site string) bool { return declared[site][f.Key] }) {
-					t.Errorf("wrote %s, which the registry declares at none of %v", k, st.sites)
+				} else if !slices.ContainsFunc(sites, func(site string) bool { return declared[site][f.Key] }) {
+					t.Errorf("wrote %s, which the registry declares at none of %v", k, sites)
 				}
 			}
 		})
@@ -309,14 +323,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			b := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&b, pairs(meta))
 			env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
-			finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", false,
+			finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID), "worker", false,
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 			return fieldBead(t, env.store, b.ID).Metadata
 		}},
 		"internal/session/lifecycle_transition.go:PreWakePatch": {
-			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending"},
-			patchSite(func(session.Info) session.MetadataPatch {
-				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now})
+			[]string{
+				"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending",
+				"started_config_hash", "v6:core", "started_live_hash", "v6:live", "live_hash", "v6:live",
+			},
+			patchSite(func(session.Info) session.MetadataPatch { // a fresh wake, which clears the baseline too
+				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
 			}),
 		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {
@@ -380,6 +397,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
 				if _, err := writeSessionKillFence(m, id, now); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"cmd/gc/cmd_session_kill_fence.go:killSleepPatch": {
+			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour)},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := m.SetMetadataBatch(id, killSleepPatch(id, fieldBead(t, m, id).Metadata, now)); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -536,4 +564,15 @@ func fieldInfo(t *testing.T, s beads.Store, id string) session.Info {
 		t.Fatal(err)
 	}
 	return info
+}
+
+// wholeDispositionClass reports whether keys hold every key of the
+// disposition class, as only its encoder writes them.
+func wholeDispositionClass(keys map[string]string) bool {
+	for k := range (session.Disposition{}).Encode().Fold() {
+		if _, ok := keys[k]; !ok {
+			return false
+		}
+	}
+	return true
 }

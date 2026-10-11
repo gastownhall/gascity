@@ -31,6 +31,7 @@ type closeReadCity struct {
 	rig      beads.Store
 	rigs     map[string]beads.Store
 	seat     session.Info
+	sw       *SeatWork // the tick's read
 }
 
 func newCloseReadCity(t *testing.T) *closeReadCity {
@@ -51,12 +52,12 @@ func newCloseReadCity(t *testing.T) *closeReadCity {
 	return c
 }
 
-// readIndex installs the tick's index and makes it read, as the tick's first
+// readIndex mints the tick's SeatWork and makes it read, as the tick's first
 // gate does.
 func (c *closeReadCity) readIndex(t *testing.T) {
 	t.Helper()
-	useSeatWorkPath(t, "index", c.path, c.cfg, c.sessions, c.rigs)
-	if has, err := sessionHasOpenAssignedWorkForReachableStore(c.path, c.cfg, c.sessions, c.rigs, c.seat); has || err != nil {
+	c.sw = testSeatWork(c.path, c.cfg, c.sessions, c.rigs)
+	if has, err := sessionHasOpenAssignedWorkForReachableStore(c.sw, c.seat); has || err != nil {
 		t.Fatalf("gate before the late claim = %v, %v", has, err)
 	}
 }
@@ -79,7 +80,7 @@ func TestCloseRead_LateClaimRefusesTheClose(t *testing.T) {
 			}
 
 			before := c.backing.n()
-			closed := closeSessionBeadIfReachableStoreUnassigned(c.path, c.cfg, c.sessions, c.rigs, c.seat, "drained", seatWorkNow, io.Discard, false)
+			closed := closeSessionBeadIfReachableStoreUnassigned(c.sessions, c.sw, c.seat, "drained", seatWorkNow, io.Discard, false)
 
 			if want := kind == "none"; closed != want {
 				t.Fatalf("close = %v, want %v", closed, want)
@@ -103,7 +104,7 @@ func TestCloseRead_ACorpseCloseReleasesALateClaim(t *testing.T) {
 			c.readIndex(t)
 			claim := createWork(t, c.leg(kind), "in_progress", c.seat.ID, nil)
 
-			if !closeBead(c.sessions, workLegs{c.path, c.cfg, c.rigs}, c.seat, "dead-runtime", seatWorkNow, io.Discard) {
+			if !closeBead(c.sessions, c.sw, c.seat, "dead-runtime", seatWorkNow, io.Discard) {
 				t.Fatal("corpse close refused")
 			}
 			assertWork(t, c.leg(kind), claim.ID, "open", "")
@@ -164,7 +165,7 @@ func TestCloseRead_DrainFinalizeIgnoresTheOwnDrainStep(t *testing.T) {
 	}
 	createWork(t, c.sessions, "in_progress", c.seat.ID, map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain", beadmeta.RootBeadIDMetadataKey: root.ID})
 
-	if !closeSessionBeadIfReachableStoreUnassigned(c.path, c.cfg, c.sessions, c.rigs, c.seat, "drained", seatWorkNow, io.Discard, true) {
+	if !closeSessionBeadIfReachableStoreUnassigned(c.sessions, c.sw, c.seat, "drained", seatWorkNow, io.Discard, true) {
 		t.Fatal("the drain-finalize close refused over the seat's own drain step")
 	}
 }
@@ -183,10 +184,10 @@ func (s assigneeListFails) List(q beads.ListQuery) ([]beads.Bead, error) {
 // Fail closed: an unreadable local leg refuses a gate-decided close.
 func TestCloseRead_AnUnreadableLocalLegRefusesTheClose(t *testing.T) {
 	c := newCloseReadCity(t)
-	c.readIndex(t)
 	c.rigs["riga"] = assigneeListFails{Store: c.rig}
+	c.readIndex(t)
 
-	if closeSessionBeadIfReachableStoreUnassigned(c.path, c.cfg, c.sessions, c.rigs, c.seat, "drained", seatWorkNow, io.Discard, false) {
+	if closeSessionBeadIfReachableStoreUnassigned(c.sessions, c.sw, c.seat, "drained", seatWorkNow, io.Discard, false) {
 		t.Fatal("the close went ahead over a local leg the re-read could not read")
 	}
 }
@@ -246,5 +247,33 @@ func TestCloseRead_BdRigsAreReadFromTheCacheOnly(t *testing.T) {
 	local := &workCallCounter{Store: beads.NewMemStore()}
 	if _, err := closeTimeLister(local, false)(q); err != nil || local.n() != 1 {
 		t.Fatalf("local rig reads = %d, %v; want one live list", local.n(), err)
+	}
+}
+
+// The work store at close: a controller's cached work store answers from its
+// cache, an uncached local one (a standalone controller, a one-shot pass) is
+// read live, and an uncached bd work store is not read at all: the tick's
+// read stands alone there. That is the residual of mc-3ixn3.19/.20.
+func TestCloseRead_WorkStoreRule(t *testing.T) {
+	q := beads.ListQuery{Assignee: "seat", Status: "open", TierMode: beads.TierBoth}
+	local := &workCallCounter{Store: beads.NewMemStore()}
+	if _, err := closeTimeLister(local, true)(q); err != nil || local.n() != 1 {
+		t.Fatalf("uncached local work store reads = %d, %v; want one live list", local.n(), err)
+	}
+	cachedBacking := &workCallCounter{Store: beads.NewMemStore()}
+	cached := cachedWorkStore(t, cachedBacking)
+	before := cachedBacking.n()
+	if _, err := closeTimeLister(cached, true)(q); err != nil || cachedBacking.n() != before {
+		t.Fatalf("cached work store read its backing %d times (%v); want the cache only", cachedBacking.n()-before, err)
+	}
+	declined := q
+	declined.IncludeClosed = true // a query the cache does not serve
+	before = cachedBacking.n()
+	if _, err := closeTimeLister(cached, true)(declined); err != nil || cachedBacking.n() != before+1 {
+		t.Fatalf("a declined cached read listed the backing %d times (%v); want one live list", cachedBacking.n()-before, err)
+	}
+	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { return []byte("[]"), nil })
+	if list := closeTimeLister(bd, true); list != nil {
+		t.Fatal("an uncached bd work store got a lister: mc-3ixn3.19/.20 is a residual, not a live read")
 	}
 }

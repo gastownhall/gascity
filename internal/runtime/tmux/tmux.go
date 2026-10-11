@@ -1470,8 +1470,8 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
-// window.pane index, pane_dead and pane pid.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}"
+// window.pane index, pane_dead, pane pid and the pane's window activity.
+const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}"
 
 // listRuntimeInventory reads every pane on the server with one untargeted
 // list-panes -a and folds the panes into one entry per session. A live server
@@ -1488,7 +1488,14 @@ func (t *Tmux) listRuntimeInventory(ctx context.Context) (map[string]runtime.Inv
 		}
 		return nil, err
 	}
-	return parseRuntimeInventory(out)
+	entries, err := parseRuntimeInventory(out)
+	for name, e := range entries {
+		if e.ActivityKnown { // the poke discount GetLastActivity applies
+			e.LastActivity = t.discountedActivity(name, e.LastActivity)
+			entries[name] = e
+		}
+	}
+	return entries, err
 }
 
 // inventoryFirstPane tracks a session's lowest window.pane index while
@@ -1505,7 +1512,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 7 || fields[0] == "" {
+		if len(fields) != 8 || fields[0] == "" {
 			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
 		}
 		name, sessionID, created, attached, index, paneDead, panePID := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
@@ -1532,6 +1539,14 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 		}
 		if !entry.DeadKnown {
 			entry.AllPanesDead = false
+		}
+
+		// The session's activity is its latest window's, dead panes
+		// included, as the state cache's FetchState reads it.
+		if activity, err := strconv.ParseInt(strings.TrimSpace(fields[7]), 10, 64); err == nil && activity > 0 {
+			if at := time.Unix(activity, 0); !entry.ActivityKnown || at.After(entry.LastActivity) {
+				entry.ActivityKnown, entry.LastActivity = true, at
+			}
 		}
 
 		incarnation := ""

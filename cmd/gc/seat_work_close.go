@@ -1,15 +1,16 @@
 package main
 
-// The close-time re-read (mc-3ixn3.16). The tick's seat work index is as fresh
+// The close-time re-read (mc-3ixn3.16). The tick's SeatWork read is as fresh
 // as its read, so a claim assigned to a seat after it was invisible to the
 // tick's gates: the seat closed holding it, and an unrouted open claim was
 // stranded on the closed row for good. Before a close, the closing seat's
 // narrow identities are read again:
 //
-//   - live on the local legs (the SQLite binding, a native rig);
-//   - from the event-fed cache on the work store and on a bd rig, which costs
-//     no I/O. A remote store is never read live here: a cache that cannot
-//     answer leaves the index's answer standing.
+//   - live on the local legs (the SQLite binding, a native rig, the uncached
+//     work store of a standalone controller or a one-shot pass);
+//   - from the event-fed cache on a controller's work store and on a bd rig,
+//     which costs no I/O. A bd-backed store is never read live here: one with
+//     no cache leaves the tick's answer standing (mc-3ixn3.19/.20).
 //
 // A close a gate decided ("this seat holds nothing") is refused on a hit; a
 // close that releases the seat's work anyway (a corpse, a stranded repair)
@@ -25,23 +26,21 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// lateSeatWork re-reads the work ids hold now, across legs: rows in one of
-// statuses, not session or mail beads, that keep (when set) accepts.
-func lateSeatWork(legs workLegs, store beads.Store, ids, statuses []string, keep func(beads.Store, beads.Bead) (bool, error)) ([]seatWorkHit, error) {
-	plan, err := assignedWorkSweepPlan(legs.cityPath, legs.cfg, store, legs.rigs, ids)
-	if err != nil {
+// lateSeatWork re-reads the work scope's identities hold now, across legs:
+// rows in one of statuses, not session or mail beads, that keep (when set)
+// accepts.
+func lateSeatWork(legs WorkLegs, scope workScope, statuses []string, keep func(beads.Store, beads.Bead) (bool, error)) ([]seatWorkHit, error) {
+	if err := legs.unusable(); err != nil {
 		return nil, err
 	}
-	work := unwrapClassStore(censusWorkLeg(legs.cityPath, store))
 	var hits []seatWorkHit
 	var errs error
-	storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) { // residency:allow — re-reads assignedWorkSweepPlan's own legs
-		list := closeTimeLister(leg.Store, unwrapClassStore(leg.Store) == work)
+	legs.each(func(store beads.Store) {
+		list := closeTimeLister(store, legs.isWork(store))
 		for _, status := range statuses {
-			for _, id := range ids {
+			for _, id := range scope.scopeIDs() {
 				if id = strings.TrimSpace(id); id == "" || list == nil {
 					continue
 				}
@@ -52,12 +51,12 @@ func lateSeatWork(legs workLegs, store beads.Store, ids, statuses []string, keep
 						continue
 					}
 					if keep != nil {
-						ok, err := keep(leg.Store, b)
+						ok, err := keep(store, b)
 						if errs = errors.Join(errs, err); !ok || err != nil {
 							continue
 						}
 					}
-					hits = append(hits, seatWorkHit{store: leg.Store, bead: b})
+					hits = append(hits, seatWorkHit{store: store, bead: b})
 				}
 			}
 		}
@@ -65,27 +64,37 @@ func lateSeatWork(legs workLegs, store beads.Store, ids, statuses []string, keep
 	return hits, errs
 }
 
-// closeTimeLister reads one leg for the re-read: a live list on a local leg,
-// the cache on the work store or a bd rig, and nil when such a leg has no
-// cache to answer from.
+// closeTimeLister reads one leg for the re-read:
+//   - the city work store from its event-fed cache when it has one (a
+//     controller's), which costs no I/O, and live when the cache declines
+//     the query, unless bd backs it;
+//   - any other local leg live: the SQLite binding, a native rig, and the
+//     uncached work store of a standalone controller or a one-shot pass;
+//   - a bd-backed leg from its cache, or not at all when it has none or the
+//     cache declines: the residual of mc-3ixn3.19/.20, where the tick's read
+//     stands alone.
 func closeTimeLister(store beads.Store, isWork bool) func(beads.ListQuery) ([]beads.Bead, error) {
-	if !isWork && !storeBackedBy[*beads.BdStore](store) {
-		return func(q beads.ListQuery) ([]beads.Bead, error) {
-			q.Live = true
-			return store.List(q)
-		}
-	}
 	type cachedLister interface {
 		CachedList(beads.ListQuery) ([]beads.Bead, bool)
 	}
-	cache, ok := storeLayer[cachedLister](store)
-	if !ok {
+	cache, cached := storeLayer[cachedLister](store)
+	bd := storeBackedBy[*beads.BdStore](store)
+	live := func(q beads.ListQuery) ([]beads.Bead, error) {
+		q.Live = true
+		return store.List(q)
+	}
+	switch {
+	case cached && (isWork || bd):
+		return func(q beads.ListQuery) ([]beads.Bead, error) {
+			if items, ok := cache.CachedList(q); ok || bd {
+				return items, nil
+			}
+			return live(q)
+		}
+	case bd:
 		return nil
 	}
-	return func(q beads.ListQuery) ([]beads.Bead, error) {
-		items, _ := cache.CachedList(q)
-		return items, nil
-	}
+	return live
 }
 
 // storeLayer finds the first layer of store, through the class, policy and
@@ -121,11 +130,11 @@ func storeBackedBy[T any](store beads.Store) bool {
 // when the close-time re-read finds work the gate's read did not, or cannot
 // read a local leg. keep is the gate's own filter (the drain-finalize gate
 // excludes the seat's own drain step).
-func closeBeadUnlessLateWork(store beads.Store, legs workLegs, info sessionpkg.Info, reason string, now time.Time, stderr io.Writer, keep func(beads.Store, beads.Bead) (bool, error)) bool {
+func closeBeadUnlessLateWork(store beads.Store, sw *SeatWork, info sessionpkg.Info, reason string, now time.Time, stderr io.Writer, keep func(beads.Store, beads.Bead) (bool, error)) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	late, err := lateSeatWork(legs, store, sessionAssignmentIdentifiersForConfigInfo(info, legs.cfg), seatWorkStatuses, keep)
+	late, err := lateSeatWork(sw.Legs(), releaseScope(info, sw.Legs().cfg), seatWorkStatuses, keep)
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "session beads: close of %s refused: re-reading its work: %v\n", info.ID, err) //nolint:errcheck
@@ -134,7 +143,7 @@ func closeBeadUnlessLateWork(store beads.Store, legs workLegs, info sessionpkg.I
 		fmt.Fprintf(stderr, "session beads: close of %s refused: %s was assigned to it since this tick's read\n", info.ID, late[0].bead.ID) //nolint:errcheck
 		return false
 	}
-	return closeBead(store, legs, info, reason, now, stderr)
+	return closeBead(store, sw, info, reason, now, stderr)
 }
 
 // appendUniqueSeatWork adds the rows of more that rows does not already hold.

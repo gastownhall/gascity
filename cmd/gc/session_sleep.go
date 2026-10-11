@@ -489,17 +489,20 @@ func markIdleSleepPendingInfo(info sessionpkg.Info, sessFront *sessionpkg.Store)
 	if sessFront == nil || info.SleepIntent == "idle-stop-pending" {
 		return nil
 	}
-	if err := sessFront.SetMarker(info.ID, "sleep_intent", "idle-stop-pending"); err != nil {
+	// The disposition's IdleStopBegin cell, on a fresh read: never over an
+	// operator's hold or a wait's intent (D8B-3: idle-stop-pending is no hold).
+	w, err := sessFront.ApplyDispositionFresh(info.ID, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopBegin}, nil, time.Time{})
+	if err != nil || w.Result != sessionpkg.CommitLanded {
 		return nil
 	}
-	return sessionpkg.MetadataPatch{"sleep_intent": "idle-stop-pending"}
+	return w.Wrote
 }
 
 // recoverPendingIdleSleepInfo reads the idle-stop-pending intent and the
 // preserved fingerprint off Info (SleepIntent, SleepPolicyFingerprint), the
 // handle off Info.ID, and persists SleepPatch(now, "idle") via
-// sessFront.ApplyKeepingUserHold, so an operator's suspend that landed since
-// the snapshot keeps its intent. It returns the patch it wrote, the caller's
+// sessFront.ApplySleep (the disposition's Sleep cell, on a fresh read), so an
+// operator's suspend that landed since the snapshot keeps its intent. It returns the patch it wrote, the caller's
 // fold onto infoByID, or nil when it wrote nothing. No raw-bead mirror.
 func recoverPendingIdleSleepInfo(
 	info sessionpkg.Info,
@@ -514,7 +517,7 @@ func recoverPendingIdleSleepInfo(
 	if fingerprint := info.SleepPolicyFingerprint; fingerprint != "" {
 		batch["sleep_policy_fingerprint"] = fingerprint
 	}
-	written, err := sessFront.ApplyKeepingUserHold(info.ID, batch)
+	written, err := sessFront.ApplySleep(info.ID, batch)
 	if err != nil {
 		return nil
 	}

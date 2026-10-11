@@ -65,6 +65,18 @@ type sessionEffect struct {
 	Run                     func(ctx context.Context) settlement
 }
 
+// errEffectShutdown is the cause the executor cancels every effect with at
+// the deadline of a shutdown that preserves sessions (a supervisor's
+// restart): a start's provider call already begun outlives it
+// (outlivesShutdown), and the next boot adopts what it launched.
+// errEffectStopped is the cause at the deadline of any other stop (gc stop),
+// whose sweep then stops every runtime: it ends a start, which cleans up
+// what it launched.
+var (
+	errEffectShutdown = errors.New("session effect: canceled at the shutdown deadline")
+	errEffectStopped  = errors.New("session effect: canceled at the stop deadline")
+)
+
 // errSwapCanceled is the cause waitStarts cancels a start with (P7).
 var errSwapCanceled = errors.New("session effect: canceled for a provider swap")
 
@@ -114,9 +126,11 @@ type effectExecutor struct {
 	spawn  func(func()) // go f() in production
 	stderr io.Writer
 
-	mu           sync.Mutex
-	ctx          context.Context // ends at stop's deadline, not at the workers' cancel
-	cancel       context.CancelFunc
+	mu     sync.Mutex
+	ctx    context.Context         // ends at stop's deadline, not at the workers' cancel
+	cancel context.CancelCauseFunc // stop's cause at its deadline
+	// preserve reports a shutdown that preserves sessions; nil reports none.
+	preserve     func() bool
 	closed       bool
 	startsClosed bool                          // a provider swap is in progress (P7)
 	inflight     map[effectKey]*inflightEffect // until settled
@@ -127,7 +141,7 @@ type effectExecutor struct {
 }
 
 func newEffectExecutor(post func(settlement), stderr io.Writer) *effectExecutor {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	return &effectExecutor{
 		post: post, clock: realPlannerClock{}, spawn: func(f func()) { go f() }, stderr: stderr, ctx: ctx, cancel: cancel,
 		inflight: make(map[effectKey]*inflightEffect), running: make(map[*inflightEffect]bool),
@@ -332,7 +346,9 @@ func (x *effectExecutor) close() {
 
 // stop closes admission and waits for the effects in flight until deadline,
 // the shutdown deadline v2's stop shares with its workers (P4 F15). At the
-// deadline it cancels every effect's context, which settles each at once.
+// deadline it cancels every effect's context, which settles each at once,
+// with errEffectShutdown when the shutdown preserves sessions, else
+// errEffectStopped.
 func (x *effectExecutor) stop(deadline time.Time) {
 	x.close()
 	joined := make(chan struct{})
@@ -347,5 +363,9 @@ func (x *effectExecutor) stop(deadline time.Time) {
 	case <-t.C():
 		fmt.Fprintln(x.stderr, "v2 reconciler: session effects still running at the shutdown deadline; canceling them") //nolint:errcheck // best-effort stderr
 	}
-	x.cancel()
+	cause := errEffectStopped
+	if x.preserve != nil && x.preserve() {
+		cause = errEffectShutdown
+	}
+	x.cancel(cause)
 }

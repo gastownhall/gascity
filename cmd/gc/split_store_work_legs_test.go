@@ -59,20 +59,31 @@ func registerWorkShapeWith(t *testing.T, cityPath, shape string, sessions, work 
 
 var seatWorkNow = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 
-// seatWorkPaths are the two ways a gate answers: by its live probes, or from a
-// tick's seat work index.
+// seatWorkPaths are the two reads a gate answers from: one seat's identities
+// listed live (a one-shot command, a v2 effect), or a tick's read of every
+// assignee.
 var seatWorkPaths = []string{"live", "index"}
 
-// useSeatWorkPath installs a tick's index for the rest of the test when path
-// is "index".
-func useSeatWorkPath(t *testing.T, path, cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store) {
-	t.Helper()
+// seatWorkOn is the SeatWork a gate reads on path: the tick's read over the
+// city's registered work store, or info's own live read of it, wide enough
+// for every gate's scope.
+func seatWorkOn(path, cityPath string, cfg *config.City, leading beads.Store, rigs map[string]beads.Store, info session.Info) *SeatWork {
+	legs := testWorkLegs(cityPath, cfg, leading, rigs)
 	if path == "index" {
-		t.Cleanup(installSeatWorkIndex(cityPath, cfg, leading, rigs))
-		if seatWorkIndexFor(cityPath, leading) == nil {
-			t.Fatal("no seat work index installed")
-		}
+		return newSeatWork(legs)
 	}
+	return seatWorkFor(legs, RefuseScope{ids: append(poolSlotRetireAssigneeIdentities(info, cfg), drainAckAssigneeIdentities(info, cfg)...)})
+}
+
+// cachedWorkStore is store behind a primed CachingStore, as a controller's work
+// store is.
+func cachedWorkStore(t *testing.T, store beads.Store) *beads.CachingStore {
+	t.Helper()
+	cached := beads.NewCachingStore(store, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	return cached
 }
 
 // createWork creates a work bead in store assigned to assignee.
@@ -146,15 +157,21 @@ func TestSplitStoreWork_KilledSeatReleasesItsWorkStoreClaim(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
-			work := e.store
+			work, registered := e.store, beads.Store(e.store)
 			if shape == "split" {
+				// maintainer-city's work store: remote, behind the
+				// controller's event-fed cache.
 				work = &killRaceStore{Store: beads.NewMemStore()}
+				registered = cachedWorkStore(t, work)
 			}
-			registerWorkShapeWith(t, e.city, shape, e.store, work)
-			routed := createWork(t, work, "open", e.seat.ID, routedClaim())
+			registerWorkShapeWith(t, e.city, shape, e.store, registered)
+			routed := createWork(t, registered, "open", e.seat.ID, routedClaim())
 
-			// The tick's gates and B1 read the work store only through the seat
-			// work index: no list keyed by an assignee reaches it.
+			// The tick's gates and B1 read the work store only through the
+			// tick's read, and the close-time re-read takes a controller's
+			// cache: no list keyed by an assignee reaches a split city's work
+			// store. On a single-store city the work store is the local
+			// sessions store, which the re-read reads live.
 			var perIdentity []beads.ListQuery
 			tickAtCityWatching(t, e, claims(routed), func(reconcile func()) {
 				work.afterList = func(q beads.ListQuery, _ []beads.Bead) {
@@ -168,7 +185,7 @@ func TestSplitStoreWork_KilledSeatReleasesItsWorkStoreClaim(t *testing.T) {
 
 			assertWork(t, work, routed.ID, "open", "")
 			assertClosedAsKilled(t, e.reload(t, e.seat.ID))
-			if len(perIdentity) != 0 {
+			if shape == "split" && len(perIdentity) != 0 {
 				t.Fatalf("the tick read the work store per identity %d times (first %+v); want only the index's lists", len(perIdentity), perIdentity[0])
 			}
 		})
@@ -240,10 +257,11 @@ func TestSplitStoreWork_PoolSlotCloseGateReadsTheWorkStore(t *testing.T) {
 					case "dark leg":
 						work.listErr = map[string]error{"open": errors.New("leg is dark"), "in_progress": errors.New("leg is dark")}
 					}
-					useSeatWorkPath(t, path, cityPath, cfg, sessions, nil)
+					info := sessionInfosFromBeads([]beads.Bead{seat})[0]
+					sw := seatWorkOn(path, cityPath, cfg, sessions, nil, info)
 
-					closed := closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, sessions, nil,
-						sessionInfosFromBeads([]beads.Bead{seat})[0], "drained", seatWorkNow, io.Discard, false)
+					closed := closeSessionBeadIfReachableStoreUnassigned(sessions, sw,
+						info, "drained", seatWorkNow, io.Discard, false)
 
 					if want := tc == "empty"; closed != want {
 						t.Fatalf("close = %v, want %v", closed, want)
@@ -321,12 +339,12 @@ func TestSplitStoreWork_RigBoundSeatHoldsItsCityStoreClaim(t *testing.T) {
 				dark := &killRaceStore{Store: beads.NewMemStore(), listErr: map[string]error{"open": errors.New("suspended"), "in_progress": errors.New("suspended")}}
 				rigs := map[string]beads.Store{"riga": beads.NewMemStore(), "rigb": dark}
 				claim := createWork(t, work, "in_progress", infos[0].ID, nil)
-				useSeatWorkPath(t, path, cityPath, cfg, sessions, rigs)
+				sw := seatWorkOn(path, cityPath, cfg, sessions, rigs, infos[0])
 
-				if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, sessions, rigs, infos[0], "drained", seatWorkNow, io.Discard, false) {
+				if closeSessionBeadIfReachableStoreUnassigned(sessions, sw, infos[0], "drained", seatWorkNow, io.Discard, false) {
 					t.Fatal("the rig-bound seat closed holding a city-store claim")
 				}
-				stranded, err := collectSessionAssignedWorkInfo(cityPath, cfg, sessions, rigs, infos[0])
+				stranded, err := collectSessionAssignedWorkInfo(sw, infos[0])
 				if err != nil || len(stranded) != 1 || stranded[0].bead.ID != claim.ID {
 					t.Fatalf("stranded read = %+v, %v; want the city-store claim", stranded, err)
 				}
@@ -335,16 +353,16 @@ func TestSplitStoreWork_RigBoundSeatHoldsItsCityStoreClaim(t *testing.T) {
 	}
 }
 
-// The leg set itself: on a split city every seat's plan names the registered
-// work store FIRST, the serving rigs, then the binding it was handed as its own
-// leg, which is the census's set.
+// The leg set itself: on a split city the WorkLegs over the city work store
+// name it FIRST, the serving rigs, then the binding as its own leg, which is
+// the census's set.
 func TestSplitStoreWork_LegSetMatchesTheCensus(t *testing.T) {
-	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	cfg, cityPath, _ := rigScopedWakeFixture(t)
 	binding := beads.NewMemStore()
 	work := registerWorkShape(t, cityPath, "split", binding)
 	rigs := map[string]beads.Store{"riga": beads.NewMemStore()}
 
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, binding, rigs, infos[0])
+	plan, err := workLegsPlan(cityPath, cfg, work, rigs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,10 +382,20 @@ func TestSplitStoreWork_LegSetMatchesTheCensus(t *testing.T) {
 	}
 }
 
-// The index answers every gate it serves exactly as that gate's live probes
-// do. Each case seeds one kind of row for the seat on the city work store of a
-// split city.
+// Every seat-work gate answers each kind of row as its question says, on
+// both reads (the tick's and one seat's). Each case seeds one kind of row for
+// the seat on the city work store of a split city; want is the oracle.
 func TestSeatWorkIndex_AnswersAsTheLiveProbesDo(t *testing.T) {
+	none := "open=false/false close-gate=false/false in-progress=false/false for-config=false/false awake=false/false first-in-progress=false/false first-claimable=false/false stranded=false/false"
+	want := map[string]string{
+		"nothing":        none,
+		"open":           "open=true/false close-gate=true/false in-progress=false/false for-config=true/false awake=true/false first-in-progress=false/false first-claimable=true/false stranded=true/false",
+		"in_progress":    "open=true/false close-gate=true/false in-progress=true/false for-config=true/false awake=true/false first-in-progress=true/false first-claimable=false/false stranded=true/false",
+		"closed":         none,
+		"other seat":     none,
+		"mail":           none,
+		"own drain step": "open=true/false close-gate=false/false in-progress=true/false for-config=true/false awake=true/false first-in-progress=false/false first-claimable=false/false stranded=true/false",
+	}
 	cases := map[string]func(t *testing.T, work beads.Store, seat string){
 		"nothing":     func(*testing.T, beads.Store, string) {},
 		"open":        func(t *testing.T, w beads.Store, seat string) { createWork(t, w, "open", seat, nil) },
@@ -400,39 +428,40 @@ func TestSeatWorkIndex_AnswersAsTheLiveProbesDo(t *testing.T) {
 				seatBead := createCanonicalPoolSession(t, sessions, &cfg.Agents[0], seatWorkNow.Add(-time.Hour), 1)
 				info := sessionInfosFromBeads([]beads.Bead{seatBead})[0]
 				seed(t, work, seatBead.ID)
-				useSeatWorkPath(t, path, cityPath, cfg, sessions, nil)
-				answers[path] = seatWorkAnswers(t, cityPath, cfg, sessions, info)
+				answers[path] = seatWorkAnswers(t, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info)
 			}
-			if answers["live"] != answers["index"] {
-				t.Fatalf("index answered\n  %s\nlive answered\n  %s", answers["index"], answers["live"])
+			for _, path := range seatWorkPaths {
+				if answers[path] != want[name] {
+					t.Errorf("%s read answered\n  %s\nwant\n  %s", path, answers[path], want[name])
+				}
 			}
 		})
 	}
 }
 
-// seatWorkAnswers renders every index-served gate's answer for info, with bead
-// ids reduced to found/not found (the two paths run on separate stores).
-func seatWorkAnswers(t *testing.T, cityPath string, cfg *config.City, store beads.Store, info session.Info) string {
+// seatWorkAnswers renders every seat-work gate's answer for info from sw, with
+// bead ids reduced to found/not found (the two paths run on separate stores).
+func seatWorkAnswers(t *testing.T, sw *SeatWork, info session.Info) string {
 	t.Helper()
 	var out []string
 	add := func(name string, v bool, err error) {
 		out = append(out, fmt.Sprintf("%s=%v/%v", name, v, err != nil))
 	}
-	has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, nil, info)
+	has, err := sessionHasOpenAssignedWorkForReachableStore(sw, info)
 	add("open", has, err)
-	has, err = sessionHasOpenAssignedWorkForReachableStoreForCloseGate(cityPath, cfg, store, nil, info)
+	has, err = sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, info)
 	add("close-gate", has, err)
-	has, err = sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, nil, info)
+	has, err = sessionHasInProgressAssignedWorkForConfig(sw, info)
 	add("in-progress", has, err)
-	has, err = sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, nil, info)
+	has, err = sessionHasOpenAssignedWorkForConfigInfo(sw, info)
 	add("for-config", has, err)
-	has, err = sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, nil, info)
+	has, err = sessionHasAwakeAssignedWorkForReachableStore(sw, info)
 	add("awake", has, err)
-	_, has, err = firstInProgressAssignedWorkBeadForReachableStore(cityPath, cfg, store, nil, info)
+	_, has, err = firstInProgressAssignedWorkBeadForReachableStore(sw, info)
 	add("first-in-progress", has, err)
-	_, has, err = firstOpenClaimableAssignedWorkBeadForReachableStore(cityPath, cfg, store, nil, info, seatWorkNow)
+	_, has, err = firstOpenClaimableAssignedWorkBeadForReachableStore(sw, info, seatWorkNow)
 	add("first-claimable", has, err)
-	stranded, err := collectSessionAssignedWorkInfo(cityPath, cfg, store, nil, info)
+	stranded, err := collectSessionAssignedWorkInfo(sw, info)
 	add("stranded", len(stranded) > 0, err)
 	return strings.Join(out, " ")
 }
@@ -511,9 +540,9 @@ func TestSeatWorkIndex_GatesAndB1CostAtMcLatency(t *testing.T) {
 		}
 		return e, work, idle
 	}
-	b1 := func(e *killedSeatEnv, work *workCallCounter) time.Duration {
+	b1 := func(e *killedSeatEnv, work *workCallCounter, sw *SeatWork) time.Duration {
 		before := work.n()
-		releaseUnexecutedClaimsOnKill(e.city, e.cfg, e.store, nil, e.now, sessionInfosFromBeads([]beads.Bead{e.seat})[0], drainAckReleaseBudget, io.Discard)
+		releaseUnexecutedClaimsOnKill(sw, e.store, e.now, sessionInfosFromBeads([]beads.Bead{e.seat})[0], io.Discard)
 		return time.Duration(work.n()-before) * mcWorkStoreCall
 	}
 	assertReleased := func(t *testing.T, e *killedSeatEnv, work *workCallCounter) {
@@ -524,23 +553,17 @@ func TestSeatWorkIndex_GatesAndB1CostAtMcLatency(t *testing.T) {
 		}
 	}
 
-	// The live probes, for scale: on mc latency B1 overruns its budget.
-	e, work, _ := b1Env(t)
-	if live := b1(e, work); live <= drainAckReleaseBudget {
-		t.Fatalf("live B1 costs %v; the fixture no longer shows the budget problem", live)
-	}
-
 	e, work, idle := b1Env(t)
-	useSeatWorkPath(t, "index", e.city, e.cfg, e.store, nil)
+	sw := testSeatWork(e.city, e.cfg, e.store, nil)
 	for _, info := range idle {
-		if has, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(e.city, e.cfg, e.store, nil, info); has || err != nil {
+		if has, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(sw, info); has || err != nil {
 			t.Fatalf("idle seat gate = %v, %v", has, err)
 		}
 	}
 	if got := work.n(); got != len(seatWorkStatuses) {
 		t.Fatalf("the index and %d idle gates read the work store %d times, want %d (one list per status)", len(idle), got, len(seatWorkStatuses))
 	}
-	if got := b1(e, work); got > drainAckReleaseBudget {
+	if got := b1(e, work, sw); got > drainAckReleaseBudget {
 		t.Fatalf("B1 from the index costs %v at mc latency, over its %v budget", got, drainAckReleaseBudget)
 	}
 	assertReleased(t, e, work)
@@ -555,28 +578,31 @@ func TestSeatWorkIndex_RechecksAHitLive(t *testing.T) {
 	work := registerWorkShape(t, cityPath, "split", sessions)
 	seat := sessionInfosFromBeads([]beads.Bead{createCanonicalPoolSession(t, sessions, &cfg.Agents[0], seatWorkNow.Add(-time.Hour), 1)})[0]
 	claim := createWork(t, work, "in_progress", seat.ID, nil)
-	useSeatWorkPath(t, "index", cityPath, cfg, sessions, nil)
+	sw := testSeatWork(cityPath, cfg, sessions, nil)
 
-	if has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, sessions, nil, seat); !has || err != nil {
+	if has, err := sessionHasOpenAssignedWorkForReachableStore(sw, seat); !has || err != nil {
 		t.Fatalf("gate with the claim = %v, %v; want held", has, err)
 	}
 	closeWork(t, work, claim)
-	if has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, sessions, nil, seat); has || err != nil {
+	if has, err := sessionHasOpenAssignedWorkForReachableStore(sw, seat); has || err != nil {
 		t.Fatalf("gate after the claim closed = %v, %v; want the index's stale row re-read and dropped", has, err)
 	}
 }
 
-// The controller tick's session phases share one seat work index, installed
-// at the first session phase and removed when the pass ends; a phase before it
-// (the config reload) runs without one.
-func TestRunTickPhases_SharesOneSeatWorkIndexAcrossSessionPhases(t *testing.T) {
+// The controller tick's session phases share one SeatWork, minted at the
+// first session phase over the controller's city work store, never its
+// sessions binding (mc-3ixn3.16); a phase before it (the config reload) runs
+// without one.
+func TestRunTickPhases_SharesOneSeatWorkAcrossSessionPhases(t *testing.T) {
 	cityPath := t.TempDir()
-	work := beads.NewMemStore()
-	cr := &CityRuntime{cityPath: cityPath, cfg: &config.City{}, standaloneCityStore: work, stderr: io.Discard}
-	registerWorkShapeWith(t, cityPath, "single", work, work)
-	var seen []*seatWorkIndex
-	probe := func(cr *CityRuntime, _ *tickPass) bool {
-		seen = append(seen, seatWorkIndexFor(cityPath, cr.sessionsBeadStore().Store))
+	work, binding := beads.NewMemStore(), beads.NewMemStore()
+	cr := &CityRuntime{cityPath: cityPath, cfg: &config.City{}, standaloneCityStore: work, storageRoutes: splitRoutes(binding), stderr: io.Discard}
+	if cr.sessionsBeadStore().Store != binding {
+		t.Fatal("fixture: the sessions store is not the binding")
+	}
+	var seen []*SeatWork
+	probe := func(_ *CityRuntime, p *tickPass) bool {
+		seen = append(seen, p.seatWork)
 		return false
 	}
 	cr.runTickPhases(&tickPass{}, []tickPhase{
@@ -587,15 +613,15 @@ func TestRunTickPhases_SharesOneSeatWorkIndexAcrossSessionPhases(t *testing.T) {
 	})
 
 	if seen[0] != nil || seen[1] == nil || seen[2] != seen[1] || seen[3] != seen[1] {
-		t.Fatalf("indexes seen by phase = %v; want none before the first session phase, then one shared index", seen)
+		t.Fatalf("SeatWork seen by phase = %v; want none before the first session phase, then one shared read", seen)
 	}
-	if seatWorkIndexFor(cityPath, work) != nil {
-		t.Fatal("the tick's index outlived the pass")
+	if legs := seen[1].Legs(); !legs.isWork(work) || legs.isWork(binding) {
+		t.Fatal("the tick's SeatWork does not read the controller's city work store as its work leg")
 	}
 }
 
-// A dark work leg fails every gate the index serves closed, exactly as the
-// live probes do: no gate may answer "no work" over a leg it could not read.
+// A dark work leg fails every gate closed on both reads: no gate may answer
+// "no work" over a leg it could not read.
 func TestSeatWorkIndex_DarkLegFailsEveryGateClosed(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "kill-town"}, Agents: []config.Agent{persistentWorker()}}
 	answers := map[string]string{}
@@ -605,14 +631,13 @@ func TestSeatWorkIndex_DarkLegFailsEveryGateClosed(t *testing.T) {
 		dark := &killRaceStore{Store: beads.NewMemStore(), listErr: map[string]error{"open": errors.New("leg is dark"), "in_progress": errors.New("leg is dark")}}
 		registerWorkShapeWith(t, cityPath, "split", sessions, dark)
 		seat := createCanonicalPoolSession(t, sessions, &cfg.Agents[0], seatWorkNow.Add(-time.Hour), 1)
-		useSeatWorkPath(t, path, cityPath, cfg, sessions, nil)
-		answers[path] = seatWorkAnswers(t, cityPath, cfg, sessions, sessionInfosFromBeads([]beads.Bead{seat})[0])
+		info := sessionInfosFromBeads([]beads.Bead{seat})[0]
+		answers[path] = seatWorkAnswers(t, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info)
 	}
-	if answers["live"] != answers["index"] {
-		t.Fatalf("index answered\n  %s\nlive answered\n  %s", answers["index"], answers["live"])
-	}
-	if strings.Contains(answers["index"], "/false") {
-		t.Fatalf("a gate answered without an error over a dark leg: %s", answers["index"])
+	for _, path := range seatWorkPaths {
+		if strings.Contains(answers[path], "/false") {
+			t.Fatalf("on the %s read a gate answered without an error over a dark leg: %s", path, answers[path])
+		}
 	}
 }
 
@@ -624,9 +649,7 @@ func TestSeatWorkIndex_RecoversALegPanic(t *testing.T) {
 	sessions := beads.NewMemStore()
 	registerWorkShapeWith(t, cityPath, "split", sessions, panickingLegStore{Store: beads.NewMemStore(), panicOnList: true})
 	seat := createCanonicalPoolSession(t, sessions, &cfg.Agents[0], seatWorkNow.Add(-time.Hour), 1)
-	useSeatWorkPath(t, "index", cityPath, cfg, sessions, nil)
-
-	if has, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, sessions, nil, sessionInfosFromBeads([]beads.Bead{seat})[0]); has || err == nil || !strings.Contains(err.Error(), "panicked") {
+	if has, err := sessionHasOpenAssignedWorkForReachableStore(testSeatWork(cityPath, cfg, sessions, nil), sessionInfosFromBeads([]beads.Bead{seat})[0]); has || err == nil || !strings.Contains(err.Error(), "panicked") {
 		t.Fatalf("gate over a panicking leg = %v, %v; want the recovered panic as the error", has, err)
 	}
 }

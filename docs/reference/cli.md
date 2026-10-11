@@ -5032,16 +5032,23 @@ Stop the running machine-wide supervisor and all its cities.
 
 By default, returns as soon as the supervisor acknowledges the stop
 request — shutdown continues asynchronously. Pass --wait to block
-until the supervisor socket is no longer answering, which is what
-most callers that need deterministic cleanup want (e.g., integration
-tests that then expect to remove temp directories without racing
-against lingering supervisor / controller subprocesses).
+until the supervisor process has exited and released its
+single-instance lock, which is what most callers that need
+deterministic cleanup want (e.g., integration tests that then expect
+to remove temp directories without racing against lingering
+supervisor / controller subprocesses, or a 'gc supervisor start'
+right after the stop). --wait waits for the control socket to stop
+answering and then for the process to exit, within --wait-timeout,
+except that the process always gets at least 10s after its socket
+closes to finish shutting down. A supervisor process this host
+cannot see (one in another PID namespace) is waited for only until
+its socket stops answering.
 
 Stopping the supervisor also stops the platform service that manages
 it, and stop exits non-zero when that fails; with --wait, gc further
 verifies on macOS that the launchd job is really gone before
-returning, sharing the same --wait-timeout deadline as the socket
-wait, and fails when it cannot confirm that. An operator stop also
+returning, sharing the same --wait-timeout deadline, and fails when
+it cannot confirm that. An operator stop also
 disables the launchd job, so it will not come back at the next login
 until 'gc supervisor install' — or 'gc start', which routes through
 install — re-enables it.
@@ -5060,8 +5067,8 @@ gc supervisor stop [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL summary |
-| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
-| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
+| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and for its process to exit before returning |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set, except that the supervisor process gets at least 10s to exit after its socket closes (in delegated mode, bounds the synchronous systemctl stop regardless of --wait) |
 
 ## gc supervisor uninstall
 

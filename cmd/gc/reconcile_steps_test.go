@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"maps"
 	"slices"
@@ -364,4 +365,121 @@ func TestDependencyCloseTriggersStepsOnlyRun(t *testing.T) {
 			t.Errorf("steps-only run: repairs=%d seq %d→%d, want no other step, read or publish", runs["demand-repairs"].Load(), seq, backstopSeq(lane))
 		}
 	})
+}
+
+// Kills mc-q6x43 regressions: a wait hold whose wait an earlier pass ended
+// (its clear lost, or the process died before it) is cleared by the next
+// pass's prepare, in legacy and v2 alike; a row with a pending wait keeps its
+// hold.
+func TestPrepareWaitWakeStateClearsAnOrphanedWaitHold(t *testing.T) {
+	for name, prepare := range map[string]func(beads.Store) error{
+		"legacy": func(s beads.Store) error {
+			deps := waitDependencyReaderFunc(func(id string) (beads.Bead, error) { return loadWaitDependencyBead("", s, id) })
+			_, err := prepareWaitWakeStateWithSnapshot(sessionFrontDoor(s), deps, beads.NudgesStore{Store: s}, stepsTestNow, nil)
+			return err
+		},
+		"v2": func(s beads.Store) error {
+			deps := waitDependencyReaderFunc(func(id string) (beads.Bead, error) { return loadWaitDependencyBead("", s, id) })
+			_, err := prepareWaitWakeStateHooked(sessionFrontDoor(s), deps, beads.NudgesStore{Store: s}, stepsTestNow, nil, waitWakeHooks{clearHold: clearSessionWaitHoldFenced})
+			return err
+		},
+	} {
+		store := beads.NewMemStore()
+		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil { // v2 writes by CAS
+			t.Fatal(err)
+		}
+		row := func(title string) string {
+			b, err := store.Create(beads.Bead{Title: title, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+				"session_name": title, "template": "worker", "state": "asleep", "wait_hold": "true", "sleep_intent": "wait-hold", "sleep_reason": "wait-hold",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b.ID
+		}
+		orphan, waiting := row("orphan"), row("waiting")
+		dep, err := store.Create(beads.Bead{Title: "dep", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(beads.Bead{Title: "wait:waiting", Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + waiting}, Metadata: map[string]string{
+			"session_id": waiting, "session_name": "waiting", "kind": "deps", "state": waitStatePending, "dep_ids": dep.ID, "dep_mode": "all",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepare(store); err != nil {
+			t.Fatalf("%s prepare: %v", name, err)
+		}
+		if m := mustBead(t, store, orphan).Metadata; m["wait_hold"] != "" || m["sleep_intent"] != "" || m["sleep_reason"] != "" {
+			t.Errorf("%s: orphaned hold wait_hold=%q intent=%q reason=%q, want cleared", name, m["wait_hold"], m["sleep_intent"], m["sleep_reason"])
+		}
+		if m := mustBead(t, store, waiting).Metadata; m["wait_hold"] != "true" || m["sleep_intent"] != "wait-hold" {
+			t.Errorf("%s: pending wait's hold wait_hold=%q intent=%q, want it kept", name, m["wait_hold"], m["sleep_intent"])
+		}
+	}
+}
+
+func mustBead(t *testing.T, store beads.Store, id string) beads.Bead {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// failsWritesTo fails every metadata write to one bead.
+type failsWritesTo struct {
+	beads.Store
+	id string
+}
+
+var errRowWriteRejected = errors.New("write rejected")
+
+func (s failsWritesTo) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.id {
+		return errRowWriteRejected
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s failsWritesTo) SetMetadataBatch(id string, kv map[string]string) error {
+	if id == s.id {
+		return errRowWriteRejected
+	}
+	return s.Store.SetMetadataBatch(id, kv)
+}
+
+// Kills: the orphaned-hold sweep (mc-q6x43) failing the pass. One row whose
+// clear keeps failing costs no other session its wait-ready wake: the pass
+// returns its ready waits and no error, and the row stays owed.
+func TestPrepareWaitWakeStateKeepsReadyWaitsPastAFailedOrphanClear(t *testing.T) {
+	mem := beads.NewMemStore()
+	row := func(title string, meta map[string]string) string {
+		m := map[string]string{"session_name": title, "template": "worker", "state": "asleep"}
+		for k, v := range meta {
+			m[k] = v
+		}
+		b, err := mem.Create(beads.Bead{Title: title, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: m})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.ID
+	}
+	ready := row("ready", map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold"})
+	orphan := row("orphan", map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold"})
+	if _, err := mem.Create(beads.Bead{Title: "wait:ready", Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + ready}, Metadata: map[string]string{
+		"session_id": ready, "session_name": "ready", "kind": "deps", "state": waitStateReady, "dep_ids": "x", "dep_mode": "all",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	store := failsWritesTo{Store: mem, id: orphan}
+	deps := waitDependencyReaderFunc(func(id string) (beads.Bead, error) { return loadWaitDependencyBead("", store, id) })
+	set, err := prepareWaitWakeStateWithSnapshot(sessionFrontDoor(store), deps, beads.NudgesStore{Store: store}, stepsTestNow, nil)
+	if err != nil || !set[ready] {
+		t.Errorf("ready waits %v, err %v; want %s ready and no error", set, err, ready)
+	}
+	if m := mustBead(t, mem, orphan).Metadata; m["wait_hold"] != "true" {
+		t.Errorf("the failed clear's row wait_hold=%q, want it still owed", m["wait_hold"])
+	}
 }

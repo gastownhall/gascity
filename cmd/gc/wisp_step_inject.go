@@ -158,8 +158,10 @@ func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string
 }
 
 // resolveActiveMolecule returns the agent's in-progress molecule bead.
-// When multiple molecules are found, the most recently updated one is returned
-// and the ambiguity is logged. Returns nil, nil when none is found.
+// When multiple molecules are found, the most recently updated of the five
+// newest is returned and the ambiguity is logged. The sample is cut in created
+// order, newest first, so which five are compared does not depend on the
+// store's default listing order. Returns nil, nil when none is found.
 func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, error) {
 	for _, molType := range []string{"molecule", "wisp"} {
 		results, err := store.List(beads.ListQuery{
@@ -168,6 +170,7 @@ func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, 
 			Assignees: assignees,
 			TierMode:  beads.TierBoth,
 			Limit:     5,
+			Sort:      beads.SortCreatedDesc,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)
@@ -207,12 +210,16 @@ func resolveActiveMolecule(store beads.Store, assignees []string) (*beads.Bead, 
 //
 // The bridge crosses a class boundary: the bead carrying the stamp is work
 // class, the root it names is ClassGraph.
+//
+// The ten candidates are the newest claimed work, cut in created order so the
+// sample does not depend on the store's default listing order.
 func resolveMoleculeRootViaBridge(workStore, graphStore beads.Store, assignees []string) *beads.Bead {
 	results, err := workStore.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
 		TierMode:  beads.TierBoth,
 		Limit:     10,
+		Sort:      beads.SortCreatedDesc,
 	})
 	if err == nil {
 		if root := firstMoleculeRootFrom(graphStore, results); root != nil {
@@ -329,13 +336,16 @@ func resolveEntryStepChild(store beads.Store, moleculeID string) (*beads.Bead, e
 
 // resolveBeadWithDescription returns the first in-progress bead assigned to any
 // of the given identities that has a non-empty Description. This is the legacy
-// resolution path used when no molecule bead is assigned to the agent.
+// resolution path used when no molecule bead is assigned to the agent. The
+// ten candidates are the newest claimed work, first in created order newest
+// first, so the answer does not depend on the store's default listing order.
 func resolveBeadWithDescription(store beads.Store, assignees []string) (*beads.Bead, error) {
 	results, err := store.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
 		TierMode:  beads.TierBoth,
 		Limit:     10,
+		Sort:      beads.SortCreatedDesc,
 	})
 	if err != nil {
 		return nil, err

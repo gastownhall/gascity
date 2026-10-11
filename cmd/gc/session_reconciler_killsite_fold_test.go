@@ -36,7 +36,7 @@ func (s *sleepWriteFailingStore) SetMetadataBatch(id string, kvs map[string]stri
 }
 
 // Update fails a sleep write the same way: the kill sites write their sleep
-// through the fenced ApplyKeepingUserHold, which lands as an Update.
+// through the fenced ApplySleep, which lands as an Update.
 func (s *sleepWriteFailingStore) Update(id string, opts beads.UpdateOpts) error {
 	if _, isSleep := opts.Metadata["slept_at"]; isSleep && s.failsLeft != 0 {
 		if s.failsLeft > 0 {
@@ -84,7 +84,7 @@ func maxAgeReconcileSnapshot(e *reconcilerTestEnv, sessions []beads.Bead, tr max
 	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), e.city, snap.OpenForReconcile(), snap, e.desiredState, cfgNames, e.cfg, e.sp,
-		beads.SessionStore{Store: e.store}, nil, nil, nil, nil, e.dt, nil, poolDesired, nil, nil, false, nil, "",
+		beads.SessionStore{Store: e.store}, testSeatWork(e.city, e.cfg, beads.SessionStore{Store: e.store}, nil), nil, nil, nil, nil, e.dt, nil, poolDesired, nil, nil, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
 		withMaxSessionAgeTracker(tr),
 	)

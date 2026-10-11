@@ -290,13 +290,14 @@ func (f FullFake) SnapshotIdle(name string) (bool, error) {
 }
 
 // RuntimeInventory implements [InventoryProvider]: every running session,
-// its attachment known.
+// its attachment known, and its activity when one was set.
 func (f FullFake) RuntimeInventory(context.Context) (map[string]InventoryEntry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	inv := make(map[string]InventoryEntry, len(f.sessions))
 	for name := range f.sessions {
-		inv[name] = InventoryEntry{AttachedKnown: true, Attached: f.Attached[name]}
+		at := f.Activity[name]
+		inv[name] = InventoryEntry{AttachedKnown: true, Attached: f.Attached[name], ActivityKnown: !at.IsZero(), LastActivity: at}
 	}
 	return inv, nil
 }

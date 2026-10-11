@@ -29,7 +29,8 @@ const (
 	// attemptPass closes the control as passed.
 	attemptPass attemptDisposition = iota
 	// attemptHardFail closes the control as a terminal hard failure regardless
-	// of attempts remaining (only the retry classifier produces this).
+	// of attempts remaining: a retry attempt classified hard, or a ralph
+	// iteration that failed hard (ralphIterationHardFailure).
 	attemptHardFail
 	// attemptContinue spawns the next attempt when attempts remain, or disposes
 	// of the exhausted control via the strategy when max_attempts is reached.
@@ -283,15 +284,25 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
-// runs the check script. A GatePass closes the control; anything else spawns
-// the next iteration or exhausts.
+// runs the check script. An iteration that failed hard closes the control as a
+// hard failure without running the check; a GatePass closes the control;
+// anything else spawns the next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
 	// review.verdict) visible on the ralph bead for check scripts that read
-	// $GC_BEAD_ID metadata.
+	// $GC_BEAD_ID metadata, and keeps it as diagnostics on a hard failure.
 	if err := propagateRetrySubjectMetadata(store, bead.ID, iteration); err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: propagating iteration metadata: %w", bead.ID, err)
+	}
+	culprit, hard, err := ralphIterationHardFailure(store, bead, iteration, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: classifying failed %s: %w", bead.ID, iteration.ID, err)
+	}
+	if hard {
+		reason := retryFailureReason(culprit)
+		opts.tracef("ralph hard-fail bead=%s iteration=%s attempt=%d culprit=%s reason=%s", bead.ID, iteration.ID, iterationNum, culprit.ID, reason)
+		return attemptEvaluation{disposition: attemptHardFail, logOutcome: "hard", logDetail: reason, reason: reason}, nil
 	}
 	// Reload the control bead after propagation so the check sees updated values.
 	reloaded, err := store.Get(bead.ID)
@@ -311,6 +322,53 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 		eval.disposition = attemptContinue
 	}
 	return eval, nil
+}
+
+// ralphIterationHardFailure returns the bead whose hard failure ended a failed
+// ralph iteration: the iteration itself when it closed hard (a childless
+// ralph's work bead, or a scope body whose abort kept its member's record), or
+// else a hard-failed member of the iteration's scope. The member scan covers
+// iteration bodies aborted before abortScope kept that record. Only an explicit
+// hard class counts, matching the retry classifier and the legacy check path;
+// an empty or transient class leaves the loop to iterate.
+func ralphIterationHardFailure(store beads.Store, control, iteration beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
+	if strings.TrimSpace(iteration.Metadata[beadmeta.OutcomeMetadataKey]) != beadmeta.OutcomeFail {
+		return beads.Bead{}, false, nil
+	}
+	if closedWithHardFailure(iteration) {
+		return iteration, true, nil
+	}
+	iterationRef := strings.TrimSpace(iteration.Metadata[beadmeta.StepRefMetadataKey])
+	if iteration.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope || iterationRef == "" {
+		return beads.Bead{}, false, nil
+	}
+	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := rootViewMembers(store, rootID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("reading members of root %s: %w", rootID, err)
+	}
+	culprit, ok := firstHardFailedMember(iterationScopeMembers(all, rootID, iterationRef), iteration.ID)
+	return culprit, ok, nil
+}
+
+// iterationScopeMembers returns the members of the scope whose body carries
+// iterationRef as its gc.step_ref: the beads whose gc.scope_ref names it,
+// exactly or as the un-namespaced suffix matchesScopeRef also accepts.
+func iterationScopeMembers(all []beads.Bead, rootID, iterationRef string) []beads.Bead {
+	var members []beads.Bead
+	for _, bead := range all {
+		scopeRef := strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey])
+		if scopeRef == "" || bead.Metadata[beadmeta.RootBeadIDMetadataKey] != rootID {
+			continue
+		}
+		if scopeRef == iterationRef || strings.HasSuffix(iterationRef, "."+scopeRef) {
+			members = append(members, bead)
+		}
+	}
+	return members
 }
 
 func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) error {
