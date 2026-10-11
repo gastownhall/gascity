@@ -1689,9 +1689,8 @@ func TestMainStoreSessionCreateOverAnEngineWithoutStorageCreate(t *testing.T) {
 	}
 	cityPath := t.TempDir()
 	cfg := &config.City{}
-	storage := effectiveBeadStorage(cfg, beadPolicySession)
-	if storage == "" {
-		t.Fatal("the session policy resolved no storage class; the create would not reach CreateWithStorage")
+	if storage := effectiveBeadStorage(cfg, beadPolicySession); storage != "no_history" {
+		t.Fatalf("the session policy resolved storage %q, want \"no_history\": the create must reach CreateWithStorage with a class the landed row can show", storage)
 	}
 	engine := plainCreateEngine{Store: beads.NewMemStore()}
 	// withMainStoreEmission's result over a native Dolt engine (pinned for the
@@ -1711,9 +1710,8 @@ func TestMainStoreSessionCreateOverAnEngineWithoutStorageCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the session bead did not land in the engine: %v", err)
 	}
-	want := applyBeadStorage(beads.Bead{}, storage)
-	if row.Ephemeral != want.Ephemeral || row.NoHistory != want.NoHistory {
-		t.Fatalf("landed with ephemeral=%v no_history=%v, want the session policy's %q (ephemeral=%v no_history=%v)", row.Ephemeral, row.NoHistory, storage, want.Ephemeral, want.NoHistory)
+	if !row.NoHistory || row.Ephemeral {
+		t.Fatalf("landed with no_history=%v ephemeral=%v, want no_history=true ephemeral=false (the session policy's no_history class)", row.NoHistory, row.Ephemeral)
 	}
 	announced := 0
 	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
@@ -1723,5 +1721,54 @@ func TestMainStoreSessionCreateOverAnEngineWithoutStorageCreate(t *testing.T) {
 	}
 	if announced != 1 {
 		t.Fatalf("the create appended %d bead.created row(s) for %s, want exactly 1", announced, created.ID)
+	}
+}
+
+// The emitter carries every method either engine declares
+// (TestEmittingClassStoreKeepsEveryEngineCapability), so it claims some
+// capabilities an engine it wraps does not have. Each such claim must answer
+// for that engine exactly as the bare engine's absence would — a sentinel, a
+// zero, or the fallback its callers take — or a caller's type assertion that
+// used to fail now matches and takes a path the engine cannot serve. That is
+// how #7611 broke `gc session new` on native Dolt (CreateWithStorage refused;
+// fixed in #7623). The sets are pinned so a new over-claim fails here and
+// whoever adds it checks its answer over each engine that lacks it.
+func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
+	wrapper := reflect.TypeOf(&emittingClassStore{})
+	want := map[reflect.Type][]string{
+		reflect.TypeOf(&beads.NativeDoltStore{}): {
+			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
+			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
+			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
+			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
+		},
+		reflect.TypeOf(&beads.SQLiteStore{}): {
+			"ConditionalWritesModeSource", "Count", "DepListBatch",
+			"NamespaceCensusHandle", "ReadOnly", "SawRows",
+			"SupportsEphemeralGraphApply", "TransferIfCurrent", "WaitForParentProjection",
+		},
+	}
+	if len(want) != len(bindingEngineTypes) {
+		t.Fatalf("pinned %d engines, bindingEngineTypes lists %d: pin the over-claims for every engine the emitter wraps", len(want), len(bindingEngineTypes))
+	}
+	for _, engine := range bindingEngineTypes {
+		pinned, ok := want[engine]
+		if !ok {
+			t.Errorf("no over-claim pin for %s", engine)
+			continue
+		}
+		var got []string
+		for i := 0; i < wrapper.NumMethod(); i++ {
+			name := wrapper.Method(i).Name
+			if _, has := engine.MethodByName(name); !has {
+				got = append(got, name)
+			}
+		}
+		sort.Strings(got)
+		sorted := slices.Clone(pinned)
+		sort.Strings(sorted)
+		if !slices.Equal(got, sorted) {
+			t.Errorf("the emitter claims %v that %s lacks, pinned %v: check each new claim answers over %s as its absence would, then update the pin", got, engine, sorted, engine)
+		}
 	}
 }
