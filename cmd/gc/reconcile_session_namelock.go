@@ -37,13 +37,9 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 }
 
 // startHolderLive reports whether a live holder has the runtime lease of
-// info's row (session.RuntimeLeaseHeld), so the start its in-flight marker
-// (state creating, a fresh last_woke_at) names is still running: every
-// PreWake is written under that lease, held through its commit. A dead
-// holder's start is abandoned, and the reconciler relaunches it under its
-// own lease (CONTRACT S7, §12.5; mc-5a1ma). What cannot be probed (no store,
-// a city path that is not absolute, a failed read) reads as held, keeping
-// the marker's time-based meaning.
+// info's row (session.RuntimeLeaseHeld): the reaper spares a row a live
+// holder is starting. What cannot be probed (no store, a city path that is
+// not absolute, a failed read) reads as held.
 func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
 	name := strings.TrimSpace(info.SessionName)
 	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
@@ -51,6 +47,23 @@ func startHolderLive(store beads.Store, cityPath string, info session.Info) bool
 	}
 	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
 	return err != nil || held
+}
+
+// startAbandoned reports whether the start whose in-flight marker (state
+// creating, a fresh last_woke_at) the pass read on info was abandoned by its
+// holder (session.RuntimeStartAbandoned): no live holder has the lease every
+// PreWake is written under, and the row read under the name's flock still
+// carries the marker. The reconciler relaunches such a start under its own
+// lease (CONTRACT S7, §12.5; mc-5a1ma). A start that committed or failed
+// since the pass's read is not abandoned, and neither is what cannot be
+// probed: the marker keeps its time-based meaning.
+func startAbandoned(store beads.Store, cityPath string, info session.Info) bool {
+	name := strings.TrimSpace(info.SessionName)
+	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
+		return false
+	}
+	abandoned, err := session.RuntimeStartAbandoned(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID}, info)
+	return err == nil && abandoned
 }
 
 // controllerStopLease takes, without waiting, the runtime lease a controller

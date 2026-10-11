@@ -257,6 +257,7 @@ func (l *RuntimeLease) TakeRecord(s *Store, req RuntimeLeaseRequest) error {
 	}
 	if err := l.acquireRecord(req.City, req.TTL); err != nil {
 		l.store, l.id, l.holder, l.epoch, l.expires = nil, "", "", 0, time.Time{}
+		writeRuntimeLeaseLockBody(l.lock, l.prev, l.now()) // no record written: keep the previous token, a dead holder's proof
 		return err
 	}
 	return nil
@@ -267,33 +268,56 @@ func (l *RuntimeLease) TakeRecord(s *Store, req RuntimeLeaseRequest) error {
 // contender could not take (another host's, unexpired). A dead holder's lease
 // is not held: its flock died with it and its record names that flock, or the
 // record expired. It writes no record, leaves the lock file's token as it
-// found it, and takes the flock only for the read, so a start that reads its
-// row's in-flight marker unheld knows that start was abandoned (mc-5a1ma).
+// found it, and takes the flock only for the read.
 func RuntimeLeaseHeld(s *Store, req RuntimeLeaseRequest) (bool, error) {
+	held, _, err := probeRuntimeLease(s, req)
+	return held, err
+}
+
+// RuntimeStartAbandoned reports whether the start whose in-flight marker the
+// caller read on decided was abandoned: no live holder has req's lease
+// (RuntimeLeaseHeld), and the row, read under the name's flock, still carries
+// decided's state, instance_token and last_woke_at. Every PreWake is written
+// under that lease and held through its commit, so a start that committed,
+// failed or was relaunched after the caller's read has moved one of them, and
+// is no abandoned start to relaunch (mc-5a1ma). A closed row is not abandoned.
+func RuntimeStartAbandoned(s *Store, req RuntimeLeaseRequest, decided Info) (bool, error) {
+	held, fresh, err := probeRuntimeLease(s, req)
+	if err != nil || held || fresh == nil || fresh.Closed {
+		return false, err
+	}
+	return strings.TrimSpace(fresh.MetadataState) == strings.TrimSpace(decided.MetadataState) &&
+		fresh.InstanceToken == decided.InstanceToken && fresh.LastWokeAt == decided.LastWokeAt, nil
+}
+
+// probeRuntimeLease is RuntimeLeaseHeld's read, with the row it read under
+// the flock (nil without an ID, or when the flock is busy).
+func probeRuntimeLease(s *Store, req RuntimeLeaseRequest) (held bool, fresh *Info, err error) {
 	now := req.now
 	if now == nil {
 		now = time.Now
 	}
 	lock, _, prev, err := lockRuntimeNameFile(req.City, strings.TrimSpace(req.Name), now())
 	if errors.Is(err, ErrRuntimeLeaseBusy) {
-		return true, nil
+		return true, nil, nil
 	}
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer unlockRuntimeNameFile(lock)
 	if req.ID == "" {
-		return false, nil
+		return false, nil, nil
 	}
 	bead, err := s.freshBead(req.ID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
+	info := infoFromPersistedBead(bead)
 	if bead.Status == "closed" {
-		return false, nil
+		return false, &info, nil
 	}
 	free, _ := parseRuntimeLease(bead.Metadata).free(now(), runtimeLeaseFlockIdentity(lock, prev))
-	return !free, nil
+	return !free, &info, nil
 }
 
 // WaitRuntimeLease retries TryRuntimeLease until it succeeds, fails for

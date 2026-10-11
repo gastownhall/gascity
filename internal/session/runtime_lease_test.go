@@ -978,3 +978,93 @@ func TestClearRuntimeLeaseForReopen(t *testing.T) {
 		t.Fatalf("a non-session bead was touched: %v", b.Metadata)
 	}
 }
+
+// TestTakeRecordFailureKeepsTheProof (#7565 review): a TakeRecord whose
+// record write fails restores the lock file's token, as a failed
+// TryRuntimeLease does, so a dead holder's record is still taken over at once
+// afterwards instead of blocking until its expiry.
+func TestTakeRecordFailureKeepsTheProof(t *testing.T) {
+	if runtimeLeaseBootID() == "" {
+		t.Skip("no boot ID on this platform")
+	}
+	store := &failingWriteStore{Store: beads.NewMemStore()}
+	f, city := leaseFixtureOver(t, store), t.TempDir()
+	dead, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flock := lockFileIdentity(t, dead)
+	dead.Release()
+	f.write(t, MetadataPatch{
+		RuntimeLeaseHolderKey: "host-a/99999/dead", RuntimeLeaseEpochKey: "1", RuntimeLeaseTTLKey: "240",
+		RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339), RuntimeLeaseFlockKey: flock,
+	})
+	flockOnly, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	if err := flockOnly.TakeRecord(f.front, f.req(city, leaseT0)); err == nil || errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("TakeRecord over a failing write = %v, want the write's error", err)
+	}
+	flockOnly.Release()
+	store.fail = false
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil || l.Epoch() != 2 {
+		t.Fatalf("takeover after a failed TakeRecord: %v, %v; want the dead holder taken over", err, l)
+	}
+	l.Release()
+}
+
+// TestRuntimeStartAbandoned (#7565 review must-fix): a start is abandoned only
+// when no live holder has its lease and the row, read under the flock, still
+// carries the in-flight marker the caller decided on: its state, its token
+// and its last_woke_at. A commit, a failure, a relaunch or a close since the
+// caller's read is no abandoned start.
+func TestRuntimeStartAbandoned(t *testing.T) {
+	f, city := newLeaseFixture(t), t.TempDir()
+	marker := MetadataPatch{"state": "creating", "instance_token": "T1", "last_woke_at": "2099-10-09T11:59:50Z"}
+	f.write(t, marker)
+	decided := infoFromPersistedBead(mustBead(t, f.store, f.id))
+	abandoned := func() bool {
+		t.Helper()
+		got, err := RuntimeStartAbandoned(f.front, f.req(city, leaseT0), decided)
+		if err != nil {
+			t.Fatalf("RuntimeStartAbandoned: %v", err)
+		}
+		return got
+	}
+	if !abandoned() {
+		t.Fatal("an unheld row still carrying the marker reads in flight")
+	}
+	live, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abandoned() {
+		t.Fatal("a start a live holder runs reads abandoned")
+	}
+	live.Release()
+	for _, moved := range []MetadataPatch{{"state": "active"}, {"instance_token": "T2"}, {"last_woke_at": ""}} {
+		f.write(t, moved)
+		if abandoned() {
+			t.Errorf("a row moved by %v since the decision reads abandoned", moved)
+		}
+		f.write(t, marker)
+	}
+	if err := f.store.Close(f.id); err != nil {
+		t.Fatal(err)
+	}
+	if abandoned() {
+		t.Fatal("a closed row reads abandoned")
+	}
+}
+
+func mustBead(t *testing.T, s beads.Store, id string) beads.Bead {
+	t.Helper()
+	b, err := s.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
