@@ -259,9 +259,10 @@ func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	var gotSessionKind string
 	var gotProfile Profile
 	factory, err := NewFactory(FactoryConfig{
-		CityPath: t.TempDir(),
-		Store:    store,
-		Provider: sp,
+		CityPath:                t.TempDir(),
+		Store:                   store,
+		Provider:                sp,
+		StaleKeyDetectionWaiter: func(_ context.Context, _ string) error { return nil },
 		ResolveSessionRuntime: func(_ sessionpkg.Info, sessionKind string, _ map[string]string) (*ResolvedRuntime, error) {
 			gotSessionKind = sessionKind
 			return &ResolvedRuntime{
@@ -408,10 +409,11 @@ func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T
 	}
 
 	factory, err := NewFactory(FactoryConfig{
-		CityPath: t.TempDir(),
-		Store:    store,
-		Provider: sp,
-		Recorder: recorder,
+		CityPath:                t.TempDir(),
+		Store:                   store,
+		Provider:                sp,
+		Recorder:                recorder,
+		StaleKeyDetectionWaiter: func(_ context.Context, _ string) error { return nil },
 	})
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)

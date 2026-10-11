@@ -2515,7 +2515,10 @@ func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder e
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(store, sp,
+		sessionpkg.WithCityPath(t.TempDir()),
+		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }),
+	)
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:  manager,
 		Recorder: recorder,
