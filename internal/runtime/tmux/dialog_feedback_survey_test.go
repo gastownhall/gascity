@@ -311,7 +311,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 
 func TestDismissFeedbackSurveyModalSendsOneDigitWhileSurveyPersists(t *testing.T) {
 	executor := &scriptedTargetExecutor{capture: feedbackSurveySessionFixture, display: "agent-pane|0"}
-	tm := &Tmux{cfg: DefaultConfig(), exec: executor}
+	tm := &Tmux{cfg: DefaultConfig(), exec: executor, sleep: func(time.Duration) {}}
 
 	if err := tm.DismissFeedbackSurveyModalIfPresent("agent-pane"); err != nil {
 		t.Fatalf("DismissFeedbackSurveyModalIfPresent error = %v", err)

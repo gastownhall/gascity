@@ -399,6 +399,16 @@ type Tmux struct {
 	// terminateProcessKillPlan; tests inject a recorder to observe when
 	// termination happens without signaling real processes.
 	certifiedPaneTerminator func(processKillPlan) error
+
+	// sleep pauses execution. Nil selects time.Sleep; tests inject a mock or no-op.
+	sleep func(time.Duration)
+}
+
+func (t *Tmux) sleeper() func(time.Duration) {
+	if t != nil && t.sleep != nil {
+		return t.sleep
+	}
+	return time.Sleep
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -3291,7 +3301,7 @@ func (t *Tmux) DismissModelSwitchModalIfPresent(session string) {
 			}
 			return nil
 		},
-		time.Sleep,
+		t.sleeper(),
 	)
 }
 
@@ -3423,7 +3433,7 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) error {
 	if err != nil || !runtime.ContainsFeedbackSurveyModal(content) {
 		return nil
 	}
-	return dismissFeedbackSurveyModal(capture, attached, sendKeys, time.Sleep)
+	return dismissFeedbackSurveyModal(capture, attached, sendKeys, t.sleeper())
 }
 
 // GetPaneCommand returns the current command running in a pane.

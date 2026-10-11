@@ -332,10 +332,11 @@ func TestInputOpsTargetExactPane(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ex := tc.ex
 			cfg := DefaultConfig()
 			cfg.DebounceMs = 0
-			tc.run(&Tmux{cfg: cfg, exec: &ex})
+			tc.run(&Tmux{cfg: cfg, exec: &ex, sleep: func(time.Duration) {}})
 			requireExactTargets(t, ex.calls, "worker-1", tc.wantSubs...)
 		})
 	}
