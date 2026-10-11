@@ -31,7 +31,7 @@ func startKit(t *testing.T, kind, state string, meta ...string) *txKit {
 	t.Helper()
 	row := poolRow("gc-1", "worker", 1, state, append([]string{"generation", "3", "instance_token", "tok"}, meta...)...)
 	m := beads.NewMemStoreFrom(0, []beads.Bead{row}, nil)
-	k := newTxKitOn(t, m, simBacking{m})
+	k := newTxKitOn(t, m, simLegBacking{simBacking{m}}) // a rollback closes atomically
 	k.it.Kind = kind
 	return k
 }

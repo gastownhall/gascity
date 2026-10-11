@@ -1774,6 +1774,19 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	}
 }
 
+// retiredCleanup is cancelStateAssignedToRetiredSessionBead for a v2
+// effect that closed its row (v5 C3; START-033): outside the linted effect
+// files, since it writes the closed row's waits and bindings, never a
+// session row.
+type retiredCleanup struct {
+	store beads.Store
+	clock interface{ Now() time.Time }
+}
+
+func (r retiredCleanup) cleanup(id string) {
+	cancelStateAssignedToRetiredSessionBead(r.store, id, r.clock.Now(), nil)
+}
+
 // syncSessionBeadsWithSnapshotAndRigStores ensures every desired session has a corresponding session
 // bead. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.

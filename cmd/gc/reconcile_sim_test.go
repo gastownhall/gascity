@@ -273,6 +273,15 @@ type simBacking struct{ *beads.MemStore }
 
 func (simBacking) CachedReadExact() bool { return true }
 
+// simLegBacking is the simulator's leg backing: simBacking with the atomic
+// terminal close the v2 close verbs require (closeRow), as the city's
+// SQLite sessions store has.
+type simLegBacking struct{ simBacking }
+
+func (b simLegBacking) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (beads.Bead, error) {
+	return beads.AtomicCloserOver(b.MemStore).CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+}
+
 // simLeg is one census leg: its backing, the cache the controller reads and
 // writes through, and the outside writers' events, which a step delivers.
 type simLeg struct {
@@ -382,7 +391,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
-		cache := beads.NewCachingStoreForTest(simBacking{m}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
+		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("prime %s: %v", name, err)
 		}

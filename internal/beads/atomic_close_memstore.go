@@ -20,6 +20,12 @@ func NewAtomicCloseMemStore() Store {
 	return &atomicCloseMemStore{MemStore: NewMemStore()}
 }
 
+// AtomicCloserOver is m's atomic terminal close, for a test whose store must
+// stay a plain *MemStore (a simulator's backing) yet close atomically.
+func AtomicCloserOver(m *MemStore) AtomicConditionalCloser {
+	return &atomicCloseMemStore{MemStore: m}
+}
+
 // CloseWithMetadataIfMatch merges metadata and closes one open bead while its
 // revision remains expectedRevision. Both changes share one MemStore lock and
 // one fresh revision.

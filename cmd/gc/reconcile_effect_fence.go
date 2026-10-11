@@ -99,3 +99,10 @@ func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow
 	})
 	return ok && last == nil
 }
+
+// ownRuntimeFence is the rollback exception's fence (v5 F2, C3): L1 alone
+// on rt, the row's own runtime, which the caller has attributed
+// (rollbackRuntime); L3 is waived.
+func ownRuntimeFence(rt *txRuntime, row session.Info) fenceVerdict {
+	return fenceDestructive(rt, txFence{Read: legLiveness}, fenceRequest{Row: row, Legs: legLiveness})
+}

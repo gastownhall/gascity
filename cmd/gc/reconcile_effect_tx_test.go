@@ -827,7 +827,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -842,7 +842,8 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 // effectCapGrants are the capabilities each kind holds: the create its
 // runner, the adopt the read-only stores its prepare reads.
 var effectCapGrants = map[string]caps{
-	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode,
+	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode | capRetire,
+	intentRollback: capProviderStart | capRetire,
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -1047,7 +1048,9 @@ func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
-	allowed := map[string]bool{"it": true, "reads": true}
+	// retire is a closed row's cleanup after its close (C3 step 5): its
+	// waits and bindings, never a session row.
+	allowed := map[string]bool{"it": true, "reads": true, "retire": true}
 	for i, ty := 0, reflect.TypeFor[aroundCaps](); i < ty.NumField(); i++ {
 		if f := ty.Field(i).Name; !allowed[f] {
 			t.Errorf("aroundCaps.%s: around runs outside every lock; a write or provider handle belongs to a Call", f)
@@ -1474,5 +1477,29 @@ func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
 	}}
 	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
 		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}
+
+// Kills an abandon (S3) that writes nothing or settles landed, and a Last
+// step whose effect runs on past its Call: a Fail with a Write lands the
+// write and settles failed with the cause; a Last step's Call runs, the
+// effect stays landed, and the section after it never runs.
+func TestTxAbandonAndLast(t *testing.T) {
+	k := newTxKit(t)
+	abandon := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{"sleep_reason": "idle"}, Fail: "gave-up"}
+	}}, {Decide: mark("detached_at")}}}
+	if s := k.run(context.Background(), abandon); s.Outcome != settledFailed || s.Cause != "gave-up" || k.meta("sleep_reason") != "idle" || k.meta("detached_at") != "" {
+		t.Fatalf("abandon: settlement %+v, reason %q detached %q; want failed gave-up with a written, b not", s, k.meta("sleep_reason"), k.meta("detached_at"))
+	}
+	k = newTxKit(t)
+	ran := false
+	last := effectSpec{needs: needs{NameLock: true}, sections: []section{
+		called(0, section{Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"sleep_reason": "idle"}, Last: true} }},
+			func(context.Context, txCaps, struct{}) (struct{}, error) { ran = true; return struct{}{}, nil }),
+		{Decide: mark("detached_at")},
+	}}
+	if s := k.run(context.Background(), last); s.Outcome != settledLanded || !ran || k.meta("detached_at") != "" {
+		t.Fatalf("last: settlement %+v, call ran %v, detached %q; want landed, the Call run, b not", s, ran, k.meta("detached_at"))
 	}
 }

@@ -51,6 +51,7 @@ const (
 	capReadStores                     // the read-only city and rig stores (reads)
 	capProviderStart                  // the start's provider, endpoint breaker and clock (a Call's)
 	capEpisode                        // the #46 startup-health episode record (a Call's)
+	capRetire                         // the retired-session cleanup after a close (an around's)
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -85,11 +86,14 @@ type startCaps struct {
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
-// reaches no write and none of a Call's handles (provider start, routing,
-// release, kill); C5a1's endpoint gate may add Eligible here, never Admit.
+// reaches no row write and none of a Call's handles (provider start,
+// routing, release, kill); C5a1's endpoint gate may add Eligible here, never
+// Admit. A closed row's cleanup (capRetire) writes only its waits and
+// bindings.
 type aroundCaps struct {
-	it    intent
-	reads effectReads // capReadStores: read-only
+	it     intent
+	reads  effectReads     // capReadStores: read-only
+	retire *retiredCleanup // capRetire, on the pass's clock
 }
 
 // capsFor is it's txCaps under grant.
@@ -404,7 +408,11 @@ type txFence struct {
 // txStep is Decide's verdict: refuse or fail (writing nothing), write, or
 // neither. Done ends the effect after the step: landed if a section wrote,
 // otherwise a no-op with Cause. Without Done, the section's Call and the
-// next section run. Pass is what the section's Call takes.
+// next section run. Pass is what the section's Call takes. A Fail with a
+// Write (or a Terminal) is an abandon (v5 S3): the write lands, and the
+// effect ends failed with its cause. Last runs the section's Call, then
+// ends the effect: a landed commit's after-commit Call, ahead of the
+// sections only a failure reaches.
 type txStep struct {
 	Write    session.MetadataPatch
 	Terminal session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
@@ -412,6 +420,7 @@ type txStep struct {
 	Fail     string
 	Err      error
 	Done     bool
+	Last     bool
 	Cause    string
 	Facts    effectFacts
 	Pass     any
@@ -481,7 +490,13 @@ func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec, latch
 		return runSpec(ctx, p, it, spec, c)
 	}
 	ran := false
-	return spec.around(ctx, aroundCaps{it: it, reads: c.reads}, func() settlement {
+	a := aroundCaps{it: it, reads: c.reads}
+	if spec.caps&capRetire != 0 {
+		r := p.held.retire
+		r.clock = p.Clock
+		a.retire = &r
+	}
+	return spec.around(ctx, a, func() settlement {
 		if ran {
 			return settlement{Outcome: settledFailed, Cause: causeAroundRun}
 		}
@@ -569,6 +584,7 @@ type tx struct {
 	basis   rowBasis              // its incarnation and token
 	started bool                  // a callStart ran, and no callStop since
 	landed  bool                  // a section's write landed
+	last    bool                  // the concluded step ends the effect after its Call (txStep.Last)
 	facts   effectFacts
 	pass    any // the concluded step's Pass, to its section's Call
 	view    txView
@@ -588,6 +604,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 		if t.view.prev, t.view.prevErr = nil, nil; sec.call == nil {
+			if t.last {
+				break
+			}
 			continue
 		}
 		if err := t.c.at(ctx, seamBeforeCall); err != nil {
@@ -596,8 +615,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		}
 		// A provider call is a write: an effect the executor abandoned first
 		// never calls, and one abandoned during it is ambiguous.
+		final := i == len(sections)-1 || t.last
 		if ctx.Err() != nil || !t.c.latch.begin() {
-			if s.Outcome != settledLanded || i != len(sections)-1 {
+			if s.Outcome != settledLanded || !final {
 				s = ended(ctx) // a landed last section stays landed: its Call never fails the effect
 			}
 			break
@@ -613,8 +633,11 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			s = injected(err)
 			break
 		}
-		if i == len(sections)-1 && t.view.prevErr != nil {
+		if final && t.view.prevErr != nil {
 			s = settlement{Outcome: settledFailed, Cause: causeCallError, Err: t.view.prevErr}
+		}
+		if t.last {
+			break
 		}
 	}
 	s.Facts = t.facts
@@ -662,8 +685,8 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			fallthrough
 		case len(step.Write) == 0:
 			t.facts.merge(step.Facts)
-			t.pass = step.Pass
-			return t.done(step), step.Done
+			t.pass, t.last = step.Pass, step.Last
+			return t.done(step), step.Done || step.Fail != ""
 		}
 		// The CAS lost to another writer: read again and decide again.
 	}
@@ -721,10 +744,14 @@ func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
 	return refused(causeCAS), true
 }
 
-// done is the settlement after a concluded step: landed once a section
-// wrote, otherwise a no-op with the step's cause.
+// done is the settlement after a concluded step: an abandon's failure once
+// its write landed, landed once a section wrote, otherwise a no-op with the
+// step's cause.
 func (t *tx) done(step txStep) settlement {
-	if t.landed {
+	switch {
+	case step.Fail != "":
+		return settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
+	case t.landed:
 		s := settlement{Outcome: settledLanded}
 		if len(step.Write) > 0 { // this step's write stood in for a refusal (healInstead)
 			s.Cause = step.Cause
@@ -795,7 +822,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	switch {
 	case step.Refuse != "":
 		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
-	case step.Fail != "":
+	case step.Fail != "" && len(step.Write) == 0 && len(step.Terminal) == 0:
 		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}
