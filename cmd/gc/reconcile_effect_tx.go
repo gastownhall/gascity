@@ -871,6 +871,13 @@ var errPremiseMoved = errors.New("the row moved since the pass")
 func (t *tx) callWatched(ctx context.Context, sec section) (any, error) {
 	c := t.c
 	c.by = sessionActor(session.ActorController, t.p.World.CityPath)
+	if sec.callKind == callStart {
+		// Detached before the lease watch, so a lost lease still ends a Start
+		// that outlives a preserve-sessions shutdown (outlivesShutdown).
+		detached, release := outlivesShutdown(ctx)
+		defer release()
+		ctx = detached
+	}
 	if t.lease == nil {
 		return sec.call(ctx, c, t.pass)
 	}

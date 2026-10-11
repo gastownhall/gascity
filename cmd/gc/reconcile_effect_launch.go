@@ -7,6 +7,8 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
@@ -283,11 +285,12 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	leaf, _, _ := runtime.ResolveBackend(c.start.sp, name)
 	prepared.cfg.FreshOnly = true
 	in.w.Templates.installSideEffects(in.agent, in.tp)
-	detached, release := outlivesShutdown(ctx)
-	startCtx, stop := c.start.clock.WithDeadline(detached, c.it.Deadline.Add(-startDeadlineSlack))
+	if !beginStart(ctx) {
+		return startOutcome{}, context.Cause(ctx) // the shutdown came first: never begin a start after it
+	}
+	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), tp: in.tp, prepared: prepared}
 	stop()
-	release()
 	in.ticket.verdict = verdictInconclusive
 	switch {
 	case runtime.IsProviderCapacity(out.err):
@@ -312,24 +315,71 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	return out, nil
 }
 
-// outlivesShutdown is ctx, with its values (the effect's lease), ended with
-// ctx's cause by any end of ctx but the executor's shutdown cancel
-// (errEffectShutdown): a lost lease, a provider swap, the effect's own
-// deadline. A provider's failed start kills the runtime it launched (tmux's
-// cleanupFailedStart), so a start the shutdown canceled mid-launch would
+// outlivesShutdown is ctx for a start's Call (callWatched, before its lease
+// watch), with ctx's values, ended with ctx's cause by any end of ctx (a
+// provider swap, the effect's own deadline, a stop that does not preserve
+// sessions), except that a preserve-sessions shutdown (errEffectShutdown)
+// that lands after the provider's Start began (beginStart) is ignored. A
+// provider's failed start kills the runtime it launched (tmux's
+// cleanupFailedStart), so a start such a shutdown canceled mid-launch would
 // kill its own runtime and the next boot would relaunch it under a new token
-// instead of adopting it (§12.2 #4, START-024; staging J35 A/B). Its caller
-// bounds it by the effect's deadline; the executor's closed write latch keeps
-// a start that finishes during shutdown from writing. release stops the
-// relay.
+// instead of adopting it (§12.2 #4, START-024; staging J35 A/B). The lease
+// watch, taken on the result, still ends the start on a lost lease. Its
+// caller bounds the Start by the effect's deadline; the executor's closed
+// write latch keeps a start that finishes during shutdown from writing.
+// release stops the relay.
 func outlivesShutdown(ctx context.Context) (context.Context, func()) {
-	detached, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	g := &startGate{parent: ctx}
+	detached, cancel := context.WithCancelCause(context.WithValue(parentDeadline{context.WithoutCancel(ctx), ctx}, startGateKey{}, g))
+	g.cancel = cancel
 	unrelay := context.AfterFunc(ctx, func() {
-		if cause := context.Cause(ctx); !errors.Is(cause, errEffectShutdown) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if cause := context.Cause(ctx); !g.begun || !errors.Is(cause, errEffectShutdown) {
 			cancel(cause)
 		}
 	})
 	return detached, func() { unrelay(); cancel(context.Canceled) }
+}
+
+// parentDeadline reports its parent's deadline, which the relay enforces,
+// so a lease watch taken on it never outlives the effect (Watch).
+type parentDeadline struct {
+	context.Context
+	parent context.Context
+}
+
+func (d parentDeadline) Deadline() (time.Time, bool) { return d.parent.Deadline() }
+
+// startGate is outlivesShutdown's record of whether the Start began.
+type startGate struct {
+	mu     sync.Mutex
+	parent context.Context
+	cancel context.CancelCauseFunc
+	begun  bool
+}
+
+type startGateKey struct{}
+
+// beginStart reports whether a start may begin on ctx, and from then on lets
+// it outlive a preserve-sessions shutdown: false once ctx, or the context
+// outlivesShutdown detached it from, has ended, so no Start begins after the
+// shutdown deadline.
+func beginStart(ctx context.Context) bool {
+	g, ok := ctx.Value(startGateKey{}).(*startGate)
+	if !ok {
+		return ctx.Err() == nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.parent.Err() != nil {
+		g.cancel(context.Cause(g.parent))
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	g.begun = true
+	return true
 }
 
 // commitStep is the commit's Decide on the read after the Start: only a

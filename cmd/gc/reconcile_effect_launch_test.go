@@ -1203,7 +1203,8 @@ func TestLaunchStartOutlivesTheShutdownCancel(t *testing.T) {
 }
 
 // TestOutlivesShutdownKeepsValuesAndOtherCauses. Kills a detached context
-// that drops the effect's values (its lease) or a cause other than the
+// that drops the effect's values (its lease), ignores a shutdown that came
+// before the Start began, or drops a cause other than a preserve-sessions
 // shutdown's.
 func TestOutlivesShutdownKeepsValuesAndOtherCauses(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -1214,41 +1215,166 @@ func TestOutlivesShutdownKeepsValuesAndOtherCauses(t *testing.T) {
 		if detached.Value(key{}) != "lease" {
 			t.Fatal("the detached context dropped its parent's values")
 		}
+		if !beginStart(detached) {
+			t.Fatal("a live start may not begin")
+		}
 		cancel(errEffectShutdown)
 		synctest.Wait()
 		if detached.Err() != nil {
-			t.Fatalf("the shutdown cancel ended the detached context: %v", context.Cause(detached))
+			t.Fatalf("a preserve-sessions shutdown after the Start began ended it: %v", context.Cause(detached))
 		}
-		parent2, cancel2 := context.WithCancelCause(context.Background())
-		detached2, release2 := outlivesShutdown(parent2)
-		defer release2()
-		cancel2(context.DeadlineExceeded)
-		synctest.Wait()
-		if !errors.Is(context.Cause(detached2), context.DeadlineExceeded) {
-			t.Fatalf("ended with %v, want the parent's cause", context.Cause(detached2))
+		for _, cause := range []error{context.DeadlineExceeded, errEffectStopped} {
+			parent2, cancel2 := context.WithCancelCause(context.Background())
+			detached2, release2 := outlivesShutdown(parent2)
+			defer release2()
+			beginStart(detached2)
+			cancel2(cause)
+			synctest.Wait()
+			if !errors.Is(context.Cause(detached2), cause) {
+				t.Fatalf("ended with %v, want the parent's %v", context.Cause(detached2), cause)
+			}
 		}
 	})
 }
 
-// TestExecutorStopCancelsWithTheShutdownCause. Kills a shutdown cancel the
-// launch cannot tell from a lost lease: at stop's deadline every effect's
-// context ends with errEffectShutdown.
-func TestExecutorStopCancelsWithTheShutdownCause(t *testing.T) {
-	clk := newFakePlannerClock(plannerT0)
-	x, _ := fakeClockExecutor(clk)
-	causes := make(chan error, 1)
-	started := make(chan struct{})
-	if err := x.submit(rowKey{Leg: rowLeg, ID: "gc-1"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Hour), Run: func(ctx context.Context) settlement {
-		close(started)
-		<-ctx.Done()
-		causes <- context.Cause(ctx)
-		return settlement{Outcome: settledRefused}
-	}}); err != nil {
-		t.Fatal(err)
+// TestNoStartBeginsAfterTheShutdown (#7592 review). Kills a Start begun
+// after the shutdown deadline passed in the launch's pre-start steps: a
+// shutdown before beginStart, even one that preserves sessions, ends the
+// start, and beginStart refuses.
+func TestNoStartBeginsAfterTheShutdown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, early := range []bool{true, false} {
+			effect, shutdown := context.WithCancelCause(context.Background())
+			if early {
+				shutdown(errEffectShutdown)
+			}
+			detached, release := outlivesShutdown(effect)
+			if !early {
+				shutdown(errEffectShutdown) // before its relay has run
+			}
+			if beginStart(detached) {
+				t.Errorf("early=%v: a start began after the shutdown", early)
+			}
+			synctest.Wait()
+			if !errors.Is(context.Cause(detached), errEffectShutdown) {
+				t.Errorf("early=%v: the start's context ended with %v, want the shutdown", early, context.Cause(detached))
+			}
+			// Before any Start began, the steps ahead of it see the shutdown.
+			effect2, shutdown2 := context.WithCancelCause(context.Background())
+			pre, release2 := outlivesShutdown(effect2)
+			shutdown2(errEffectShutdown)
+			synctest.Wait()
+			if !errors.Is(context.Cause(pre), errEffectShutdown) {
+				t.Errorf("early=%v: the pre-start steps' context ended with %v, want the shutdown", early, context.Cause(pre))
+			}
+			release2()
+			release()
+			shutdown(nil)
+		}
+	})
+}
+
+// TestStartOutlivesTheShutdownButNotALostLease (#7592 review). Kills a start
+// detached after its lease watch (whose goroutine ends at the shutdown
+// cancel): a start Call that began, then saw a preserve-sessions shutdown,
+// still ends when another holder takes its lease.
+func TestStartOutlivesTheShutdownButNotALostLease(t *testing.T) {
+	defer func(every time.Duration) { leaseWatchEvery = every }(leaseWatchEvery)
+	leaseWatchEvery = 10 * time.Millisecond
+	k := newTxKit(t)
+	ctx, shutdown := context.WithCancelCause(context.Background())
+	defer shutdown(nil)
+	var cause error
+	call := called(callStart, section{Decide: func(txView) txStep { return txStep{} }}, func(ctx context.Context, _ txCaps, _ any) (any, error) {
+		if !beginStart(ctx) {
+			return nil, errors.New("the start did not begin")
+		}
+		shutdown(errEffectShutdown)
+		k.outside(session.RuntimeLeaseHolderKey, "other-host", session.RuntimeLeaseEpochKey, "9")
+		select {
+		case <-ctx.Done():
+			cause = context.Cause(ctx)
+		case <-time.After(5 * time.Second):
+		}
+		return nil, cause
+	})
+	k.run(ctx, effectSpec{needs: needs{Lease: true}, sections: []section{call}})
+	if !errors.Is(cause, session.ErrRuntimeLeaseLost) {
+		t.Fatalf("the started Call's context ended with %v, want the lease lost after the shutdown", cause)
 	}
-	<-started
-	go x.stop(plannerT0)
-	if cause := <-causes; !errors.Is(cause, errEffectShutdown) {
-		t.Fatalf("an effect's context ended at shutdown with %v, want errEffectShutdown", cause)
+}
+
+// TestNonPreserveStopEndsALateStart (#7592 review). Kills a start that
+// outlives a stop that does not preserve sessions (gc stop): the executor
+// cancels with errEffectStopped, which ends a start already in its provider
+// Start, so nothing it launches outlives the stop-all sweep.
+func TestNonPreserveStopEndsALateStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rt := newDefaultPlanner(io.Discard)
+		cfg := &config.City{}
+		cfg.Daemon.ShutdownTimeout = "1s"
+		sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+		preStart := make(chan struct{})
+		created := make(chan error, 1)
+		if err := rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, sessionEffect{
+			Kind: intentStart, Deadline: time.Now().Add(time.Hour),
+			Run: func(ctx context.Context) settlement {
+				detached, release := outlivesShutdown(ctx) // callWatched's
+				defer release()
+				if !beginStart(detached) { // startLaunch's
+					created <- context.Cause(detached)
+					return settlement{Outcome: settledFailed}
+				}
+				<-preStart // pre_start still running at the shutdown deadline
+				if err := detached.Err(); err != nil {
+					created <- err
+					return settlement{Outcome: settledFailed, Err: err}
+				}
+				created <- sp.Start(detached, "late", runtime.Config{})
+				return settlement{Outcome: settledLanded}
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var stdout bytes.Buffer
+		cr := &CityRuntime{cfg: cfg, sp: sp, v2: rt, rec: events.Discard, logPrefix: "gc stop", stdout: &stdout, stderr: io.Discard}
+		rt.stop()       // the executor's deadline
+		synctest.Wait() // its cancel's relay has run
+		cr.shutdown()   // not preserve: the stop-all sweep
+		close(preStart) // pre_start finishes after the sweep
+		<-created
+		if running, _ := sp.ListRunning(""); slices.Contains(running, "late") {
+			t.Errorf("a start created its runtime after the non-preserve stop-all sweep: %v", running)
+		}
+	})
+}
+
+// TestExecutorStopCancelsWithTheShutdownCause. Kills a stop whose cause
+// ignores the shutdown mode: at stop's deadline every effect's context ends
+// with errEffectShutdown when the shutdown preserves sessions, else with
+// errEffectStopped.
+func TestExecutorStopCancelsWithTheShutdownCause(t *testing.T) {
+	for _, c := range []struct {
+		preserve bool
+		want     error
+	}{{true, errEffectShutdown}, {false, errEffectStopped}} {
+		clk := newFakePlannerClock(plannerT0)
+		x, _ := fakeClockExecutor(clk)
+		x.preserve = func() bool { return c.preserve }
+		causes := make(chan error, 1)
+		started := make(chan struct{})
+		if err := x.submit(rowKey{Leg: rowLeg, ID: "gc-1"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Hour), Run: func(ctx context.Context) settlement {
+			close(started)
+			<-ctx.Done()
+			causes <- context.Cause(ctx)
+			return settlement{Outcome: settledRefused}
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		<-started
+		go x.stop(plannerT0)
+		if cause := <-causes; !errors.Is(cause, c.want) {
+			t.Fatalf("preserve=%v: an effect's context ended at shutdown with %v, want %v", c.preserve, cause, c.want)
+		}
 	}
 }

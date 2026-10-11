@@ -1598,3 +1598,19 @@ func TestPlannerDoesNotReferenceCityRuntime(t *testing.T) {
 		t.Fatalf("planner code must reach the city only through plannerHost and the published env (F2):\n  %s", strings.Join(bad, "\n  "))
 	}
 }
+
+// Kills a shutdown mode the effects never see (#7592 review): an installed
+// planner's executor reports the city's preserve-sessions shutdown, so it
+// cancels with errEffectShutdown only then.
+func TestV2ExecutorSeesThePreserveSessionsShutdown(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	rt := newDefaultPlanner(io.Discard)
+	cr.installPlanner(rt)
+	if rt.exec.preserve() {
+		t.Fatal("the executor reports a preserve-sessions shutdown before one began")
+	}
+	cr.preserveSessionsOnShutdown()
+	if !rt.exec.preserve() {
+		t.Fatal("the executor does not see the city's preserve-sessions shutdown")
+	}
+}

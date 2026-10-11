@@ -50,6 +50,9 @@ type plannerHost struct {
 	safeTick         func(fn func(), trigger string) (panicked bool)
 	rec              events.Recorder
 	stderr           io.Writer
+	// preserveSessions reports a shutdown that leaves the city's sessions
+	// running for the next boot to adopt (a supervisor's restart).
+	preserveSessions func() bool
 }
 
 // plannerRuntime owns the planner and what runs beside it. mu orders
@@ -82,6 +85,7 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 	}
 	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
 	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
+	rt.exec.preserve = func() bool { return rt.host.preserveSessions != nil && rt.host.preserveSessions() }
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
 	if v2EffectsEnabled(reconcilerModeLookupEnv) {
 		rt.planner.effects = rt.exec

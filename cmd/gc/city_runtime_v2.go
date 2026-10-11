@@ -72,6 +72,7 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 func (cr *CityRuntime) newPlannerHost() plannerHost {
 	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
+		preserveSessions: cr.preserveSessionsShutdown.Load,
 		gather: gatherEnv{
 			CityPath: cr.cityPath, CityName: cr.cityName,
 			Sessions:  cr.v2SessionsStore,
