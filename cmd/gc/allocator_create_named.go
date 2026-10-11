@@ -151,8 +151,10 @@ func adoptLiveStamp(ctx context.Context, sp runtime.Provider, store beads.Store,
 	}
 	defer release()
 	if lease != nil && lease.Epoch() > 0 {
+		// Under the record, the lease bounds the rest, not the effect's
+		// deadline: a token recorded on the row is stamped on the runtime.
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, lease.SafeUntil())
+		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), lease.SafeUntil())
 		defer cancel()
 	}
 	leaf, _, known := runtime.ResolveBackend(sp, name)
@@ -181,7 +183,7 @@ func adoptLiveStamp(ctx context.Context, sp runtime.Provider, store beads.Store,
 		return fmt.Errorf("%w: %w", errStampRetriable, err)
 	case err != nil:
 		return err
-	case ctx.Err() != nil: // past the lease's SafeUntil, or the effect's deadline
+	case ctx.Err() != nil: // past the lease's SafeUntil (with no record, the effect's deadline)
 		return fmt.Errorf("stamping the runtime: %w", context.Cause(ctx))
 	}
 	return stampAdoptedRuntime(sp, name, written.ID, generation, minted)
