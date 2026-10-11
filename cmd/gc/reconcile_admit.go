@@ -36,6 +36,7 @@ const (
 	intentClose           = "close"             // A21 (C3)
 	intentRollback        = "rollback"          // A10 (C3)
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
+	intentRuntimeAlias    = "runtime-alias"     // A7's runtime alias sync, after its alias write (M1)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
 	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
@@ -117,6 +118,9 @@ type intent struct {
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
 	Event *events.Event
+	// AliasLock is the city alias lock A7's row-metadata verb takes around
+	// its effect (v5 M1), when its alias work needs one.
+	AliasLock string
 	// Heal is the A6 heal a start carries into its PreWake (startHealed),
 	// written alone when the start is not admitted or refuses before it.
 	Heal *intent

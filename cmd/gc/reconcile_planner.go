@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -142,6 +143,10 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
+	// aliasOwed are the rows whose alias write landed with their runtime
+	// not yet synced (A7's runtime-alias sync): set by the write's fact,
+	// cleared when the sync settles.
+	aliasOwed map[rowKey]bool
 	// idleProbes are the idle begins submitted to prove an agent idle, by
 	// row, which paceIdleProbes holds a patrol apart.
 	idleProbes map[rowKey]idleProbe
@@ -168,13 +173,14 @@ type planner struct {
 func newPlanner(clock plannerClock, patrol func() time.Duration, pass passFunc, inflight plannerInflight, stopEffects func(time.Time), stderr io.Writer) *planner {
 	p := &planner{
 		clock: clock, patrol: patrol, pass: pass, stopEffects: stopEffects, stderr: stderr,
-		metrics:  newPassMetrics(),
-		inflight: inflight,
-		backoff:  newBackoffTable(),
-		rowTrace: make(map[rowKey]string),
-		dirty:    make(chan struct{}, 1),
-		quit:     make(chan struct{}),
-		done:     make(chan struct{}),
+		metrics:   newPassMetrics(),
+		inflight:  inflight,
+		backoff:   newBackoffTable(),
+		rowTrace:  make(map[rowKey]string),
+		aliasOwed: make(map[rowKey]bool),
+		dirty:     make(chan struct{}, 1),
+		quit:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	p.settlements.wake = func() { p.markDirty("settlement") }
 	return p
@@ -225,6 +231,21 @@ func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalled
 		out[id] = r
 	}
 	return out
+}
+
+// aliasOwedFor forgets the owed runtime-alias syncs of rows a complete c
+// holds closed, and returns the pass's copy.
+func (p *planner) aliasOwedFor(c *sessionCensus) map[rowKey]bool {
+	if len(p.aliasOwed) == 0 {
+		return nil
+	}
+	complete, ok := c.complete()
+	for k := range p.aliasOwed {
+		if ok && complete.Closed(k) {
+			delete(p.aliasOwed, k)
+		}
+	}
+	return maps.Clone(p.aliasOwed)
 }
 
 // pauseStarts and resumeStarts bracket a provider swap; the pass reads
@@ -335,6 +356,9 @@ func (p *planner) drainSettlements(now time.Time) {
 			p.backoffSettled(s)
 			p.observeSettlement(s)
 			p.softReload.Load().settle(s)
+			if s.Kind == intentRuntimeAlias && (s.Outcome == settledLanded || s.Outcome == settledNoop) {
+				delete(p.aliasOwed, s.Key)
+			}
 		}
 	}
 	for _, s := range items {
@@ -345,7 +369,8 @@ func (p *planner) drainSettlements(now time.Time) {
 // applyFacts applies an effect's facts, on time or late alike: its events to
 // the recorder, each recovered alone; its drain transition and its
 // quarantine to legacy's telemetry; its worktree verdict to the work item's
-// backoff record (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+// backoff record (C6.5(a)); an alias write's owed runtime sync to the
+// planner's set. Every field is consumed here (TestApplyFactsConsumesEveryField).
 func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	for _, ev := range f.Events {
 		if p.rec != nil {
@@ -357,6 +382,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 	if f.Quarantined != "" {
 		recordAgentQuarantine(context.Background(), f.Quarantined)
+	}
+	if f.AliasOwed != nil {
+		p.aliasOwed[*f.AliasOwed] = true
 	}
 	switch {
 	case f.Work == nil:

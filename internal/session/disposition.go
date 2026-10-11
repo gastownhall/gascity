@@ -138,12 +138,16 @@ func DecodeDisposition(meta map[string]string) Disposition {
 }
 
 // DispositionOfInfo is DecodeDisposition over a typed row.
-func DispositionOfInfo(info Info) Disposition {
-	return DecodeDisposition(map[string]string{
+func DispositionOfInfo(info Info) Disposition { return DecodeDisposition(dispositionMeta(info)) }
+
+// dispositionMeta is info's disposition keys and the lifecycle keys the
+// decoder reads.
+func dispositionMeta(info Info) map[string]string {
+	return map[string]string{
 		"state": info.MetadataState, "held_until": info.HeldUntil, "quarantined_until": info.QuarantinedUntil,
 		"sleep_intent": info.SleepIntent, "wait_hold": info.WaitHold, "suspended_at": info.SuspendedAt,
 		"sleep_reason": info.SleepReason,
-	})
+	}
 }
 
 func formatDispositionTime(t time.Time) string {
@@ -456,7 +460,13 @@ func (d Disposition) Apply(by ActorKind, ev DispEvent, life State, now time.Time
 			d.Quarantine = time.Time{}
 		}
 		if d.Operator == OperatorSuspended && !d.Until.IsZero() && !d.Until.After(now) {
-			d = d.clearOperator() // an expired finite suspend: asleep, unheld (D-J 2, mc-92clf)
+			// An expired held_until on an operator's suspend goes, and the
+			// suspend stands (main's heal). Every operator suspend is ∞, so an
+			// expired one was shortened by a heartbeat racing it on a store
+			// without CAS (D-I) or by an undo; D-J 2's release applies only to a
+			// suspend the operator made finite, which needs a marker no writer
+			// sets today.
+			d.Until = time.Time{}
 		}
 	case EvWake:
 		if by != ActorOperator {

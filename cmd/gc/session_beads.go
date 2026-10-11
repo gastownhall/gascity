@@ -484,7 +484,7 @@ func reopenClosedConfiguredNamedSessionBead(
 			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
 			return nil
 		}
-		batch := reopenNamedSessionBatch(state, bead.Metadata["sleep_reason"], now)
+		batch := reopenNamedSessionBatch(bead, state, now)
 		for k, v := range extraMeta {
 			batch[k] = v
 		}
@@ -573,11 +573,12 @@ type reopenWriteError struct{ err error }
 func (e reopenWriteError) Error() string { return e.err.Error() }
 func (e reopenWriteError) Unwrap() error { return e.err }
 
-// reopenNamedSessionBatch is the metadata a reopen of a closed configured
-// named session writes with its open status, for the target state: active
-// when its runtime runs, else stopped with a pending-create claim. A caller
-// merges any extra keys over it.
-func reopenNamedSessionBatch(state, sleepReason string, now time.Time) map[string]string {
+// reopenNamedSessionBatch is the metadata a reopen of closed, the closed
+// configured named session, writes with its open status, for the target
+// state: active when its runtime runs, else stopped with a pending-create
+// claim. A caller merges any extra keys over it.
+func reopenNamedSessionBatch(closed beads.Bead, state string, now time.Time) map[string]string {
+	sleepReason := closed.Metadata["sleep_reason"]
 	pendingCreateClaim := ""
 	if state != "active" {
 		pendingCreateClaim = "true"
@@ -614,10 +615,9 @@ func reopenNamedSessionBatch(state, sleepReason string, now time.Time) map[strin
 		// crash-accrual counters the canonical wake patches reset -- a
 		// stale hold/quarantine, sleep_intent, or wake/churn counter would
 		// otherwise keep gating wake or re-quarantine the reopened runtime
-		// on its first failure. Compose ClearWakeBlockersPatch so this path
-		// tracks that full set (including sleep_intent, wake_attempts, and
-		// churn_count) by construction instead of hand-listing a subset
-		// that drifts from the canonical contract.
+		// on its first failure. The holds go as a retired row's do (the
+		// disposition's Retire cell); ClearWakeBlockersPatch is the rest.
+		session.CellInto(closed.ID, closed.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, batch)
 		blockers := session.ClearWakeBlockersPatch(session.State(state), sleepReason, now)
 		delete(blockers, "state")    // the reopen owns the target state set above.
 		delete(blockers, "slept_at") // a respawn is a wake, not a sleep.
@@ -713,7 +713,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", stderr) {
 				continue
 			}
-			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
+			batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
 			if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 				continue
 			}
@@ -808,7 +808,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", stderr) {
 				continue
 			}
-			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
+			batch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
 			if setMetaBatch(sessionFrontDoor(store), info.ID, batch, stderr) != nil {
 				continue
 			}
@@ -890,7 +890,7 @@ func retireRemovedConfiguredNamedSessionBead(
 	if !stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, nil, b, "removed named session", stderr) {
 		return false
 	}
-	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
+	batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b)))
 	if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 		return false
 	}
@@ -2473,7 +2473,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 							if openBeads[idx].Metadata == nil {
 								openBeads[idx].Metadata = map[string]string{}
 							}
-							for k, v := range session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity) {
+							fold := session.RetireNamedSessionPatch(now, "removed-configured-named-session", identity)
+							maps.Copy(fold, session.Cell(openBeads[idx].Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
+							for k, v := range fold {
 								openBeads[idx].Metadata[k] = v
 							}
 						}
@@ -2855,21 +2857,28 @@ func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, 
 // batch and Close as a single Tx-callback step. Shared by closeFailedCreateBead
 // and rollbackPendingCreate so the latter can fold this close into its own
 // larger transaction instead of nesting a second store.Tx call.
-func closeFailedCreateBeadInTx(tx beads.Tx, id string, now time.Time) error {
-	if err := tx.SetMetadataBatch(id, failedCreateClosePatch(now)); err != nil {
+func closeFailedCreateBeadInTx(tx beads.Tx, info session.Info, now time.Time) error {
+	if err := tx.SetMetadataBatch(info.ID, failedCreateClosePatch(info, now)); err != nil {
 		return err
 	}
-	return tx.Close(id)
+	return tx.Close(info.ID)
 }
 
-// failedCreateClosePatch is the failed-create terminal metadata: ClosePatch for
-// the failed-create state plus the create-claim, create-start and sleep-intent
-// clears. closeFailedCreateBead and closeFailedCreateBeadInTx both write it.
-func failedCreateClosePatch(now time.Time) session.MetadataPatch {
+// failedCreateClosePatch is the failed-create terminal metadata for row info:
+// ClosePatch for the failed-create state plus the create-claim and
+// create-start clears, and the Retire cell's hold clears.
+// closeFailedCreateBead and closeFailedCreateBeadInTx both write it.
+func failedCreateClosePatch(info session.Info, now time.Time) session.MetadataPatch {
+	// The row ends: its holds are the disposition's Retire cell.
+	return session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, failedCreateCloseLife(now))
+}
+
+// failedCreateCloseLife is failedCreateClosePatch's lifecycle: ClosePatch for
+// the failed-create state plus the create-claim and create-start clears.
+func failedCreateCloseLife(now time.Time) session.MetadataPatch {
 	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
-	patch["sleep_intent"] = ""
 	return patch
 }
 
@@ -2892,7 +2901,7 @@ func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now 
 	// would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
 	// reports false either way, so the reconciler re-runs the close.
-	if _, err := sessFront.CloseWithTerminalPatch(expected, failedCreateClosePatch(now), "gc: close failed-create session "+id, now); err != nil {
+	if _, err := sessFront.CloseWithTerminalPatch(expected, failedCreateClosePatch(expected, now), "gc: close failed-create session "+id, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}

@@ -126,7 +126,12 @@ func (c *healCase) pass(t *testing.T, sp runtime.Provider, writer beads.Store) (
 		t.Fatalf("decideRow = %+v, want a registered heal", it)
 	}
 	w := *c.w
-	w.Env = &reconcileEnv{SP: sp}
+	env := reconcileEnv{}
+	if c.w.Env != nil {
+		env = *c.w.Env // its config, for the arms that read it (A7)
+	}
+	env.SP = sp
+	w.Env = &env
 	if writer != nil {
 		w.LegStores = map[string]beads.Store{rowLeg: writer}
 	}

@@ -827,7 +827,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentBaseline, intentClose, intentCreate, intentDrainBegin, intentDrainBeginFresh, intentDrainCancel, intentDrainVoid, intentRekey, intentRollback, intentRowHeal, intentRowHealFresh, intentRowMetadata, intentRuntimeAlias, intentStart}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -847,8 +847,9 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 // runner, the adopt the read-only stores its prepare reads.
 var effectCapGrants = map[string]caps{
 	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode | capRetire,
-	intentRollback: capProviderStart | capRetire,
-	intentClose:    capReadStores | capRelease,
+	intentRollback:    capProviderStart | capRetire,
+	intentClose:       capReadStores | capRelease,
+	intentRowMetadata: capReadStores, intentRuntimeAlias: capProviderStart, // the alias probe's store; the runtime alias sync
 }
 
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
@@ -876,6 +877,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
 		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
 		Quarantined: "worker-1",
+		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -884,6 +886,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
 		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
+		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {
@@ -1489,6 +1492,55 @@ func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
 	}}
 	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
 		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
+	}
+}
+
+// Kills a step's title or label deltas dropped, or written apart from its
+// metadata (v5 M1; C7d): a step's Title, AddLabels and RemoveLabels land
+// with its Write, in its one CAS.
+func TestTxWritesTitleAndLabelsWithTheMetadata(t *testing.T) {
+	k := newTxKit(t)
+	if err := k.backing.Update(k.it.Key.ID, beads.UpdateOpts{Labels: []string{"agent:old"}}); err != nil {
+		t.Fatal(err)
+	}
+	title := "worker-1"
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Title: &title, AddLabels: []string{"agent:new"}, RemoveLabels: []string{"agent:old"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want landed", s)
+	}
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata[txKeyA] != "1" || b.Title != title || !slices.Contains(b.Labels, "agent:new") || slices.Contains(b.Labels, "agent:old") {
+		t.Fatalf("row title %q labels %v meta %v, want the title and label deltas with the write", b.Title, b.Labels, b.Metadata)
+	}
+}
+
+// labelRefusingBacking is a backing whose conditional write cannot guard
+// labels, as a FileStore's (LL1).
+type labelRefusingBacking struct{ simBacking }
+
+func (b labelRefusingBacking) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if len(opts.Labels)+len(opts.RemoveLabels) > 0 {
+		return &beads.ConditionalUpdateFieldUnsupportedError{Field: "labels"}
+	}
+	return b.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+// Kills a label write the store cannot guard settled as a plain failure
+// (C7d-1 review should-fix 4): it refuses with its own cause, which A7's
+// deferral reads, and writes nothing.
+func TestTxRefusesUnguardedLabels(t *testing.T) {
+	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
+	k := newTxKitOn(t, m, labelRefusingBacking{simBacking{m}})
+	spec := effectSpec{sections: []section{{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, AddLabels: []string{"agent:new"}}
+	}}}}
+	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeLabelsUnguarded || k.meta(txKeyA) != "" {
+		t.Fatalf("settlement %+v, a=%q; want refused with cause %q and nothing written", s, k.meta(txKeyA), causeLabelsUnguarded)
 	}
 }
 

@@ -213,7 +213,7 @@ func controllerClosePaths(now time.Time) []struct {
 			close: func(store beads.Store, id string, stderr *bytes.Buffer) bool {
 				return closeFailedCreateBead(sessionFrontDoor(store), decidedSessionInfo(store, id), now, stderr)
 			},
-			want: failedCreateClosePatch(now),
+			want: failedCreateClosePatch(session.Info{ID: "want"}, now),
 		},
 	}
 }

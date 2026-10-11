@@ -740,6 +740,10 @@ func TestPreWakeLaunchesWaitHeldAndUnparseableTimerRows(t *testing.T) {
 		if s := k.runKind(); s.Outcome != settledLanded || len(k.starts()) != 1 {
 			t.Errorf("%v: settlement %+v, starts %d; want one launch", meta, s, len(k.starts()))
 		}
+		// The PreWake cell clears the wait's intent and keeps its hold.
+		if meta[0] == "wait_hold" && (k.meta("sleep_intent") != "" || k.meta("wait_hold") != "true") {
+			t.Errorf("%v: after the PreWake sleep_intent=%q wait_hold=%q, want the intent cleared and the wait kept", meta, k.meta("sleep_intent"), k.meta("wait_hold"))
+		}
 	}
 }
 

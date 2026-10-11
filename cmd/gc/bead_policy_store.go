@@ -538,7 +538,13 @@ func beadStorageClass(storage string) beads.StorageClass {
 }
 
 func applyBeadStorage(b beads.Bead, storage string) beads.Bead {
-	switch beadStorageClass(storage) {
+	return applyStorageClass(b, beadStorageClass(storage))
+}
+
+// applyStorageClass sets the bead's own storage flags to storage, for a store
+// that has no storage-class create. StorageDefault leaves them as they are.
+func applyStorageClass(b beads.Bead, storage beads.StorageClass) beads.Bead {
+	switch storage {
 	case beads.StorageEphemeral:
 		b.Ephemeral = true
 		b.NoHistory = false

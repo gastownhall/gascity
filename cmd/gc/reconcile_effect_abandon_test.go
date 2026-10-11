@@ -124,7 +124,7 @@ func TestAbandonStepClasses(t *testing.T) {
 		event    string
 	}{
 		{"terminal", terminal, txRuntime{Class: rtAbsent}, session.MetadataPatch(providerTerminalErrorPatch("model_not_found", gatherNow)), "", false, false, ""},
-		{"rate-limit", limited, txRuntime{Class: rtAbsent}, session.RateLimitQuarantinePatch(gatherNow.Add(defaultRateLimitQuarantineDuration)), "", false, false, ""},
+		{"rate-limit", limited, txRuntime{Class: rtAbsent}, rateLimitQuarantine(session.Info{}, gatherNow), "", false, false, ""},
 		{"prepare", prepare, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
 		{"configured named pending, not died", named, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
 		{"configured named pending, died", namedDied, txRuntime{Class: rtAbsent}, nil, "", true, false, ""},
@@ -535,7 +535,8 @@ func TestComposedStartFailureRestoresTheHealedRow(t *testing.T) {
 	})
 	t.Run("timer heal", func(t *testing.T) {
 		k, _ := launchKit(t, "asleep", "held_until", gatherNow.Add(-time.Minute).Format(time.RFC3339), "sleep_reason", "user-hold")
-		heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: session.ClearExpiredHoldPatch("user-hold")}
+		healPatch, _ := timerHealPatch(k.p.World.Census.Rows[k.it.Key].Info, gatherNow)
+		heal := intent{Kind: intentRowHeal, Reason: decideTimerHeal, Key: k.it.Key, Patch: healPatch}
 		r := &rowFacts{w: k.p.World, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker"}}
 		it := r.startHealed(heal)
 		if it.Kind != intentStart {
@@ -594,7 +595,8 @@ func TestComposedUndoMatchesLegacyRestore(t *testing.T) {
 	k := composedStart(t, nil, false)
 	b, _ := k.backing.Get("gc-1")
 	healedMeta := k.it.Kept.Apply(b.Metadata)
-	_, _, wake := preWakePatch(sessionInfoFromBead(beads.Bead{Metadata: healedMeta}), gatherNow, "tok-new")
+	_, _, wake, wakeClass := preWakePatch(sessionInfoFromBead(beads.Bead{Metadata: healedMeta}), gatherNow, "tok-new")
+	maps.Copy(wake, wakeClass.Fold())
 	patch := maps.Clone(k.it.Patch)
 	maps.Copy(patch, wake)
 	ours := preWakeUndoOf(txView{It: k.it, Row: sessionInfoFromBead(b), Meta: b.Metadata}, patch, false)

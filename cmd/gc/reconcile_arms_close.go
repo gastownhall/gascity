@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"maps"
 	"strings"
 	"time"
 
@@ -63,7 +64,10 @@ func armClose(r *rowFacts) (intent, bool) {
 	it := intent{Kind: intentClose, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}}
 	switch {
 	case e.Desired == desireNone && e.Reason == reasonFailedCreate:
-		it.Reason, it.Patch = decideCloseFailedCreate, failedCreateClosePatch(now)
+		// The row ends: failedCreateClosePatch's lifecycle with the Retire
+		// cell's clears, folded (the decider is pure and cannot mint).
+		it.Reason, it.Patch = decideCloseFailedCreate, failedCreateCloseLife(now)
+		maps.Copy(it.Patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now).Fold())
 		it.Closing = closeSpec{Kind: closeFailedCreate}
 	case e.Desired == desireSleep && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) && isPoolSessionSlotFreeableInfo(info, now):
 		killed := strings.TrimSpace(info.SleepReason) == string(session.SleepReasonKilled)

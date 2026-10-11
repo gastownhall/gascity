@@ -444,16 +444,21 @@ type txFence struct {
 // ends the effect: a landed commit's after-commit Call, ahead of the
 // sections only a failure reaches.
 type txStep struct {
-	Write    session.MetadataPatch
-	Terminal session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
-	Refuse   string
-	Fail     string
-	Err      error
-	Done     bool
-	Last     bool
-	Cause    string
-	Facts    effectFacts
-	Pass     any
+	Write session.MetadataPatch
+	// Title and the label deltas ride Write's CAS (LL4's UpdateRowFenced):
+	// the row-metadata verb's (M1). A step that sets them writes metadata
+	// too (its synced_at).
+	Title                   *string
+	AddLabels, RemoveLabels []string
+	Terminal                session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
+	Refuse                  string
+	Fail                    string
+	Err                     error
+	Done                    bool
+	Last                    bool
+	Cause                   string
+	Facts                   effectFacts
+	Pass                    any
 }
 
 // effectFacts are what an effect learned or did besides its outcome, merged
@@ -468,6 +473,9 @@ type effectFacts struct {
 	// Quarantined is the agent a landed death accrual quarantined, for
 	// legacy's RecordAgentQuarantine.
 	Quarantined string
+	// AliasOwed is the row whose landed alias write owes its runtime the
+	// alias (A7's runtime-alias sync, M1).
+	AliasOwed *rowKey
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -477,7 +485,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == ""
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -486,6 +494,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Work = cmp.Or(g.Work, f.Work)
 	f.Noted = cmp.Or(g.Noted, f.Noted)
 	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
+	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -687,12 +696,12 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		var step txStep
 		var ended *settlement
 		var wroteFacts session.Facts
-		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
-			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil {
-				return nil
+		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.RowPatch {
+			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 {
+				return session.RowPatch{}
 			}
 			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
-			return step.Write
+			return session.RowPatch{Metadata: step.Write, Title: step.Title, AddLabels: step.AddLabels, RemoveLabels: step.RemoveLabels}
 		})
 		switch {
 		case ended != nil:
@@ -701,6 +710,8 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			continue // a newer write owns the row: read it again
 		case errors.Is(err, errNoConditionalWriter):
 			return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, true
+		case errors.As(err, new(*beads.ConditionalUpdateFieldUnsupportedError)):
+			return settlement{Outcome: settledRefused, Cause: causeLabelsUnguarded, Err: err}, true
 		case err != nil:
 			return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, true
 		case wrote:

@@ -6520,6 +6520,9 @@ func beginIdleRespawnDrainIfIdle(
 	// Record the attempt on the row the drain decides on, fenced on it, and
 	// fold it in: the drain's basis is then the row as stored.
 	res, err := sessFront.Commit(sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), patch)
+	if err != nil || res != sessionpkg.CommitLanded {
+		sessionpkg.UnmintDisposition(info.ID, patch)
+	}
 	if err != nil {
 		return false, nil, fmt.Errorf("record idle-respawn attempt: %w", err)
 	}

@@ -38,6 +38,9 @@ import (
 //     undesired, and its pool drains file as "unexplained" until the export
 //     carries work beads.
 
+// replayUntracedSync is the harness gap of A7's identity sync.
+const replayUntracedSync = "untraced identity sync: its keys are the differential's, not the export's"
+
 // replayLookup reads GC_V2_REPLAY_DIR; injected, so no test sets env.
 var replayLookup = os.LookupEnv
 
@@ -442,7 +445,10 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
 // by item, a deferred arm, INC-003, unknown-never-destroys, a harness gap
 // (by what the export cannot carry: a pool template's start, which rests on
-// demand), a replay approximation, or unexplained. arms are the legacy
+// demand; or A7's identity sync, which legacy's trace never records and
+// whose keys the export's config-free resolver cannot decide: the
+// differential and timeline harnesses pin them), a replay approximation,
+// or unexplained. arms are the legacy
 // records' owning arms. The two evidence families need as many rows of the
 // template showing the cause, as v2 traced it, as legacy acted beyond v2:
 // INC-003 a row v2 held for undesired-wake-grace. C8.9's fresh attach and
@@ -456,6 +462,9 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 // heal, one pass before A21's close of the same row) number at least the
 // closes v2 is short.
 func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info, heals int) (family, item string) {
+	if (d.Class == intentRowMetadata || d.Class == intentRuntimeAlias) && d.Legacy == 0 {
+		return "harness gap", replayUntracedSync
+	}
 	if d.V2 > d.Legacy {
 		if d.Class == "close" {
 			return "replay approximation", "close's L5 runs in the effect"
@@ -611,6 +620,7 @@ func TestReplayFamilies(t *testing.T) {
 		family, item                     string
 	}{
 		{"v2 only", "A20", "heal", "", "", 1, 0, "unexplained", ""},
+		{"an identity sync", "", intentRowMetadata, "", "", 1, 0, "harness gap", replayUntracedSync},
 		{"a v2-only close", "A21", "close", "", "", 1, 0, "replay approximation", "close's L5 runs in the effect"},
 		{"a close a timer heal precedes", "A21", "close", "x/closed/orphaned", "", 0, 1, "replay approximation", "timer heal precedes the close"},
 		{"two closes one heal precedes", "A21", "close", "x/closed/orphaned,x/closed/orphaned", "", 0, 1, "unexplained", ""},

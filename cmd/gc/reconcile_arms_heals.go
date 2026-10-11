@@ -176,8 +176,11 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accr
 	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
 		// SESS-532: an idle stop was pending, so the death is the idle
 		// sleep it asked for, which accrues nothing: legacy's
-		// SleepPatch(idle), which keeps the pre-drain sleep_policy_fingerprint.
-		return session.SleepPatch(r.w.Now, drainIdle), false
+		// SleepPatch(idle), which keeps the pre-drain sleep_policy_fingerprint,
+		// with the disposition's Sleep cell.
+		patch := session.SleepPatch(r.w.Now, drainIdle)
+		maps.Copy(patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvSleep}, r.w.Now).Fold())
+		return patch, false
 	}
 	patch = session.MetadataPatch{}
 	if heal {
@@ -217,6 +220,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accr
 		return patch, false
 	}
 	maps.Copy(patch, accrual.Patch)
+	maps.Copy(patch, accrual.Class(info, r.w.Now).Fold())
 	patch["last_woke_at"] = ""
 	return patch, true
 }
@@ -275,7 +279,8 @@ func armStabilityClear(r *rowFacts) (intent, bool) {
 		patch["wake_attempts"] = "0"
 	}
 	if info.QuarantinedUntil != "" {
-		patch["quarantined_until"] = ""
+		// The Quarantine cell with no deadline: the quarantine ends.
+		maps.Copy(patch, session.CellInfo(info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine}, r.w.Now).Fold())
 	}
 	if info.ChurnCount != "" && info.ChurnCount != "0" && r.w.Now.Sub(woke) >= churnProductivityThreshold {
 		patch["churn_count"] = "0"

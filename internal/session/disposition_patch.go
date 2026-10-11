@@ -48,6 +48,48 @@ func (p DispositionPatch) Into(id string, patch MetadataPatch) MetadataPatch {
 // nothing: written, it fails the guard.
 func (p DispositionPatch) Fold() MetadataPatch { return maps.Clone(p.kv) }
 
+// Cell is the class keys of the move of meta's disposition by ev from by
+// (its cell), meta being the row the write is decided on; empty when the
+// cell refuses: the hold stands. It mints nothing, so a pure decider may
+// call it.
+func Cell(meta map[string]string, by ActorKind, ev DispEvent, now time.Time) DispositionPatch {
+	to, err := DecodeDisposition(meta).Apply(by, ev, State(strings.TrimSpace(meta["state"])), now)
+	if err != nil {
+		return DispositionPatch{}
+	}
+	return to.Changed()
+}
+
+// CellInfo is Cell over a typed row.
+func CellInfo(info Info, by ActorKind, ev DispEvent, now time.Time) DispositionPatch {
+	return Cell(dispositionMeta(info), by, ev, now)
+}
+
+// CellInto adds Cell's class keys to patch, the write it rides to row id, and
+// returns patch (a new one when patch is nil).
+func CellInto(id string, meta map[string]string, by ActorKind, ev DispEvent, now time.Time, patch MetadataPatch) MetadataPatch {
+	return Cell(meta, by, ev, now).Into(id, patch)
+}
+
+// CellIntoInfo is CellInto over a typed row.
+func CellIntoInfo(info Info, by ActorKind, ev DispEvent, now time.Time, patch MetadataPatch) MetadataPatch {
+	return CellInfo(info, by, ev, now).Into(info.ID, patch)
+}
+
+// UndoDisposition is the undo of a cell's write: for each class key written
+// (the write's patch) that current (the row now) still holds as written,
+// the value before held (the row the write was decided on). An undo restores
+// only the row's own earlier text, never a value of the caller's.
+func UndoDisposition(before, written, current map[string]string) DispositionPatch {
+	undo := MetadataPatch{}
+	for _, k := range dispositionKeys {
+		if v, ok := written[k]; ok && current[k] == v && before[k] != v {
+			undo[k] = before[k]
+		}
+	}
+	return DispositionPatch{undo}
+}
+
 // dispositionGuard is the write guard's state in a guarded test: by row, the
 // class writes Into minted that no store write has spent yet. A mint a lost
 // or refused write never spends stays open; it admits only a later write to
@@ -68,6 +110,35 @@ func mintDisposition(id string, kv MetadataPatch) {
 		dispositionGuard.mints = map[string][]MetadataPatch{}
 	}
 	dispositionGuard.mints[id] = append(dispositionGuard.mints[id], maps.Clone(kv))
+}
+
+// UnmintDisposition spends the mint a write to row id of written (the patch
+// whose class keys a DispositionPatch.Into minted) left, when that write did
+// not land: a lost CAS attempt, a refused or failed write. A writer that
+// re-decides after a lost attempt mints again, so an unspent mint would
+// otherwise admit a later hand-built write of the same content to any row of
+// that ID, in any store of the test.
+func UnmintDisposition(id string, written map[string]string) {
+	if !dispositionGuard.on.Load() {
+		return
+	}
+	class := MetadataPatch{}
+	for _, k := range dispositionKeys {
+		if v, ok := written[k]; ok {
+			class[k] = v
+		}
+	}
+	if len(class) > 0 {
+		spendDisposition(id, class)
+	}
+}
+
+// OpenDispositionMints is the number of mints for row id no write has spent:
+// a guarded test's check that a writer unmints what did not land.
+func OpenDispositionMints(id string) int {
+	dispositionGuard.mu.Lock()
+	defer dispositionGuard.mu.Unlock()
+	return len(dispositionGuard.mints[id])
 }
 
 // spendDisposition reports whether class, a write's class keys to row id, is
@@ -121,42 +192,15 @@ func (b bypassWrite) admits(class MetadataPatch) bool {
 	return true
 }
 
-// Bounds the bypass list draws on: clears of the hold keys; a quarantine
-// stamp; an undo of a suspend, kill or start, which restores the keys its
-// cell wrote to whatever they held.
-var (
-	clearsAll   = map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "quarantined_until": shapeEmpty, "suspended_at": shapeEmpty}
-	quarantined = map[string]shape{"quarantined_until": shapeTime}
-	undoHold    = map[string]shape{"held_until": shapeAny, "sleep_intent": shapeAny, "suspended_at": shapeAny}
-)
-
 // dispositionBypass are the production writers that still write class keys
-// by hand, by function, each bounded by the keys and value forms it writes
-// today (the guard's census over internal/session, internal/api and cmd/gc)
-// and naming the cell that replaces it. The guard admits a write that fits
-// the bound of a listed writer on its stack. The list only shrinks: R7c2
-// empties it.
+// without a mint, by function, each bounded by the keys and value forms it
+// writes and naming the cells it carries. The guard admits a write that fits
+// the bound of a listed writer on its stack. Only v2's casRow is left: its
+// deciders are pure and cannot mint, so their cells reach it folded until
+// R7c2b carries them typed and deletes the list.
 var dispositionBypass = map[string]bypassWrite{
-	"cmd/gc.preWakeCommitWith":                                                 {"PreWakePatch's intent clear: the PreWake cell", map[string]shape{"sleep_intent": shapeEmpty}},
-	"cmd/gc.restorePreWakeState":                                               {"the PreWake rollback: an undo of the cell's own write", undoHold},
-	"cmd/gc.fencedWriter.casRow":                                               {"v2 row patches (the launch's PreWakePatch, the expired-timer clears, the heal's quarantine accrual and clear): their cells", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty | shapeTime}},
-	"cmd/gc.closeFailedCreateBead":                                             {"failedCreateClosePatch's clears: the Retire cell", clearsAll},
-	"cmd/gc.closeFailedCreateBeadInTx":                                         {"failedCreateClosePatch's clears: the Retire cell", clearsAll},
-	"cmd/gc.rollbackPendingCreateClears":                                       {"failedCreateClosePatch's clears: the Retire cell", clearsAll},
-	"cmd/gc.reopenClosedConfiguredNamedSessionBead":                            {"the named reopen's ClearWakeBlockersPatch: the Retire cell", clearsAll},
-	"cmd/gc.reopenNamed":                                                       {"the named reopen's ClearWakeBlockersPatch: the Retire cell", clearsAll},
-	"cmd/gc.retireDuplicateConfiguredNamedSessionBeads":                        {"RetireNamedSessionPatch: the Retire cell", clearsAll},
-	"cmd/gc.retireDuplicateConfiguredNamedSessionRows":                         {"RetireNamedSessionPatch: the Retire cell", clearsAll},
-	"cmd/gc.retireRemovedConfiguredNamedSessionBead":                           {"RetireNamedSessionPatch: the Retire cell", clearsAll},
-	"internal/api.(*Server).retireContinuityIneligibleNamedSessionIdentifiers": {"RetireNamedSessionPatch: the Retire cell", clearsAll},
-	"cmd/gc.healExpiredTimersInfo":                                             {"ClearExpiredHoldPatch, ClearExpiredQuarantinePatch: the TimerTick cell", clearsAll},
-	"cmd/gc.clearWakeFailures":                                                 {"the quarantine clear: the TimerTick cell", map[string]shape{"quarantined_until": shapeEmpty}},
-	"cmd/gc.recordWakeFailure":                                                 {"the wake-failure quarantine: the Quarantine cell", quarantined},
-	"cmd/gc.recordChurn":                                                       {"the churn quarantine: the Quarantine cell", quarantined},
-	"cmd/gc.recordRateLimitQuarantine":                                         {"the rate-limit quarantine: the Quarantine cell", quarantined},
-	"cmd/gc.(*sessionKillFence).rollback":                                      {"the kill fence rollback: an undo of the Kill cell's own write", undoHold},
-	"internal/session.(*Manager).Suspend":                                      {"the soft suspend's stamp and the failed-stop rollback: the Suspend cell and its undo", undoHold},
-	"internal/session.(*Manager).clearWakeAndHoldOverrides":                    {"the close's hold clear: the Retire cell", clearsAll},
+	"cmd/gc.fencedWriter.closeRow": {"v2's A10 rollback close: the Retire cell, folded by its pure decider; R7c2b carries it typed and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty}},
+	"cmd/gc.fencedWriter.casRow":   {"v2 row patches (the launch's PreWake, the expired-timer TimerTick, the dead runtime's Sleep and quarantine, the stability clear): their cells, folded by the pure deciders; R7c2b carries them typed to the write and deletes this list", map[string]shape{"held_until": shapeEmpty, "sleep_intent": shapeEmpty, "wait_hold": shapeEmpty, "suspended_at": shapeEmpty, "quarantined_until": shapeEmpty | shapeTime}},
 }
 
 // dispositionPlumbing are the store wrappers between a writer and the backend,

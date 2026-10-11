@@ -1,5 +1,7 @@
 {"family":"INC-003","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"gascity/polecat","class":"drain","legacy":1,"v2":0,"legacy_records":["reconciler.session.orphan_or_suspended/drain/orphaned"]}
 {"family":"harness gap","item":"no exported demand","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"gascity/polecat","class":"start","legacy":1,"v2":0,"legacy_records":["reconciler.session.wake_decision/start_candidate/wake"]}
+{"family":"harness gap","item":"untraced identity sync: its keys are the differential's, not the export's","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"mayor","class":"row-metadata","legacy":0,"v2":1,"v2_intents":["row-metadata/row-metadata:identity"]}
+{"family":"harness gap","item":"untraced identity sync: its keys are the differential's, not the export's","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"mayor","class":"row-metadata","legacy":0,"v2":1,"v2_intents":["row-metadata/row-metadata:identity"]}
 {"family":"replay approximation","item":"timer heal precedes the close","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"gascity/polecat","class":"close","legacy":1,"v2":0,"legacy_records":["reconciler.session.close_orphan/closed/orphaned"]}
 {"family":"unexplained","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"gascity/polecat","class":"drain","legacy":1,"v2":0,"legacy_records":["reconciler.session.drain/drain/idle"]}
 {"family":"unexplained","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"gascity/polecat","class":"heal","legacy":0,"v2":1,"v2_intents":["row-heal/timer-heal"]}

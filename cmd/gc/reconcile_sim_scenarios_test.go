@@ -589,8 +589,9 @@ func TestSimDeferredStrandedDeathsRecordOnce(t *testing.T) {
 func TestSimCutoverV5HashesRebaselineNotDrain(t *testing.T) {
 	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
-	s.settle()
-	s.settle()
+	for range 4 { // A7 converges the row's identity first, then A8 hashes it (v5 B4)
+		s.settle()
+	}
 	m := s.gc1()
 	for i := 0; i < len(v5); i += 2 {
 		if k := v5[i]; k != "core_hash_breakdown" && !strings.HasPrefix(m[k], runtime.FingerprintVersion+":") || m[k] == v5[i+1] {
@@ -613,7 +614,7 @@ func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale), gc1Work())
 	q := newSoftReloadRequest(1)
 	s.p.openSoftReload(q)
-	for range 3 {
+	for range 5 { // A7 converges the row's identity first (v5 B4)
 		s.settle()
 	}
 	select {
@@ -636,6 +637,34 @@ func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
 	case <-older.done:
 	default:
 		t.Fatal("a newer request left the older open")
+	}
+	s.noViolations(t)
+}
+
+// Kills A8 hashing a row before A7 rewrites its identity (v5 B4; R43): a
+// live seat with the previous fingerprint's hashes and no origin is given
+// its identity first, by A7 alone, then rebaselined by A8, with no stop and
+// no start. (An alias A7 writes rebaselines in A7's own CAS, as legacy's
+// does: the hashes are taken on the rewritten row either way.)
+func TestSimR43IdentityBeforeRebaseline(t *testing.T) {
+	v5 := []string{"started_config_hash", "v5:core", "started_provision_hash", "v5:prov", "started_launch_hash", "v5:launch", "started_live_hash", "v5:live", "live_hash", "v5:live", "core_hash_breakdown", "{}"}
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour)}, v5...)...), gc1Work())
+	identityFirst := false
+	for range 4 {
+		s.settle()
+		m := s.gc1()
+		rebaselined := m["started_config_hash"] != "v5:core"
+		if rebaselined && m["session_origin"] == "" {
+			t.Fatalf("row %v: rebaselined before its identity was written", m)
+		}
+		identityFirst = identityFirst || !rebaselined && m["session_origin"] == "ephemeral"
+	}
+	m := s.gc1()
+	if !identityFirst || !strings.HasPrefix(m["started_config_hash"], runtime.FingerprintVersion+":") {
+		t.Fatalf("row %v: want the identity written alone, then the rebaseline", m)
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 || m["state"] != "active" {
+		t.Errorf("kills %v starts %v state %q, want the seat left running", s.sp.kills, s.sp.starts, m["state"])
 	}
 	s.noViolations(t)
 }

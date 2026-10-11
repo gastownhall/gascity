@@ -19,7 +19,17 @@ import (
 // begins, once no stop request is active. A resolved drift clears its
 // deferral keys, and a missing stored hash or an undesired row never
 // drifts.
+// withoutA7 takes A7 out of the arms for the test: A14's tests decide on
+// rows whose identity A7 would converge first, a pass ahead.
+func withoutA7(t *testing.T) {
+	t.Helper()
+	saved := rowArms
+	rowArms = slices.DeleteFunc(slices.Clone(saved), func(a rowArm) bool { return a.name == "A7" })
+	t.Cleanup(func() { rowArms = saved })
+}
+
 func TestDecideRowConfigDrift(t *testing.T) {
+	withoutA7(t)
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
 	base := censusRowOf(t, drainRow()).Info
 	cfg := sessionCoreConfigForHashInfo(tp, base)

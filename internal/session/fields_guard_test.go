@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // The census is the guard: this package's tests, like cmd/gc's, internal/api's
@@ -105,31 +106,19 @@ func TestGuardDispositionWrites(t *testing.T) {
 		class  map[string]string
 		admit  bool
 	}{
-		{"cmd/gc.healExpiredTimersInfo", map[string]string{"held_until": "", "quarantined_until": ""}, true},
-		{"cmd/gc.healExpiredTimersInfo", map[string]string{"held_until": stamp}, false},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"quarantined_until": stamp, "sleep_intent": ""}, true},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"sleep_intent": "user-hold"}, false},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"held_until": stamp}, false},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"suspended_at": stamp}, false},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": stamp}, true},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": "soon"}, false},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": stamp, "wait_hold": ""}, false},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"held_until": stamp, "sleep_intent": "user-hold", "suspended_at": stamp}, true},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"sleep_intent": "someday", "held_until": "soon"}, true},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"wait_hold": "true"}, false},
-		{"cmd/gc.preWakeCommitWith", map[string]string{"sleep_intent": ""}, true},
-		{"cmd/gc.preWakeCommitWith", map[string]string{"held_until": ""}, false},
 	} {
 		on := func() (string, []string, bool) { return "cmd/gc.inner", []string{tc.writer}, false }
 		if msg := checkDispositionWrite("r3", tc.class, on); (msg == "") != tc.admit {
 			t.Errorf("%s writing %v: admitted %v, want %v", tc.writer, tc.class, msg == "", tc.admit)
 		}
 	}
-	both := func() (string, []string, bool) {
-		return "x", []string{"cmd/gc.preWakeCommitWith", "cmd/gc.recordChurn"}, false
-	}
-	if msg := checkDispositionWrite("r3", map[string]string{"quarantined_until": stamp}, both); msg != "" {
-		t.Errorf("a write one of two bypass writers on the stack admits failed: %s", msg)
+	unlisted := func() (string, []string, bool) { return "x", []string{"cmd/gc.healExpiredTimersInfo"}, false }
+	if msg := checkDispositionWrite("r3", map[string]string{"held_until": ""}, unlisted); msg == "" {
+		t.Error("a writer moved onto its cell (no longer listed) passed a hand-built clear")
 	}
 }
 
@@ -170,3 +159,57 @@ func TestDispositionGuardReadsTheStack(t *testing.T) {
 func dispositionWriterFromHere() (string, []string, bool) { return hookFrame() }
 
 func hookFrame() (string, []string, bool) { return dispositionWriter() }
+
+// TestLostDispositionWritesLeaveNoMint (L1, L1b): a move whose every CAS
+// attempt loses leaves no open mint, so a hand-built write of the same
+// content fails the guard, on its row and on the same ID in another store
+// (every MemStore's first row is gc-1).
+func TestLostDispositionWritesLeaveNoMint(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive), "sleep_intent": "idle-stop-pending"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	if w, err := NewStore(beads.SessionStore{Store: loser}).ApplyDispositionFresh(b.ID, ActorController, DispEvent{Kind: EvIdleStopEnd}, nil, dispT0); err != nil || w.Result != CommitContended {
+		t.Fatalf("IdleStopEnd under a CAS that always loses = %+v, %v; want contended", w, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost move left %d open mints for %s", n, b.ID)
+	}
+	other := beads.NewMemStore()
+	b2, err := other.Create(beads.Bead{Title: "x", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod := func() (string, []string, bool) { return "cmd/gc.someHandWriter", nil, false }
+	if b2.ID == b.ID && checkDispositionWrite(b2.ID, map[string]string{"sleep_intent": ""}, prod) == "" {
+		t.Errorf("a hand-built {sleep_intent: \"\"} to %s in another store passed the guard", b2.ID)
+	}
+}
+
+// TestUpdateMetadataFencedUnmintsLostAttempts: a fenced decider that mints
+// (the wait clear, the undos) and loses every CAS attempt leaves no open mint.
+func TestUpdateMetadataFencedUnmintsLostAttempts(t *testing.T) {
+	stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+	b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateActive), "wait_hold": "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := OpenDispositionMints(b.ID)
+	loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+	ok, err := NewStore(beads.SessionStore{Store: loser}).UpdateMetadataFenced(b.ID, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+		to, err := DispositionOfInfo(info).Apply(ActorController, DispEvent{Kind: EvWaitEnd}, State(info.MetadataState), dispT0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return to.Changed().Into(info.ID, nil)
+	})
+	if ok || err != nil {
+		t.Fatalf("UpdateMetadataFenced under a CAS that always loses = %v, %v; want not written", ok, err)
+	}
+	if n := OpenDispositionMints(b.ID) - before; n != 0 {
+		t.Errorf("the lost attempts left %d open mints", n)
+	}
+}

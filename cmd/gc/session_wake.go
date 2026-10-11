@@ -95,7 +95,8 @@ func preWakeCommitWith(
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
 
-	newGen, token, batch := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	newGen, token, batch, class := preWakePatch(info, clk.Now(), sessions.NewInstanceToken())
+	batch = class.Into(info.ID, batch)
 	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
 	if writeErr := write(batch); writeErr != nil {
 		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
@@ -106,9 +107,13 @@ func preWakeCommitWith(
 }
 
 // preWakePatch is the PreWakePatch preWakeCommit writes for info at now with
-// token as the new instance token, and the generation it advances to. The v2
-// start effect decides the same patch in its PreWake CAS (CONTRACT v5 S1).
-func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch) {
+// token as the new instance token, the generation it advances to, and the
+// disposition's PreWake cell (class) beside it: the idle stop's and a wait's
+// intent and a soft suspend go; an operator's suspend refuses it, and the
+// controller never starts that row (errStartUserHeld). The v2 start effect
+// decides the same patch in its PreWake CAS (CONTRACT v5 S1). It mints
+// nothing: the writer puts class in its write.
+func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, _ string, batch sessions.MetadataPatch, class sessions.DispositionPatch) {
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
 	continuationEpoch, _ := strconv.Atoi(info.ContinuationEpoch)
@@ -137,7 +142,7 @@ func preWakePatch(info sessions.Info, now time.Time, token string) (newGen int, 
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	return newGen, token, batch
+	return newGen, token, batch, sessions.CellInfo(info, sessions.ActorController, sessions.DispEvent{Kind: sessions.EvPreWake}, now)
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake

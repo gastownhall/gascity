@@ -60,7 +60,7 @@ func TestFencedWriterRefusesWhenWriterStopsResolving(t *testing.T) {
 	calls := map[string]func() error{
 		"updateMetadataFenced": func() error { _, err := w.updateMetadataFenced(id, 1, set("2")); return err },
 		"updateRowFenced": func() error {
-			_, err := w.updateRowFenced(id, 1, func(session.Info) (session.RowPatch, bool) {
+			_, err := w.updateRowFenced(id, 1, func(session.Info, session.PersistedResponse) (session.RowPatch, bool) {
 				return session.RowPatch{Metadata: session.MetadataPatch{txKeyA: "2"}}, true
 			})
 			return err

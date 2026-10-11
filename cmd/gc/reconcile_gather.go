@@ -90,6 +90,7 @@ type World struct {
 	Boot        bootState
 	Paused      bool            // starts paused for a provider swap (P7)
 	SoftReload  *softReloadView // the open soft reload this pass read, for A8 (M2)
+	AliasOwed   map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -172,6 +173,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	w.ExecutionStalled = p.executionStalled(w.Census)
+	w.AliasOwed = p.aliasOwedFor(w.Census)
 	w.Phantoms = censusPhantoms(w.Census, cfg, e.CityName)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()

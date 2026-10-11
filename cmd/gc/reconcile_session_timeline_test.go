@@ -579,7 +579,7 @@ var (
 // new digest; the last entry per fixture is the one in force.
 var timelineGoldenRulings = []goldenRuling{
 	{"a cutover finds v5 hashes on a live seat", timelineGoldenBaseline, "42010976a333"},
-	{"a live drift on a seat", timelineGoldenBaseline, "f5175dc3cf8b"},
+	{"a live drift on a seat", timelineGoldenBaseline, "e4f04b540c00"},
 	{"a crash 29s after wake", timelineGoldenBaseline, "55c4df6af9c5"},
 	{"a crash 31s after wake", timelineGoldenBaseline, "b799cd2aa091"},
 	{"a crash 5m0s after wake", timelineGoldenBaseline, "21983abfeb7d"},
@@ -599,7 +599,7 @@ var timelineGoldenRulings = []goldenRuling{
 	{"an unwanted row woken by a clock ten minutes ahead", timelineGoldenBaseline, "27e15af2efe9"},
 	{"an unwanted row woken by a clock two minutes ahead", timelineGoldenBaseline, "7863a5af3820"},
 	{"attach, then detach, then idle", timelineGoldenBaseline, "a8a76fb85cf8"},
-	{"drift deferrals through time", timelineGoldenBaseline, "276c26877b00"},
+	{"drift deferrals through time", timelineGoldenBaseline, "b7bf2d092994"},
 	{"idle, then sleep, then the next pass", timelineGoldenBaseline, "df4154567a92"},
 	{"kill a seat holding a dep-blocked claim", timelineGoldenBaseline, "44f501ec9412"},
 	{"kill a seat holding a ready claim", timelineGoldenBaseline, "a6a3283ef592"},
@@ -858,7 +858,7 @@ func tlPol(id string) map[string]string {
 	return map[string]string{"row:" + id + ":*policy": "sleep-policy-keys"}
 }
 
-func tlIdent() map[string]string { return map[string]string{"row:gc-1:*identity": "A7 identity"} }
+func tlIdent() map[string]string { return map[string]string{"row:gc-1:*a7": "§12.2#51 a7-lag"} }
 
 // tlStartState is the row and runtime a start of row gc-1 under s-gc-1
 // leaves, and tlStarted that start in its own step, accounted to cause: a
@@ -912,8 +912,9 @@ func driftTimeline() []timelineFixture {
 		cfg.Agents[0].MaxActiveSessions, cfg.Agents[0].MinActiveSessions = intPtr(1), intPtr(0)
 		return cfg
 	}
-	row := tlRow("gc-1", 1, time.Hour, "state", "asleep")
+	row := tlRow("gc-1", 1, time.Hour, "state", "asleep", "pool_slot", "")
 	row.Metadata["alias"], row.Metadata["agent_name"] = "worker", "worker"
+	row.Labels = append(row.Labels, "agent:worker") // a canonical singleton's identity, converged: A7 takes no pass
 	set := func(kv ...string) func(tw twin) { return func(tw twin) { tw.set("gc-1", kv...) } }
 	attach := func(on bool) func(tw twin) { // a copy that never started the seat has none to attach
 		return func(tw twin) {
@@ -927,8 +928,8 @@ func driftTimeline() []timelineFixture {
 		}
 	}
 	drifted := runtime.FingerprintVersion + ":drifted"
-	started := tlMerged(tlIdent(), tlRestarted(), map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"})
-	standing := tlMerged(tlPol("gc-1"), tlIdent())
+	started := tlMerged(tlRestarted(), map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"})
+	standing := tlPol("gc-1")
 	liveApplied := map[string]string{"row:gc-1:started_live_hash": "C7b2 live-apply", "provider:RunLive s-gc-1": "C7b2 live-apply", "event:session.updated worker null": "C7b2 live-apply"}
 	deferrals := tlFixture("drift deferrals through time", one, []parityRow{row}, tlClaim("in_progress", "worker"), nil,
 		[]parityStep{
@@ -978,7 +979,7 @@ func stabilityTimeline() []timelineFixture {
 	quarantinedAt := func(d time.Duration, per map[string]map[string]string) timelineFixture {
 		return tlFixture(fmt.Sprintf("a live quarantined row %s after wake", d), stable,
 			[]parityRow{row("wake_attempts", "2", "quarantined_until", tlAt(time.Hour))}, tlClaim("in_progress", "worker"), []simRuntime{tlLive("gc-1")},
-			[]parityStep{{Name: "seed", Ticks: 1, Restless: true}, {Name: "alive", At: d, Ticks: -1, Restless: true}, {Name: "settled", Ticks: 6}}, standing, per)
+			[]parityStep{{Name: "seed", Ticks: 1, Restless: true}, {Name: "alive", At: d, Ticks: -1, Restless: true}, {Name: "settled", Ticks: 6}}, tlPol("gc-1"), per) // A7 takes its first pass: no lag
 	}
 	// drained is legacy's drain of the quarantined row, begun and vetoed in
 	// a tick and its follow-up; lagged, v2's current-bead stamp a pass after
@@ -1010,17 +1011,23 @@ func (tw twin) reconfigure(change func(*config.City)) {
 	tw.reload(&next)
 }
 
-// tlAliasSeed adds legacy's seed-tick clear of gc-1's unmanaged alias on
-// its live runtime to the identity difference.
-func tlAliasSeed() map[string]string {
-	return tlMerged(tlIdent(), map[string]string{"provider:SetMeta s-gc-1": "A7 identity", "provider:RemoveMeta s-gc-1": "A7 identity"})
+// tlAliasSync is legacy's seed-tick sync of gc-1's live runtime to its
+// alias, which v2's runtime-alias effect makes a pass after A7's write
+// (§12.2 #51).
+func tlAliasSync() map[string]string {
+	return map[string]string{
+		"provider:SetMeta s-gc-1": "§12.2#51 a7-lag", "provider:RemoveMeta s-gc-1": "§12.2#51 a7-lag",
+		"runtime:s-gc-1:meta:GC_AGENT": "§12.2#51 a7-lag", "runtime:s-gc-1:meta:BEADS_ACTOR": "§12.2#51 a7-lag",
+	}
 }
 
-// tlAliasMeta is the identity legacy's alias clear leaves on gc-1's runtime,
-// which the fake keeps past the runtime.
-func tlAliasMeta() map[string]string {
-	return map[string]string{"runtime:s-gc-1:meta:GC_AGENT": "A7 identity", "runtime:s-gc-1:meta:BEADS_ACTOR": "A7 identity"}
-}
+// tlAliasSeed is legacy's seed-tick clear of gc-1's unmanaged alias, with
+// its live runtime's sync, which v2's A7 writes a pass later (§12.2 #51).
+func tlAliasSeed() map[string]string { return tlMerged(tlIdent(), tlAliasSync()) }
+
+// tlRestlessSeed is the default seed step for a fixture whose runtime-alias
+// sync, a pass after A7's write, still acts at the seed's last tick.
+var tlRestlessSeed = parityStep{Name: "seed", Restless: true}
 
 // idleTimeline is the idle and drain timers: the idle drain and its latch,
 // detached_at, and the INC-003 wake grace.
@@ -1051,7 +1058,7 @@ func idleTimeline() []timelineFixture {
 		"provider:SetMeta " + chatName: "A4 idle-sleep", "provider:RemoveMeta " + chatName: "A4 idle-sleep", "provider:Stop " + chatName: "A4 idle-sleep",
 		`event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"}`: "A4 idle-sleep",
 	})
-	chatStanding := tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*sync": "A7 row-metadata"})
+	chatStanding := tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*sync": "C7d-2 row-metadata"})
 	// Legacy's idle probe succeeds (WaitForIdle answers idle), so it begins
 	// and finishes the idle drain itself: the idle sleep, its latch over the
 	// always-named demand, and the latch's release once a reload changes the
@@ -1088,12 +1095,12 @@ func idleTimeline() []timelineFixture {
 			// never a backoff (C6a2 review 2c), probed at most once a patrol
 			// (review 1a).
 			{Name: "idle past sleep_after_idle", Advance: 6 * time.Minute},
-		}, tlMerged(tlPol("gc-1"), tlIdent(), tlAliasMeta()), map[string]map[string]string{"seed": tlAliasSeed()})
+		}, tlPol("gc-1"), map[string]map[string]string{"seed": tlAliasSync()})
 	// retired is legacy's drain of gc-1, acknowledged and stopped, and the
 	// pool slot's close that follows it; v2's stop verb (A4) is not built,
 	// so its runtime stays up and A21 has nothing to close.
 	retired := map[string]string{
-		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*sync": "A7 row-metadata",
+		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*sync": "C7d-2 row-metadata",
 		"row:gc-1:status": "A4 drain-stop", "row:gc-1:state": "A4 drain-stop", "row:gc-1:close_reason": "A4 drain-stop", "row:gc-1:closed_at": "A4 drain-stop",
 	}
 	retiring := map[string]string{
@@ -1134,7 +1141,7 @@ func idleTimeline() []timelineFixture {
 		[]parityRow{tlRow("gc-1", 1, time.Minute)}, []parityRow{routedDemandBead("gw-1")}, []simRuntime{tlLive("gc-1")},
 		[]parityStep{{Name: "the reload", Advance: time.Minute, Op: func(tw twin) {
 			tw.reconfigure(func(c *config.City) { c.Agents[0].SleepAfterIdle = "5m" })
-		}}}, tlMerged(tlPol("gc-1"), tlIdent(), tlAliasMeta()), map[string]map[string]string{"seed": tlAliasSeed()})
+		}}}, tlPol("gc-1"), map[string]map[string]string{"seed": tlAliasSync()})
 	// An on_demand named session, running and detached with no work: the
 	// awake set puts it to idle sleep (ComputeAwakeSet's idle-sleep) once
 	// it has been detached past sleep_after_idle, and its probe answers
@@ -1188,7 +1195,7 @@ func (tw twin) patch(id string, p session.MetadataPatch) {
 // without a controller to own it), kill on a ready and a blocked claim, a
 // provider swap, and a quarantine expiring under a kill fence.
 func operatorTimeline() []timelineFixture {
-	standing := tlMerged(tlPol("gc-1"), tlAliasMeta())
+	standing := tlMerged(tlPol("gc-1"))
 	wake := func(tw twin) {
 		st, _ := tw.row("gc-1")
 		if _, err := session.NewStore(beads.SessionStore{Store: st}).WakeSession("gc-1", tw.now, session.WakeOpts{}); err != nil {
@@ -1222,6 +1229,7 @@ func operatorTimeline() []timelineFixture {
 	suspend := tlFixture("suspend, then wake", tlCity,
 		[]parityRow{tlRow("gc-1", 1, time.Hour)}, tlClaim("in_progress", "s-gc-1"), []simRuntime{tlLive("gc-1")},
 		[]parityStep{
+			tlRestlessSeed,
 			{Name: "suspend", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
 				if err := session.NewManagerWithOptions(st, tw.sp, session.WithClock(&clock.Fake{Time: tw.now}), session.WithCityPath(tw.city)).Suspend(context.Background(), testActorIn(tw.t, session.ActorOperator, tw.city), "gc-1", false); err != nil {
@@ -1246,6 +1254,7 @@ func operatorTimeline() []timelineFixture {
 	managed := tlFixture("a managed suspend drains, then wake", tlCity,
 		[]parityRow{tlRow("gc-1", 1, time.Hour)}, tlClaim("in_progress", "s-gc-1"), []simRuntime{tlLive("gc-1")},
 		[]parityStep{
+			tlRestlessSeed,
 			{Name: "suspend", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
 				if _, err := session.NewStore(beads.SessionStore{Store: st}).OperatorSuspend("gc-1", tw.now); err != nil {
@@ -1272,14 +1281,16 @@ func operatorTimeline() []timelineFixture {
 	// releases it and closes the seat with no fresh seat (owner ruling B1).
 	kill := func(blocked bool) timelineFixture {
 		name, work := "kill a seat holding a ready claim", tlClaim("open", "gc-1")
-		graced := restarted
+		graced, seed, killed := restarted, tlAliasSeed(), tlIdent()
 		if blocked {
 			name = "kill a seat holding a dep-blocked claim"
 			work = append(work, parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}})
-			graced = tlIdent() // legacy and v2 both close the killed seat (A21, B1)
+			graced = nil                      // legacy and v2 both close the killed seat (A21, B1)
+			seed, killed = tlAliasSync(), nil // A7 writes in the first pass, the runtime sync a pass later
 		}
 		f := tlFixture(name, tlCity, []parityRow{tlRow("gc-1", 1, time.Hour)}, work, []simRuntime{tlLive("gc-1")},
 			[]parityStep{
+				tlRestlessSeed,
 				{Name: "kill", Op: func(tw twin) {
 					tw.patch("gc-1", session.KillPendingPatch(tw.now))
 					tw.sp.external = true // the operator's kill, not v2's
@@ -1287,7 +1298,7 @@ func operatorTimeline() []timelineFixture {
 					tw.sp.external = false
 				}},
 				{Name: "past the kill grace", Advance: session.KillPendingGrace + time.Minute},
-			}, tlMerged(tlPol("gc-1"), tlAliasMeta()), map[string]map[string]string{"seed": tlAliasSeed(), "kill": tlIdent(), "past the kill grace": graced})
+			}, tlPol("gc-1"), map[string]map[string]string{"seed": seed, "kill": killed, "past the kill grace": graced})
 		if blocked {
 			f.Setup = func(tw twin) {
 				st, _ := tw.row("gw-1")
@@ -1303,6 +1314,7 @@ func operatorTimeline() []timelineFixture {
 	swap := tlFixture("a provider swap stops the runtime", tlCity,
 		[]parityRow{tlRow("gc-1", 1, 10*time.Second)}, tlClaim("in_progress", "gc-1"), []simRuntime{tlLive("gc-1")},
 		[]parityStep{
+			tlRestlessSeed,
 			{Name: "swap", Ticks: 6, Op: func(tw twin) {
 				if err := stopProviderSwapRuntimes([]swapStop{{name: "s-gc-1", backend: tw.sp}}, tw.cfg, tw.stores[0], tw.rec, io.Discard, io.Discard); err != nil {
 					tw.t.Fatal(err)
@@ -1323,7 +1335,10 @@ func operatorTimeline() []timelineFixture {
 			{Name: "the kill fence expires", At: 6 * time.Minute},
 		}, tlIdent(), map[string]map[string]string{
 			"the quarantine expires": {"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal"},
-			"the kill fence expires": tlMerged(tlPol("gc-1"), restarted, map[string]string{"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal", "row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}),
+			"the kill fence expires": tlMerged(tlPol("gc-1"), restarted, map[string]string{
+				"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal", "row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag",
+				"runtime:s-gc-1:meta:GC_AGENT": "§12.2#51 a7-lag", "runtime:s-gc-1:meta:BEADS_ACTOR": "§12.2#51 a7-lag", "provider:SetMeta s-gc-1": "§12.2#51 a7-lag",
+			}),
 		})
 	// gc session wait --sleep on a live seat holding a claim, under an idle
 	// policy: the wait holds it (wait_hold, sleep_intent=wait-hold), so legacy
@@ -1347,6 +1362,7 @@ func operatorTimeline() []timelineFixture {
 	waiter := tlFixture("a waiter sleeps", napping, []parityRow{tlRow("gc-1", 1, time.Hour)},
 		append(tlClaim("in_progress", "s-gc-1"), parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}}), []simRuntime{tlLive("gc-1")},
 		[]parityStep{
+			tlRestlessSeed,
 			{Name: "wait", Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
 				if _, err := st.Create(beads.Bead{Title: "wait:worker", Type: waitBeadType, Labels: []string{waitBeadLabel, "session:gc-1"}, Metadata: map[string]string{

@@ -5,12 +5,16 @@
 ## 0 seed (+20s)
 @ +0s
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [§12.2#51 a7-lag]
+row:gc-1:pool_slot legacy="" v2="1" [§12.2#51 a7-lag]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+@ +10s
+row:gc-1:labels resolved
+row:gc-1:pool_slot resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
 ## 1 crash (+1m19s)
 @ +39s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
@@ -22,23 +26,31 @@ row:gc-1:state resolved
 ## 0 seed (+20s)
 @ +0s
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [§12.2#51 a7-lag]
+row:gc-1:pool_slot legacy="" v2="1" [§12.2#51 a7-lag]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+@ +10s
+row:gc-1:labels resolved
+row:gc-1:pool_slot resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
 ## 1 crash (+1m21s)
 === a crash 5m0s after wake
 ## 0 seed (+20s)
 @ +0s
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [§12.2#51 a7-lag]
+row:gc-1:pool_slot legacy="" v2="1" [§12.2#51 a7-lag]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+@ +10s
+row:gc-1:labels resolved
+row:gc-1:pool_slot resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
 ## 1 crash (+5m50s)
 @ +5m0s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
@@ -50,12 +62,16 @@ row:gc-1:state resolved
 ## 0 seed (+20s)
 @ +0s
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [§12.2#51 a7-lag]
+row:gc-1:pool_slot legacy="" v2="1" [§12.2#51 a7-lag]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+@ +10s
+row:gc-1:labels resolved
+row:gc-1:pool_slot resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
 ## 1 v5 hashes at the cutover (+40s)
 ## 2 the live hash cleared (+2m0s)
 ## 3 a v5 live hash (+3m20s)
@@ -65,8 +81,6 @@ row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
@@ -90,8 +104,6 @@ provider:RunLive s-gc-1 resolved
 provider:RemoveMeta s-gc-1 legacy="11" v2="" [A4 drain-stop]
 provider:SetMeta s-gc-1 legacy="4" v2="" [A4 drain-stop]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
@@ -110,8 +122,6 @@ row:gc-1:currently_processing_bead_id resolved
 provider:RemoveMeta s-gc-1 legacy="11" v2="" [A4 drain-stop]
 provider:SetMeta s-gc-1 legacy="4" v2="" [A4 drain-stop]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
@@ -127,19 +137,26 @@ row:gc-1:currently_processing_bead_id resolved
 === a managed suspend drains, then wake
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
+row:gc-1:alias legacy="" v2="alias-gc-1" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
+row:gc-1:alias resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+@ +20s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
 ## 1 suspend (+40s)
 @ +20s
 event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="1" v2="" [A4 drain-stop]
@@ -211,20 +228,30 @@ row:gc-1:last_woke_at legacy="T+8m10s" v2="T-1h0m0s" [A4 managed-suspend]
 === a provider swap stops the runtime
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
+row:gc-1:alias legacy="" v2="alias-gc-1" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
+row:gc-1:alias resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+@ +20s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
 ## 1 swap (+1m10s)
+@ +20s
+provider:RemoveMeta s-gc-1 resolved
+provider:SetMeta s-gc-1 resolved
 @ +30s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:state legacy="active" v2="awake" [§12.2#39 commit-writes-awake]
@@ -235,7 +262,7 @@ row:gc-1:state resolved
 === a quarantine, then a kill fence, expires
 ## 0 seed (+20s)
 @ +0s
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+row:gc-1:alias legacy="" v2="alias-gc-1" [§12.2#51 a7-lag]
 ## 1 the quarantine expires (+3m30s)
 @ +2m10s
 row:gc-1:churn_count legacy="0" v2="" [§12.2#35 fenced-timer-heal]
@@ -258,20 +285,35 @@ row:gc-1:wake_attempts resolved
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:currently_processing_bead_id resolved
 row:gc-1:state resolved
+@ +5m20s
+row:gc-1:alias resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+5m20s" [§12.2#51 a7-lag]
+@ +5m30s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#38 start-meta-clears]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="" v2="gc-1" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="" v2="gc-1" [§12.2#51 a7-lag]
+@ +5m40s
+provider:RemoveMeta s-gc-1 resolved
+provider:SetMeta s-gc-1 resolved
 === a reload turns idle sleep on for a detached row
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
+@ +20s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 ## 1 the reload (+1m40s)
@@ -283,19 +325,26 @@ row:gc-1:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
 === a waiter sleeps
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
+row:gc-1:alias legacy="" v2="alias-gc-1" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
+row:gc-1:alias resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+@ +20s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
 ## 1 wait (+40s)
 @ +20s
 event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="1" v2="" [A4 drain-stop]
@@ -400,7 +449,7 @@ row:gc-c:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-c:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
-row:gc-c:work_dir legacy="<city>" v2="" [A7 row-metadata]
+row:gc-c:work_dir legacy="<city>" v2="" [C7d-2 row-metadata]
 ## 1 idle past sleep_after_idle (+6m30s)
 @ +5m0s
 row:gc-c:config_wake_suppressed legacy="true" v2="" [sleep-policy-keys]
@@ -444,7 +493,7 @@ row:gc-1:drain_intent_reason legacy="" v2="orphaned" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+4m0s" v2="" [A7 row-metadata]
+row:gc-1:synced_at legacy="T+4m0s" v2="" [C7d-2 row-metadata]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +4m10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -468,7 +517,7 @@ row:gc-1:drain_intent_reason legacy="" v2="suspended" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+0s" v2="" [A7 row-metadata]
+row:gc-1:synced_at legacy="T+0s" v2="" [C7d-2 row-metadata]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -492,7 +541,7 @@ row:gc-1:drain_intent_reason legacy="" v2="orphaned" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+0s" v2="" [A7 row-metadata]
+row:gc-1:synced_at legacy="T+0s" v2="" [C7d-2 row-metadata]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -517,7 +566,7 @@ row:gc-1:drain_intent_reason legacy="" v2="orphaned" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+7m0s" v2="" [A7 row-metadata]
+row:gc-1:synced_at legacy="T+7m0s" v2="" [C7d-2 row-metadata]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +7m10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -527,17 +576,21 @@ provider:Stop s-gc-1 resolved
 === attach, then detach, then idle
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
+@ +20s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 ## 1 detach (+1m40s)
@@ -550,8 +603,6 @@ row:gc-1:config_wake_suppressed legacy="true" v2="" [sleep-policy-keys]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
-row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
-row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
@@ -572,7 +623,7 @@ row:gc-c:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-c:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
-row:gc-c:work_dir legacy="<city>" v2="" [A7 row-metadata]
+row:gc-c:work_dir legacy="<city>" v2="" [C7d-2 row-metadata]
 ## 1 idle past sleep_after_idle (+6m30s)
 @ +5m0s
 row:gc-c:config_wake_suppressed legacy="true" v2="" [sleep-policy-keys]
@@ -641,17 +692,21 @@ row:gc-c:state resolved
 === kill a seat holding a dep-blocked claim
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
+@ +20s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 ## 1 kill (+40s)
@@ -659,20 +714,30 @@ provider:SetMeta s-gc-1 resolved
 === kill a seat holding a ready claim
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
+row:gc-1:alias legacy="" v2="alias-gc-1" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
+row:gc-1:alias resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+@ +20s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
 ## 1 kill (+40s)
+@ +20s
+provider:RemoveMeta s-gc-1 resolved
+provider:SetMeta s-gc-1 resolved
 ## 2 past the kill grace (+7m10s)
 @ +5m20s
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
@@ -683,21 +748,30 @@ row:gc-1:state resolved
 === suspend, then wake
 ## 0 seed (+20s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
-provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
-row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="2" v2="" [§12.2#51 a7-lag]
+row:gc-1:alias legacy="" v2="alias-gc-1" [§12.2#51 a7-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
-runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
-runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [§12.2#51 a7-lag]
 @ +10s
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
+row:gc-1:alias resolved
+row:gc-1:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+@ +20s
+provider:RemoveMeta s-gc-1 legacy="" v2="1" [§12.2#51 a7-lag]
+provider:SetMeta s-gc-1 legacy="" v2="2" [§12.2#51 a7-lag]
+runtime:s-gc-1:meta:BEADS_ACTOR resolved
+runtime:s-gc-1:meta:GC_AGENT resolved
 ## 1 suspend (+40s)
 @ +20s
+provider:RemoveMeta s-gc-1 resolved
+provider:SetMeta s-gc-1 resolved
 row:gc-1:state legacy="asleep" v2="suspended" [suspended-row-heal]
 ## 2 wake (+1m20s)
 @ +1m0s

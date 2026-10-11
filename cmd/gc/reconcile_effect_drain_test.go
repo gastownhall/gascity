@@ -345,6 +345,7 @@ func TestDrainBeginRedecidesOutsideTheBasis(t *testing.T) {
 // work assigned after the pass (L5), it refuses and writes nothing; detached
 // with no work it writes the config-drift request.
 func TestConfigDriftBeginFencesAttachAndWork(t *testing.T) {
+	withoutA7(t)
 	tp := TemplateParams{TemplateName: "worker", Command: "run"}
 	drifted := []string{"started_config_hash", runtime.FingerprintVersion + ":stale"}
 	desired := func(e *selectionEntry) { e.InDesired, e.Desired = true, desireKeep }
