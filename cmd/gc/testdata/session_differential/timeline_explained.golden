@@ -449,7 +449,10 @@ row:gc-c:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-c:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
-row:gc-c:work_dir legacy="<city>" v2="" [C7d-2 row-metadata]
+row:gc-c:work_dir legacy="<city>" v2="" [§12.2#51 a7-lag]
+@ +10s
+row:gc-c:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+row:gc-c:work_dir resolved
 ## 1 idle past sleep_after_idle (+6m30s)
 @ +5m0s
 row:gc-c:config_wake_suppressed legacy="true" v2="" [sleep-policy-keys]
@@ -493,7 +496,7 @@ row:gc-1:drain_intent_reason legacy="" v2="orphaned" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+4m0s" v2="" [C7d-2 row-metadata]
+row:gc-1:synced_at legacy="T+4m0s" v2="" [§12.2#51 a7-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +4m10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -517,7 +520,7 @@ row:gc-1:drain_intent_reason legacy="" v2="suspended" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+0s" v2="" [C7d-2 row-metadata]
+row:gc-1:synced_at legacy="T+0s" v2="" [§12.2#51 a7-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -541,7 +544,7 @@ row:gc-1:drain_intent_reason legacy="" v2="orphaned" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+0s" v2="" [C7d-2 row-metadata]
+row:gc-1:synced_at legacy="T+0s" v2="" [§12.2#51 a7-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -566,7 +569,7 @@ row:gc-1:drain_intent_reason legacy="" v2="orphaned" [A4 drain-stop]
 row:gc-1:state legacy="drained" v2="awake" [A4 drain-stop]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [A4 drain-stop]
 row:gc-1:status legacy="closed" v2="open" [A4 drain-stop]
-row:gc-1:synced_at legacy="T+7m0s" v2="" [C7d-2 row-metadata]
+row:gc-1:synced_at legacy="T+7m0s" v2="" [§12.2#51 a7-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 drain-stop]
 @ +7m10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -623,7 +626,10 @@ row:gc-c:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-c:sleep_capability legacy="full" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=chat" v2="" [sleep-policy-keys]
 row:gc-c:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
-row:gc-c:work_dir legacy="<city>" v2="" [C7d-2 row-metadata]
+row:gc-c:work_dir legacy="<city>" v2="" [§12.2#51 a7-lag]
+@ +10s
+row:gc-c:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+row:gc-c:work_dir resolved
 ## 1 idle past sleep_after_idle (+6m30s)
 @ +5m0s
 row:gc-c:config_wake_suppressed legacy="true" v2="" [sleep-policy-keys]

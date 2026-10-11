@@ -1058,7 +1058,7 @@ func idleTimeline() []timelineFixture {
 		"provider:SetMeta " + chatName: "A4 idle-sleep", "provider:RemoveMeta " + chatName: "A4 idle-sleep", "provider:Stop " + chatName: "A4 idle-sleep",
 		`event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"}`: "A4 idle-sleep",
 	})
-	chatStanding := tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*sync": "C7d-2 row-metadata"})
+	chatStanding := tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*a7": "§12.2#51 a7-lag"})
 	// Legacy's idle probe succeeds (WaitForIdle answers idle), so it begins
 	// and finishes the idle drain itself: the idle sleep, its latch over the
 	// always-named demand, and the latch's release once a reload changes the
@@ -1100,7 +1100,7 @@ func idleTimeline() []timelineFixture {
 	// pool slot's close that follows it; v2's stop verb (A4) is not built,
 	// so its runtime stays up and A21 has nothing to close.
 	retired := map[string]string{
-		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*sync": "C7d-2 row-metadata",
+		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*a7": "§12.2#51 a7-lag",
 		"row:gc-1:status": "A4 drain-stop", "row:gc-1:state": "A4 drain-stop", "row:gc-1:close_reason": "A4 drain-stop", "row:gc-1:closed_at": "A4 drain-stop",
 	}
 	retiring := map[string]string{

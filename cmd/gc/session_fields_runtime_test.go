@@ -169,12 +169,15 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = healRec.keys
 		}},
-		{"v2 A7 row-metadata effect", "agent_name alias alias_history configured_named_identity configured_named_session core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 A7 row-metadata effect", "agent_name alias alias_history builtin_ancestor close_reason closed_at command configured_named_identity configured_named_session continuation_epoch core_hash_breakdown live_hash pool_alias_conflict pool_alias_conflict_at pool_alias_conflict_count pool_managed pool_slot provider provider_kind resume_command resume_flag resume_style session_id_flag session_key session_origin started_config_hash started_launch_hash started_live_hash started_provision_hash synced_at wake_mode", []string{"cmd/gc/reconcile_arms_metadata.go:identityPatch", "cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v6:x", "alias", "stale",
 				poolAliasConflictMetadataKey, "stale", poolAliasConflictCountMetadataKey, "1", poolAliasConflictAtMetadataKey, rowAt(-time.Hour),
-				namedSessionIdentityMetadata, "old", namedSessionMetadataKey, "true")
+				namedSessionIdentityMetadata, "old", namedSessionMetadataKey, "true", "close_reason", "orphaned", "closed_at", rowAt(-time.Hour))
 			c.w.Env = &reconcileEnv{Cfg: workerCity(3)}
-			c.w.Templates.entries = map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: TemplateParams{TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2}}}
+			c.w.Templates.entries = map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: TemplateParams{
+				TemplateName: "worker", InstanceName: "worker-2", PoolSlot: 2, WakeMode: "fresh", Command: "run-worker", WorkDir: t.TempDir(),
+				ResolvedProvider: &config.ResolvedProvider{Name: "my-claude", BuiltinAncestor: "claude", ResumeFlag: "--resume", ResumeStyle: "flag", ResumeCommand: "resume {{.SessionKey}}", SessionIDFlag: "--session-id"},
+			}}}
 			c.a.Snapshot.Entries[c.k].InDesired = true
 			a7Rec := newSessionKeyRecorder(c.store)
 			if it, st := c.run(t, nil, a7Rec); it.Kind != intentRowMetadata || st.Outcome != settledLanded {

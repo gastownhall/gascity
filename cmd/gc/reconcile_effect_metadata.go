@@ -56,7 +56,7 @@ type aliasCheck struct{ err error }
 // aliasAvailability is legacy's EnsureAliasAvailableWithConfig[ForOwner],
 // under the lock the around took, for alias work that is not blocked.
 func aliasAvailability(_ context.Context, r effectReads, v txView) (aliasCheck, error) {
-	id, _, lock, ok := v.World.rowIdentityOf(v.It.Key, v.Row)
+	id, _, lock, ok := v.World.rowIdentityOf(v.It.Key, v.Row, readRefreshKeys(v.Meta))
 	if !ok || lock == "" || id.Alias == "" {
 		return aliasCheck{}, nil
 	}
@@ -70,19 +70,27 @@ func aliasAvailability(_ context.Context, r effectReads, v txView) (aliasCheck, 
 // pass took for other alias work is redecided; a converged row is a no-op.
 // A written alias owes the runtime its sync (AliasOwed).
 func rowMetadataStep(v txView, chk aliasCheck, _ error) txStep {
-	id, blocked, lock, ok := v.World.rowIdentityOf(v.It.Key, v.Row)
+	id, blocked, lock, ok := v.World.rowIdentityOf(v.It.Key, v.Row, readRefreshKeys(v.Meta))
 	if !ok || lock != v.It.AliasLock {
 		return txStep{Refuse: causeRedecided}
+	}
+	if id.NeedsKey { // minted on the fresh row that has none: set-once (R1)
+		id.Key, _ = session.GenerateSessionKey() // legacy skips the fill on an error, as this does
+	}
+	var typ *string
+	if id.Type {
+		t := session.BeadType
+		typ = &t
 	}
 	rebaseline := func() session.MetadataPatch {
 		res, _ := v.World.Templates.lookup(v.Row)
 		return baselinePatch(sessionCoreConfigForHashInfo(res.TP, v.Row), baselineAliasRerender)
 	}
 	patch := identityPatch(id, v.Row, blocked, chk.err, rebaseline, v.Now.UTC().Format(time.RFC3339))
-	if len(patch) == 0 {
+	if !id.writes(patch) {
 		return txStep{Done: true, Cause: causeConverged}
 	}
-	step := txStep{Write: patch, Title: id.Title, AddLabels: id.Add, RemoveLabels: id.Remove}
+	step := txStep{Write: patch, Title: id.Title, Type: typ, AddLabels: id.Add, RemoveLabels: id.Remove}
 	if _, aliased := patch["alias"]; aliased {
 		step.Facts.AliasOwed = &v.It.Key
 	}

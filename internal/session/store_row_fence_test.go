@@ -292,3 +292,40 @@ func TestUpdateRowFencedDecideRefusalWritesNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateRowFencedRepairsTypeInTheCAS proves an empty session type is
+// repaired in the same UpdateIfMatch as the metadata (CONTRACT v5 M1,
+// SESS-701). Kills a dropped Type, a type-only patch read as empty, and a
+// separate RepairType write.
+func TestUpdateRowFencedRepairsTypeInTheCAS(t *testing.T) {
+	for _, backend := range rowFenceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store, backing := backend.open(t)
+			b := sessionBeadFixture("s-typeless", "open", map[string]string{"state": string(StateAsleep)})
+			b.Labels = append(b.Labels, LabelSession) // what admits a typeless row (IsSessionBeadOrRepairable)
+			created, err := store.Create(b)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			empty := ""
+			if err := store.Update(created.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+				t.Fatalf("clearing the type: %v", err)
+			}
+			if got, _ := backing.Get(created.ID); got.Type != "" {
+				t.Skipf("%s stamps a type on create (%q)", backend.name, got.Type)
+			}
+			rec := &rowWriteRecorder{Store: store}
+			front := NewStore(beads.SessionStore{Store: rec})
+			typ := BeadType
+			written, err := front.UpdateRowFenced(created.ID, 3, func(Info, PersistedResponse) (RowPatch, bool) {
+				return RowPatch{Type: &typ}, true
+			})
+			if err != nil || !written || !slices.Equal(rec.writes, []string{"UpdateIfMatch"}) {
+				t.Fatalf("UpdateRowFenced = (%v, %v), writes %v; want one UpdateIfMatch", written, err, rec.writes)
+			}
+			if got, err := backing.Get(created.ID); err != nil || got.Type != BeadType {
+				t.Fatalf("type %q (%v), want %q", got.Type, err, BeadType)
+			}
+		})
+	}
+}

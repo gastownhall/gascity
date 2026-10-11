@@ -282,17 +282,18 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	return false, nil
 }
 
-// RowPatch is one fenced row write: a metadata patch, a title (nil leaves it)
-// and label deltas. Labels travel as deltas, never as a whole set.
+// RowPatch is one fenced row write: a metadata patch, a title and a type
+// (nil leaves them) and label deltas. Labels travel as deltas, never as a whole set.
 type RowPatch struct {
 	Metadata     MetadataPatch
 	Title        *string
+	Type         *string // an empty type's repair (RepairType's, in the same CAS)
 	AddLabels    []string
 	RemoveLabels []string
 }
 
 func (p RowPatch) empty() bool {
-	return len(p.Metadata) == 0 && p.Title == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
+	return len(p.Metadata) == 0 && p.Title == nil && p.Type == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
 }
 
 // UpdateRowFenced writes metadata, title and labels decided from a fresh read
@@ -325,6 +326,7 @@ func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info, Persi
 		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{
 			Metadata:     map[string]string(patch.Metadata),
 			Title:        patch.Title,
+			Type:         patch.Type,
 			Labels:       patch.AddLabels,
 			RemoveLabels: patch.RemoveLabels,
 		})

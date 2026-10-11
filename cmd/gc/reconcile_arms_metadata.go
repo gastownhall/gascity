@@ -13,9 +13,9 @@ import (
 // decideRow's row-metadata arm (CONTRACT v5 M1, A7; plan C7d): a desired
 // row's identity converged to its configuration before A8 hashes it (v5
 // B4): legacy's per-row identity refresh (SESS-713), the managed alias under
-// the city alias lock (SESS-717/718), the stale pool slot (SESS-719) and a
-// canonical singleton's collapse (POOL-046). The rest of the refresh
-// (SESS-714..716) is C7d-2's.
+// the city alias lock (SESS-717/718), the stale pool slot (SESS-719), a
+// canonical singleton's collapse (POOL-046), the launch and close keys
+// (SESS-714/715; C7d-2) and an empty type's repair (SESS-701).
 
 // Row-metadata decide reasons.
 const (
@@ -37,13 +37,48 @@ type rowIdentity struct {
 	AliasWork    bool
 	Alias, Owner string
 	ManagedPool  bool // a managed pool instance: a conflict clears a wrong alias
+	// NeedsKey: the provider takes a session id and the row has no
+	// session_key; the effect mints one (Key), set-once in its CAS (R1).
+	NeedsKey bool
+	Key      string
+	// Type: the row is typeless, admitted by its gc:session label; the
+	// effect repairs the type in its CAS (SESS-701).
+	Type bool
+}
+
+// writes reports that id's write is not empty: patch, its metadata, or a
+// session key to mint or a type to repair. The arm and the verb's step
+// decide by it both, so a proposal always writes.
+func (id rowIdentity) writes(patch session.MetadataPatch) bool {
+	return len(patch) > 0 || id.NeedsKey || id.Type
+}
+
+// rowRefreshKeys are the raw values of the refresh keys session.Info does
+// not carry raw (SESS-713..715), as the census read them.
+type rowRefreshKeys map[string]string
+
+// refreshKeyNames are rowRefreshKeys' keys.
+var refreshKeyNames = []string{
+	"work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
+	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at",
+}
+
+// readRefreshKeys is the census's projection of a row's metadata.
+func readRefreshKeys(meta map[string]string) rowRefreshKeys {
+	out := make(rowRefreshKeys, len(refreshKeyNames))
+	for _, k := range refreshKeyNames {
+		if v, ok := meta[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // desiredRowIdentity is legacy's identity refresh of an existing desired
 // row (syncSessionBeadsWithSnapshotAndRigStores' update arm, then
 // syncDesiredPoolSlots, after POOL-046's collapse), pure: tp is the row's
 // resolution (the memo, the realize path for a pool seat).
-func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info) rowIdentity {
+func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info, raw rowRefreshKeys) rowIdentity {
 	id := rowIdentity{Meta: session.MetadataPatch{}, Guarded: session.MetadataPatch{}}
 	cfgAgent := findAgentByTemplate(cfg, tp.TemplateName)
 	named := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
@@ -129,6 +164,19 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info) 
 	if (existing == "" || legacyTemplate) && agentName != "" {
 		id.Guarded["agent_name"] = agentName
 	}
+	if tp.WorkDir != "" { // a legacy identity's running session keeps its work_dir until it stops
+		concrete, active := existing == "" || legacyTemplate, false
+		switch session.State(strings.TrimSpace(info.MetadataState)) {
+		case "", session.StateActive, session.StateAwake:
+			active = true
+		}
+		switch {
+		case raw["work_dir"] == "" && !concrete:
+			id.Meta["work_dir"] = tp.WorkDir
+		case raw["work_dir"] == "" && !active, concrete && raw["work_dir"] != tp.WorkDir && !active:
+			id.Guarded["work_dir"] = tp.WorkDir
+		}
+	}
 	set(id.Meta, "dependency_only", boolMetadata(tp.DependencyOnly), info.DependencyOnlyMetadata)
 	if named {
 		set(id.Meta, namedSessionMetadataKey, boolMetadata(true), boolMetadata(info.ConfiguredNamedSession))
@@ -141,6 +189,9 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info) 
 			}
 		}
 	}
+	refreshLaunchKeys(id.Meta, tp, raw)
+	id.NeedsKey = raw["session_key"] == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != ""
+	id.Type = info.Type == "" && session.IsSessionBeadOrRepairableInfo(info)
 	// SESS-719: a pool row's slot follows the allocation's (realize).
 	if cfgAgent != nil && cfgAgent.SupportsInstanceExpansion() && !cfgAgent.UsesCanonicalSingletonPoolIdentity() && !named && !tp.ManualSession &&
 		tp.PoolSlot > 0 && (tp.Alias == "" || strings.TrimSpace(info.Alias) == tp.Alias) {
@@ -150,6 +201,35 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info) 
 		set(id.Meta, "pool_slot", strconv.Itoa(tp.PoolSlot), info.PoolSlot)
 	}
 	return id
+}
+
+// refreshLaunchKeys sets on m legacy's launch and close refresh (SESS-714/
+// 715): wake_mode, a continuation_epoch backfill, and the command, provider
+// and resume keys from the resolution, where an empty resolved value never
+// clobbers a stored one; a stale close_reason or closed_at clears.
+func refreshLaunchKeys(m session.MetadataPatch, tp TemplateParams, raw rowRefreshKeys) {
+	diff := func(k, v string) {
+		if v != "" && raw[k] != v {
+			m[k] = v
+		}
+	}
+	if raw["wake_mode"] != tp.WakeMode {
+		m["wake_mode"] = tp.WakeMode
+	}
+	if raw["continuation_epoch"] == "" {
+		m["continuation_epoch"] = strconv.Itoa(session.DefaultContinuationEpoch)
+	}
+	diff("command", tp.Command)
+	if p := tp.ResolvedProvider; p != nil {
+		queueChangedResolvedProviderSessionMetadata(raw, func(k, v string) { m[k] = v }, p)
+		diff("resume_flag", p.ResumeFlag)
+		diff("resume_style", p.ResumeStyle)
+		diff("resume_command", p.ResumeCommand)
+		diff("session_id_flag", p.SessionIDFlag)
+	}
+	if raw["close_reason"] != "" || raw["closed_at"] != "" {
+		m["close_reason"], m["closed_at"] = "", ""
+	}
 }
 
 // identityPatch is id's write on info: aliasErr is the live availability
@@ -162,6 +242,9 @@ func desiredRowIdentity(cfg *config.City, tp TemplateParams, info session.Info) 
 // conflict the census does not show free) writes the plain keys alone.
 func identityPatch(id rowIdentity, info session.Info, blocked bool, aliasErr error, rebaseline func() session.MetadataPatch, nowRFC string) session.MetadataPatch {
 	out := maps.Clone(id.Meta)
+	if id.NeedsKey && id.Key != "" {
+		out["session_key"] = id.Key
+	}
 	merge := func() {
 		queueClearPoolAliasConflictMetadataInfo(out, info)
 		maps.Copy(out, id.Guarded)
@@ -214,12 +297,12 @@ func (w *World) aliasTaken(k rowKey, id rowIdentity, info session.Info) bool {
 // rowIdentityOf is the identity decision on row k, read as info: the
 // resolution, whether its alias work is blocked, and the lock it takes
 // (the target alias, or the alias it clears).
-func (w *World) rowIdentityOf(k rowKey, info session.Info) (id rowIdentity, blocked bool, lock string, ok bool) {
+func (w *World) rowIdentityOf(k rowKey, info session.Info, raw rowRefreshKeys) (id rowIdentity, blocked bool, lock string, ok bool) {
 	res, resolved := w.Templates.lookup(info)
 	if !resolved || res.Err != nil || w.Env == nil || w.Env.Cfg == nil {
 		return rowIdentity{}, false, "", false
 	}
-	id = desiredRowIdentity(w.Env.Cfg, res.TP, info)
+	id = desiredRowIdentity(w.Env.Cfg, res.TP, info, raw)
 	blocked = id.AliasWork && aliasConflictRecorded(info, id.Alias) && w.aliasTaken(k, id, info)
 	if w.a7Deferred(k) { // the plain keys alone, as legacy's unlocked batch
 		blocked, id.Title, id.Add, id.Remove = id.AliasWork, nil, nil, nil
@@ -251,11 +334,11 @@ func armRowMetadata(r *rowFacts) (intent, bool) {
 	if r.entry == nil || !r.entry.InDesired || r.w.CitySuspended { // a suspended city's legacy builds no desired state
 		return intent{}, false
 	}
-	id, blocked, lock, ok := r.w.rowIdentityOf(r.k, r.row.Info)
+	id, blocked, lock, ok := r.w.rowIdentityOf(r.k, r.row.Info, r.row.Refresh)
 	switch {
 	case !ok:
 		return intent{}, false
-	case lock != "" || len(identityPatch(id, r.row.Info, blocked, nil, nil, "")) > 0:
+	case lock != "" || id.writes(identityPatch(id, r.row.Info, blocked, nil, nil, "")):
 		reason := decideRowIdentity
 		if lock != "" {
 			reason = decideRowAlias

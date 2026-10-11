@@ -450,10 +450,11 @@ type txStep struct {
 	// in a premiseClose section, beside Terminal), minted where the section
 	// writes them.
 	Class session.DispositionPatch
-	// Title and the label deltas ride Write's CAS (LL4's UpdateRowFenced):
-	// the row-metadata verb's (M1). A step that sets them writes metadata
-	// too (its synced_at).
-	Title                   *string
+	// Title, Type and the label deltas ride Write's CAS (LL4's
+	// UpdateRowFenced): the row-metadata verb's (M1). A step that sets a
+	// title or labels writes metadata too (its synced_at); a type repair
+	// alone writes none, as legacy's RepairType.
+	Title, Type             *string
 	AddLabels, RemoveLabels []string
 	Terminal                session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
 	Refuse                  string
@@ -702,7 +703,7 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		var ended *settlement
 		var wroteFacts session.Facts
 		wrote, err := t.writer.casRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) session.RowPatch {
-			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 && step.Class.Len() == 0 {
+			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Write) == 0 && step.Class.Len() == 0 && step.Type == nil {
 				return session.RowPatch{}
 			}
 			if step.Class.Len() > 0 {
@@ -711,7 +712,7 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 				step.Write = step.Class.Into(t.view.It.Key.ID, maps.Clone(step.Write))
 			}
 			wroteFacts = session.FactsOf(step.Write.Apply(resp.Metadata))
-			return session.RowPatch{Metadata: step.Write, Title: step.Title, AddLabels: step.AddLabels, RemoveLabels: step.RemoveLabels}
+			return session.RowPatch{Metadata: step.Write, Title: step.Title, Type: step.Type, AddLabels: step.AddLabels, RemoveLabels: step.RemoveLabels}
 		})
 		switch {
 		case ended != nil:
