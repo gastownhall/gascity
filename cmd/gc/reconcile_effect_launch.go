@@ -23,8 +23,8 @@ import (
 // verb section and the admit-ticket Call (SC N1: only a Launch takes the
 // ticket); PreWake, decided again on the fresh row, and the launch Call
 // (prepare, the FreshOnly Start, START-019's wait); the commit (S2's
-// FactsCommit premise) and a Call that clears the #46 episode. Until C5a2's
-// abandon table, a failure writes nothing more.
+// FactsCommit premise) and a Call that clears the #46 episode; a start that
+// did not commit, its abandon (reconcile_effect_abandon.go).
 
 // Launch refusal and failure causes.
 const (
@@ -46,7 +46,9 @@ var errEndpointGate = errors.New("v2 start: the endpoint admits no start now")
 var startSections = []section{
 	called(0, probed(prepareAdoption, verbStep(false)), admitTicket),
 	called(callStart, probed(foldPreWake, preWakeStep), startLaunch),
-	called(0, section{Premise: premiseOwnToken, Decide: commitStep}, afterCommit),
+	called(0, section{Premise: premiseOwnToken, Decide: commitStep}, afterStart),
+	called(0, section{Premise: premiseOwnToken, Decide: abandonStep}, stopOwnRuntime),
+	{Premise: premiseClose, Decide: rollbackClose},
 }
 
 // launchRow is the row, template and pass a Launch's Calls act on.
@@ -152,6 +154,8 @@ type launchPass struct {
 	bound      session.Info
 	transcript sessTranscriptState
 	ticket     *startTicket
+	undo       preWakeUndo // what the PreWake wrote, for a capacity refusal's restore (S3)
+	relaunched bool        // the PreWake found the row creating (#7570)
 }
 
 // preWakeHolds are the holds that refuse a PreWake (S1: not held or
@@ -207,8 +211,27 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch)}
+	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
+}
+
+// preWakeUndoOf is what a failed launch restores (S3) of the PreWake
+// patch wrote on v's row: the row as the part of its patch the start keeps
+// left it (intent.Kept: the heal it carries, as legacy's restore finds the
+// row its tick healed first; a stranded seat's death accrual alone, which
+// keeps it committed). A continuation reset the PreWake consumed stays
+// pending, so the next start rotates the continuation again.
+func preWakeUndoOf(v txView, patch session.MetadataPatch) preWakeUndo {
+	row, meta := v.Row, v.Meta
+	if len(v.It.Kept) > 0 {
+		row, meta = foldInfo(row, v.It.Kept), v.It.Kept.Apply(meta)
+	}
+	u := newPreWakeUndo(row, meta, patch)
+	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && (meta["continuation_reset_pending"] == "true" || patch["continuation_epoch"] != meta["continuation_epoch"]) {
+		u.restore["continuation_reset_pending"] = "true"
+	}
+	return u
 }
 
 // preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
@@ -245,13 +268,16 @@ func boundTemplate(tp TemplateParams, row session.Info) TemplateParams {
 
 // startOutcome is the launch Call's typed output for the commit.
 type startOutcome struct {
-	err      error
-	tp       TemplateParams // the template launched
-	paced    bool           // a capacity refusal the endpoint breaker paces: admitted on a ticket, the poison valve not tripped
-	prepared *preparedStart
-	mcp      session.MetadataPatch
-	health   string
-	accrued  bool
+	err        error
+	prepErr    error          // prepare failed, before the Start (S3's prepare class)
+	undo       preWakeUndo    // the launch's, for the abandon
+	relaunched bool           // the launch's
+	tp         TemplateParams // the template launched
+	paced      bool           // a capacity refusal the endpoint breaker paces: admitted on a ticket, the poison valve not tripped
+	prepared   *preparedStart
+	mcp        session.MetadataPatch
+	health     string
+	accrued    bool
 }
 
 // startLaunch is the launch Call: prepare of the PreWaked row, RouteACP, the
@@ -276,7 +302,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	})
 	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.transcript)
 	if err != nil {
-		return startOutcome{}, err
+		return startOutcome{prepErr: err, undo: in.undo, relaunched: in.relaunched, tp: in.tp}, nil
 	}
 	name := strings.TrimSpace(in.row.SessionName)
 	if router, ok := c.start.sp.(interface{ RouteACP(string) }); ok && in.tp.IsACP {
@@ -288,8 +314,8 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	if !beginStart(ctx) {
 		return startOutcome{}, context.Cause(ctx) // the shutdown came first: never begin a start after it
 	}
-	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack))
-	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), tp: in.tp, prepared: prepared}
+	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
+	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
 	in.ticket.verdict = verdictInconclusive
 	switch {
@@ -308,7 +334,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 		err = session.PersistRuntimeMCPServersSnapshot(prepared.cfg.Env["GC_CITY_PATH"], in.row.ID, prepared.cfg.MCPServers)
 	}
 	if err != nil {
-		return out, err // C5a2: the runtime may be up; the next pass adopts it
+		return out, err // the runtime may be up: S1 adopts it next pass (S3)
 	}
 	out.health = startupHealthEpisodeKey(in.row, name)
 	out.accrued = startupHealthRecord{store: c.reads.city}.accrued(out.health)
@@ -385,12 +411,16 @@ func beginStart(ctx context.Context) bool {
 // commitStep is the commit's Decide on the read after the Start: only a
 // runtime alive with the PreWake token commits (I3), whatever the Start
 // returned, with the MCP keys and the #46 mirror cleared (the launch Call
-// records session.woke once it lands); a
-// death is died during startup (S3).
+// records session.woke once it lands). A start that did not commit is S3's:
+// a deferral writes nothing; a capacity refusal restores the PreWake here;
+// the other classes go to the failure Call and the abandon (failStart).
 func commitStep(v txView) txStep {
 	out, err := callResult[startOutcome](v)
 	if err != nil {
 		return txStep{Fail: causeCallError, Err: err}
+	}
+	if out.prepErr != nil {
+		return failStart(v, out, causePrepare, out.prepErr)
 	}
 	died := out.err == nil || errors.Is(out.err, runtime.ErrSessionDiedDuringStartup)
 	cause := runtimeCause(v.Row, v.RT)
@@ -399,15 +429,17 @@ func commitStep(v txView) txStep {
 	case errors.Is(out.err, runtime.ErrSessionInitializing) || errors.Is(out.err, runtime.ErrRuntimeUnavailable):
 		return txStep{Fail: causeStartDeferred, Err: out.err}
 	case runtime.IsProviderCapacity(out.err) && out.paced:
-		return txStep{Fail: causeCapacity, Err: out.err}
+		return txStep{Write: restorePatch(out.undo, v.Meta), Fail: causeCapacity, Err: out.err}
 	case runtime.IsProviderCapacity(out.err): // no ticket, or the poison valve blamed this template: legacy's failure arms, which back off
-		return txStep{Fail: causeStartError, Err: out.err}
+		return failStart(v, out, causeStartError, out.err)
 	case died && (v.RT.Class == rtAbsent || v.RT.Class == rtCorpse || v.RT.Class == rtZombie):
-		return txStep{Fail: causeDiedDuringStartup, Err: out.err} // C5a2's abandon class
+		return failStart(v, out, causeDiedDuringStartup, out.err)
 	case errors.Is(out.err, runtime.ErrSessionExists) && (v.RT.Class == rtCorpse || v.RT.Class == rtZombie):
 		return txStep{Refuse: causeHeldDead}
+	case out.err != nil && !errors.Is(out.err, runtime.ErrSessionExists) && cause == causeAttribution && v.Row.PendingCreateClaim:
+		return failStart(v, out, causeAttribution, out.err) // deferred, with its #46 accrual
 	case out.err != nil && !errors.Is(out.err, runtime.ErrSessionExists):
-		return txStep{Fail: causeStartError, Err: out.err}
+		return failStart(v, out, causeStartError, out.err)
 	default:
 		return txStep{Refuse: cause}
 	}
@@ -417,7 +449,7 @@ func commitStep(v txView) txStep {
 		patch[startupHealthActiveCountMetadataKey], patch[startupHealthActiveKindMetadataKey] = "0", ""
 	}
 	noted := &notedRuntime{Name: strings.TrimSpace(v.Row.SessionName), At: v.Now}
-	return txStep{Write: patch, Facts: effectFacts{Noted: noted}, Pass: landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}
+	return txStep{Write: patch, Last: true, Facts: effectFacts{Noted: noted}, Pass: startEnd{landed: &landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}}
 }
 
 // landedCommit is what a landed commit hands the after-commit Call.
@@ -426,12 +458,18 @@ type landedCommit struct {
 	name, display string
 }
 
-// afterCommit clears the #46 episode (a lost clear only delays, v5 §13) and
-// records legacy's start telemetry; it never fails the effect.
-func afterCommit(_ context.Context, c txCaps, in landedCommit) (struct{}, error) {
-	if in.out.accrued {
-		_ = c.episode.clear(in.out.health)
+// afterStart is the commit section's Call: after a landed commit it clears
+// the #46 episode (a lost clear only delays, v5 §13) and records legacy's
+// start telemetry, and never fails the effect; after a start that did not
+// commit, the failure's reads and #46 accrual (readStartFailure).
+func afterStart(ctx context.Context, c txCaps, in startEnd) (startFailureRead, error) {
+	if in.failed != nil {
+		telemetry.RecordAgentStart(context.Background(), in.failed.name, in.failed.display, in.failed.err)
+		return readStartFailure(ctx, c, *in.failed), nil
 	}
-	telemetry.RecordAgentStart(context.Background(), in.name, in.display, nil)
-	return struct{}{}, nil
+	if in.landed.out.accrued {
+		_ = c.episode.clear(in.landed.out.health)
+	}
+	telemetry.RecordAgentStart(context.Background(), in.landed.name, in.landed.display, nil)
+	return startFailureRead{}, nil
 }

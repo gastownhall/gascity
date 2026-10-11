@@ -10,14 +10,15 @@ import (
 
 // decideRow's start arms (CONTRACT v5 §4, S1; plan C5b): A10's adopt and
 // A17's heartbeat respawn and A18's start, whose effects are C5a1's adopt
-// and bringUp. A10's rollback waits for C5a2's effect and its StaleSelf
-// exit for C5a3's. A committed row
+// and bringUp, and A10's rollback (C5a2). A10's StaleSelf exit waits for
+// C5a3's effect. A committed row
 // whose claim outlived its commit (START-037, SESS-542) is A6's claim
 // clear, not an adopt: S1 leaves a committed row alone.
 
 // Start decide reasons. A held start names its gate.
 const (
 	decideAdopt             = "adopt"
+	decideRollback          = "rollback"
 	decideStart             = "start"
 	decideHeartbeatRespawn  = "heartbeat-respawn"         // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"  // SESS-537/538: legacy restarts the next tick
@@ -39,6 +40,28 @@ func armAdopt(r *rowFacts) (intent, bool) {
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	return intent{Kind: intentAdopt, Reason: decideAdopt, Basis: basis}, true
+}
+
+// armRollback is A10's rollback (v5 §4 A10, C3): a pending create the
+// allocation reads past its never-started deadline with nothing running
+// (its rollback candidate), undesired (a Drain row, C5b-2) with its runtime
+// gone or dead, or under a name another row's runtime holds. The effect reads
+// the runtime fresh and attributes it (C3, O2, C8.2(a)).
+func armRollback(r *rowFacts) (intent, bool) {
+	e := r.entry
+	if !r.row.Info.PendingCreateClaim || e == nil {
+		return intent{}, false
+	}
+	switch {
+	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
+	case e.Desired == desireDrain && e.Liveness.startCandidate():
+	case e.Liveness == livenessOccupied:
+	default:
+		return intent{}, false
+	}
+	r.rests |= restRuntime
+	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
+	return intent{Kind: intentRollback, Reason: decideRollback, Basis: basis}, true
 }
 
 // armHeartbeatRespawn is A17 (SESS-602; v5.9i): a row the allocation does
@@ -90,13 +113,16 @@ func (r *rowFacts) restart() (intent, bool) {
 // create a crash interrupted launches again on its own bead (S7).
 func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	e, info := r.entry, r.row.Info
-	var patch session.MetadataPatch
+	var patch, kept session.MetadataPatch
 	if committed(info) && r.gone() {
 		var accrued bool
 		if patch, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
-		info = foldInfo(info, patch)
+		info, kept = foldInfo(info, patch), patch
+		if r.asleepStranded() {
+			kept, _ = deadRuntimePatch(r, false)
+		}
 	}
 	now := r.w.Now
 	if isFailedCreateSessionInfo(info) {
@@ -119,7 +145,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch}, true
+	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Kept: kept}, true
 }
 
 // startHealed is heal, an A6 row write, or the start the start arms (A17,
@@ -141,6 +167,11 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
 	it.Patch, it.Key = patch, heal.Key
+	if heal.Reason != decideDeadRuntimeHeal { // a dead runtime's heal is the start's own (startIntent's Kept)
+		kept := maps.Clone(heal.Patch)
+		maps.Copy(kept, it.Kept)
+		it.Kept = kept
+	}
 	switch {
 	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal

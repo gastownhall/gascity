@@ -255,6 +255,14 @@ type CityRuntime struct {
 	// reload, like asyncStartLimiter.
 	capacityGuard *endpointCapacityGuard
 
+	// strandedAlerts raises session.stranded_claims across ticks
+	// (work_release.go); built on first use (strandedClaimAlerter).
+	strandedAlerts     *strandedClaimAlerts
+	strandedAlertsOnce sync.Once
+	// deadAssigneeKeeps dedupes the dead-assignee sweep's keep log across
+	// ticks.
+	deadAssigneeKeeps deadAssigneeKeepLog
+
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
 	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
@@ -1349,7 +1357,7 @@ func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
 			continue
 		}
 		if phase.session && p.seatWork == nil {
-			p.seatWork = newSeatWork(cr.workLegs())
+			p.seatWork = cr.newSeatWork()
 		}
 		if phase.run(cr, p) {
 			return false
@@ -3163,7 +3171,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// arm of this very tick is about to act on (the release-first ordering plus
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase, &cr.deadAssigneeKeeps)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
@@ -3178,6 +3186,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, time.Now())
 		assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores, released)
 	}
+	detectStrandedClaims(sw.Legs(), sessStore.Store, sessionBeads.OpenInfos(), cr.strandedClaimAlerter(), time.Now())
 	// Detached handoff orphans: the tick repairs only the beads the journal named
 	// since the last pass. The whole-corpus scan this replaced was a live
 	// open-corpus read of the city ledger and every rig, serially, on every tick
@@ -4059,7 +4068,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
 	}
-	sw := newSeatWork(cr.workLegs())
+	sw := cr.newSeatWork()
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into

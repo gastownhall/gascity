@@ -426,7 +426,11 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 			}
 			d := replayDivergence{Tick: tk.ID, At: tk.At.Format(time.RFC3339Nano), Template: k[0], Class: k[1], Legacy: c.legacy, V2: c.v2, Records: c.records, Intents: c.intents}
 			slices.Sort(c.arms)
-			d.Family, d.Item = replayFamily(d, c.arms, built, rec, info)
+			heals := 0
+			if h := cells[[2]string{k[0], "heal"}]; h != nil {
+				heals = len(slices.DeleteFunc(slices.Clone(h.intents), func(i string) bool { return !strings.HasPrefix(i, intentRowHeal+"/"+decideTimerHeal) }))
+			}
+			d.Family, d.Item = replayFamily(d, c.arms, built, rec, info, heals)
 			sum.Divergences[d.Family]++
 			out = append(out, d)
 		}
@@ -438,14 +442,24 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
 // by item, a deferred arm, INC-003, unknown-never-destroys, a harness gap
 // (by what the export cannot carry: a pool template's start, which rests on
-// demand), or unexplained.
-// arms are the legacy records' owning arms. The two evidence families need
-// as many rows of the template showing the cause, as v2 traced it, as legacy
-// acted beyond v2: INC-003 a row v2 held for undesired-wake-grace.
-// C8.9's fresh attach and pending reads run in the effect, which a trace-only
-// pass never runs, so the replay cannot see that family.
-func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info) (family, item string) {
+// demand), a replay approximation, or unexplained. arms are the legacy
+// records' owning arms. The two evidence families need as many rows of the
+// template showing the cause, as v2 traced it, as legacy acted beyond v2:
+// INC-003 a row v2 held for undesired-wake-grace. C8.9's fresh attach and
+// pending reads run in the effect, which a trace-only pass never runs, so
+// the replay cannot see that family.
+//
+// A replay approximation is a difference the one-pass, trace-only replay
+// makes itself: a v2 close it proposes that the close's L5 work read (in the
+// effect, over work the export does not carry) would decide, and a close
+// legacy made where heals of the template's rows in this pass (A6's timer
+// heal, one pass before A21's close of the same row) number at least the
+// closes v2 is short.
+func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info, heals int) (family, item string) {
 	if d.V2 > d.Legacy {
+		if d.Class == "close" {
+			return "replay approximation", "close's L5 runs in the effect"
+		}
 		return "unexplained", ""
 	}
 	var sec string
@@ -486,6 +500,8 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		return "harness gap", "no exported demand"
 	case d.Class == "drain" && min(undesired, undesiredRecords) >= short:
 		return "INC-003", ""
+	case d.Class == "close" && heals >= short:
+		return "replay approximation", "timer heal precedes the close"
 	case replayDestructive[d.Class] && unknown >= short:
 		return "unknown-never-destroys", ""
 	}
@@ -591,25 +607,28 @@ func TestReplayFamilies(t *testing.T) {
 	built := map[string]bool{"A18": true, "A20": true, "A21": true}
 	for _, tc := range []struct {
 		name, arm, class, record, reason string
-		v2                               int
+		v2, heals                        int
 		family, item                     string
 	}{
-		{"v2 only", "A20", "heal", "", "", 1, "unexplained", ""},
-		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, "v5 §12.2", "1"},
-		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A17"},
-		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, "harness gap", "no exported demand"},
-		{"a named session's start", "A18", "start", "x/start_candidate/wake", "", 0, "unexplained", ""},
-		{"INC-003", "A20", "drain", "x/drain/orphaned", decideWakeGrace, 0, "INC-003", ""},
-		{"woken lately, not held for the grace", "A20", "drain", "x/drain/orphaned", decideDrainWorkKept, 0, "unexplained", ""},
-		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, "unknown-never-destroys", ""},
-		{"idle drain", "A20", "drain", "x/drain/idle", decideWakeGrace, 0, "unexplained", ""},
-		{"INC-003 on one row of two", "A20", "drain", "x/drain/orphaned,x/drain/orphaned", decideWakeGrace, 0, "unexplained", ""},
+		{"v2 only", "A20", "heal", "", "", 1, 0, "unexplained", ""},
+		{"a v2-only close", "A21", "close", "", "", 1, 0, "replay approximation", "close's L5 runs in the effect"},
+		{"a close a timer heal precedes", "A21", "close", "x/closed/orphaned", "", 0, 1, "replay approximation", "timer heal precedes the close"},
+		{"two closes one heal precedes", "A21", "close", "x/closed/orphaned,x/closed/orphaned", "", 0, 1, "unexplained", ""},
+		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, 0, "v5 §12.2", "1"},
+		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, 0, "deferred arm", "A17"},
+		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, 0, "harness gap", "no exported demand"},
+		{"a named session's start", "A18", "start", "x/start_candidate/wake", "", 0, 0, "unexplained", ""},
+		{"INC-003", "A20", "drain", "x/drain/orphaned", decideWakeGrace, 0, 0, "INC-003", ""},
+		{"woken lately, not held for the grace", "A20", "drain", "x/drain/orphaned", decideDrainWorkKept, 0, 0, "unexplained", ""},
+		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, 0, "unknown-never-destroys", ""},
+		{"idle drain", "A20", "drain", "x/drain/idle", decideWakeGrace, 0, 0, "unexplained", ""},
+		{"INC-003 on one row of two", "A20", "drain", "x/drain/orphaned,x/drain/orphaned", decideWakeGrace, 0, 0, "unexplained", ""},
 	} {
 		rec := &passTrace{Rows: []rowTrace{{Key: k, Template: "t", Reason: tc.reason}}}
 		records := strings.Split(tc.record, ",")
 		template := cmp.Or(map[string]string{"a named session's start": "n"}[tc.name], "t")
 		d := replayDivergence{Template: template, Class: tc.class, Legacy: len(records) * (1 - tc.v2), V2: tc.v2, Records: records}
-		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info); f != tc.family || i != tc.item {
+		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info, tc.heals); f != tc.family || i != tc.item {
 			t.Errorf("%s: family %q item %q, want %q %q", tc.name, f, i, tc.family, tc.item)
 		}
 	}

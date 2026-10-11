@@ -9,8 +9,8 @@
   },
   "divergences_by_family": {
     "INC-003": 1,
-    "deferred arm": 1,
     "harness gap": 1,
+    "replay approximation": 1,
     "unexplained": 3,
     "v5 §12.2": 1
   }

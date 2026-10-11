@@ -51,6 +51,8 @@ const (
 	capReadStores                     // the read-only city and rig stores (reads)
 	capProviderStart                  // the start's provider, endpoint breaker and clock (a Call's)
 	capEpisode                        // the #46 startup-health episode record (a Call's)
+	capRetire                         // the retired-session cleanup after a close (an around's)
+	capRelease                        // the close's raw work legs, for its release Call and its around's cascade
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -69,7 +71,8 @@ type txCaps struct {
 	episode startupHealthRecord // capEpisode
 	// by is the controller, as a Call's leasing helper (a Manager start or
 	// stop) is handed it, carrying the effect's lease (callWatched).
-	by session.Actor
+	by      session.Actor
+	release *closeReleases // capRelease
 }
 
 // startCaps are what the start's Calls hold to admit the endpoint ticket and
@@ -85,11 +88,16 @@ type startCaps struct {
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
-// reaches no write and none of a Call's handles (provider start, routing,
-// release, kill); C5a1's endpoint gate may add Eligible here, never Admit.
+// reaches no row write and none of a Call's handles (provider start,
+// routing, kill), but two after-close writers: the close's cascade
+// (capRelease), which writes only after its close landed, and a closed row's
+// cleanup (capRetire), which writes only its waits and bindings; C5a1's
+// endpoint gate may add Eligible here, never Admit.
 type aroundCaps struct {
-	it    intent
-	reads effectReads // capReadStores: read-only
+	it      intent
+	reads   effectReads     // capReadStores: read-only
+	release *closeReleases  // capRelease
+	retire  *retiredCleanup // capRetire, on the pass's clock
 }
 
 // capsFor is it's txCaps under grant.
@@ -107,6 +115,9 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capEpisode != 0 {
 		c.episode = p.held.episode
+	}
+	if grant&capRelease != 0 {
+		c.release = p.held.release
 	}
 	return c
 }
@@ -312,6 +323,10 @@ type section struct {
 	// which the effect lint covers; each set by one write, never read by the
 	// transaction.
 	probeDef, decideDef, callDef any
+	// when, set by calledWhen, decides from the concluded step's Pass
+	// whether the Call runs at all: a skipped Call is no write, so it passes
+	// no gate, opens no latch and runs no seam.
+	when func(pass any) bool
 }
 
 // probed is a section whose Probe, a bounded read under both locks after the
@@ -346,6 +361,9 @@ const (
 	// callStop stops one: the full premise holds after it, a start's
 	// before it included.
 	callStop
+	// callWork writes work beads (a release), not the runtime: the premise
+	// after it is the one before it.
+	callWork
 )
 
 // called is sec with a provider Call after it, run under the name lock with
@@ -362,6 +380,22 @@ func called[In, Out any](kind callKind, sec section, call func(context.Context, 
 		return call(ctx, c, typed)
 	}
 	sec.callDef = call
+	return sec
+}
+
+// calledWhen is called with an opt-in skip: the Call runs only when when
+// accepts the step's Pass (a corpse to remove, a release to make). By
+// default a section's Call always runs, and opens the latch like a write.
+// Both are stored:
+//
+//gc:stored-param call
+//gc:stored-param when
+func calledWhen[In, Out any](kind callKind, sec section, when func(In) bool, call func(context.Context, txCaps, In) (Out, error)) section {
+	sec = called(kind, sec, call)
+	sec.when = func(pass any) bool {
+		typed, ok := pass.(In)
+		return ok && when(typed)
+	}
 	return sec
 }
 
@@ -404,7 +438,11 @@ type txFence struct {
 // txStep is Decide's verdict: refuse or fail (writing nothing), write, or
 // neither. Done ends the effect after the step: landed if a section wrote,
 // otherwise a no-op with Cause. Without Done, the section's Call and the
-// next section run. Pass is what the section's Call takes.
+// next section run. Pass is what the section's Call takes. A Fail with a
+// Write (or a Terminal) is an abandon (v5 S3): the write lands, and the
+// effect ends failed with its cause. Last runs the section's Call, then
+// ends the effect: a landed commit's after-commit Call, ahead of the
+// sections only a failure reaches.
 type txStep struct {
 	Write    session.MetadataPatch
 	Terminal session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
@@ -412,6 +450,7 @@ type txStep struct {
 	Fail     string
 	Err      error
 	Done     bool
+	Last     bool
 	Cause    string
 	Facts    effectFacts
 	Pass     any
@@ -481,7 +520,13 @@ func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec, latch
 		return runSpec(ctx, p, it, spec, c)
 	}
 	ran := false
-	return spec.around(ctx, aroundCaps{it: it, reads: c.reads}, func() settlement {
+	a := aroundCaps{it: it, reads: c.reads, release: c.release}
+	if spec.caps&capRetire != 0 {
+		r := p.held.retire
+		r.clock = p.Clock
+		a.retire = &r
+	}
+	return spec.around(ctx, a, func() settlement {
 		if ran {
 			return settlement{Outcome: settledFailed, Cause: causeAroundRun}
 		}
@@ -569,6 +614,7 @@ type tx struct {
 	basis   rowBasis              // its incarnation and token
 	started bool                  // a callStart ran, and no callStop since
 	landed  bool                  // a section's write landed
+	last    bool                  // the concluded step ends the effect after its Call (txStep.Last)
 	facts   effectFacts
 	pass    any // the concluded step's Pass, to its section's Call
 	view    txView
@@ -587,7 +633,10 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		if end {
 			break
 		}
-		if t.view.prev, t.view.prevErr = nil, nil; sec.call == nil {
+		if t.view.prev, t.view.prevErr = nil, nil; sec.call == nil || sec.when != nil && !sec.when(t.pass) {
+			if t.last {
+				break
+			}
 			continue
 		}
 		if err := t.c.at(ctx, seamBeforeCall); err != nil {
@@ -596,8 +645,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		}
 		// A provider call is a write: an effect the executor abandoned first
 		// never calls, and one abandoned during it is ambiguous.
+		final := i == len(sections)-1 || t.last
 		if ctx.Err() != nil || !t.c.latch.begin() {
-			if s.Outcome != settledLanded || i != len(sections)-1 {
+			if s.Outcome != settledLanded || !final {
 				s = ended(ctx) // a landed last section stays landed: its Call never fails the effect
 			}
 			break
@@ -613,8 +663,11 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			s = injected(err)
 			break
 		}
-		if i == len(sections)-1 && t.view.prevErr != nil {
+		if final && t.view.prevErr != nil {
 			s = settlement{Outcome: settledFailed, Cause: causeCallError, Err: t.view.prevErr}
+		}
+		if t.last {
+			break
 		}
 	}
 	s.Facts = t.facts
@@ -662,8 +715,8 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			fallthrough
 		case len(step.Write) == 0:
 			t.facts.merge(step.Facts)
-			t.pass = step.Pass
-			return t.done(step), step.Done
+			t.pass, t.last = step.Pass, step.Last
+			return t.done(step), step.Done || step.Fail != ""
 		}
 		// The CAS lost to another writer: read again and decide again.
 	}
@@ -721,10 +774,14 @@ func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
 	return refused(causeCAS), true
 }
 
-// done is the settlement after a concluded step: landed once a section
-// wrote, otherwise a no-op with the step's cause.
+// done is the settlement after a concluded step: an abandon's failure once
+// its write landed, landed once a section wrote, otherwise a no-op with the
+// step's cause.
 func (t *tx) done(step txStep) settlement {
-	if t.landed {
+	switch {
+	case step.Fail != "":
+		return settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
+	case t.landed:
 		s := settlement{Outcome: settledLanded}
 		if len(step.Write) > 0 { // this step's write stood in for a refusal (healInstead)
 			s.Cause = step.Cause
@@ -795,7 +852,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	switch {
 	case step.Refuse != "":
 		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
-	case step.Fail != "":
+	case step.Fail != "" && len(step.Write) == 0 && len(step.Terminal) == 0:
 		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
 	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
 		s = settlement{Outcome: settledFailed, Cause: causeStep}

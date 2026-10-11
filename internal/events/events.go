@@ -183,6 +183,14 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// SessionStrandedClaims fires when claims no lane serves (an unserved
+	// route, or an expanded workflow root with no route of its own) stay
+	// assigned to a closed or retired session: stranded work, which no sweep
+	// releases (owner ruling O5, revised). The close completed; the claims were
+	// kept rather than released into no lane. It fires when the operation
+	// completes and again every 15 minutes (D6's cadence) while they stay, at
+	// once when the set of claims changes.
+	SessionStrandedClaims = "session.stranded_claims"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -502,6 +510,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	SessionStrandedClaims,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,

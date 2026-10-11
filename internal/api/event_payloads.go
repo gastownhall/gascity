@@ -577,6 +577,40 @@ func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, te
 	return b
 }
 
+// SessionStrandedClaimsPayload carries the machine-readable context for a
+// session.stranded_claims event: claims no lane serves that stay assigned to
+// a closed or retired session rather than being released into no lane.
+type SessionStrandedClaimsPayload struct {
+	SessionID   string          `json:"session_id" doc:"Canonical session bead ID of the closed or retired seat holding the claims."`
+	SessionName string          `json:"session_name,omitempty" doc:"Runtime session name from the session bead metadata, when set."`
+	Template    string          `json:"template,omitempty" doc:"Template of the seat, when set."`
+	Kind        string          `json:"kind" doc:"What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close)."`
+	Claims      []StrandedClaim `json:"claims" doc:"The stranded claims, sorted by bead ID."`
+}
+
+// StrandedClaim is one claim a session.stranded_claims event reports.
+type StrandedClaim struct {
+	BeadID string `json:"bead_id" doc:"The claim's work bead ID."`
+	Route  string `json:"route,omitempty" doc:"The route the claim would be released into, when it has one: no configured agent serves it."`
+	Reason string `json:"reason" doc:"Why it was kept: unserved-route."`
+}
+
+// IsEventPayload marks SessionStrandedClaimsPayload as an events.Payload variant.
+func (SessionStrandedClaimsPayload) IsEventPayload() {}
+
+// SessionStrandedClaimsPayloadJSON builds the JSON wire form for attachment
+// to an events.Event.Payload field.
+func SessionStrandedClaimsPayloadJSON(sessionID, sessionName, template, kind string, claims []StrandedClaim) json.RawMessage {
+	b, _ := json.Marshal(SessionStrandedClaimsPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Kind:        kind,
+		Claims:      claims,
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -751,6 +785,7 @@ func init() {
 	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
+	events.RegisterPayload(events.SessionStrandedClaims, SessionStrandedClaimsPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})

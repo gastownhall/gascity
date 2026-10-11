@@ -8,6 +8,7 @@ import (
 	"log"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -144,6 +145,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	keeps *deadAssigneeKeepLog,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -151,7 +153,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
@@ -217,6 +219,7 @@ func releaseOrphanedPoolAssignments(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	keepLog *deadAssigneeKeepLog, // nil: log every keep
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -365,14 +368,10 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
-		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		// The verb's route guard is the one this sweep's pre-filter lacks:
+		// an expanded workflow root's run_target is no lane (NEW-5).
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
+			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -385,6 +384,37 @@ func releaseOrphanedPoolAssignments(
 		})
 	}
 	return released
+}
+
+// deadAssigneeKeepLog is the last logged keep reason by bead, so a claim the
+// sweep keeps every tick (a detached probe alive, an unserved route) logs
+// once per reason, not per tick. Its owner (the controller, the v2 lane)
+// keeps it across ticks; a nil log logs every keep.
+type deadAssigneeKeepLog struct {
+	mu   sync.Mutex
+	last map[string]string
+}
+
+// log logs why the dead-assignee sweep kept id, when the reason changed
+// since the last log, and reports whether it logged.
+func (l *deadAssigneeKeepLog) log(id, assignee, why string) bool {
+	if why == "" {
+		return false
+	}
+	if l != nil {
+		l.mu.Lock()
+		repeat := l.last[id] == why
+		if l.last == nil {
+			l.last = make(map[string]string)
+		}
+		l.last[id] = why
+		l.mu.Unlock()
+		if repeat {
+			return false
+		}
+	}
+	log.Printf("releaseOrphanedPoolAssignments: kept %q of dead assignee %q: %s", id, assignee, why)
+	return true
 }
 
 // releaseConfirmedOrphanSessionWork releases the pool-routed work still held by
@@ -442,23 +472,9 @@ func releaseConfirmedOrphanSessionWork(
 	}
 
 	var released []releasedPoolAssignment
+	seat := releaseSeatOfInfo(info)
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		if _, ok := identifiers[assignee]; !ok {
-			continue
-		}
-		template := routedToOrLegacyWorkflowTarget(wb)
-		if template == "" {
-			continue
-		}
-		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+		if _, ok := identifiers[strings.TrimSpace(wb.Assignee)]; !ok {
 			continue
 		}
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
@@ -468,17 +484,9 @@ func releaseConfirmedOrphanSessionWork(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, seat, cfg, ReleaseOpts{}); len(out.Released) > 0 {
+			released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
-			continue
-		}
-		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
 }

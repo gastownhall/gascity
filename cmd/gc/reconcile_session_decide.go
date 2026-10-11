@@ -84,7 +84,7 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 //
 //gc:pure
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
-	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
+	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k], partial: len(a.Snapshot.Partial.Global) > 0}
 	r.row, r.found = w.Census.Rows[k]
 	if f := w.fresh; f != nil && f.k == k {
 		r.fresh = f.rt
@@ -140,6 +140,9 @@ type rowFacts struct {
 	next  time.Time
 	rests rests      // what the arm deciding reads through the fresh accessors
 	fresh *txRuntime // the effect's fresh runtime read (World.withRuntime), else nil
+	// partial is a pass with a global partial cause (P-3): nothing closes.
+	// Not the snapshot's mode, which a suspended city overwrites.
+	partial bool
 }
 
 // rests are the fresh facts a decision rests on (EFFECT-STRUCTURE §2.2;
@@ -180,7 +183,7 @@ type rowArm struct {
 // rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
 // (A1, A6) takes one line per row. Later PRs insert their arms at their
 // numbers: A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline
-// (C7c), A10's rollback (C5a2), A11-A17 and A21.
+// (C7c), A11-A17 and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A1", armCensusOnly},
@@ -199,10 +202,12 @@ var rowArms = []rowArm{
 	{"A8", armBaseline},
 	{"A9", armLivenessUnknown},
 	{"A10", armAdopt},
+	{"A10", armRollback},
 	{"A17", armHeartbeatRespawn},
 	{"A18", armStart},
 	{"A19", armDrainVoidCancel},
 	{"A20", armDrainBegin},
+	{"A21", armClose},
 }
 
 // decideRow's other reasons.
