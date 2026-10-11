@@ -179,7 +179,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return healInstead(v, txStep{Refuse: causeSessionName})
-	case session.HoldsInfo(v.Row, v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
+	case session.HoldsInfo(foldInfo(v.Row, v.It.Patch), v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too; TODO(R7): Disposition
 		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}

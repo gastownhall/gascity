@@ -26,7 +26,7 @@ const (
 	// call needs an unbounded hold; the ceiling comfortably exceeds any realistic
 	// silent operation while stopping an oversized --duration (e.g. 8760h) from
 	// pinning a session's timers for an effectively unbounded window.
-	maximumHeartbeatDuration = 12 * time.Hour
+	maximumHeartbeatDuration = session.MaxHeartbeatDuration
 )
 
 // validateHeartbeatDuration bounds a requested hold against the floor and

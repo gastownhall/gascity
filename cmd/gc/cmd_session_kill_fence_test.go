@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -701,5 +702,43 @@ func TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged(t *testing.T) {
 	}
 	if got := mustGetBead(t, mem, b.ID).Metadata["suspended_at"]; got != "2026-10-11T00:00:00Z" {
 		t.Fatalf("suspended_at = %q, want the stamp written during the fence's write", got)
+	}
+}
+
+// Kills a no-fence kill sync that writes hold keys the fence leaves (the
+// delta review's D22): over an operator suspend, a heartbeat, a wait's
+// intent and an idle stop, killSleepPatch writes exactly the disposition
+// keys writeSessionKillFence writes, so a wait or a heartbeat stays.
+func TestKillSleepPatchWritesTheFencesHoldKeys(t *testing.T) {
+	now := time.Now().UTC()
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	classKeys := func(p map[string]string) map[string]string {
+		out := map[string]string{}
+		lifecycle := sessionpkg.LifecycleOnly(p)
+		for k, v := range p {
+			if _, ok := lifecycle[k]; !ok {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	for name, meta := range map[string]map[string]string{
+		"operator suspend": {"state": "suspended", "sleep_intent": "user-hold", "held_until": future, "suspended_at": now.Format(time.RFC3339)},
+		"heartbeat":        {"state": "active", "held_until": future},
+		"wait intent":      {"state": "asleep", "sleep_intent": string(sessionpkg.SleepReasonWaitHold), "wait_hold": "true"},
+		"idle stop":        {"state": "active", "sleep_intent": "idle-stop-pending"},
+	} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Title: "s", Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fence, err := writeSessionKillFence(store, b.ID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := classKeys(killSleepPatch(meta, now)), classKeys(fence.wrote); !maps.Equal(got, want) {
+			t.Errorf("%s: killSleepPatch writes hold keys %v, the fence %v", name, got, want)
+		}
 	}
 }

@@ -542,6 +542,9 @@ func TestEndpointGateRefusalDoesNotBackOffRow(t *testing.T) {
 		{settlement{Outcome: settledRefused, Cause: causeEndpointGate}, false},
 		{settlement{Outcome: settledFailed, Cause: causeCapacity}, false},
 		{settlement{Outcome: settledFailed, Cause: causeStartError}, true},
+		{settlement{Outcome: settledLanded}, false},
+		{settlement{Outcome: settledLanded, Cause: causeEndpointGate}, false}, // a heal written in an endpoint refusal's stead
+		{settlement{Outcome: settledLanded, Cause: causeSessionName}, true},   // and in another refusal's: backed off as the refusal
 	} {
 		p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, nil)
 		k := rowKey{Leg: rowLeg, ID: "a"}
@@ -1038,49 +1041,65 @@ func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
 	}
 }
 
-// Kills a heal lost behind its start (should-fix 2): a start carrying its
-// A6 heal that refuses before its PreWake (the endpoint's breaker open, no
-// template) writes the heal alone, but only while its fresh read still finds
-// the runtime absent, on which the heal rests.
+// Kills a heal lost behind its start: a start carrying its A6 heal that
+// refuses before its PreWake (the endpoint's breaker open, no template, an
+// invalid name, a hold, refused worktree evidence) writes the heal alone,
+// settling with the refusal's cause, but only while its fresh read still
+// finds the runtime absent, on which the heal rests. A hold the intent's own
+// patch writes (a quarantining accrual) refuses it too.
 func TestRefusedStartStillHeals(t *testing.T) {
 	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	open := func(k *txKit) {
+		guard := newEndpointCapacityGuard(func() time.Time { return gatherNow })
+		k.it.Endpoint = endpointKey("provider:test-agent")
+		trip, _ := guard.Admit(k.it.Endpoint, "outside", "outside")
+		trip.Resolve(verdictCapacity)
+		k.p.held.start.capacity = guard
+	}
+	refusedWork := func(k *txKit) {
+		k.p.Alloc.Snapshot.Entries[k.it.Key] = &selectionEntry{Binding: &bindingTarget{WorktreeSpec: &worktree.Spec{BeadID: "w-1"}}}
+		old := verifyWorktree
+		verifyWorktree = func(worktree.Spec) (worktree.Report, error) { return worktree.Report{}, errors.New("not owned") }
+		k.t.Cleanup(func() { verifyWorktree = old })
+	}
 	for _, tc := range []struct {
-		name       string
-		open, tmpl bool // the endpoint's breaker open; the template resolves
-		alive      bool
-		wantState  string
+		name      string
+		meta      []string
+		tmpl      bool
+		arrange   func(*txKit)
+		patch     session.MetadataPatch // more in the intent's own patch
+		cause     string
+		wantState string
 	}{
-		{"endpoint gate", true, true, false, "asleep"},
-		{"no template", false, false, false, "asleep"},
-		{"no template over a live runtime", false, false, true, "active"},
+		{"endpoint gate", nil, true, open, nil, causeEndpointGate, "asleep"},
+		{"no template", nil, false, nil, nil, causeTemplate, "asleep"},
+		{"no template over a live runtime", nil, false, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, nil, causeTemplate, "active"},
+		{"an invalid session name", []string{"session_name", ""}, true, nil, nil, causeSessionName, "asleep"},
+		{"an operator's hold", []string{"sleep_intent", "user-hold"}, true, nil, nil, causeHeld, "asleep"},
+		{"a quarantine its own patch writes", nil, true, nil, session.MetadataPatch{"quarantined_until": gatherNow.Add(time.Hour).Format(time.RFC3339)}, causeHeld, "asleep"},
+		{"refused worktree evidence", nil, true, refusedWork, nil, causeWorktree, "asleep"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			k, _ := launchKit(t, "active", "session_key", "k-1", "started_config_hash", "h", "last_woke_at", woke)
+			k, _ := launchKit(t, "active", append([]string{"session_key", "k-1", "started_config_hash", "h", "last_woke_at", woke}, tc.meta...)...)
 			row := k.p.World.Census.Rows[k.it.Key]
 			k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{}}
 			if tc.tmpl {
 				tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
 				k.p.World.Templates.entries[templateMemoKeyOf(row.Info)] = templateResolution{TP: tp}
 			}
-			if tc.open {
-				guard := newEndpointCapacityGuard(func() time.Time { return gatherNow })
-				k.it.Endpoint = endpointKey("provider:test-agent")
-				trip, _ := guard.Admit(k.it.Endpoint, "outside", "outside")
-				trip.Resolve(verdictCapacity)
-				k.p.held.start.capacity = guard
-			}
-			if tc.alive {
-				k.runtimeAs("gc-1", "tok", nil)
+			if tc.arrange != nil {
+				tc.arrange(k)
 			}
 			k.it.Reason = decideStart
-			heal, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}})
+			heal, _ := deadRuntimePatch(&rowFacts{w: k.p.World, row: row, entry: &selectionEntry{Liveness: livenessGone, Desired: desireWake}}, true)
+			maps.Copy(heal, tc.patch)
 			k.it.Patch, k.it.Heal = heal, &intent{Kind: intentRowHealFresh, Key: k.it.Key, Reason: decideDeadRuntimeHeal, Patch: heal}
 			s := k.runKind()
 			if got := k.meta("state"); got != tc.wantState || len(k.starts()) != 0 {
 				t.Fatalf("settlement %+v: state %q, %d starts; want %q and no start", s, got, len(k.starts()), tc.wantState)
 			}
-			if healed := tc.wantState == "asleep"; healed != (s.Outcome == settledLanded) {
-				t.Fatalf("settlement %+v, want landed %v", s, healed)
+			if healed := tc.wantState == "asleep"; healed != (s.Outcome == settledLanded) || s.Cause != tc.cause {
+				t.Fatalf("settlement %+v, want landed %v with cause %q", s, healed, tc.cause)
 			}
 		})
 	}

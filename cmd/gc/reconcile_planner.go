@@ -381,7 +381,8 @@ func (p *planner) record(ev events.Event) {
 }
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
-// resets its record; a refusal, failure or ambiguous outcome (an abandoned
+// resets its record; a refusal (a landing with a cause, a heal written in a
+// refusal's stead, included), failure or ambiguous outcome (an abandoned
 // write) backs it off with its cause, except a swap pause and an endpoint-gate
 // refusal, deferrals the gate itself paces.
 func (p *planner) backoffSettled(s settlement) {
@@ -391,9 +392,9 @@ func (p *planner) backoffSettled(s settlement) {
 	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
+	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

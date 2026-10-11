@@ -151,7 +151,7 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
 		return intent{}, false
 	}
-	patch, _ := deadRuntimePatch(r)
+	patch, _ := deadRuntimePatch(r, true)
 	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, patch)
 }
 
@@ -167,9 +167,16 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // the row for the tick ("record, fold, continue"): A18 starts it on the next
 // pass, as legacy's next tick does (a stranded seat's in this one:
 // asleepStranded).
-func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
+//
+// With heal false the patch is the death's accrual alone, the row left
+// committed: a stranded seat's record of its death while its restart
+// cannot run (startHealed).
+func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accrued bool) {
 	info := r.row.Info
-	patch = asleepHealPatch(info)
+	patch = session.MetadataPatch{}
+	if heal {
+		patch = asleepHealPatch(info)
+	}
 	_, draining := activeStop(r.row)
 	until := r.w.Now.Add(defaultQuarantineDuration)
 	var accrual session.ExitAccrual
@@ -208,12 +215,9 @@ func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 	return patch, true
 }
 
-// heartbeatHeld reports SESS-602's heartbeat hold: a live hold no sleep
-// intent explains, within a heartbeat's horizon (maximumHeartbeatDuration
-// plus an hour's skew). The timer is trimmed, as operatorDormant's.
+// heartbeatHeld reports SESS-602's heartbeat hold (Disposition.HeartbeatHeld).
 func heartbeatHeld(info session.Info, now time.Time) bool {
-	until, ok := parseRFC3339Metadata(strings.TrimSpace(info.HeldUntil))
-	return ok && until.After(now) && !until.After(now.Add(maximumHeartbeatDuration+time.Hour)) && strings.TrimSpace(info.SleepIntent) == ""
+	return session.DispositionOfInfo(info).HeartbeatHeld(now)
 }
 
 // armAwakeHeal is legacy's heal of an asleep row whose own runtime is alive

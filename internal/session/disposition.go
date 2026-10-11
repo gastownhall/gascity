@@ -252,11 +252,17 @@ func (d Disposition) OperatorDormant(now time.Time) bool {
 		d.Until.After(now) || d.Quarantine.After(now)
 }
 
+// MaxHeartbeatDuration bounds one agent heartbeat's hold (gc runtime
+// heartbeat --duration).
+const MaxHeartbeatDuration = 12 * time.Hour
+
 // HeartbeatHeld reports an agent heartbeat keeping a live row up (A17,
-// SESS-602): a live held_until under no sleep intent at all, as legacy and
-// v2's heartbeatHeld read it. A bare wait_hold beside it does not stop it.
+// SESS-602, v5.9i): a live held_until under no sleep intent at all, within a
+// heartbeat's horizon (MaxHeartbeatDuration plus an hour's skew), so an
+// operator hold whose intent a blind write cleared is not one. A bare
+// wait_hold beside it does not stop it.
 func (d Disposition) HeartbeatHeld(now time.Time) bool {
-	return d.Heartbeat.After(now) && strings.TrimSpace(d.Encode()["sleep_intent"]) == ""
+	return d.Heartbeat.After(now) && !d.Heartbeat.After(now.Add(MaxHeartbeatDuration+time.Hour)) && strings.TrimSpace(d.Encode()["sleep_intent"]) == ""
 }
 
 // KeepsSlot reports a row whose slot no free or close may take: an

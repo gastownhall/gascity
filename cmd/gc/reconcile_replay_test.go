@@ -434,7 +434,8 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
 // by item, a deferred arm, INC-003, unknown-never-destroys, a harness gap
-// (by what the export cannot carry), or unexplained.
+// (by what the export cannot carry: a pool template's start, which rests on
+// demand), or unexplained.
 // arms are the legacy records' owning arms. The two evidence families need
 // as many rows of the template showing the cause as legacy acted beyond v2.
 // C8.9's fresh attach and pending reads run in the effect, which a trace-only
@@ -474,7 +475,7 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		}
 	}
 	switch {
-	case d.Class == "start" && d.V2 == 0:
+	case d.Class == "start" && d.V2 == 0 && demandDriven(d.Template, info):
 		// A start rests on demand, and the export carries no work beads: the
 		// replay feeds every leg empty demand, so AL1 wants no seat legacy
 		// woke for its work (C5b: mc's resume-tier polecat, bd's worker).
@@ -485,6 +486,21 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		return "unknown-never-destroys", ""
 	}
 	return "unexplained", ""
+}
+
+// demandDriven reports a template whose rows are pool seats, none a named
+// session's: its starts rest on demand. A named always session's do not.
+func demandDriven(template string, info map[string]session.Info) bool {
+	pool := false
+	for _, i := range info {
+		if i.Template == template {
+			if i.ConfiguredNamedSession {
+				return false
+			}
+			pool = pool || i.PoolManaged
+		}
+	}
+	return pool
 }
 
 // writeReplay writes divergence.jsonl and divergence_summary.json into dir.
@@ -567,7 +583,7 @@ func TestReplaySampleMatchesExpectedDivergences(t *testing.T) {
 func TestReplayFamilies(t *testing.T) {
 	at := time.Date(2026, 10, 5, 0, 2, 0, 0, time.UTC)
 	k := rowKey{Leg: rowLeg, ID: "r1"}
-	info := map[string]session.Info{"r1": {Template: "t", LastWokeAt: at.Add(-time.Minute).Format(time.RFC3339)}}
+	info := map[string]session.Info{"r1": {Template: "t", PoolManaged: true, LastWokeAt: at.Add(-time.Minute).Format(time.RFC3339)}, "n1": {Template: "n", ConfiguredNamedSession: true}}
 	built := map[string]bool{"A18": true, "A20": true, "A21": true}
 	for _, tc := range []struct {
 		name, arm, class, record, reason string
@@ -578,6 +594,7 @@ func TestReplayFamilies(t *testing.T) {
 		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, "v5 §12.2", "1"},
 		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A17"},
 		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, "harness gap", "no exported demand"},
+		{"a named session's start", "A18", "start", "x/start_candidate/wake", "", 0, "unexplained", ""},
 		{"INC-003", "A20", "drain", "x/drain/orphaned", "", 0, "INC-003", ""},
 		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, "unknown-never-destroys", ""},
 		{"idle drain", "A20", "drain", "x/drain/idle", "", 0, "unexplained", ""},
@@ -585,7 +602,8 @@ func TestReplayFamilies(t *testing.T) {
 	} {
 		rec := &passTrace{Rows: []rowTrace{{Key: k, Template: "t", Reason: tc.reason}}}
 		records := strings.Split(tc.record, ",")
-		d := replayDivergence{Template: "t", Class: tc.class, Legacy: len(records) * (1 - tc.v2), V2: tc.v2, Records: records}
+		template := cmp.Or(map[string]string{"a named session's start": "n"}[tc.name], "t")
+		d := replayDivergence{Template: template, Class: tc.class, Legacy: len(records) * (1 - tc.v2), V2: tc.v2, Records: records}
 		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info, at); f != tc.family || i != tc.item {
 			t.Errorf("%s: family %q item %q, want %q %q", tc.name, f, i, tc.family, tc.item)
 		}

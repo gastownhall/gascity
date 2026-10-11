@@ -225,8 +225,8 @@ func TestTimerHealStartsAWantedRowInTheSamePass(t *testing.T) {
 
 // Kills a persistent pool seat's young death left to a next pass that never
 // comes (staging J23): AL1 never wakes such a seat asleep, so its accruing
-// death restarts it in the same pass, carrying the accrual, and keeps no
-// heal fallback that would strand it asleep; a seat with its work assigned
+// death restarts it in the same pass, carrying the accrual, and its fallback
+// records the death alone rather than strand it asleep; a seat with its work assigned
 // and a one-shot pool's, which AL1 wakes asleep, and a named row record the
 // death first, as legacy's.
 func TestDeadRuntimeAccrualRestartsAStrandedSeatInPlace(t *testing.T) {
@@ -257,9 +257,73 @@ func TestDeadRuntimeAccrualRestartsAStrandedSeatInPlace(t *testing.T) {
 			if got := it.Kind == intentStart; got != tc.inPlace {
 				t.Fatalf("decideRow = (%q, %q), want a same-pass restart %v", it.Kind, it.Reason, tc.inPlace)
 			}
-			if tc.inPlace && (it.Patch["churn_count"] != "1" || it.Heal != nil) {
-				t.Fatalf("restart patch %v heal %+v, want the churn accrued and no heal fallback", it.Patch, it.Heal)
+			if tc.inPlace && (it.Patch["churn_count"] != "1" || it.Heal == nil || it.Heal.Patch["churn_count"] != "1" || it.Heal.Patch["state"] != "") {
+				t.Fatalf("restart patch %v heal %+v, want the churn accrued and a fallback recording it alone", it.Patch, it.Heal)
 			}
 		})
+	}
+}
+
+// strandedCase is a persistent singleton pool seat with no work assigned,
+// committed, its runtime gone, woken ago before the pass.
+func strandedCase(t *testing.T, ago time.Duration, kv ...string) *healCase {
+	t.Helper()
+	meta := append([]string{"state", "active", "session_key", "k-1", "last_woke_at", gatherNow.Add(-ago).Format(time.RFC3339), "pool_managed", "true", "pool_slot", "1"}, kv...)
+	c := newHealCase(t, livenessGone, desireWake, meta...)
+	c.w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(1)}}}}
+	c.a.Snapshot.Entries[c.k].Template = "worker"
+	return c
+}
+
+// Kills a stranded seat's death recorded only by its start (review J1):
+// while the start cannot run, the death's class drifts with the pass clock
+// (a rapid crash turns churn at 30s, a productive death at 5m). Its start
+// carries the accrual alone, the row left committed, and once that lands
+// later passes record nothing more.
+func TestStrandedDeathIsRecordedOnce(t *testing.T) {
+	c := strandedCase(t, 10*time.Second, "wake_attempts", "2", "churn_count", "2")
+	it := c.decide()
+	if it.Kind != intentStart || it.Heal == nil {
+		t.Fatalf("decideRow = (%q, %q) heal %+v, want a start carrying the death's record", it.Kind, it.Reason, it.Heal)
+	}
+	rec := it.Heal.Patch
+	if _, healed := rec["state"]; healed || rec["wake_attempts"] != "3" || rec["last_woke_at"] != "" {
+		t.Fatalf("fallback %v, want the wake failure alone, last_woke_at cleared, the row left committed", rec)
+	}
+	if err := c.store.SetMetadataBatch(c.k.ID, rec); err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range []time.Duration{40 * time.Second, 6 * time.Minute} {
+		c2 := strandedCase(t, 10*time.Second)
+		if err := c2.store.SetMetadataBatch(c2.k.ID, c.meta(t)); err != nil {
+			t.Fatal(err)
+		}
+		c2.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c2.store))
+		c2.w.Now = gatherNow.Add(at)
+		it := c2.decide()
+		if it.Kind != intentStart || it.Heal != nil || it.Patch["churn_count"] != "" || it.Patch["wake_attempts"] != "" {
+			t.Fatalf("+%v: decideRow = (%q, %q) patch %v heal %+v, want a plain restart recording nothing more", at, it.Kind, it.Reason, it.Patch, it.Heal)
+		}
+	}
+}
+
+// Kills a stranded seat started past its own quarantine (review J2, D18):
+// the accrual that quarantines holds the start, and the heal lands with it.
+func TestStrandedQuarantineHoldsTheStart(t *testing.T) {
+	it := strandedCase(t, 10*time.Second, "wake_attempts", "4").decide()
+	if it.Kind == intentStart || it.Patch["quarantined_until"] == "" || it.Patch["state"] != "asleep" {
+		t.Fatalf("decideRow = (%q, %q) patch %v, want the heal with its quarantine and no start", it.Kind, it.Reason, it.Patch)
+	}
+}
+
+// Pins C5c1's leftover (review J3): a red provider holds a stranded seat's
+// restart, so A6 heals it asleep, where it stays until A21 closes it.
+func TestStrandedSeatUnderARedProviderHealsAsleep(t *testing.T) {
+	c := strandedCase(t, 10*time.Minute)
+	c.w.ProviderHealth = &providerHealthSnapshot{present: true, entries: map[string]bool{"claude": false}}
+	tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "claude"}}
+	c.w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(c.w.Census.Rows[c.k].Info): {TP: tp}}}
+	if it := c.decide(); it.Kind != intentRowHealFresh || it.Patch["state"] != string(session.StateAsleep) {
+		t.Fatalf("decideRow = (%q, %q) patch %v, want A6's heal asleep", it.Kind, it.Reason, it.Patch)
 	}
 }

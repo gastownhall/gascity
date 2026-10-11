@@ -335,8 +335,8 @@ func TestDispositionProjectionsMatchHolds(t *testing.T) {
 }
 
 // TestDispositionHeartbeatHeldMatchesSESS602: over the grid, HeartbeatHeld is
-// legacy SESS-602's and v2's heartbeatHeld: a live held_until under an empty
-// sleep_intent.
+// legacy SESS-602's: a live held_until under an empty sleep_intent, within a
+// heartbeat's horizon (v5.9i; the grid's holds all lie inside it).
 func TestDispositionHeartbeatHeldMatchesSESS602(t *testing.T) {
 	dispositionGrid(func(meta map[string]string) {
 		at, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["held_until"]))
@@ -452,6 +452,9 @@ func TestDispositionHeartbeatHeld(t *testing.T) {
 		{map[string]string{"held_until": future, "sleep_intent": string(SleepReasonWaitHold)}, false},
 		{map[string]string{"held_until": future, "sleep_intent": string(sleepIntentIdleStopPending)}, false},
 		{map[string]string{"held_until": future, "state": string(StateSuspended)}, true},
+		{map[string]string{"held_until": dispT0.Add(MaxHeartbeatDuration + time.Hour).Format(time.RFC3339)}, true}, // the horizon's edge
+		{map[string]string{"held_until": dispT0.Add(MaxHeartbeatDuration + time.Hour + time.Second).Format(time.RFC3339)}, false},
+		{map[string]string{"held_until": dispT0.AddDate(100, 0, 0).Format(time.RFC3339)}, false}, // an operator hold whose intent was cleared
 	} {
 		if got := DecodeDisposition(c.meta).HeartbeatHeld(dispT0); got != c.held {
 			t.Errorf("%v: HeartbeatHeld = %v, want %v", c.meta, got, c.held)

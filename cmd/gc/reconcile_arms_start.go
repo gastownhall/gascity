@@ -93,7 +93,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	var patch session.MetadataPatch
 	if committed(info) && r.gone() {
 		var accrued bool
-		if patch, accrued = deadRuntimePatch(r); accrued && !r.asleepStranded() {
+		if patch, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
 		info = foldInfo(info, patch)
@@ -128,7 +128,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 // hold, a dead runtime) restarts it in the same pass, as legacy heals and
 // wakes in one tick. A dead runtime's start decides on the unhealed row,
 // whose death startIntent accrues. The start keeps heal (intent.Heal) for
-// when it cannot run, but for a stranded seat's death.
+// when it cannot run; a stranded seat's death keeps only its accrual.
 func (r *rowFacts) startHealed(heal intent) intent {
 	healed := *r
 	if heal.Reason != decideDeadRuntimeHeal {
@@ -141,16 +141,23 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
 	it.Patch, it.Key = patch, heal.Key
-	if heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded() {
+	switch {
+	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal
+	default: // a stranded seat records its death alone and stays committed, so it is recorded once
+		if accrual, accrued := deadRuntimePatch(r, false); accrued {
+			recorded := heal
+			recorded.Patch = accrual
+			it.Heal = &recorded
+		}
 	}
 	return it
 }
 
 // asleepStranded reports a persistent pool seat with no work assigned, which
 // AL1 never wakes asleep (reusablePoolSessionInfo); legacy's pool-slot close
-// replaces it. Until A21 does (C5c1), its death restarts it in place, with no
-// heal fallback to leave it asleep for good (staging J23).
+// replaces it. Until A21 does (C5c1), its death restarts it in place, and
+// the fallback that leaves it asleep for good is not its (staging J23).
 func (r *rowFacts) asleepStranded() bool {
 	info := r.row.Info
 	if !info.PoolManaged || info.ConfiguredNamedSession || r.entry == nil || r.entry.AssignedWork != nil || r.w.Env == nil {

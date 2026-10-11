@@ -531,3 +531,42 @@ func TestSimYoungDeathRestartsAPoolSeatInPlace(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// Kills a deferred stranded death reclassified by a later pass (review J1,
+// the budget shape): three seats rapid-crash together with one wake per
+// pass (and room for their row writes); each records a wake failure, as
+// legacy records it in the tick it sees it, and is restarted in turn.
+func TestSimDeferredStrandedDeathsRecordOnce(t *testing.T) {
+	ids := []string{"gc-1", "gc-2", "gc-3"}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		one := 1
+		s.cfg.Daemon.MaxWakesPerTick, s.cfg.Daemon.ProbeConcurrency = &one, intPtr(4)
+		var rows []beads.Bead
+		for i, id := range ids {
+			row := poolRow(id, "worker", i+1, "active", "instance_token", "tok-"+id, "session_key", "k-"+id, "last_woke_at", plannerT0.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", "1")
+			s.sp.put(row.Metadata["session_name"], id, "1", "tok-"+id)
+			rows = append(rows, row, beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+		}
+		return rows, nil
+	}})
+	s.lag = false
+	s.sp.mu.Lock()
+	for _, id := range ids {
+		s.sp.drop("s-" + id)
+	}
+	s.sp.mu.Unlock()
+	for range len(ids) { // inside 30s of the last restart, before its stability clear
+		s.advance(simPatrol)
+		s.settle()
+	}
+	for _, id := range ids {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := b.Metadata; m["wake_attempts"] != "2" || m["churn_count"] != "" || !s.livePane(b) {
+			t.Errorf("%s: wake_attempts %q churn_count %q live %v, want the rapid crash recorded once and the seat restarted", id, m["wake_attempts"], m["churn_count"], s.livePane(b))
+		}
+	}
+	s.noViolations(t)
+}
