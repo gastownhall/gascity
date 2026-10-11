@@ -208,7 +208,12 @@ func TestPinnedSenderIgnoresOtherAddresses(t *testing.T) {
 // writeCountingStore counts the writes an archive makes.
 type writeCountingStore struct {
 	*readCountingStore
-	updates, setMetadata, closes int
+	updates, setMetadata, closes, closeAlls int
+}
+
+func (s *writeCountingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closeAlls++
+	return s.MemStore.CloseAll(ids, metadata)
 }
 
 func (s *writeCountingStore) Update(id string, opts beads.UpdateOpts) error {
@@ -227,9 +232,11 @@ func (s *writeCountingStore) Close(id string) error {
 }
 
 // TestArchiveFromInboxRetiresWithoutRereading pins the archive from inbox
-// rows: an injected auto-handoff is marked read, stamped and closed with one
-// update and one close and no read of the row the inbox already holds, while
-// ordinary mail and ids the inbox did not read are left alone.
+// rows: an injected auto-handoff is marked read, stamped and closed by ONE
+// close-with-metadata write and no read of the row the inbox already holds —
+// so a hook killed mid-archive leaves the handoff either archived or still
+// unread, never read-but-open — while ordinary mail and ids the inbox did not
+// read are left alone.
 func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
 	p := New(store)
@@ -256,21 +263,24 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 		t.Fatalf("InboxForRoutes: %v", err)
 	}
 	store.reset()
-	store.updates, store.setMetadata, store.closes = 0, 0, 0
+	store.updates, store.setMetadata, store.closes, store.closeAlls = 0, 0, 0, 0
 
 	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID, ordinary.ID, elsewhere.ID}); err != nil {
 		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
 	}
-	if store.gets != 0 || store.updates != 1 || store.setMetadata != 0 || store.closes != 1 {
-		t.Fatalf("archive made %d gets, %d updates, %d metadata writes, %d closes; want 0, 1, 0, 1",
-			store.gets, store.updates, store.setMetadata, store.closes)
+	if store.gets != 0 || store.updates != 0 || store.setMetadata != 0 || store.closes != 0 || store.closeAlls != 1 {
+		t.Fatalf("archive made %d gets, %d updates, %d metadata writes, %d closes, %d close-with-metadata writes; want 0, 0, 0, 0, 1",
+			store.gets, store.updates, store.setMetadata, store.closes, store.closeAlls)
 	}
 	b, err := store.MemStore.Get(handoff.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if b.Status != "closed" || !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
+	if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
 		t.Fatalf("archived handoff = status %q labels %v metadata %v", b.Status, b.Labels, b.Metadata)
+	}
+	if got, err := p.Get(handoff.ID); err != nil || !got.Read {
+		t.Fatalf("archived handoff reads back as (read=%v, %v), want a read, still addressable message", got.Read, err)
 	}
 	for _, id := range []string{ordinary.ID, elsewhere.ID} {
 		other, err := store.MemStore.Get(id)

@@ -598,22 +598,24 @@ func isInjectedAutoHandoff(b beads.Bead) bool {
 }
 
 // archiveInjectedAutoHandoff marks one injected handoff read and closes it,
-// retain-addressable. One update carries the read label, mail.read (so a later
-// SessionStart does not re-inject it and the read-gated TTL sweep can reclaim
-// it) and the retention close_reason — mirroring SweepReadMessagesBefore, so
+// retain-addressable, in ONE close-with-metadata write ([beads.Store.CloseAll]
+// of the one id): mail.read (so a later SessionStart does not re-inject it, a
+// read-back reports it read, and the read-gated purge can reclaim it) and the
+// retention close_reason — mirroring SweepReadMessagesBefore, so
 // isRemovedMessageBead keeps the closed handoff addressable (recoverable) until
 // PurgeReadMessageWisps reclaims it. Never a hard delete.
+//
+// One write is what makes an archive that a hook deadline cuts short safe:
+// there is no step after which the handoff is marked read but still open and
+// so neither archived nor delivered again. A store that applies the metadata
+// and the close as two operations underneath can still stop between them, and
+// that leaves the handoff open with no "read" label — unread, so the next hook
+// delivers it again rather than losing it.
 func (p *Provider) archiveInjectedAutoHandoff(id string) error {
-	if err := p.store.Update(id, beads.UpdateOpts{
-		Labels: []string{"read"},
-		Metadata: map[string]string{
-			mail.ReadMetadataKey: "true",
-			"close_reason":       RetentionSweepCloseReason,
-		},
+	if _, err := p.store.CloseAll([]string{id}, map[string]string{
+		mail.ReadMetadataKey: "true",
+		"close_reason":       RetentionSweepCloseReason,
 	}); err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return fmt.Errorf("marking %s read: %w", id, err)
-	}
-	if err := p.store.Close(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return fmt.Errorf("archiving %s: %w", id, err)
 	}
 	return nil

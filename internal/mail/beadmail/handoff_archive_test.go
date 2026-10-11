@@ -60,9 +60,10 @@ func TestArchiveInjectedAutoHandoffMarksReadRetainsAddressable(t *testing.T) {
 	if raw.Status != "closed" {
 		t.Errorf("raw.Status = %q, want closed", raw.Status)
 	}
-	if !hasLabel(raw.Labels, "read") {
-		t.Errorf("raw.Labels = %#v, missing %q (must be marked read)", raw.Labels, "read")
-	}
+	// The archive is one close-with-metadata write, so "marked read" is the
+	// mail.read mirror it carries — what every reader of closed mail (the
+	// message read-back below, PurgeReadMessageWisps) consults; the "read"
+	// label only filters open mail.
 	if got := raw.Metadata[mail.ReadMetadataKey]; got != "true" {
 		t.Errorf("raw.Metadata[%q] = %q, want %q", mail.ReadMetadataKey, got, "true")
 	}
@@ -73,8 +74,10 @@ func TestArchiveInjectedAutoHandoffMarksReadRetainsAddressable(t *testing.T) {
 	// Acceptance 1: still addressable through the Provider surface (recoverable
 	// via gc mail show / bd show), exactly like retention-swept read mail — not
 	// treated as user-removed.
-	if _, err := p.Get(auto.ID); err != nil {
+	if got, err := p.Get(auto.ID); err != nil {
 		t.Errorf("p.Get(injected auto-handoff) = %v, want addressable", err)
+	} else if !got.Read {
+		t.Errorf("p.Get(injected auto-handoff).Read = false, want it marked read")
 	}
 	if _, err := p.Read(auto.ID); err != nil {
 		t.Errorf("p.Read(injected auto-handoff) = %v, want addressable", err)
