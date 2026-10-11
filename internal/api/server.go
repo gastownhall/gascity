@@ -11,6 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -68,6 +70,9 @@ type Server struct {
 	// sessionLogSearchPaths overrides the default search paths for Claude
 	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
+
+	// StaleKeyDetectionWaiter overrides the worker factory's stale key detection wait.
+	StaleKeyDetectionWaiter session.StaleKeyDetectionWaiter
 
 	// structuredPeekPoll overrides the structured fallback stream's periodic
 	// history check in tests. Nil uses outputStreamPollInterval.
@@ -272,6 +277,11 @@ func newServer(state State, readOnly bool) *Server {
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
 		activityMemo:   worker.NewDerivedActivityMemo(),
+	}
+	if state != nil {
+		if _, isFake := state.SessionProvider().(*runtime.Fake); isFake {
+			s.StaleKeyDetectionWaiter = func(context.Context, string) error { return nil }
+		}
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for
