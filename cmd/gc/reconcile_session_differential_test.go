@@ -156,11 +156,6 @@ var parityFindings = map[string]parityEntry{
 	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so its later restart replaces the suspend stamp", []string{"state", "suspended_at", "slept_at"}},
 	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
 	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
-	// Owed by C5a2, which has no fixture until its start-failure path lands:
-	// legacy's wake-failure accrual (wakeFailureKeepsConversation) resets
-	// the conversation of a provider without a keyed transcript. v2's
-	// dead-runtime accrual writes that reset (deadRuntimePatch); C5a2's
-	// start failure must write the same ConversationResetPatch(true).
 	"idle-activity-unread": {
 		"BEHAVIORS SESS-601/585 (A20 idle begin, AL1 stage 6b); C6a2 replay finding (owner to rule)", "legacy idle-sleeps a live row its probe reads idle past sleep_after_idle (its drain, latch, signal and stop in one tick); v2's AL1 suppresses a live row only on a known I3 activity fact (configSleepSuppressed), and no observer sets LastActivityKnown, so v2 never decides the idle sleep of a live non-interactive or always-named session (AL1's idle stage covers on-demand and pool rows from detached_at), and A20's idle begin and latch do not fire there (C6a2b)",
 		[]string{"detached_at", "drain_at", "last_woke_at", "sleep_reason", "slept_at", "state"},
