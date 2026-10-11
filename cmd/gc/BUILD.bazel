@@ -1663,6 +1663,7 @@ go_test(
         "session_event_pump_acp_test.go",
         "session_event_pump_live_test.go",
         "session_event_pump_test.go",
+        "session_exit_fresh_read_test.go",
         "session_fields_runtime_test.go",
         "session_identity_test.go",
         "session_idle_kill_wake_treadmill_test.go",
