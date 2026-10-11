@@ -258,8 +258,8 @@ func TestInjectedAutoHandoffIsArchivedOnlyWhenTheHookCanFinish(t *testing.T) {
 					if !strings.Contains(stderr.String(), "auto-handoff") {
 						t.Fatalf("skipping the archive was silent; stderr=%q", stderr.String())
 					}
-				} else if b.Metadata["close_reason"] == "" {
-					t.Fatalf("archived handoff lacks its close_reason: labels %v metadata %v", b.Labels, b.Metadata)
+				} else if !hasBeadLabel(b.Labels, "read") || b.Metadata["close_reason"] == "" {
+					t.Fatalf("archived handoff lacks the read label or close_reason: labels %v metadata %v", b.Labels, b.Metadata)
 				}
 			})
 		}

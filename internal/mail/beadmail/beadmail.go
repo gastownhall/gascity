@@ -598,25 +598,36 @@ func isInjectedAutoHandoff(b beads.Bead) bool {
 }
 
 // archiveInjectedAutoHandoff marks one injected handoff read and closes it,
-// retain-addressable, in ONE close-with-metadata write ([beads.Store.CloseAll]
-// of the one id): mail.read (so a later SessionStart does not re-inject it, a
-// read-back reports it read, and the read-gated purge can reclaim it) and the
-// retention close_reason — mirroring SweepReadMessagesBefore, so
-// isRemovedMessageBead keeps the closed handoff addressable (recoverable) until
-// PurgeReadMessageWisps reclaims it. Never a hard delete.
+// retain-addressable, mirroring SweepReadMessagesBefore: mail.read (so a later
+// SessionStart does not re-inject it, a read-back reports it read, and the
+// read-gated purge can reclaim it), the retention close_reason (so
+// isRemovedMessageBead keeps the closed handoff addressable — recoverable —
+// until PurgeReadMessageWisps reclaims it) and the "read" label. Never a hard
+// delete.
 //
-// One write is what makes an archive that a hook deadline cuts short safe:
-// there is no step after which the handoff is marked read but still open and
-// so neither archived nor delivered again. A store that applies the metadata
-// and the close as two operations underneath can still stop between them, and
-// that leaves the handoff open with no "read" label — unread, so the next hook
-// delivers it again rather than losing it.
+// The order of the two writes is what makes an archive that a hook deadline
+// cuts short safe. The close comes first, as one close-with-metadata write
+// ([beads.Store.CloseAll] of the one id) carrying mail.read and the
+// close_reason; the "read" label, which is what hides OPEN mail from every
+// inbox read, is added only once the handoff is closed. So no step leaves it
+// read but still open — neither archived nor delivered again. Stopped before
+// or inside the close (a store that applies the metadata and the close as two
+// operations underneath can stop between them), the handoff is open with no
+// "read" label: unread, so the next hook delivers it again. Stopped after the
+// close, it is closed and read through mail.read, missing only the label, and
+// a later archive of the same id adds it idempotently.
 func (p *Provider) archiveInjectedAutoHandoff(id string) error {
 	if _, err := p.store.CloseAll([]string{id}, map[string]string{
 		mail.ReadMetadataKey: "true",
 		"close_reason":       RetentionSweepCloseReason,
-	}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+	}); err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
 		return fmt.Errorf("archiving %s: %w", id, err)
+	}
+	if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("labeling archived %s read: %w", id, err)
 	}
 	return nil
 }

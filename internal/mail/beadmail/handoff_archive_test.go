@@ -60,10 +60,9 @@ func TestArchiveInjectedAutoHandoffMarksReadRetainsAddressable(t *testing.T) {
 	if raw.Status != "closed" {
 		t.Errorf("raw.Status = %q, want closed", raw.Status)
 	}
-	// The archive is one close-with-metadata write, so "marked read" is the
-	// mail.read mirror it carries — what every reader of closed mail (the
-	// message read-back below, PurgeReadMessageWisps) consults; the "read"
-	// label only filters open mail.
+	if !hasLabel(raw.Labels, "read") {
+		t.Errorf("raw.Labels = %#v, missing %q (must be marked read)", raw.Labels, "read")
+	}
 	if got := raw.Metadata[mail.ReadMetadataKey]; got != "true" {
 		t.Errorf("raw.Metadata[%q] = %q, want %q", mail.ReadMetadataKey, got, "true")
 	}

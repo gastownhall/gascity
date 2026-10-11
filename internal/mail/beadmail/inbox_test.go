@@ -1,7 +1,9 @@
 package beadmail
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -209,15 +211,24 @@ func TestPinnedSenderIgnoresOtherAddresses(t *testing.T) {
 type writeCountingStore struct {
 	*readCountingStore
 	updates, setMetadata, closes, closeAlls int
+	// ops records the order of the writes.
+	ops []string
+	// updateErr, when set, fails every Update after counting it.
+	updateErr error
 }
 
 func (s *writeCountingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	s.closeAlls++
+	s.ops = append(s.ops, "closeAll")
 	return s.MemStore.CloseAll(ids, metadata)
 }
 
 func (s *writeCountingStore) Update(id string, opts beads.UpdateOpts) error {
 	s.updates++
+	s.ops = append(s.ops, "update")
+	if s.updateErr != nil {
+		return s.updateErr
+	}
 	return s.MemStore.Update(id, opts)
 }
 
@@ -232,11 +243,12 @@ func (s *writeCountingStore) Close(id string) error {
 }
 
 // TestArchiveFromInboxRetiresWithoutRereading pins the archive from inbox
-// rows: an injected auto-handoff is marked read, stamped and closed by ONE
-// close-with-metadata write and no read of the row the inbox already holds —
-// so a hook killed mid-archive leaves the handoff either archived or still
-// unread, never read-but-open — while ordinary mail and ids the inbox did not
-// read are left alone.
+// rows: an injected auto-handoff is stamped read and closed by ONE
+// close-with-metadata write, THEN given the "read" label, with no read of the
+// row the inbox already holds — so a hook killed mid-archive leaves the
+// handoff archived, archived without its label, or still unread, never
+// read-but-open — while ordinary mail and ids the inbox did not read are left
+// alone.
 func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
 	p := New(store)
@@ -268,15 +280,18 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID, ordinary.ID, elsewhere.ID}); err != nil {
 		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
 	}
-	if store.gets != 0 || store.updates != 0 || store.setMetadata != 0 || store.closes != 0 || store.closeAlls != 1 {
-		t.Fatalf("archive made %d gets, %d updates, %d metadata writes, %d closes, %d close-with-metadata writes; want 0, 0, 0, 0, 1",
+	if store.gets != 0 || store.updates != 1 || store.setMetadata != 0 || store.closes != 0 || store.closeAlls != 1 {
+		t.Fatalf("archive made %d gets, %d updates, %d metadata writes, %d closes, %d close-with-metadata writes; want 0, 1, 0, 0, 1",
 			store.gets, store.updates, store.setMetadata, store.closes, store.closeAlls)
+	}
+	if !slices.Equal(store.ops, []string{"closeAll", "update"}) {
+		t.Fatalf("archive wrote %v, want the close before the label (closeAll,update)", store.ops)
 	}
 	b, err := store.MemStore.Get(handoff.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
+	if b.Status != "closed" || !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" || b.Metadata["close_reason"] != RetentionSweepCloseReason {
 		t.Fatalf("archived handoff = status %q labels %v metadata %v", b.Status, b.Labels, b.Metadata)
 	}
 	if got, err := p.Get(handoff.ID); err != nil || !got.Read {
@@ -290,6 +305,50 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 		if other.Status != "open" || hasLabel(other.Labels, "read") {
 			t.Fatalf("%s was archived: status %q labels %v", id, other.Status, other.Labels)
 		}
+	}
+}
+
+// TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff pins the window
+// between the archive's two writes: when the "read" label cannot be added
+// after the close (a kill, or a store that refuses it), the handoff is still
+// closed, reads back read through mail.read and is never delivered again, and
+// the failed label write is reported rather than swallowed.
+func TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff(t *testing.T) {
+	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
+	p := New(store)
+	handoff, err := p.SendHandoff(mail.HandoffIntent{
+		From: "human", To: "sky", Subject: "context cycle", ThreadID: "t1",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	inbox, err := p.InboxForRoutes([]string{"sky"})
+	if err != nil {
+		t.Fatalf("InboxForRoutes: %v", err)
+	}
+	store.updateErr = errors.New("label write refused")
+
+	err = p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID})
+	if err == nil || !strings.Contains(err.Error(), "label write refused") {
+		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox = %v, want the label failure reported", err)
+	}
+	b, err := store.MemStore.Get(handoff.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" {
+		t.Fatalf("handoff after a failed label write = status %q metadata %v, want closed and read", b.Status, b.Metadata)
+	}
+	if got, err := p.Get(handoff.ID); err != nil || !got.Read {
+		t.Fatalf("handoff reads back as (read=%v, %v), want read", got.Read, err)
+	}
+	again, err := p.CheckAutoHandoffs([]string{"sky"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("CheckAutoHandoffs = %v, want the closed handoff never delivered again", again)
 	}
 }
 
