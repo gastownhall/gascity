@@ -1977,7 +1977,7 @@ func TestRuntimeHandleNudgeWaitIdleInteractionUnsupportedReturnsProviderUnsuppor
 		t.Fatalf("NewRuntimeHandle: %v", err)
 	}
 
-	result, err := handle.Nudge(context.Background(), NudgeRequest{
+	result, err := handle.Nudge(context.Background(), testActor(t, sessionpkg.ActorAgent), NudgeRequest{
 		Text:     "check deploy status",
 		Delivery: NudgeDeliveryWaitIdle,
 	})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func TestExitAccrualDecidesOnAFreshRead(t *testing.T) {
 					t.Fatal(err)
 				}
 				mgr := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithCityPath(env.city))
-				if err := mgr.Kill(row.ID); err != nil {
+				if err := mgr.Kill(context.Background(), testActorIn(t, sessionpkg.ActorOperator, env.city), row.ID); err != nil {
 					t.Fatal(err)
 				}
 				if err := fence.clear(env.store); err != nil {
