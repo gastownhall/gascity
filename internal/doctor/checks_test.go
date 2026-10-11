@@ -4413,7 +4413,7 @@ func TestDoltVersionCheck_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookPath(sleep): %v", err)
 	}
-	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\n"+sleepPath+" 5\n"), 0o755); err != nil {
+	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\nexec "+sleepPath+" 5\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)
