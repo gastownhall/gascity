@@ -65,7 +65,11 @@ func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.In
 				continue
 			}
 			if route, served := releaseRoute(legs.cfg, b, "", laneDirect); !served {
-				held[seat] = append(held[seat], strandedClaim{id: b.ID, route: route, reason: keptUnservedRoute})
+				reason := keptUnservedRoute
+				if _, carried := releaseRoute(legs.cfg, b, "", laneCarried); carried {
+					reason = failedBudget // the close's own lane serves it: its release ran out of budget
+				}
+				held[seat] = append(held[seat], strandedClaim{id: b.ID, route: route, reason: reason})
 			}
 		}
 	})

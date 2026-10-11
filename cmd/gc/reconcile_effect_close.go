@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -411,9 +412,12 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 		strand(c.alerts, releaseSeatOfBead(b), strings.TrimSpace(b.Metadata["state"]), out, c.now, c.stderr)
 	}
 	if it.Closing.Kind == closePoolSlot && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {
-		pruneAgentHomeWorktreeIfSafeInfo(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
+		pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
 	}
 }
+
+// pruneWorktree is pruneAgentHomeWorktreeIfSafeInfo; a test observes it.
+var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 
 // workDirInUse reports an open session row other than closed's whose work
 // dir is the prune's target (WorkerDirFromInfo: worker_dir, else work_dir),
@@ -421,7 +425,13 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 // started in the same slot keeps its worktree. A read error counts as in
 // use.
 func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool {
-	dir := session.WorkerDirFromInfo(sessionInfoFromBead(closed))
+	clean := func(dir string) string {
+		if dir = strings.TrimSpace(dir); dir == "" {
+			return ""
+		}
+		return filepath.Clean(resolveWorkDirAgainstCity(c.cityPath, dir))
+	}
+	dir := clean(session.WorkerDirFromInfo(sessionInfoFromBead(closed)))
 	if dir == "" {
 		return false
 	}
@@ -434,7 +444,7 @@ func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool 
 			return false
 		}
 		for _, k := range []string{beadmeta.WorkerDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
-			if strings.TrimSpace(r.Metadata[k]) == dir {
+			if clean(r.Metadata[k]) == dir {
 				return true
 			}
 		}

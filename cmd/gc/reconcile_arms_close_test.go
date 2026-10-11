@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -608,6 +609,56 @@ func TestCloseEffectEdges(t *testing.T) {
 		if evts, _ := c.rec.List(events.Filter{Type: events.SessionStrandedClaims}); len(evts) != 1 {
 			t.Fatalf("session.stranded_claims = %d, want the left claim alerted", len(evts))
 		}
+		// The detector's re-alert names it budget too, as the close did.
+		rec := events.NewFake()
+		detectStrandedClaims(c.w.WorkLegs, c.store, nil, &strandedClaimAlerts{rec: rec, scanned: gatherNow.Add(-strandedRealertEvery)}, gatherNow)
+		evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims})
+		if len(evts) != 1 || !strings.Contains(string(evts[0].Payload), `"reason":"`+failedBudget+`"`) {
+			t.Fatalf("re-alerts %+v, want one naming the claim %s", evts, failedBudget)
+		}
+	})
+	t.Run("a cascade on a canceled context releases nothing and stamps what it leaves (D4)", func(t *testing.T) {
+		c := orphan(t)
+		claim := c.work(t, "in_progress", routedClaim())
+		it := c.decide()
+		if err := c.store.Close(c.k.ID); err != nil {
+			t.Fatal(err)
+		}
+		rel := newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, io.Discard)
+		rel.cfg = c.cfg
+		ctx, cancel := context.WithCancel(context.Background()) // a shutdown: no deadline
+		cancel()
+		rel.cascade(ctx, it)
+		if got, _ := c.store.Get(claim.ID); got.Assignee != c.k.ID || got.Metadata[beadmeta.StrandedSessionMetadataKey] != c.k.ID {
+			t.Fatalf("claim assignee %q stamp %v, want kept and stamped", got.Assignee, got.Metadata)
+		}
+	})
+	t.Run("past its deadline a cascade neither prunes nor clears the current claim (D9, D10)", func(t *testing.T) {
+		pruned := 0
+		orig := pruneWorktree
+		pruneWorktree = func(session.Info, string, *config.City, io.Writer) { pruned++ }
+		t.Cleanup(func() { pruneWorktree = orig })
+		for _, past := range []bool{false, true} {
+			c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339),
+				"work_dir", "/city/.gc/worktrees/repo/worker-1", beadmeta.CurrentClaimBeadIDMetadataKey, "gw-x")
+			it := c.decide()
+			if err := c.store.Close(c.k.ID); err != nil {
+				t.Fatal(err)
+			}
+			rel := newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, io.Discard)
+			rel.cfg = c.cfg
+			at := time.Now().Add(time.Minute)
+			if past {
+				at = time.Now().Add(-time.Second)
+			}
+			ctx, cancel := context.WithDeadline(context.Background(), at)
+			rel.cascade(ctx, it)
+			cancel()
+			cleared := c.row(t).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey] == ""
+			if want := map[bool]int{false: 1, true: 1}[past]; pruned != want || cleared == past {
+				t.Fatalf("past %v: pruned %d (want %d), current claim cleared %v", past, pruned, want, cleared)
+			}
+		}
 	})
 	t.Run("the prune spares a work dir a successor shares", func(t *testing.T) {
 		dir := "/city/.gc/worktrees/repo/worker-1"
@@ -617,7 +668,7 @@ func TestCloseEffectEdges(t *testing.T) {
 			if rel.workDirInUse(c.store, c.row(t)) {
 				t.Fatalf("%s: in use with no successor", key)
 			}
-			if _, err := c.store.Create(sessionRow("succ", "template", "worker", "session_name", "s-succ", "pool_managed", "true", "pool_slot", "1", "state", "awake", key, dir)); err != nil {
+			if _, err := c.store.Create(sessionRow("succ", "template", "worker", "session_name", "s-succ", "pool_managed", "true", "pool_slot", "1", "state", "awake", key, dir+"/")); err != nil { // the same dir, uncleaned
 				t.Fatal(err)
 			}
 			if !rel.workDirInUse(c.store, c.row(t)) {
