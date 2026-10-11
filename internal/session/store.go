@@ -417,10 +417,11 @@ func (s *Store) SetState(id string, state State, reason string) error {
 	})
 }
 
-// Sleep records a non-terminal sleep/drain result via SleepPatch, keeping an
-// operator's user hold (ApplyKeepingUserHold). The city stop writes it.
+// Sleep records a non-terminal sleep/drain result: SleepPatch's lifecycle
+// with the disposition's Sleep cell (ApplySleep), which keeps an operator's
+// user hold. The city stop writes it.
 func (s *Store) Sleep(id, reason string, now time.Time) error {
-	_, err := s.ApplyKeepingUserHold(id, SleepPatch(now, reason))
+	_, err := s.ApplySleep(id, SleepPatch(now, reason))
 	return err
 }
 
@@ -460,46 +461,25 @@ func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
 	return patch
 }
 
-// ApplyKeepingUserHold writes a sleep patch decided from an older read,
-// fenced on a fresh one (UpdateMetadataFenced) and passed through
-// KeepUserHold, so an operator's suspend that landed since keeps its intent.
-// It returns the patch it wrote, for the caller's fold: nil with no error
-// when the row is closed, and an error when every CAS attempt lost.
-func (s *Store) ApplyKeepingUserHold(id string, patch MetadataPatch) (MetadataPatch, error) {
-	var written MetadataPatch
-	closed := false
-	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, _ PersistedResponse) MetadataPatch {
-		if closed = info.Closed; closed {
-			return nil
-		}
-		written = KeepUserHold(info, patch)
-		return written
-	})
+// SetWaitHold begins (on) or ends an agent's wait on the row: the
+// disposition's WaitBegin or WaitEnd cell, decided on a fresh read. A wait
+// never replaces an operator's user-hold intent. reason is the wait's, which
+// the wait hold no longer records.
+func (s *Store) SetWaitHold(id string, on bool, _ string) error {
+	ev := DispEvent{Kind: EvWaitEnd}
+	if on {
+		ev.Kind = EvWaitBegin
+	}
+	w, err := s.ApplyDispositionFresh(id, ActorAgent, ev, nil, time.Now())
 	switch {
 	case err != nil:
-		return nil, err
-	case closed:
-		return nil, nil
-	case !ok:
-		return nil, fmt.Errorf("writing session %q: lost to concurrent writes; retry", id)
+		return err
+	case w.Result == CommitClosed:
+		return fmt.Errorf("session %s: closed", id)
+	case w.Result != CommitLanded:
+		return fmt.Errorf("session %s: wait hold lost to concurrent writes; retry", id)
 	}
-	return written, nil
-}
-
-// SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
-// SetMetadataBatch(sessionID, {wait_hold, sleep_intent}) writes in cmd_wait.go.
-// When on is false both keys are cleared (empty-string write).
-func (s *Store) SetWaitHold(id string, on bool, reason string) error {
-	if on {
-		return s.ApplyPatch(id, MetadataPatch{
-			"wait_hold":    reason,
-			"sleep_intent": reason,
-		})
-	}
-	return s.ApplyPatch(id, MetadataPatch{
-		"wait_hold":    "",
-		"sleep_intent": "",
-	})
+	return nil
 }
 
 // setMetadataValue is the single-key write chokepoint. It is the byte-identical

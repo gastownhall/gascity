@@ -256,7 +256,6 @@ row:gc-1:last_woke_at=
 row:gc-1:sleep_reason=idle
 row:gc-1:slept_at=T+20s
 row:gc-1:state=asleep
-row:gc-1:suspended_at=
 runtime:s-gc-1=
 ## 2 past the drain timeout (+7m10s)
 ## 3 wake (+8m30s)
@@ -453,6 +452,46 @@ row:gc-1:effective_sleep_after_idle=5m
 row:gc-1:requested_sleep_after_idle=5m
 row:gc-1:sleep_policy_fingerprint=value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker
 row:gc-1:sleep_policy_source=agent
+=== a waiter sleeps
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1=1
+provider:SetMeta s-gc-1=2
+row:gc-1:alias=
+row:gc-1:alias_history=alias-gc-1
+row:gc-1:command=true
+row:gc-1:continuation_epoch=1
+row:gc-1:currently_processing_bead_id=gw-1
+row:gc-1:effective_sleep_after_idle=off
+row:gc-1:gc.trigger_bead_id=gw-1
+row:gc-1:gc.work_dir=<city>
+row:gc-1:requested_sleep_after_idle=off
+row:gc-1:session_origin=ephemeral
+row:gc-1:sleep_capability=full
+row:gc-1:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker
+row:gc-1:sleep_policy_source=legacy_off
+row:gc-1:synced_at=T+0s
+row:gc-1:work_dir=<city>
+runtime:s-gc-1:meta:BEADS_ACTOR=gc-1
+runtime:s-gc-1:meta:GC_AGENT=gc-1
+work:gw-1:gc.session_name=s-gc-1
+## 1 wait (+40s)
+~ op
+@ +20s
+event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}=1
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}=1
+event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}=1
+provider:RemoveMeta s-gc-1=6
+provider:SetMeta s-gc-1=4
+provider:Stop s-gc-1=1
+row:gc-1:drain_at=T+20s
+row:gc-1:last_woke_at=
+row:gc-1:sleep_reason=idle
+row:gc-1:slept_at=T+20s
+row:gc-1:state=asleep
+row:gc-1:stranded_event_emitted_at=T+20s
+runtime:s-gc-1=
+## 2 the next pass (+2m10s)
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
 @ +0s

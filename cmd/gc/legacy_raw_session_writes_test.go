@@ -32,8 +32,7 @@ type rawWriteVerb struct {
 // its caller's patch to a verb here must be listed itself.
 var rawSessionWriteVerbs = map[string]rawWriteVerb{
 	"ApplyPatch": {1, true}, "ApplyPatchInfo": {1, true}, "SetMarker": {1, true},
-	"ApplyKeepingUserHold": {1, true},
-	"applyStore":           {2, true}, "applySleepOptimistic": {2, true},
+	"applyStore": {2, true}, "applySleepOptimistic": {2, true},
 	"setMetaBatch": {2, true}, "writeSessionMetadata": {2, true},
 	"setMeta": {2, true}, "setMetadataValue": {1, true},
 	"SetMetadataBatch": {1, false}, "SetMetadata": {1, false}, "setWaitTerminalState": {1, false},

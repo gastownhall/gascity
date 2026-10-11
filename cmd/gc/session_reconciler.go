@@ -980,11 +980,20 @@ func finalizeDrainAckStoppedSession(
 	if info.RestartRequested == "true" {
 		batch["restart_requested"] = ""
 	}
-	// Decided from the tick's snapshot, so the write keeps an operator's user
-	// hold that a fresh read still shows (ApplyKeepingUserHold).
-	written, err := sessionFrontDoor(store).ApplyKeepingUserHold(info.ID, batch)
-	if err == nil && written == nil {
-		err = errors.New("row closed")
+	// A drain-ack is no disposition move: an idle stop's intent stays for the
+	// next pass's idle sleep (recoverPendingIdleSleepInfo). A drain that keeps
+	// assigned work completes as a sleep, decided from the tick's snapshot, so
+	// it writes the disposition's Sleep cell on a fresh read (ApplySleep).
+	var foldedInfo sessionpkg.Info
+	var err error
+	if hasAssignedWork {
+		var written sessionpkg.MetadataPatch
+		if written, err = sessionFrontDoor(store).ApplySleep(info.ID, batch); err == nil && written == nil {
+			err = errors.New("row closed")
+		}
+		foldedInfo = info.ApplyPatch(written)
+	} else {
+		foldedInfo, err = sessionFrontDoor(store).ApplyPatchInfo(info, batch)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
@@ -992,8 +1001,6 @@ func finalizeDrainAckStoppedSession(
 		// (zero result → applyTo no-op).
 		return drainAckFinalizeResult{}
 	}
-	batch = written
-	foldedInfo := info.ApplyPatch(batch)
 	// The raw metadata mirror loop is dropped (Step 5b): ApplyPatchInfo persisted
 	// the drain-ack batch and folded it onto the caller's coherent Info in one step
 	// (write-returns-Info, Step 6d), and no later this-tick reader consumes the raw
@@ -6988,8 +6995,13 @@ func beginIdleRespawnDrainIfIdle(
 	}
 	if info.SleepIntent == "idle-stop-pending" {
 		// The tick clears the idle intent after this (clearIdleStopPending):
-		// clear it here, so the drain's basis is the row the tick leaves.
-		patch["sleep_intent"] = ""
+		// clear it here (the IdleStopEnd cell), so the drain's basis is the
+		// row the tick leaves.
+		if ended, err := sessionpkg.DispositionOfInfo(info).Apply(sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopEnd}, sessionpkg.State(info.MetadataState), time.Time{}); err == nil {
+			for k, v := range ended.Changed() {
+				patch[k] = v
+			}
+		}
 	}
 	if sessFront == nil {
 		return false, nil, errors.New("session store is unavailable")

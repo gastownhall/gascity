@@ -114,7 +114,6 @@ row:gc-1:last_woke_at legacy="" v2="T-1h0m0s" [A20 drain-begin]
 row:gc-1:sleep_reason legacy="idle" v2="" [A20 drain-begin]
 row:gc-1:slept_at legacy="T+20s" v2="" [A20 drain-begin]
 row:gc-1:state legacy="asleep" v2="suspended" [suspended-row-heal]
-row:gc-1:suspended_at legacy="" v2="T+20s" [A20 drain-begin]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A20 drain-begin]
 @ +30s
 event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} resolved
@@ -160,7 +159,6 @@ row:gc-1:started_live_hash legacy="<changed>" v2="" [A20 managed-suspend]
 row:gc-1:started_provision_hash legacy="<changed>" v2="" [A20 managed-suspend]
 row:gc-1:state legacy="active" v2="awake" [A20 managed-suspend]
 row:gc-1:state_reason legacy="creation_complete" v2="" [A20 drain-begin]
-row:gc-1:suspended_at resolved
 row:gc-1:wake_request legacy="" v2="explicit" [A20 managed-suspend]
 row:gc-1:wake_requested_at legacy="" v2="T+8m10s" [A20 managed-suspend]
 runtime:s-gc-1 legacy="id=gc-1 epoch=2 token=<set> alive attached=false" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A20 managed-suspend]
@@ -244,6 +242,45 @@ row:gc-1:effective_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="5m" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_fingerprint legacy="value=5m|class=interactive_resume|source=agent|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
 row:gc-1:sleep_policy_source legacy="agent" v2="" [sleep-policy-keys]
+=== a waiter sleeps
+## 0 seed (+20s)
+@ +0s
+provider:RemoveMeta s-gc-1 legacy="1" v2="" [A7 identity]
+provider:SetMeta s-gc-1 legacy="2" v2="" [A7 identity]
+row:gc-1:alias legacy="" v2="alias-gc-1" [A7 identity]
+row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+runtime:s-gc-1:meta:BEADS_ACTOR legacy="gc-1" v2="" [A7 identity]
+runtime:s-gc-1:meta:GC_AGENT legacy="gc-1" v2="" [A7 identity]
+@ +10s
+provider:RemoveMeta s-gc-1 resolved
+provider:SetMeta s-gc-1 resolved
+## 1 wait (+40s)
+@ +20s
+event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} legacy="1" v2="" [A20 drain-begin]
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} legacy="1" v2="" [A20 drain-begin]
+event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]} legacy="1" v2="" [A21 stranded]
+provider:RemoveMeta s-gc-1 legacy="6" v2="" [A20 drain-begin]
+provider:SetMeta s-gc-1 legacy="4" v2="" [A20 drain-begin]
+provider:Stop s-gc-1 legacy="1" v2="" [A20 drain-begin]
+row:gc-1:drain_at legacy="T+20s" v2="" [A20 drain-begin]
+row:gc-1:last_woke_at legacy="" v2="T-1h0m0s" [A20 drain-begin]
+row:gc-1:sleep_reason legacy="idle" v2="" [A20 drain-begin]
+row:gc-1:slept_at legacy="T+20s" v2="" [A20 drain-begin]
+row:gc-1:state legacy="asleep" v2="awake" [A20 drain-begin]
+row:gc-1:stranded_event_emitted_at legacy="T+20s" v2="" [A21 stranded]
+runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A20 drain-begin]
+@ +30s
+event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"} resolved
+event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
+event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]} resolved
+provider:RemoveMeta s-gc-1 resolved
+provider:SetMeta s-gc-1 resolved
+provider:Stop s-gc-1 resolved
+## 2 the next pass (+2m10s)
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
 @ +0s
@@ -527,7 +564,6 @@ row:gc-1:state legacy="asleep" v2="suspended" [suspended-row-heal]
 provider:RemoveMeta s-gc-1 legacy="5" v2="" [§12.2#38 start-meta-clears]
 row:gc-1:slept_at legacy="" v2="T+1m0s" [suspended-row-heal]
 row:gc-1:state legacy="active" v2="awake" [suspended-row-heal]
-row:gc-1:suspended_at legacy="T+20s" v2="" [suspended-row-heal]
 @ +1m10s
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved

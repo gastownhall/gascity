@@ -177,26 +177,6 @@ func ClearWakeRequestPatch() MetadataPatch {
 // 100 years is effectively forever without risking time arithmetic overflow.
 const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
 
-// KeepUserHold is patch as written over fresh: when fresh carries an
-// operator's sleep_intent=user-hold, the intent stays, so a sleep decided from
-// an older read (a drain completion, a timer stop, a city stop) never turns
-// the operator's indefinite held_until into a heartbeat hold. The patch
-// carries fresh's value, so a caller folding it onto an older snapshot sees
-// the hold too; write it fenced on fresh's revision, or it could revive a
-// hold cleared since.
-func KeepUserHold(fresh Info, patch MetadataPatch) MetadataPatch {
-	// HoldUser reads no timer, so the clock does not matter here.
-	if _, ok := patch["sleep_intent"]; !ok || HoldsInfo(fresh, time.Time{}).In&HoldUser == 0 {
-		return patch
-	}
-	kept := make(MetadataPatch, len(patch))
-	for k, v := range patch {
-		kept[k] = v
-	}
-	kept["sleep_intent"] = string(SleepReasonUserHold)
-	return kept
-}
-
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{

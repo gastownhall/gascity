@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -131,4 +132,29 @@ func LifecycleOnly(patch MetadataPatch) MetadataPatch {
 		delete(out, k)
 	}
 	return out
+}
+
+// ApplySleep writes a sleep (a drain's completion, an idle sleep, a kill
+// site's sleep) decided on an older read: patch's lifecycle with the
+// disposition's Sleep cell, on a fresh read. An operator's suspend, a wait
+// and its intent stay (D-J 3); the idle stop's transient goes. It returns
+// the caller's fold: the patch written with the row's whole disposition as it
+// now stands, so a fold onto an older snapshot shows a hold that landed since;
+// nil with no error when the row is closed, and an error when every CAS
+// attempt lost.
+func (s *Store) ApplySleep(id string, patch MetadataPatch) (MetadataPatch, error) {
+	life := LifecycleOnly(patch)
+	w, err := s.ApplyDispositionFresh(id, ActorController, DispEvent{Kind: EvSleep}, func(Disposition, Disposition, Info) MetadataPatch { return life }, time.Time{}) // the Sleep cell reads no clock
+	switch {
+	case err != nil:
+		return nil, err
+	case w.Result == CommitClosed:
+		return nil, nil
+	case w.Result != CommitLanded:
+		return nil, fmt.Errorf("writing session %q: lost to concurrent writes; retry", id)
+	}
+	fold := make(MetadataPatch, len(w.Wrote)+len(dispositionKeys))
+	maps.Copy(fold, w.Wrote)
+	maps.Copy(fold, w.To.Encode())
+	return fold, nil
 }

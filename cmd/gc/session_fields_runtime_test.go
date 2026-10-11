@@ -212,7 +212,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator session key", "session_key", []string{"internal/session/manager.go:Manager.PersistSessionKey"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.PersistSessionKey(id, "key-2")) }},
-		{"operator wake", "churn_count held_until quarantined_until sleep_intent wait_hold wake_attempts wake_refused_event_at wake_request wake_requested_at", []string{"internal/session/wait_store.go:Store.wakeSessionFromBead"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"operator wake", "churn_count wake_attempts wake_refused_event_at wake_request wake_requested_at", []string{"internal/session/wait_store.go:Store.wakeSessionFromBead"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			_, err := sessionFrontDoor(rec).WakeSession(id, now, session.WakeOpts{})
 			must(t, err)
 		}},
