@@ -1113,6 +1113,10 @@ func TestReconcileSessionBeads_DrainingSeatsBelongToTheStopPendingHandler(t *tes
 	})
 
 	t.Run("immortal_runtime_is_never_closed_over", func(t *testing.T) {
+		oldTimeout, oldPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
+		drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = 50*time.Millisecond, 5*time.Millisecond
+		defer func() { drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll = oldTimeout, oldPoll }()
+
 		env := poolSeatEnv(t)
 		seat := newDrainingSeat(t, env)
 		env.sp.StopLeavesRunning = map[string]bool{poolSeatName: true}
