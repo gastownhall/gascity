@@ -146,7 +146,7 @@ var parityFindings = map[string]parityEntry{
 		"C6d, BEHAVIORS DRAIN-044", "legacy cancels an idle-respawn drain no longer eligible; A19 holds it until C6d completes its policy row",
 		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
-	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so a later wake neither restarts it nor is consumed", append([]string{"state", "wake_request", "wake_requested_at", "suspended_at", "slept_at"}, parityStartKeys...)},
+	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so its later restart replaces the suspend stamp", []string{"state", "suspended_at", "slept_at"}},
 	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
 	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
 	// Owed by C5a2, which has no fixture until its start-failure path lands:
@@ -160,11 +160,22 @@ var parityFindings = map[string]parityEntry{
 // parityUnported is legacy behavior that belongs to an arm or effect kind
 // not yet registered. The key's arm ("A18") or kind must stay unregistered.
 var parityUnported = map[string]parityEntry{
-	"rollback A10":    {"C5a2 (the rollback effect; A10's arm, C5b)", "legacy closes an undesired pending create past its never-started deadline; v2's A10 proposes the rollback once C5a2 registers its effect", []string{"status", "state", "close_reason", "closed_at"}},
-	"A21 close":       {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
-	"A21 stranded":    {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
-	"A7 identity":     {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
-	"A20 idle-sleep":  {"C6a2, BEHAVIORS SESS-532", "legacy drains an idle row (its probe answers idle) and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2 registers no drain-policy arm yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at"}, parityStartKeys...)},
+	// Unported with no fixture, since neither twin reads a provider-health
+	// registry (legacy's gate is nil there): legacy's ADR-0013 episode
+	// bookkeeping around A18's red skip, recordRedSkip, recordGreenTick and
+	// the once-per-episode emitProviderHealthGateAlert (stdout and
+	// provider.health_gate_alert). v2's A18 skips a red provider's start
+	// (TestDecideRowStartGates) but keeps no episode and records no alert.
+	// Owner: the C5b follow-up PR, with episode-mirror.
+	"rollback A10":   {"C5a2 (the rollback effect; A10's arm, C5b)", "legacy closes an undesired pending create past its never-started deadline; v2's A10 proposes the rollback once C5a2 registers its effect", []string{"status", "state", "close_reason", "closed_at"}},
+	"A21 close":      {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
+	"A21 stranded":   {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
+	"A7 identity":    {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
+	"A20 idle-sleep": {"C6a2, BEHAVIORS SESS-532", "legacy drains an idle row (its probe answers idle) and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2 registers no drain-policy arm yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at"}, parityStartKeys...)},
+	"A20 managed-suspend": {
+		"C6a2 (A20 + D2)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2 registers no drain-begin arm yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
+		append([]string{"state", "wake_request", "wake_requested_at"}, parityStartKeys...),
+	},
 	"A20 drain-begin": {"C6a2 (A20 + D2)", "legacy begins a drain v2 does not: on a live row its quarantine keeps from waking (canceled again once its work vetoes it), on an unwanted row past the INC-003 grace, and on a managed suspend; v2 registers no drain-begin arm yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"A21 killed-seat": {"C5c1 (#7314), owner ruling B1 (CONTRACT C3 killed pool seats)", "past the kill grace legacy releases a killed seat's open claim and closes it, and the freed demand creates and starts a fresh seat; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
@@ -1044,7 +1055,8 @@ func parityFixtures() []parityFixture {
 		}()}, Work: []parityRow{routedDemandBead("gw-1")}, Explain: started("gc-2", "worker-gc-2", "worker-2", created("gc-2"))},
 		// A18's gates (C5b). The twin has no provider-health registry, so
 		// health reads unknown and fails open in both copies; the red skip
-		// and the green tick are TestDecideRowStartGates'.
+		// is TestDecideRowStartGates', and the episode and its alert are
+		// unported (parityUnported's note).
 		// S1's start end to end: the PreWake's incarnation bump, one Start
 		// per admission, the commit; legacy's runtime meta clears are §12.2
 		// #38. The start's deadline, stale-key wait, panic recovery and

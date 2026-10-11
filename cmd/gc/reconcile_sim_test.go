@@ -1193,6 +1193,21 @@ var simMutants = []struct {
 		specs[intentRowHeal] = heal
 	}}},
 	{"an effect section runs outside the row's mutation lock", "LOCK ", simOpts{rowLock: func(_ string, fn func() error) error { return fn() }}},
+	// The PreWake keeps the row's token rather than minting one, so a row's
+	// second start creates a runtime under its first one's token. (A launch
+	// over a live runtime never reaches I2: S1's verb section refuses it.)
+	{"a PreWake reuses the row's token", "I2 ", simOpts{
+		specs: func(specs map[string]effectSpec) {
+			reuse := func(ctx context.Context, r effectReads, v txView) (preWakeFold, error) {
+				f, err := foldPreWake(ctx, r, v)
+				f.token = v.Row.InstanceToken
+				return f, err
+			}
+			s := specs[intentStart]
+			s.sections = []section{startSections[0], called(callStart, probed(reuse, preWakeStep), startLaunch), startSections[2]}
+			specs[intentStart] = s
+		},
+	}},
 }
 
 // Kills invariant checks that check nothing: the corpus catches each mutant

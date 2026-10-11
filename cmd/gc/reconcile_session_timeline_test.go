@@ -1117,14 +1117,16 @@ func operatorTimeline() []timelineFixture {
 	// restarted is a restart both copies make: legacy's runtime metadata
 	// clears and its next tick's active-to-awake heal.
 	restarted := tlMerged(tlIdent(), tlRestarted())
-	// woken is the managed-suspended row woken: legacy heals it asleep and
-	// restarts it, consuming the wake request (D7) in its start; v2 keeps it
-	// suspended (mc-92clf), so it neither restarts nor consumes the wake;
-	// settled, the row each leaves.
+	// woken is the managed-suspended row woken: legacy, whose drain stopped
+	// it, restarts it, consuming the wake request (D7) in its start; v2
+	// drains no managed suspend (A20, unported), so its runtime stays up and
+	// the wake neither restarts the row nor is consumed; settled, the row
+	// each leaves.
+	undrained := "A20 managed-suspend"
+	wakeRequest := map[string]string{"row:gc-1:wake_request": undrained, "row:gc-1:wake_requested_at": undrained}
+	woken := tlMerged(tlIdent(), tlStarted("worker-1", undrained), wakeRequest)
+	settled := tlMerged(tlIdent(), tlStartState(undrained), wakeRequest)
 	unhealed := "suspended-row-heal"
-	wakeRequest := map[string]string{"row:gc-1:wake_request": unhealed, "row:gc-1:wake_requested_at": unhealed}
-	woken := tlMerged(tlIdent(), tlStarted("worker-1", unhealed), wakeRequest)
-	settled := tlMerged(tlIdent(), tlStartState(unhealed), wakeRequest)
 	// healed is legacy's state heal of the suspended row whose runtime is
 	// gone: asleep, under the hold; v2 keeps it suspended.
 	healed := map[string]string{"row:gc-1:state": "suspended-row-heal"}
