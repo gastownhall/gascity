@@ -211,7 +211,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch)}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, patch, len(f.reset) > 0)}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: pass}
 }
@@ -220,15 +220,16 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 // patch wrote on v's row: the row as the part of its patch the start keeps
 // left it (intent.Kept: the heal it carries, as legacy's restore finds the
 // row its tick healed first; a stranded seat's death accrual alone, which
-// keeps it committed). A continuation reset the PreWake consumed stays
-// pending, so the next start rotates the continuation again.
-func preWakeUndoOf(v txView, patch session.MetadataPatch) preWakeUndo {
+// keeps it committed). A stale key's reset the PreWake consumed (staleKey)
+// stays pending, so the next start rotates the continuation again; any other
+// epoch bump is restored as legacy restores it.
+func preWakeUndoOf(v txView, patch session.MetadataPatch, staleKey bool) preWakeUndo {
 	row, meta := v.Row, v.Meta
 	if len(v.It.Kept) > 0 {
 		row, meta = foldInfo(row, v.It.Kept), v.It.Kept.Apply(meta)
 	}
 	u := newPreWakeUndo(row, meta, patch)
-	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && (meta["continuation_reset_pending"] == "true" || patch["continuation_epoch"] != meta["continuation_epoch"]) {
+	if v, ok := u.written["continuation_reset_pending"]; ok && v == "" && staleKey {
 		u.restore["continuation_reset_pending"] = "true"
 	}
 	return u

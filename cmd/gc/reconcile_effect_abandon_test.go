@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"strings"
 	"testing"
@@ -586,10 +587,9 @@ func TestLandedStartKeepsItsWaits(t *testing.T) {
 	}
 }
 
-// Kills an undo base other than the healed row: on a composed restart, the
-// undo v2's abandon restores is legacy's (newPreWakeUndo, the undo
-// restorePreWakeState applies) over the row its tick healed first, but for
-// the pending continuation reset, which v2 keeps.
+// Kills an undo base other than the healed row: on a composed restart that
+// fails, v2's restore leaves the row as legacy's restorePreWakeState leaves
+// the row its tick healed first.
 func TestComposedUndoMatchesLegacyRestore(t *testing.T) {
 	k := composedStart(t, nil, false)
 	b, _ := k.backing.Get("gc-1")
@@ -597,20 +597,35 @@ func TestComposedUndoMatchesLegacyRestore(t *testing.T) {
 	_, _, wake := preWakePatch(sessionInfoFromBead(beads.Bead{Metadata: healedMeta}), gatherNow, "tok-new")
 	patch := maps.Clone(k.it.Patch)
 	maps.Copy(patch, wake)
-	ours := preWakeUndoOf(txView{It: k.it, Row: sessionInfoFromBead(b), Meta: b.Metadata}, patch)
-	healed := b
-	healed.Metadata = healedMeta
-	legacy := newPreWakeUndo(sessionInfoFromBead(healed), healedMeta, wake)
-	for key, want := range legacy.restore {
-		if key == "continuation_reset_pending" {
-			continue
-		}
-		if got := ours.restore[key]; got != want || ours.written[key] != legacy.written[key] {
-			t.Errorf("%s: restores %q over %q, legacy's undo of the healed row %q over %q", key, got, ours.written[key], want, legacy.written[key])
+	ours := preWakeUndoOf(txView{It: k.it, Row: sessionInfoFromBead(b), Meta: b.Metadata}, patch, false)
+	woken := patch.Apply(b.Metadata)
+	after := restorePatch(ours, woken).Apply(woken)
+
+	// Legacy: the healed row, its PreWake, then restorePreWakeState.
+	m := beads.NewMemStore()
+	var kv []string
+	for key, v := range healedMeta {
+		kv = append(kv, key, v)
+	}
+	row, err := m.Create(sessionRow("gc-1", kv...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	undo := newPreWakeUndo(sessionInfoFromBead(row), row.Metadata, wake)
+	undo.token = "tok-new"
+	if err := m.SetMetadataBatch(row.ID, wake); err != nil {
+		t.Fatal(err)
+	}
+	woke, _ := m.Get(row.ID)
+	restorePreWakeState(preparedStart{candidate: startCandidate{info: sessionInfoFromBead(woke)}, preWakeUndo: undo}, sessionFrontDoor(m), io.Discard)
+	legacy, _ := m.Get(row.ID)
+	for _, key := range append([]string{"last_woke_at"}, preWakeRestoredKeys...) {
+		if after[key] != legacy.Metadata[key] {
+			t.Errorf("%s = %q, legacy's restore of the healed row %q", key, after[key], legacy.Metadata[key])
 		}
 	}
-	if ours.restore["state"] != "asleep" || ours.restore["continuation_reset_pending"] != "true" {
-		t.Fatalf("undo %v, want the healed asleep row with its reset pending", ours.restore)
+	if legacy.Metadata["state"] != "asleep" {
+		t.Fatalf("legacy's restore left state %q: the comparison is vacuous", legacy.Metadata["state"])
 	}
 }
 
@@ -628,5 +643,68 @@ func TestCapacityRefusalKeepsTheContinuationReset(t *testing.T) {
 	k.p.held.start.capacity, k.it.Endpoint = newEndpointCapacityGuard(func() time.Time { return now }), endpointKey("provider:test-agent")
 	if s := k.runKind(); s.Cause != causeCapacity || k.meta("continuation_epoch") != "5" || k.meta("continuation_reset_pending") != "true" {
 		t.Fatalf("settlement %+v epoch %q reset pending %q, want capacity, 5, the reset kept", s, k.meta("continuation_epoch"), k.meta("continuation_reset_pending"))
+	}
+}
+
+// Kills a Kept that drops what A6 folded beside a dead runtime's heal: the
+// heal clears detached_at with the death, and a failed composed restart
+// keeps it cleared, as legacy's tick wrote it before its start.
+func TestComposedStartKeepsTheFoldedHeal(t *testing.T) {
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	k, _ := launchKit(t, "active", "last_woke_at", woke, "detached_at", woke)
+	row := k.p.World.Census.Rows[k.it.Key]
+	r := &rowFacts{w: k.p.World, k: k.it.Key, row: row, found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessGone, Desired: desireWake, Template: "worker", AssignedWork: &assignedWorkView{BeadID: "gw-1"}}}
+	patch, _ := deadRuntimePatch(r, true)
+	patch["detached_at"] = ""
+	it := r.startHealed(intent{Kind: intentRowHealFresh, Reason: decideDeadRuntimeHeal, Key: k.it.Key, Patch: patch})
+	if it.Kind != intentStart {
+		t.Fatalf("startHealed = %+v, want a start", it)
+	}
+	it.Deadline = k.it.Deadline
+	k.it = it
+	k.sp.nextStart = errors.New("boom")
+	k.runKind()
+	if got := k.meta("detached_at"); got != "" {
+		t.Fatalf("detached_at %q, want the heal's clear kept", got)
+	}
+}
+
+// Kills the kept-reset rule applied past the stale key: a fresh-mode wake
+// bumps the continuation epoch with no reset pending, and a capacity refusal
+// restores the epoch with no reset left pending, as legacy restores it.
+func TestCapacityRefusalRestoresAFreshWakesEpoch(t *testing.T) {
+	k := failingLaunch(t, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity), "asleep", "wake_mode", "fresh", "continuation_epoch", "5", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	now := gatherNow
+	k.p.held.start.capacity, k.it.Endpoint = newEndpointCapacityGuard(func() time.Time { return now }), endpointKey("provider:test-agent")
+	if s := k.runKind(); s.Cause != causeCapacity || k.meta("continuation_epoch") != "5" || k.meta("continuation_reset_pending") != "" {
+		t.Fatalf("settlement %+v epoch %q reset pending %q, want capacity, 5, none pending", s, k.meta("continuation_epoch"), k.meta("continuation_reset_pending"))
+	}
+}
+
+// Kills an abandon a timed-out Start cannot reach under the effect's real
+// deadline (S3, startFailureSlack): a pending create whose Start runs to its
+// own bound, startup_timeout, still rolls back, accrues #46 as a timeout and
+// records session.cold_start_timeout before the effect's deadline.
+func TestTimedOutStartAbandonsBeforeItsDeadline(t *testing.T) {
+	k, leaf := launchKit(t, "creating", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339))
+	clk := k.p.Clock.(*fakePlannerClock)
+	leaf.onStart = func(ctx context.Context) {
+		clk.Advance(k.it.Deadline.Sub(clk.Now()) - startDeadlineSlack - startFailureSlack) // the Start's own bound
+		<-ctx.Done()
+		k.sp.nextStart = context.Cause(ctx)
+	}
+	ctx, cancel := clk.WithDeadline(context.Background(), k.it.Deadline) // the executor's deadline
+	defer cancel()
+	s := k.run(ctx, effectSpecs[intentStart])
+	b, _ := k.backing.Get("gc-1")
+	ep, _ := sessionFrontDoor(k.backing).LoadStartupHealthEpisode(startupHealthEpisodeKey(sessionInfoFromBead(b), "s-gc-1"))
+	if !s.Closed || b.Status != "closed" || ep.ConsecutiveCount != 1 || ep.Kind != session.FailureKindTimeout {
+		t.Fatalf("settlement %+v, row %s, episode %+v: want rolled back with a timeout accrued", s, b.Status, ep)
+	}
+	if len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.SessionColdStartTimeout {
+		t.Fatalf("events %+v, want session.cold_start_timeout", s.Facts.Events)
 	}
 }
