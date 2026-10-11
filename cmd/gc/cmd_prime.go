@@ -341,7 +341,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// than resolving the city and opening its store again.
 	var sessionStart *primeSessionStart
 	if hookMode && primeHookSessionStart(hookContext) {
-		sessionStart = primeHookLiveManagedSession(cityPath)
+		sessionStart = primeHookLiveManagedSession(cityPath, stderr)
 		if sessionStart == nil {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 			return 0, nil
@@ -685,8 +685,9 @@ type primeSessionStart struct {
 
 // primeHookLiveManagedSession returns the city store and the hook's session
 // only after the session-class projection proves the hook's exact live
-// managed-session identity, and nil otherwise.
-func primeHookLiveManagedSession(cityPath string) *primeSessionStart {
+// managed-session identity, and nil otherwise. A closed session bead is said
+// so on stderr: its SessionStart surfaces no mail, rather than a successor's.
+func primeHookLiveManagedSession(cityPath string, stderr io.Writer) *primeSessionStart {
 	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 	if sessionID == "" {
 		return nil
@@ -713,6 +714,7 @@ func primeHookLiveManagedSession(cityPath string) *primeSessionStart {
 		return nil
 	}
 	if info.Closed {
+		fmt.Fprintf(stderr, "gc prime: %v; surfacing no mail\n", closedHookSessionError(info.ID)) //nolint:errcheck // best-effort hook diagnostics
 		return nil
 	}
 	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which

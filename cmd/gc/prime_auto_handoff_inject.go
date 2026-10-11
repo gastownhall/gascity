@@ -53,7 +53,9 @@ func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, ho
 		// READ-ONLY — it never archives, so it can never consume/hide a message —
 		// and it excludes the auto-handoff messages already rendered above so a
 		// beadmail-backed ordinary provider does not double-render them.
-		injection.text += primeUnreadMailInjectionFromInbox(startMail.autoHandoffIDs, startMail.ordinaryProvider, startMail.inbox)
+		if !startMail.ownSessionClosed {
+			injection.text += primeUnreadMailInjectionFromInbox(startMail.autoHandoffIDs, startMail.ordinaryProvider, startMail.inbox)
+		}
 	}
 	return injection
 }
@@ -67,6 +69,9 @@ type sessionStartMail struct {
 	autoHandoffIDs   map[string]bool
 	ordinaryProvider mail.Provider
 	inbox            *beadmail.Inbox
+	// ownSessionClosed is set when the hook's own session bead is closed:
+	// neither block surfaces mail (refuseClosedHookSession).
+	ownSessionClosed bool
 }
 
 // primeInjectMailContent returns the unread-mail <system-reminder> block that
@@ -234,6 +239,10 @@ func sessionStartMailInjection(store beads.Store, live *session.Info, cityPath s
 	if err != nil {
 		fmt.Fprintf(stderr, "gc prime: resolving auto-handoff mailbox: %v\n", err) //nolint:errcheck // best-effort hook diagnostics
 		return startMail
+	}
+	if err := refuseClosedHookSession(target); err != nil {
+		fmt.Fprintf(stderr, "gc prime: %v; surfacing no mail\n", err) //nolint:errcheck // best-effort hook diagnostics
+		return sessionStartMail{ownSessionClosed: true}
 	}
 	var messages []mail.Message
 	if target.session != nil {

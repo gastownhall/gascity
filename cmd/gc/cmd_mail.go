@@ -716,6 +716,15 @@ func doMailCheckFallback(args []string, inject bool, hookFormat string, stdout, 
 		}
 		return 1
 	}
+	if len(args) == 0 {
+		if err := refuseClosedHookSession(target); err != nil {
+			fmt.Fprintf(stderr, "gc mail check: %v; not reading its mailbox\n", err) //nolint:errcheck // best-effort stderr
+			if inject {
+				return 0
+			}
+			return 1
+		}
+	}
 
 	return doMailCheckTargetWithFormat(mp, target, inject, hookFormat, stdout, stderr)
 }

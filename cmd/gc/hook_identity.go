@@ -42,6 +42,29 @@ func resolveHookIdentity(sessStore beads.Store) (hookIdentity, bool, error) {
 	return hookIdentity{info: info}, true, nil
 }
 
+// errHookSessionClosed is the refusal of a hook whose own session bead
+// (GC_SESSION_ID) is closed. Such a hook serves nothing: falling back to
+// GC_ALIAS would reach whichever session holds the alias now — a successor, or
+// a named session materialized for it — and consume its mail or nudges.
+var errHookSessionClosed = errors.New("the hook's own session is closed")
+
+// closedHookSessionError is errHookSessionClosed naming the session.
+func closedHookSessionError(id string) error {
+	return fmt.Errorf("%w: session %q (GC_SESSION_ID)", errHookSessionClosed, id)
+}
+
+// refuseClosedHookSession returns closedHookSessionError when target was
+// resolved from the hook's own session bead and that bead is closed.
+func refuseClosedHookSession(target resolvedMailTarget) error {
+	if target.session == nil || !target.session.Closed {
+		return nil
+	}
+	if target.session.ID != strings.TrimSpace(os.Getenv("GC_SESSION_ID")) {
+		return nil
+	}
+	return closedHookSessionError(target.session.ID)
+}
+
 // mailboxAddress is the address the session sends mail from: its alias, else
 // its bead id, else its session name.
 func (h hookIdentity) mailboxAddress() string {

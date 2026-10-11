@@ -744,6 +744,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
+			if errors.Is(err, errHookSessionClosed) {
+				fmt.Fprintf(stderr, "gc nudge drain: %v; not draining its nudges\n", err) //nolint:errcheck
+			}
 			wispExtra = ""
 			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
 			return 0
@@ -1649,9 +1652,10 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 // resolveNudgeTargetPreferringHookIdentity is resolveNudgeTarget for a caller
 // that may target the hook's own session. With preferHookIdentity, an open
 // session bead named by GC_SESSION_ID is the target, resolved with one Get and
-// without entering the named-session materialize path; when GC_SESSION_ID is
-// unset, stale or closed, identifier resolves exactly as resolveNudgeTarget
-// resolves it.
+// without entering the named-session materialize path, and a closed one is
+// refused (errHookSessionClosed) rather than replaced by whatever identifier
+// resolves to now — a successor holding the alias. When GC_SESSION_ID is unset
+// or stale, identifier resolves exactly as resolveNudgeTarget resolves it.
 func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -1672,7 +1676,10 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 			if err != nil {
 				return nudgeTarget{}, err
 			}
-			if ok && !identity.info.Closed {
+			if ok {
+				if identity.info.Closed {
+					return nudgeTarget{}, closedHookSessionError(identity.info.ID)
+				}
 				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
 			}
 		}

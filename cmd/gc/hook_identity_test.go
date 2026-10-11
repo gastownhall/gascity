@@ -120,3 +120,85 @@ func TestNudgeDrainTargetsTheHookSessionBeforeItsAlias(t *testing.T) {
 		}
 	}
 }
+
+// closeHookSession closes the fixture session's own bead, as a session that
+// has been retired while its hooks still run.
+func (f hookBudgetFixture) closeHookSession(t *testing.T) {
+	t.Helper()
+	store, err := openCityStoreAt(f.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if err := store.Close(f.sessionID); err != nil {
+		t.Fatalf("Close(%s): %v", f.sessionID, err)
+	}
+	resetHookBudgetProcessState(t)
+}
+
+// TestClosedHookSessionIsNotServed pins the hooks of a session whose own bead
+// (GC_SESSION_ID) is closed: none of them injects or archives anything, and
+// none falls back to GC_ALIAS — which a successor session may hold, or a named
+// session may materialize — so a retired session never consumes its
+// successor's mail, handoffs or nudges. Each says why on stderr.
+func TestClosedHookSessionIsNotServed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		run     func(t *testing.T, f hookBudgetFixture, stdout, stderr io.Writer) int
+		content string
+	}{
+		{name: "mail check --inject", run: mailCheckInject, content: "status please"},
+		{name: "prime --hook", run: primeHook, content: "context cycle"},
+		{name: "nudge drain --inject", run: nudgeDrainInject, content: "review queued work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookBudgetFixture(t)
+			f.sendMail(t, "human", hookBudgetIdentity, "status please")
+			f.autoHandoff(t)
+			handoffID := onlyAutoHandoffID(t, f)
+			f.queueNudge(t)
+			f.closeHookSession(t)
+
+			run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return tc.run(t, f, stdout, stderr) })
+			if run.code != 0 {
+				t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+			}
+			if strings.Contains(run.stdout, tc.content) {
+				t.Fatalf("a closed session's hook injected %q:\n%s", tc.content, run.stdout)
+			}
+			if !strings.Contains(run.stderr, "closed") {
+				t.Fatalf("skipping a closed session was silent; stderr=%q", run.stderr)
+			}
+			if b := getBead(t, f, handoffID); b.Status != "open" || b.Metadata[mail.ReadMetadataKey] != "" {
+				t.Fatalf("a closed session's hook archived the handoff: status %q metadata %v", b.Status, b.Metadata)
+			}
+			for _, op := range run.ops {
+				if op.Kind == beadstest.OpCreate {
+					t.Fatalf("a closed session's hook created a bead (a successor materialized?):\n%s", describeHookBudgetOps(run.ops))
+				}
+			}
+		})
+	}
+}
+
+// TestSessionStartMailRefusesAClosedOwnSession pins the SessionStart mail read
+// that is not handed a proven live session: when GC_SESSION_ID resolves to a
+// closed bead it surfaces neither the auto-handoff block nor the ordinary-mail
+// block, and says why.
+func TestSessionStartMailRefusesAClosedOwnSession(t *testing.T) {
+	f := newHookBudgetFixture(t)
+	f.autoHandoff(t)
+	f.closeHookSession(t)
+	store, err := openCityStoreAt(f.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	t.Cleanup(func() { resetHookBudgetProcessState(t) })
+	var stderr strings.Builder
+	startMail := sessionStartMailInjection(store, nil, f.cityDir, &stderr)
+	if !startMail.ownSessionClosed || startMail.autoHandoff.text != "" || startMail.autoHandoff.afterDelivery != nil {
+		t.Fatalf("closed own session: ownSessionClosed=%v autoHandoff=%q", startMail.ownSessionClosed, startMail.autoHandoff.text)
+	}
+	if !strings.Contains(stderr.String(), "closed") {
+		t.Fatalf("refusal was silent; stderr=%q", stderr.String())
+	}
+}
