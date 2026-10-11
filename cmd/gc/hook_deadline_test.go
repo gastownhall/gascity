@@ -306,20 +306,31 @@ func getBead(t *testing.T, f hookBudgetFixture, id string) beads.Bead {
 func TestInboxArchiveRetiresExactlyTheInjectedWindow(t *testing.T) {
 	type outcome map[string]string
 	run := func(t *testing.T, withRoutes bool) outcome {
-		store := beads.NewMemStore()
-		mp := beadmail.New(store)
-		seed := func(title string, labels ...string) string {
-			b, err := store.Create(beads.Bead{Title: title, Type: "message", Assignee: "mayor", From: "mayor", Labels: labels})
-			if err != nil {
-				t.Fatalf("Create %s: %v", title, err)
-			}
-			return b.ID
+		// The window keeps the newest mail, so the messages are seeded a second
+		// apart rather than created: MemStore.Create stamps time.Now, which a
+		// coarse clock (macOS reads microseconds) repeats for back-to-back
+		// creates.
+		base := time.Date(2026, 8, 13, 14, 0, 0, 0, time.UTC)
+		var seeded []beads.Bead
+		seed := func(title string, labels ...string) {
+			seeded = append(seeded, beads.Bead{
+				ID:        fmt.Sprintf("gc-%d", len(seeded)+1),
+				Title:     title,
+				Type:      "message",
+				Status:    "open",
+				Assignee:  "mayor",
+				From:      "mayor",
+				Labels:    labels,
+				CreatedAt: base.Add(time.Duration(len(seeded)) * time.Second),
+			})
 		}
-		ids := []string{seed("clamped handoff", mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel)}
+		seed("clamped handoff", mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel)
 		for i := 0; i < mailInjectMaxMessages-1; i++ {
-			ids = append(ids, seed(fmt.Sprintf("ordinary-%d", i)))
+			seed(fmt.Sprintf("ordinary-%d", i))
 		}
-		ids = append(ids, seed("windowed handoff", mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel))
+		seed("windowed handoff", mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel)
+		store := beads.NewMemStoreFrom(len(seeded), seeded, nil)
+		mp := beadmail.New(store)
 		target := resolvedMailTarget{display: "mayor", recipients: []string{"mayor"}}
 		if withRoutes {
 			target.session = &session.Info{ID: "mayor"}
@@ -329,10 +340,10 @@ func TestInboxArchiveRetiresExactlyTheInjectedWindow(t *testing.T) {
 			t.Fatalf("doMailCheckTargetWithFormat = %d; stderr=%s", code, stderr.String())
 		}
 		out := outcome{}
-		for i, id := range ids {
-			b, err := store.Get(id)
+		for i, s := range seeded {
+			b, err := store.Get(s.ID)
 			if err != nil {
-				t.Fatalf("Get(%s): %v", id, err)
+				t.Fatalf("Get(%s): %v", s.ID, err)
 			}
 			out[fmt.Sprint(i)] = b.Status + "/" + b.Metadata[mail.ReadMetadataKey]
 		}

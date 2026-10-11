@@ -1234,10 +1234,12 @@ func listLiveSessionMailboxesCached(sessStore beads.Store, cache *mailIdentitySe
 type resolvedMailTarget struct {
 	display    string
 	recipients []string
-	// session is the session bead the target was resolved from by its own id
-	// (mailTargetFromSessionInfo); nil when the target was resolved by name. An
-	// inbox read takes the session's mailbox from it (sessionInboxForTarget)
-	// instead of expanding each recipient again.
+	// session is the session bead the target resolved to, by its id or by a
+	// name (mailTargetFromSessionInfo); nil when no session bead was resolved:
+	// "human", a configured mailbox address, or a live configured named
+	// session matched by its identity. An inbox read takes the session's
+	// mailbox from it (sessionInboxForTarget) instead of expanding each
+	// recipient again.
 	session *session.Info
 }
 

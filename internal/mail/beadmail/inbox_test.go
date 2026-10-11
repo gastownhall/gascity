@@ -503,6 +503,9 @@ func sendTo(t *testing.T, p *Provider, addresses ...string) map[string]string {
 //     none of its routes join (the per-address expansion leaked them);
 //   - held by exactly one CLOSED session, the predecessor: its routes join, so
 //     mail a sender routed to the predecessor's id or runtime name is not lost;
+//   - held by a live session and one closed session: the live claimant owns
+//     the alias, so the closed session is no predecessor and neither's routes
+//     join;
 //   - claimed by two closed sessions: ambiguous, so neither's routes join.
 //
 // In every case the alias itself stays one of the session's routes.
@@ -541,6 +544,17 @@ func TestInboxForSessionSuccession(t *testing.T) {
 				t.Fatalf("the per-address expansion did not deliver mail for %q; the fixture does not pin succession", to)
 			}
 		}
+	})
+	t.Run("history alias held by a live session and one closed session", func(t *testing.T) {
+		store, p, current := newSuccessionFixture(t)
+		predecessor := createSessionBead(t, store, map[string]string{"alias": "old-sky", "session_name": "runtime-pred"}, true)
+		live := createSessionBead(t, store, map[string]string{"alias": "old-sky", "session_name": "runtime-other"}, false)
+		ids := sendTo(t, p, "sky", "old-sky", predecessor, "runtime-pred", live, "runtime-other")
+		inbox, err := p.InboxForSession(current())
+		if err != nil {
+			t.Fatalf("InboxForSession: %v", err)
+		}
+		assertInboxHolds(t, inbox, ids, []string{"sky", "old-sky"}, []string{predecessor, "runtime-pred", live, "runtime-other"})
 	})
 	t.Run("history alias claimed by two closed sessions", func(t *testing.T) {
 		store, p, current := newSuccessionFixture(t)
