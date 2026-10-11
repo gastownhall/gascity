@@ -142,6 +142,7 @@ func TestRuntimeLeaseCrossProcess(t *testing.T) {
 	// A process holding the lease excludes another on its host until it
 	// releases.
 	t.Run("two processes on one host", func(t *testing.T) {
+		t.Parallel()
 		h, city := newLeaseHarness(t), t.TempDir()
 		holder := start(t, h, "hold", city, leaseTTL)
 		if _, err := h.try(city); !errors.Is(err, ErrRuntimeLeaseBusy) || !strings.Contains(err.Error(), "on this host") {
@@ -159,6 +160,7 @@ func TestRuntimeLeaseCrossProcess(t *testing.T) {
 	// A holder killed mid-start frees the lease at once, long before its
 	// record expires.
 	t.Run("crash releases on one host", func(t *testing.T) {
+		t.Parallel()
 		h, city := newLeaseHarness(t), t.TempDir()
 		start(t, h, "hold", city, leaseTTL).crash(t)
 		if m := h.f.meta(t); m[RuntimeLeaseHolderKey] == "" {
@@ -176,6 +178,7 @@ func TestRuntimeLeaseCrossProcess(t *testing.T) {
 	// past expiry has its late commit refused by the epoch.
 	for _, role := range []string{"hold", "stall"} {
 		t.Run("two hosts "+role, func(t *testing.T) {
+			t.Parallel()
 			h := newLeaseHarness(t)
 			cityA := t.TempDir()
 			other := start(t, h, role, t.TempDir(), 2*time.Second)
