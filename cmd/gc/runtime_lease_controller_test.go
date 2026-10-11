@@ -280,11 +280,11 @@ func TestDeadCorpseCleanupSkipsAHeldName(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr strings.Builder
-	if got := cleanupDeadRuntimeSessionCorpses(city, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
+	if got := cleanupDeadRuntimeSessionCorpses(city, store, testSeatWork(city, nil, store, nil), snapshot, nil, sp, nil, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
 		t.Fatalf("cleanup under a held name = %d (stopped %v), want none", got, sp.stopped)
 	}
 	held.Release()
-	if got := cleanupDeadRuntimeSessionCorpses(city, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
+	if got := cleanupDeadRuntimeSessionCorpses(city, store, testSeatWork(city, nil, store, nil), snapshot, nil, sp, nil, nil, &stderr); got != 1 {
 		t.Fatalf("cleanup of a free name = %d, want 1; stderr %q", got, stderr.String())
 	}
 }

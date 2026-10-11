@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
-	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -160,7 +158,7 @@ func TestCollectAssignedWorkBeads_UsesExplicitDepEventsForCachedReady(t *testing
 	})
 }
 
-func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {
+func TestSessionHasOpenAssignedWorkForConfig_UsesLiveOpenOwnership(t *testing.T) {
 	t.Parallel()
 
 	backing := beads.NewMemStore()
@@ -184,94 +182,14 @@ func TestSessionHasOpenAssignedWorkInStore_UsesLiveOpenOwnership(t *testing.T) {
 		t.Fatalf("Update(%s, unassign): %v", work.ID, err)
 	}
 
+	// SeatWork lists live, so the cache's stale ownership does not answer.
 	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(testSeatWork("", nil, cache, nil), session)
 	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
+		t.Fatalf("sessionHasOpenAssignedWorkForConfig: %v", err)
 	}
 	if hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStoreByIdentifiers() = true, want false after external open-work reassignment")
-	}
-}
-
-type failLiveWispListStore struct {
-	beads.Store
-	mu   sync.Mutex
-	fail bool
-}
-
-func (s *failLiveWispListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	s.mu.Lock()
-	fail := s.fail
-	s.mu.Unlock()
-	if fail && query.Live && (query.TierMode == beads.TierWisps || query.TierMode == beads.TierBoth) {
-		return nil, errors.New("live wisp list should not be required")
-	}
-	return s.Store.List(query)
-}
-
-func (s *failLiveWispListStore) setFail(fail bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fail = fail
-}
-
-func TestSessionHasOpenAssignedWorkInStore_UsesCachedWispOwnership(t *testing.T) {
-	t.Parallel()
-
-	backing := &failLiveWispListStore{Store: beads.NewMemStore()}
-	if _, err := backing.Create(beads.Bead{
-		Title:     "wisp work",
-		Type:      "task",
-		Status:    "in_progress",
-		Assignee:  "sess-1",
-		Ephemeral: true,
-	}); err != nil {
-		t.Fatalf("Create(wisp): %v", err)
-	}
-
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
-	}
-	backing.setFail(true)
-
-	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
-	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
-	}
-	if !hasAssignedWork {
-		t.Fatal("sessionHasOpenAssignedWorkInStoreByIdentifiers() = false, want cached wisp ownership to count")
-	}
-}
-
-func TestSessionHasOpenAssignedWorkInStore_FallsBackToLiveForCachedWispMiss(t *testing.T) {
-	t.Parallel()
-
-	backing := beads.NewMemStore()
-	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
-	}
-	wisp, err := backing.Create(beads.Bead{
-		Title:     "new wisp work",
-		Type:      "task",
-		Status:    "in_progress",
-		Assignee:  "sess-1",
-		Ephemeral: true,
-	})
-	if err != nil {
-		t.Fatalf("Create(wisp): %v", err)
-	}
-
-	session := beads.Bead{ID: "sess-1"}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(cache, sessionAssignmentIdentifiers(session))
-	if err != nil {
-		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers: %v", err)
-	}
-	if !hasAssignedWork {
-		t.Fatalf("sessionHasOpenAssignedWorkInStoreByIdentifiers() = false, want live wisp %s after cached miss", wisp.ID)
+		t.Fatal("sessionHasOpenAssignedWorkForConfig() = true, want false after external open-work reassignment")
 	}
 }
 
@@ -300,8 +218,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBead_UsesLiveOpenOwnership(t *testin
 	}
 
 	unclaimWorkAssignedToRetiredSessionBead(
-		"", nil, cache,
-		nil,
+		testWorkLegs("", nil, cache, nil), cache,
 		beads.Bead{ID: "retired-session"},
 		"worker",
 		io.Discard,
@@ -332,8 +249,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testin
 	}
 
 	unclaimWorkAssignedToRetiredSessionBead(
-		"", nil, store,
-		nil,
+		testWorkLegs("", nil, store, nil), store,
 		beads.Bead{ID: "retired-session"},
 		"worker",
 		io.Discard,
@@ -373,8 +289,7 @@ func TestReassignWorkAssignedToRetiredSessionBead_IncludesEphemeralWork(t *testi
 	}
 
 	reassignWorkAssignedToRetiredSessionBead(
-		"", nil, store,
-		nil,
+		testWorkLegs("", nil, store, nil), store,
 		beads.Bead{ID: "retired-session"},
 		"replacement-session",
 		io.Discard,

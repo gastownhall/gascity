@@ -53,7 +53,7 @@ func TestSplitStoreCascade_DeadRuntimeReleasesTheGatesLegs(t *testing.T) {
 
 			var stderr bytes.Buffer
 			rigs := map[string]beads.Store{"riga": rig, "rigb": suspended}
-			if got := cleanupDeadRuntimeSessionCorpses(cityPath, sessions, rigs, cfg, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
+			if got := cleanupDeadRuntimeSessionCorpses(cityPath, sessions, testSeatWork(cityPath, cfg, sessions, rigs), snapshot, nil, sp, nil, nil, &stderr); got != 1 {
 				t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 			}
 
@@ -85,9 +85,8 @@ func TestSplitStoreCascade_DrainFinalizeReleasesTheOwnDrainStep(t *testing.T) {
 					t.Fatal(err)
 				}
 				step := createWork(t, work, "in_progress", seat.ID, map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain", beadmeta.RootBeadIDMetadataKey: root.ID})
-				useSeatWorkPath(t, path, cityPath, cfg, sessions, nil)
-
-				if !closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, sessions, nil, sessionInfosFromBeads([]beads.Bead{seat})[0], "drained", seatWorkNow, io.Discard, true) {
+				info := sessionInfosFromBeads([]beads.Bead{seat})[0]
+				if !closeSessionBeadIfReachableStoreUnassigned(sessions, seatWorkOn(path, cityPath, cfg, sessions, nil, info), info, "drained", seatWorkNow, io.Discard, true) {
 					t.Fatal("the drain-finalize close refused over the seat's own drain step")
 				}
 				assertWork(t, work, step.ID, "open", "")
@@ -104,12 +103,13 @@ func TestSplitStoreCascade_PoolSlotCloseReadsOnlyTheTickIndex(t *testing.T) {
 	for _, shape := range workShapes {
 		t.Run(shape, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
-			work := e.store
+			work, registered := e.store, beads.Store(e.store)
 			if shape == "split" {
 				work = &killRaceStore{Store: beads.NewMemStore()}
+				registered = cachedWorkStore(t, work) // a controller's cached work store
 			}
-			registerWorkShapeWith(t, e.city, shape, e.store, work)
-			routed := createWork(t, work, "open", e.seat.ID, routedClaim())
+			registerWorkShapeWith(t, e.city, shape, e.store, registered)
+			routed := createWork(t, registered, "open", e.seat.ID, routedClaim())
 
 			// The index reads its legs concurrently.
 			var mu sync.Mutex
@@ -122,8 +122,8 @@ func TestSplitStoreCascade_PoolSlotCloseReadsOnlyTheTickIndex(t *testing.T) {
 					switch {
 					case q.Assignee != "" || len(q.Assignees) > 0:
 						// The close-time re-read lists the local binding per
-						// identity; the work store never is.
-						if s == work {
+						// identity, and a controller's cached work store never.
+						if s == work && shape == "split" {
 							perIdentity = append(perIdentity, q)
 						}
 					case q.Live && q.TierMode == beads.TierBoth && q.Type == "" && q.Label == "" && len(q.IDs) == 0:
@@ -158,7 +158,7 @@ func TestSplitStoreCascade_StrandedRepairReleasesFromTheIndex(t *testing.T) {
 	env, seat, _, _ := strandedRepairReconcileEnv(t)
 	cityPath := t.TempDir()
 	work := &killRaceStore{Store: beads.NewMemStore()}
-	registerWorkShapeWith(t, cityPath, "split", env.store, work)
+	registerWorkShapeWith(t, cityPath, "split", env.store, cachedWorkStore(t, work)) // a controller's cached work store
 	claim := createWork(t, work, "in_progress", seat.ID, nil)
 	var mu sync.Mutex
 	var perIdentity int

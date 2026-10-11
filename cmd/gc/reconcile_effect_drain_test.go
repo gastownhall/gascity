@@ -36,6 +36,7 @@ func admittedBegin(t *testing.T, entry func(*selectionEntry), world ...func(*Wor
 		SleepPolicies: map[string]resolvedSessionSleepPolicy{b.ID: {Class: config.SessionSleepNonInteractive}},
 	}
 	w.Obs, w.ObsMaxAge = observedOwn(w, b.ID), observeMaxAge
+	w.WorkLegs = testWorkLegs(w.CityPath, w.Env.Cfg, store, nil) // the city's work store is the sessions store
 	for _, f := range world {
 		f(w)
 	}
@@ -167,7 +168,7 @@ func TestDrainBeginReReadsWorkLive(t *testing.T) {
 	p, it, store, _ = admittedBegin(t, undesired(drainOrphaned))
 	stuck := make(chan struct{})
 	t.Cleanup(func() { close(stuck) })
-	p.reads.city = blockingReads{store, stuck}
+	p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, blockingReads{store, stuck}, nil) // the live work read (L5) goes through the legs
 	done := make(chan settlement, 1)
 	go func() { done <- runTx(ctx, p, it, effectSpecs[it.Kind], nil) }()
 	select {
@@ -182,7 +183,7 @@ func TestDrainBeginReReadsWorkLive(t *testing.T) {
 		t.Fatalf("a begin whose work read outlived its context wrote %v", got.Metadata)
 	}
 	p, it, store, _ = admittedBegin(t, undesired(drainSuspended))
-	p.reads.city = failingReads{store}
+	p.reads.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, failingReads{store}, nil)
 	if s := runBegin(p, it); s.Outcome != settledRefused || s.Cause != causeHasWork {
 		t.Fatalf("work read failed: %+v, want refused %q", s, causeHasWork)
 	}

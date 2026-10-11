@@ -22,8 +22,8 @@ type txWork struct {
 	Err  error
 }
 
-// errNoReadStore: the pass holds no city store to read L5 through.
-var errNoReadStore = errors.New("v2 effect: no read-only city store for the live work read")
+// errNoReadStore: the pass holds no city work legs to read L5 through.
+var errNoReadStore = errors.New("v2 effect: no city work legs for the live work read")
 
 // readFence reads the legs and the idle proof the transaction needs, for the
 // expected row, or refuses with a cause when no backend resolves the name.
@@ -72,10 +72,13 @@ func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, 
 }
 
 func (p *effectPass) readWork(row session.Info) *txWork {
-	if p.reads.city == nil || p.World.Env == nil {
+	if p.reads.legs.unusable() != nil || p.World.Env == nil {
 		return &txWork{Err: errNoReadStore}
 	}
-	has, err := sessionHasOpenAssignedWorkForReachableStore(p.World.CityPath, p.World.Env.Cfg, p.reads.city, p.reads.rigs, row)
+	// One seat's read, live, over the pass's city work legs (NEW2-1: never
+	// the sessions store standing in for the work store).
+	sw := seatWorkFor(p.reads.legs, releaseScope(row, p.World.Env.Cfg))
+	has, err := sessionHasOpenAssignedWorkForReachableStore(sw, row)
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 

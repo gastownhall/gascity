@@ -29,13 +29,17 @@ type effectPass struct {
 	// held are the capabilities the pass holds beyond its writers; an
 	// effect reaches each only through txCaps, as its spec grants (capsFor).
 	held heldCaps
-	// reads are the read-only city and rig stores of the live work read.
+	// reads are what the live work read (L5) reads.
 	reads effectReads
 	seam  txSeamFunc // the planner's: runs at the effect's seams (tests, staging)
 }
 
-// effectReads are read-only city and rig stores.
+// effectReads are the city work legs, every leg read-only.
 type effectReads struct {
+	legs WorkLegs
+	// city and rigs are the sessions store and the rig stores, read-only,
+	// which the start effect's prepare reads (template overrides, the task
+	// work dir, the claimed-work probe); the live work read uses legs.
 	city beads.Store
 	rigs map[string]beads.Store
 }
@@ -68,9 +72,10 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	for rig, store := range w.RigStores {
 		p.reads.rigs[rig] = readOnlyStore{blindWriteRefusingStore{inner: store}}
 	}
+	p.reads.legs = w.WorkLegs.readOnly()
 	stripped := *w
 	stripped.LegStores, stripped.Demand.AssignedStores = nil, nil
-	stripped.SessionsStore, stripped.RigStores = nil, nil
+	stripped.SessionsStore, stripped.RigStores, stripped.WorkLegs = nil, nil, WorkLegs{}
 	if w.Env != nil {
 		env := *w.Env
 		env.SP = nil

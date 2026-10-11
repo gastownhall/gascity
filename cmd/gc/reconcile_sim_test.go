@@ -400,6 +400,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		CityPath: t.TempDir(), CityName: "test-city",
 		Env:          func() *reconcileEnv { return env },
 		Sessions:     func() beads.Store { return s.legs[0].cache },
+		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return s.lane.cache },

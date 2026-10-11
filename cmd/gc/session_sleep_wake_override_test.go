@@ -101,7 +101,7 @@ func TestWaiterWithWorkWakesWhenItsWaitIsReady(t *testing.T) {
 	}
 	// The drain-ack completes the drain (the seat keeps assigned work).
 	var stderr bytes.Buffer
-	finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(session.ID), "worker", false, nil, env.dt, env.clk, env.rec, &stderr)
+	finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(session.ID), "worker", false, nil, env.dt, env.clk, env.rec, &stderr)
 	// A tick persists the sleep policy (the fingerprint), as every tick does.
 	info := env.sessionInfo(session.ID)
 	policy := resolveSessionSleepPolicyInfo(info, env.cfg, env.sp)
