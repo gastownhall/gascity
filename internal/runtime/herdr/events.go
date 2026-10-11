@@ -54,14 +54,17 @@ const (
 	sessionEventMinBackoff   = 250 * time.Millisecond
 	sessionEventMaxBackoff   = 5 * time.Second
 	sessionEventHealthyCycle = 5 * time.Second
-	// sessionEventRelistDebounce coalesces a burst of pane_created /
-	// pane_agent_detected frames into one agent.list refresh.
-	sessionEventRelistDebounce = 300 * time.Millisecond
 	// sessionEventOpTimeout bounds each bounded socket op (dial, subscribe
 	// ack, agent.list) so a wedged server cannot hang the stream loop; the
 	// event stream itself legitimately idles indefinitely and carries no
 	// deadline.
 	sessionEventOpTimeout = 10 * time.Second
+)
+
+var (
+	// sessionEventRelistDebounce coalesces a burst of pane_created /
+	// pane_agent_detected frames into one agent.list refresh. Var so tests can shrink it.
+	sessionEventRelistDebounce = 300 * time.Millisecond
 )
 
 var (
