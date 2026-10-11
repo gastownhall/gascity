@@ -8537,6 +8537,67 @@ func TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure(t *testing
 	}
 }
 
+// TestJsonlExportPushRetryDelayIsLocaleIndependent guards against the retry
+// delay being formatted with a locale decimal separator ("1,50"), which
+// `sleep` rejects. POSIXLY_CORRECT makes gawk honor LC_NUMERIC on output the
+// way mawk and BSD awk do by default.
+func TestJsonlExportPushRetryDelayIsLocaleIndependent(t *testing.T) {
+	probeScript := filepath.Join(t.TempDir(), "locale-probe.sh")
+	writeExecutable(t, probeScript, "#!/bin/sh\nawk 'BEGIN{printf \"%.2f\",1.5}'\n")
+	probeOut, err := runScriptResult(t, probeScript, map[string]string{
+		"LC_ALL":          "de_DE.UTF-8",
+		"POSIXLY_CORRECT": "1",
+	})
+	if err != nil || string(probeOut) != "1,50" {
+		t.Skipf("awk does not emit a comma decimal under de_DE.UTF-8 (locale missing?): %q, %v", probeOut, err)
+	}
+
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "fail-first", pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "1"
+	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "1"
+	env["LC_ALL"] = "de_DE.UTF-8"
+	env["POSIXLY_CORRECT"] = "1"
+
+	out, err := runScriptResult(t, coreScriptPath("jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	delays := strings.Fields(string(sleepData))
+	if len(delays) == 0 {
+		t.Fatalf("expected at least one retry sleep, got none\n%s", out)
+	}
+	delayRE := regexp.MustCompile(`^[0-9]+\.[0-9]{2}$`)
+	for _, d := range delays {
+		if !delayRE.MatchString(d) {
+			t.Fatalf("retry delay %q is not a dot-decimal sleep argument; all delays: %q", d, delays)
+		}
+	}
+}
+
 func TestJsonlExportPushRetryRebasesAfterRemoteAdvanceRace(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

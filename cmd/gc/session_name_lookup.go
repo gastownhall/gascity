@@ -54,8 +54,9 @@ type poolSessionCreateIdentity struct {
 	// allocator mints it at plan time: it is the create's ledger marker.
 	InstanceToken string
 	// BeforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none).
-	BeforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write, which then never happens.
+	BeforeWrite func(rowID string) error
 }
 
 // poolCreateWriteError marks a create error from the row write itself, or
@@ -408,7 +409,9 @@ func createPoolSessionBeadWithIdentifiers(
 		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
 	}
 	if identity.BeforeWrite != nil {
-		identity.BeforeWrite(explicitID)
+		if err := identity.BeforeWrite(explicitID); err != nil {
+			return sessionpkg.Info{}, err
+		}
 	}
 	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
 	// The session_name is already final in meta, so there is no second write.

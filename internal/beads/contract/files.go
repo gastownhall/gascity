@@ -235,27 +235,39 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 // value (e.g. "yes", "off", "foo") returns ok=false so callers fall back
 // to other gc-managed signals rather than mis-treating the scope as
 // canonical.
+//
+// err is reserved for a config.yaml that exists but cannot be read, which
+// may hide an explicit true, so callers can leave the JSONL alone on it. A
+// file that reads but does not parse is line-scanned for the key instead;
+// without a recognizable value it reports ok=false and a nil error.
 func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false, nil
 		}
-		if raw, scanOK := scanConfigLineValue(fs, path, "export.auto:"); scanOK {
-			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
-				return parsed, true, nil
-			}
-			return false, false, nil
+		if !isConfigParseError(err) {
+			return false, false, err
 		}
-		return false, false, err
-	}
-	if raw, present := configStringValue(mappingRoot(doc), "export.auto"); present {
-		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
-			return parsed, true, nil
+		data, readErr := fs.ReadFile(path)
+		if readErr != nil {
+			return false, false, readErr
 		}
-		return false, false, nil
+		value, ok = parseExportAuto(scanConfigLineValueFromData(data, "export.auto:"))
+		return value, ok, nil
 	}
-	return false, false, nil
+	value, ok = parseExportAuto(configStringValue(mappingRoot(doc), "export.auto"))
+	return value, ok, nil
+}
+
+// parseExportAuto applies ReadExportAuto's strict boolean parsing to a raw
+// export.auto value: only strconv.ParseBool literals count as present.
+func parseExportAuto(raw string, present bool) (value bool, ok bool) {
+	if !present {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(raw)
+	return parsed, err == nil
 }
 
 // ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
@@ -589,11 +601,16 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	}
 	changed = setNestedBool(root, "dolt", "disable-event-flush", *doltConfig.DisableEventFlush) || changed
 	changed = deleteKeys(root, "dolt.disable-event-flush", "dolt.disable_event_flush") || changed
-	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
-	// triggers a re-import cycle that stalls bd writes for minutes on large
-	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
-	// so bake it into the on-disk config too.
-	changed = setConfigBool(root, "export.auto", false) || changed
+	// Managed beads default to disabling issues.jsonl auto-export because a
+	// stale export can trigger bd's expensive import-on-write path. Preserve an
+	// explicitly configured true, however: some cities intentionally commit
+	// issues.jsonl for JSONL-based sharing. Absence and malformed values still
+	// converge to the safe managed default.
+	exportAuto := false
+	if raw, ok := configStringValue(root, "export.auto"); ok {
+		exportAuto, _ = strconv.ParseBool(raw)
+	}
+	changed = setConfigBool(root, "export.auto", exportAuto) || changed
 	// Managed scopes back up through mol-dog-backup; bd's PersistentPostRun
 	// auto-backup (the "backup_export" Dolt remote) is redundant and, when its
 	// remote state breaks, stuck-loops and saturates the commit path — the
@@ -757,9 +774,13 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		}
 	}
 
+	exportAuto := false
+	if raw, ok := scanConfigLineValueFromData(data, "export.auto:"); ok {
+		exportAuto, _ = strconv.ParseBool(raw)
+	}
 	replacements := map[string]string{
 		"dolt.auto-start": "dolt.auto-start: false",
-		"export.auto":     "export.auto: false",
+		"export.auto":     "export.auto: " + strconv.FormatBool(exportAuto),
 		"backup.enabled":  "backup.enabled: false",
 	}
 	if prefix != "" {

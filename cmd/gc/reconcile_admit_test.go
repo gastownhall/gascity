@@ -26,7 +26,7 @@ func startOn(i int, ep endpointKey, rank time.Duration) intent {
 func rowIntent(kind string, i int) intent { return intent{Kind: kind, Key: admitRow(i)} }
 
 func poolCreate(template string, ep endpointKey) intent {
-	return intent{Kind: intentCreate, Endpoint: ep, Create: createPlan{Template: template}}
+	return intent{Kind: intentCreate, Endpoint: ep, CreatePlan: createPlan{Template: template}}
 }
 
 func keysOf(its []intent) []string {
@@ -285,7 +285,7 @@ func TestAdmitFairShareSurvivesTheCreateCap(t *testing.T) {
 		in.FairSeed = seed
 		per := map[string]int{}
 		for _, it := range admit(in, intents).Admitted {
-			per[it.Create.Template]++
+			per[it.CreatePlan.Template]++
 		}
 		if per["a"] != 4 || per["b"] != 4 {
 			t.Fatalf("seed %d: admitted %v, want 4 each", seed, per)
@@ -333,6 +333,33 @@ func TestAdmitOpenEndpointAdmitsNothing(t *testing.T) {
 	}
 }
 
+// Kills a heal lost behind its start (should-fix 2): a start that carries
+// its A6 heal and is deferred (an open endpoint, the row-repeated rule
+// aside) admits the heal in its stead, as the row write it is, under the
+// row write's own cap; a start without one admits nothing.
+func TestAdmitHealsInsteadOfADeferredStart(t *testing.T) {
+	in := admitIn(5, 1)
+	shut := map[endpointKey]endpointView{"provider:a": {Gate: gateShut}}
+	in.Endpoints = shut
+	healed := func(i int) intent {
+		it := startOn(i, "provider:a", time.Duration(i))
+		it.Heal = &intent{Kind: intentRowHealFresh, Key: it.Key, Patch: session.MetadataPatch{"state": "asleep"}}
+		return it
+	}
+	res := admit(in, []intent{healed(1), healed(2), startOn(3, "provider:a", 3)})
+	if got := keysOf(res.Admitted); !slices.Equal(got, []string{intentRowHealFresh + ":gc-1"}) || res.Admitted[0].Patch["state"] != "asleep" {
+		t.Fatalf("admitted %v, want gc-1's heal alone (one row write)", got)
+	}
+	if got := causesOf(res.Deferred); len(got) != 3 || got["start:gc-1"] != causeEndpointGate || got["start:gc-2"] != causeEndpointGate {
+		t.Fatalf("deferred %v, want the three starts on the endpoint", got)
+	}
+	twice := admitIn(5, 4)
+	twice.Endpoints = shut
+	if res := admit(twice, []intent{healed(1), healed(1)}); len(res.Admitted) != 1 {
+		t.Fatalf("admitted %v, want one heal for a row proposed twice", keysOf(res.Admitted))
+	}
+}
+
 // Kills rank inversion (START-009): starts go oldest wakeFairnessTime first,
 // and a never-woken row ranks by its CreatedAt.
 func TestAdmitLRUOrderUsesWakeFairnessTime(t *testing.T) {
@@ -374,7 +401,7 @@ func TestAdmitCreateOnlyIfStartAdmissible(t *testing.T) {
 	if res := admit(in, []intent{poolCreate("w", ""), poolCreate("w", "")}); len(res.Admitted) != 1 || res.Deferred[0].Cause != causeAwaitingBudget || res.FairSeed != 1 {
 		t.Fatalf("admitted %d deferred %v seed %d: two creates shared one token, or the seed stood still", len(res.Admitted), res.Deferred, res.FairSeed)
 	}
-	named := intent{Kind: intentCreate, Create: createPlan{Named: &namedCreatePlan{Identity: "boss"}}}
+	named := intent{Kind: intentCreate, CreatePlan: createPlan{Named: &namedCreatePlan{Identity: "boss"}}}
 	if res := admit(in, []intent{poolCreate("w", ""), named}); len(res.Admitted) != 1 || !res.Admitted[0].named() || res.FairSeed != 0 {
 		t.Fatalf("admitted %+v seed %d: a named create goes first, and no pool create advanced the seed", res.Admitted, res.FairSeed)
 	}
@@ -412,7 +439,7 @@ func TestAdmitBootGateClosedDefersExactlyTheSixKinds(t *testing.T) {
 	in := admitIn(50, 50)
 	in.BootOpen = false
 	var intents []intent
-	for i, kind := range slices.Sorted(maps.Keys(intentKinds)) {
+	for i, kind := range slices.Sorted(maps.Keys(effectSpecs)) {
 		it := rowIntent(kind, i)
 		if kind == intentCreate {
 			it = poolCreate("w", "")
@@ -472,7 +499,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 	rowWrites := []string{intentBaseline, intentDrainBegin, intentDrainCancel, intentDrainVoid, intentRowHeal, intentRowMetadata, intentSignal}
 	in := admitIn(50, 50)
 	in.Cfg.Session.StartupTimeout = "2m"
-	for kind := range intentKinds {
+	for kind := range effectSpecs {
 		it := rowIntent(kind, 1)
 		if kind == intentCreate {
 			it = poolCreate("w", "")
@@ -506,7 +533,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 func TestAdmitRowBackoffDefersAllButGoneFinalize(t *testing.T) {
 	in := admitIn(50, 50)
 	in.Backoff = map[string]backoffRecord{rowBackoffKey(admitRow(1)): {Until: admitT0.Add(time.Second), Cause: "fence-l3"}}
-	for kind := range intentKinds {
+	for kind := range effectSpecs {
 		if kind == intentCreate {
 			continue
 		}

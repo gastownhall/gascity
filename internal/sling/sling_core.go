@@ -332,7 +332,7 @@ func onFormulaNeedsAttachment(opts SlingOpts, querier BeadQuerier, deps SlingDep
 }
 
 func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bool {
-	return deps.Router != nil && !opts.IsFormula && !opts.DryRun
+	return deps.Router != nil && !opts.IsFormula
 }
 
 // shouldReopenForReassign reports whether the pre-flight reassign reopen should
@@ -1935,6 +1935,11 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			return SlingResult{}, err
 		}
 	}
+	if opts.DryRun && shouldValidateBuiltInRouteStoreReachable(opts, deps) {
+		if err := validateBuiltInRouteStoreReachable(deps, b.ID, a); err != nil {
+			return SlingResult{}, err
+		}
+	}
 
 	// Dry-run: return early with container preview info.
 	if opts.DryRun {
@@ -2015,8 +2020,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2032,8 +2036,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			}
 			formulaResult, err := attachBatchFormula(context.Background(), opts, deps, child, a, useFormula, formulaLabel, batchMethod, isGraph)
 			if err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2056,8 +2059,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if deps.Router != nil {
 			if err := validateBuiltInRouteStoreReachable(deps, child.ID, a); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2072,8 +2074,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				Force:   opts.Force,
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
@@ -2086,8 +2087,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				depsTracef(deps, "sling-core: %s", slingWarn)
 			}
 			if _, err := deps.Runner(rigDir, slingCmd, childEnv); err != nil {
-				childResult.Failed = true
-				childResult.FailReason = err.Error()
+				childResult.fail(err)
 				batchResult.Children = append(batchResult.Children, childResult)
 				childErrors = append(childErrors, err)
 				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)

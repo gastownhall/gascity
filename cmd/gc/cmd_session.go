@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -27,12 +28,6 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
-
-// indefiniteHoldDuration is the canonical "suspended indefinitely" sentinel
-// used when setting held_until on a session bead. The reconciler treats any
-// held_until in the future as "do not wake." 100 years is effectively forever
-// without risking time arithmetic overflow.
-const indefiniteHoldDuration = 100 * 365 * 24 * time.Hour
 
 func newSessionCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -396,7 +391,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return 1
 			}
 			fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-			if err := handle.Attach(context.Background()); err != nil {
+			if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 				fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -505,7 +500,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	}
 
 	fmt.Fprintln(stdout, "Attaching...") //nolint:errcheck // best-effort stdout
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session new: attaching: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1561,7 +1556,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session attach: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1707,6 +1702,14 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
+// The managed `gc session suspend` path's controller calls, as mutable
+// global test seams.
+var (
+	sessionSuspendManagedReconciler = cityUsesManagedReconciler
+	sessionSuspendPokeController    = pokeController
+	sessionSuspendEnqueueController = enqueueController
+)
+
 // cmdSessionSuspend is the CLI entry point for "gc session suspend".
 //
 // Phase 2: sets held_until metadata on the session bead and pokes the
@@ -1737,21 +1740,16 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	// Try reconciler-first path: set held_until metadata, poke controller.
 	// Only use this path when the city is managed by a standalone controller
 	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
-	if cityErr == nil && cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			// Controller is running — metadata-only suspend.
-			// Set held_until far in the future so the reconciler drains/stops the session.
-			heldUntil := time.Now().Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
-			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, map[string]string{
-				"held_until":   heldUntil,
-				"sleep_intent": "user-hold",
-				"state":        "suspended",
-			}); err != nil {
+	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
+		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
+			// Controller is running — metadata-only suspend: the operator
+			// hold (the disposition's Suspend cell), which the reconciler drains.
+			if _, err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			// Enqueue the held session to trigger an immediate reconcile.
-			_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+			_ = sessionSuspendEnqueueController(cityPath, reconcilekey.Session(sessionID))
 			if asJSON {
 				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",
@@ -1781,7 +1779,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		return 1
 	}
 
-	if err := handle.Stop(context.Background()); err != nil {
+	if err := handle.Stop(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1798,7 +1796,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1839,9 +1837,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
-	// store for relocation-safety; the post-close work-release below
-	// (unclaimWorkAssignedToRetiredSessionBead) is WORK-class and stays on the
-	// generic store.
+	// store for relocation-safety. The post-close work-release below
+	// (unclaimWorkAssignedToRetiredSessionBeadVia) releases WORK-class beads
+	// through the generic store and clears the session bead's claim back-channel
+	// in sessStore.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {
@@ -1868,7 +1867,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		closedSessionBead = beads.Bead{ID: sessionID}
 	}
 
-	closeResult, err := handle.CloseDetailed(context.Background())
+	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1885,18 +1884,19 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
 	//
-	// The scan leads with the WORK store here, unlike the reconciler's, which
-	// leads with the sessions-class store. On a split city that difference used
-	// to be the whole release tier for relocated work: claim-time class routing
-	// (claim_class_route.go) can leave an in_progress assignee in the graph
-	// binding, and a work-led scan cannot see it. The binding is now a leg of
-	// the sweep's own plan (assignedWorkSweepPlan), so this site hands in
-	// nothing and a city that relocates nothing still reads one store.
+	// The legs are the city's work legs over the work store this command
+	// opened: claim-time class routing (claim_class_route.go) can leave an
+	// in_progress assignee in the graph binding, which is a leg of the plan,
+	// and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
+	// The session bead lives in the sessions-class store (sessStore), which on a
+	// split city is not the work store the sweep leads with; the claim
+	// back-channel must be cleared where the session bead actually is.
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
+	unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -2353,7 +2353,7 @@ func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
-		Short: "Force-kill session runtime (reconciler restarts)",
+		Short: "Force-kill session runtime",
 		Long: `Force-kill the runtime process for a session without discarding its work.
 
 The kill syncs the session's lifecycle state to asleep and pokes the controller,
@@ -2363,6 +2363,13 @@ assignments, and work still point at the same session bead. If the provider has
 resume metadata, Gas City may attempt provider resume, but
 provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
+
+An idle pool seat (no started work and no ready work) is replaced: the
+reconciler releases the routed work it had not started so another seat can
+pick it up, closes it, and the pool starts a fresh seat in its slot. A pool seat holding started or ready work
+restarts in place on its bead; while its started work is blocked, it holds its
+slot asleep. A task assigned directly to the seat with no route is kept, not
+released, and the seat holds its slot until that task is ready.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
@@ -2375,7 +2382,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
-	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents")
+	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired")
 	return cmd
 }
 
@@ -2450,6 +2457,25 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// the controller leaves a fenced row alone instead of healing it back to
 	// awake. A row whose runtime is already gone has no window to close and
 	// keeps the post-kill sync below.
+	// The kill holds the runtime lease from the fence write through the Stop
+	// and the asleep sync (I-LEASE). A controller mid-start keeps it for up
+	// to RuntimeLeaseOperatorWait, after which the kill fails retryably (O3).
+	// --force also overrides a hung holder of the flock whose record expired.
+	// A lease failure other than busy never holds the kill hostage: it stops
+	// under the name's flock alone. The lease ends before the controller poke.
+	killCtx, killBy := context.Background(), sessionActor(session.ActorOperator, cityPath)
+	releaseLease, leaseOverridden := func() {}, false
+	if infoErr == nil && !info.Closed {
+		req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
+		lease, overridden, err := killRuntimeLease(killCtx, sessionFrontDoor(sessStore), req, force, stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		releaseLease, leaseOverridden = lease.Release, overridden
+		defer releaseLease()
+		killBy.Lease = lease
+	}
 	var fence *sessionKillFence
 	if infoErr == nil && !info.Closed && !runtimeAlreadyInactive {
 		fence, err = writeSessionKillFence(sessStore, sessionID, time.Now().UTC())
@@ -2462,7 +2488,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	}
 
-	killErr := handle.Kill(context.Background())
+	killErr := handle.Kill(killCtx, killBy)
 	if killErr != nil && fence != nil && sessionKillRuntimeGone(info, sp) {
 		// With the fence in place Manager.Kill sees an asleep row and falls
 		// through to the provider liveness check, which reports "not active"
@@ -2511,9 +2537,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	case infoErr == nil:
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
-		patch["synced_at"] = now.Format(time.RFC3339)
-		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
+		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
+			return killSleepPatch(b.ID, b.Metadata, now), true
+		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -2525,6 +2551,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// unconditional: a poke failure (e.g. no controller running) is non-fatal,
 	// and a spurious poke when the asleep sync was skipped is harmless — the
 	// reconciler observes unchanged state and continues.
+	releaseLease()
 	if err := sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -2533,11 +2560,15 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// consumers. This ensures a stable key regardless of how the user
 	// specified the target (session ID or alias).
 	rec := openCityRecorder(stderr)
+	message := "killed"
+	if leaseOverridden {
+		message = "killed past a hung runtime lease holder (--force)"
+	}
 	rec.Record(events.Event{
 		Type:    events.SessionStopped,
 		Actor:   eventActor(),
 		Subject: sessionID,
-		Message: "killed",
+		Message: message,
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
 	recordSessionKillStop(info, infoErr, cfg)
@@ -2571,6 +2602,24 @@ func recordSessionKillStop(info session.Info, beadErr error, cfg *config.City) {
 		return
 	}
 	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentityInfo(info, cfg), "killed", nil)
+}
+
+// killRuntimeLease takes req's runtime lease for `gc session kill`: it waits
+// up to RuntimeLeaseOperatorWait (CONTRACT O3), and with force it then takes
+// the record past a hung flock holder whose record expired (overridden). A
+// failure other than busy never holds the kill hostage: it falls back to the
+// name's flock alone, with a warning.
+func killRuntimeLease(ctx context.Context, front *session.Store, req session.RuntimeLeaseRequest, force bool, stderr io.Writer) (lease *session.RuntimeLease, overridden bool, err error) {
+	lease, err = session.WaitOperatorRuntimeLease(ctx, front, req)
+	if force && errors.Is(err, session.ErrRuntimeLeaseBusy) {
+		lease, err = session.ForceRuntimeLease(front, req)
+		overridden = err == nil
+	}
+	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+		fmt.Fprintf(stderr, "gc session kill: warning: stopping %s under the name's flock alone: %v\n", req.Name, err) //nolint:errcheck // best-effort stderr
+		lease, err = session.WaitOperatorRuntimeLease(ctx, nil, session.RuntimeLeaseRequest{City: req.City, Name: req.Name})
+	}
+	return lease, overridden, err
 }
 
 // sessionKillRuntimeGone reports whether the provider positively observes no
@@ -2695,7 +2744,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
+	outcome, err := handle.Message(context.Background(), sessionActor(session.ActorOperator, cityPath), worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
 	})

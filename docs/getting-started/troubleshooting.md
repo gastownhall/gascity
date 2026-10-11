@@ -375,6 +375,28 @@ gc restart
 Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
 contract that keeps `bd` and gc in agreement.
 
+## Listings Miss Durable Beads After Changing `types.infra`
+
+**Symptom:** after a type is added to a store's `types.infra` setting, a
+running city's listings of that type return only its ephemeral beads.
+
+The native store asks the server to filter a listing by type only for types
+the server keeps durable, and it reads which types those are from the store's
+stored `types.infra` setting when it opens. A running city keeps what it read
+for the stores it holds open. `gc` commands, and the stores the city opens for
+a single tick, read the current setting every time.
+
+**Remedy:** change the stored setting, then restart the city:
+
+```bash
+gc bd config set types.infra "<types>"   # add --rig <name> for a rig's store
+gc restart
+```
+
+Gas City reads only the stored setting. If the server of a remote beads
+workspace names `types.infra` in its own `.beads/config.yaml`, put the same
+types in the stored setting too.
+
 ## flock Not Found (macOS)
 
 macOS does not ship `flock`. Install it via Homebrew:
@@ -449,15 +471,36 @@ The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
 an optional `export ` prefix, and optional surrounding quotes. Only keys that
 are already eligible for the supervisor environment are merged — provider
 credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
-`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
-other key in the file is ignored. A value exported in the calling shell still
-takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
-suppresses provider credentials from both sources.
+`OPENAI_`, `GEMINI_`), a short built-in list of settings (among them the Dolt
+credential and logging settings `GC_DOLT_USER`, `GC_DOLT_PASSWORD`, and
+`GC_DOLT_LOGLEVEL`, and the beads pool deadlines below), plus any keys you opt
+in via `GC_SUPERVISOR_ENV`; any other key in the file is ignored. A value
+exported in the calling shell still takes precedence over the file, and
+`GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
+sources.
+
+The same file is the durable home for the beads connection-pool deadlines.
+`gc` reads `BEADS_DOLT_POOL_READ_TIMEOUT` and `BEADS_DOLT_POOL_WRITE_TIMEOUT`
+for its own store connections only from its process environment; the
+`dolt.pool-*-timeout` keys in `.beads/config.yaml` and entries in `.beads/.env`
+reach the `bd` CLI, not `gc`. If the 10-second default is too tight for a
+loaded shared Dolt server (store operations fail with `i/o timeout` or
+`invalid connection`), raise both here:
+
+```bash
+# ~/.gc/secrets.env
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+```
+
+These values also reach the `bd` commands and agent sessions that inherit the
+supervisor's environment, where they take precedence over the per-workspace
+`.beads/` settings.
 
 Apply the change by regenerating the service file:
 
 ```bash
-gc service restart     # restarts the launchd/systemd service
+gc supervisor install  # rewrites the service file; restarts on change
 ```
 
 ## A Custom Environment Variable Doesn't Reach Agent Sessions

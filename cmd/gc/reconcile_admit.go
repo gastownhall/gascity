@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/poolplan"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The planner's admission (CONTRACT v5 P2-P4): one pure function over the
@@ -36,6 +38,7 @@ const (
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
+	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
 )
 
 // capClass is the cap an intent counts against (P4); none is per endpoint.
@@ -48,33 +51,6 @@ const (
 	capRowWrites                     // probe_concurrency, counted apart
 )
 
-// kindSpec is all admission knows of a kind: a later kind is one line.
-type kindSpec struct {
-	class     capClass
-	bootGated bool // destructive: deferred while the boot gate is closed (P2)
-	tokens    int  // debited on admission, never refunded (I9)
-}
-
-var intentKinds = map[string]kindSpec{
-	intentStart:           {class: capStarts, tokens: 1},
-	intentAdopt:           {class: capProbing},
-	intentCreate:          {class: capCreates},
-	intentRekey:           {class: capProbing},
-	intentZombie:          {class: capProbing, bootGated: true},
-	intentDrainBegin:      {class: capRowWrites, bootGated: true},
-	intentDrainBeginFresh: {class: capProbing, bootGated: true},
-	intentSignal:          {class: capRowWrites, bootGated: true},
-	intentSignalFresh:     {class: capProbing, bootGated: true},
-	intentDrainCancel:     {class: capRowWrites},
-	intentDrainVoid:       {class: capRowWrites},
-	intentStop:            {class: capProbing, bootGated: true},
-	intentClose:           {class: capProbing, bootGated: true},
-	intentRollback:        {class: capProbing, bootGated: true},
-	intentRowMetadata:     {class: capRowWrites},
-	intentBaseline:        {class: capRowWrites},
-	intentRowHeal:         {class: capRowWrites},
-}
-
 // createsInFlightCap bounds running creates (P4, C1); the rest are P3's
 // flat deadlines.
 const (
@@ -86,7 +62,7 @@ const (
 
 // deadline is the effect's deadline (P3), by class alone with no exception:
 // a start startup_timeout + 10s, a row write 30s, every other effect 60s.
-func (k kindSpec) deadline(startupTimeout time.Duration) time.Duration {
+func (k effectSpec) deadline(startupTimeout time.Duration) time.Duration {
 	switch k.class {
 	case capStarts:
 		return startupTimeout + startDeadlineSlack
@@ -122,20 +98,31 @@ type intent struct {
 	Reason   string      // the arm's reason, for the trace
 	Endpoint endpointKey // config-only; a start or create is gated on it
 	Rank     time.Time   // orders starts oldest first: wakeFairnessTime (START-009)
-	// Create is a create's plan; Floor marks a pool create that satisfies a
-	// min_active_sessions floor, for the fair share.
-	Create createPlan
-	Floor  bool
-	Basis  rowBasis // the incarnation the pass saw; the effect's CAS re-checks it
+	// CreatePlan is a create's plan; Floor marks a pool create that
+	// satisfies a min_active_sessions floor, for the fair share.
+	CreatePlan createPlan
+	Floor      bool
+	Basis      rowBasis // the incarnation the pass saw; the effect's CAS re-checks it
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
+	// Patch is a row write's patch and Event what it records once it lands.
+	// The row-write effect re-decides on the fresh row and writes the
+	// re-decided intent's (R2).
+	Patch session.MetadataPatch
+	Event *events.Event
+	// Heal is the A6 heal a start carries into its PreWake (startHealed),
+	// written alone when the start is not admitted or refuses before it.
+	Heal *intent
+	// Rests are the fresh facts the decision rests on, which only a fresh
+	// kind's arm records: its effect reads them and decides again on them.
+	Rests rests
 	// Deadline is set on admission (P3); Cause on deferral.
 	Deadline time.Time
 	Cause    string
 }
 
-func (it intent) named() bool { return it.Create.Named != nil }
+func (it intent) named() bool { return it.CreatePlan.Named != nil }
 
 // finalizesOnly is the stop verb's finalize, the one intent a row backoff
 // does not defer (P4), unless the finalize's own refusal recorded it.
@@ -205,6 +192,8 @@ type admission struct {
 // creates in fair-share order; the other probing effects; row writes. Each
 // intent is checked against the boot gate, its row's backoff, the swap
 // pause, then its class's caps.
+//
+//gc:pure
 func admit(in admitInput, intents []intent) admitResult {
 	cfg := in.Cfg
 	if cfg == nil {
@@ -227,7 +216,7 @@ func admit(in admitInput, intents []intent) admitResult {
 	a.inFlight, a.counted = cityInFlight(in.InFlight, in.BringUp, a.gate)
 	a.outstanding = endpointOutstanding(in.InFlight)
 	for _, e := range in.InFlight.Entries {
-		spec, ok := intentKinds[e.Kind]
+		spec, ok := effectSpecs[e.Kind]
 		if !ok {
 			spec.class = capProbing // a running kind this table does not know
 		}
@@ -244,6 +233,9 @@ func admit(in admitInput, intents []intent) admitResult {
 	for _, it := range a.order(intents) {
 		if it.Cause = a.admitOne(&it); it.Cause != "" {
 			res.Deferred = append(res.Deferred, it)
+			if heal, ok := a.healInstead(it); ok {
+				res.Admitted = append(res.Admitted, heal)
+			}
 			continue
 		}
 		res.Admitted = append(res.Admitted, it)
@@ -264,7 +256,7 @@ func admit(in admitInput, intents []intent) admitResult {
 // creates' fair-share demand.
 func (a *admission) order(intents []intent) []intent {
 	tier := func(it intent) int {
-		switch spec, ok := intentKinds[it.Kind]; {
+		switch spec, ok := effectSpecs[it.Kind]; {
 		case !ok:
 			return 6
 		case spec.class == capStarts:
@@ -301,9 +293,9 @@ func (a *admission) order(intents []intent) []intent {
 		if tier(it) != 3 {
 			continue
 		}
-		i := slices.IndexFunc(a.demands, func(d poolplan.Demand) bool { return d.Template == it.Create.Template })
+		i := slices.IndexFunc(a.demands, func(d poolplan.Demand) bool { return d.Template == it.CreatePlan.Template })
 		if i < 0 {
-			i, a.demands = len(a.demands), append(a.demands, poolplan.Demand{Template: it.Create.Template})
+			i, a.demands = len(a.demands), append(a.demands, poolplan.Demand{Template: it.CreatePlan.Template})
 		}
 		a.demands[i].FreshCreates++
 		a.demands[i].HasFloor = a.demands[i].HasFloor || it.Floor
@@ -320,7 +312,7 @@ func (a *admission) admitOne(it *intent) string {
 		}
 		a.seen[it.Key] = true
 	}
-	spec, ok := intentKinds[it.Kind]
+	spec, ok := effectSpecs[it.Kind]
 	backoff := a.in.Backoff[rowBackoffKey(it.Key)]
 	switch {
 	case !ok:
@@ -360,6 +352,18 @@ func (a *admission) admitOne(it *intent) string {
 	return ""
 }
 
+// healInstead is the heal a deferred start carries (intent.Heal), admitted
+// in its stead as the row write it is.
+func (a *admission) healInstead(start intent) (intent, bool) {
+	if start.Heal == nil || start.Cause == causeRowRepeated {
+		return intent{}, false
+	}
+	heal := *start.Heal
+	delete(a.seen, heal.Key)
+	heal.Cause = a.admitOne(&heal)
+	return heal, heal.Cause == ""
+}
+
 // createCause is why a create may not be admitted, or "": the create cap,
 // a start for its row not admissible now (behind a probe gate the
 // endpoint's pending rows count as outstanding), or, for a pool create,
@@ -381,7 +385,7 @@ func (a *admission) createCause(it intent) string {
 		a.budget, a.budgetSet = poolplan.NewCreateBudget(min(left, createsInFlightCap-a.running[capCreates])), true
 		a.budget.ConfigureFairShare(a.demands, a.in.FairSeed)
 	}
-	if !a.budget.TryClaim(it.Create.Template) {
+	if !a.budget.TryClaim(it.CreatePlan.Template) {
 		return causeFairShare
 	}
 	a.poolAdmitted = true

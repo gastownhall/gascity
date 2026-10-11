@@ -242,7 +242,9 @@ becoming more useful as models improve — it becomes LESS useful instead.
   entry) and stages nothing (so no dangling blob): overwritten uncommitted
   work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
   To check something out, use your own worktree or a disposable
-  `git worktree add`.
+  `git worktree add`. Native managed `gc worktree ensure`/`verify` must
+  retain the recorded input commit in HEAD's ancestry; refusal preserves
+  existing work. Workflows own input selection and behavioral acceptance.
 - **Non-interactive shell:** `cp`, `mv`, and `rm` may be aliased to `-i` and
   hang an agent; use `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Use
   `-o BatchMode=yes` for `ssh`/`scp`, `-y` for `apt-get`, and

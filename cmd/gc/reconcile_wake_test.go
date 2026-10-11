@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -94,7 +93,7 @@ func TestLegacyWakeMatchesLegacyEnqueue(t *testing.T) {
 			t.Error("a nil wake reported a landed enqueue")
 		}
 		w.WakeMaintenance()
-		w.OnBeadEvent(events.Event{}, false, false)
+		w.OnBeadEvent(events.Event{}, false)
 		w.OnEventGap()
 	})
 }
@@ -103,11 +102,11 @@ func TestLegacyWakeOnBeadEventPokesOnlyForNonSnapshot(t *testing.T) {
 	pokeCh, dispatchCh := make(chan struct{}, 1), make(chan struct{}, 1)
 	w := newLegacyWake(pokeCh, dispatchCh)
 
-	w.OnBeadEvent(events.Event{}, true, false)
+	w.OnBeadEvent(events.Event{}, true)
 	if drainSignal(pokeCh) || drainSignal(dispatchCh) {
 		t.Fatal("a cache-reconcile replay woke the reconciler: every controller write would echo into a tick (ga-yoix1)")
 	}
-	w.OnBeadEvent(events.Event{}, false, false)
+	w.OnBeadEvent(events.Event{}, false)
 	if !drainSignal(pokeCh) {
 		t.Fatal("a bead event did not poke the reconciler")
 	}
@@ -116,21 +115,30 @@ func TestLegacyWakeOnBeadEventPokesOnlyForNonSnapshot(t *testing.T) {
 	}
 }
 
-// Kills the router's wake policy leaking into legacy. A live event for
-// unrouted, unassigned work, which v2 keeps from the allocator, still pokes
-// the legacy tick; its replay still does not.
-func TestRouterLegacyWakeUnchanged(t *testing.T) {
-	pokeCh := make(chan struct{}, 1)
-	w := newLegacyWake(pokeCh, nil)
+// Kills legacy regressions in controllerWake, the planner's half leaking
+// into legacy among them. A live event for unrouted, unassigned work, which
+// the planner's dirty filter drops, still pokes the legacy tick; its replay
+// still does not; an event gap signals nothing; and the supervisor reload's
+// enqueue is legacy's fold.
+func TestLegacyWakeUnchanged(t *testing.T) {
+	pokeCh, dispatchCh := make(chan struct{}, 1), make(chan struct{}, 1)
+	w := newLegacyWake(pokeCh, dispatchCh)
 	evt := beadEvent(t, events.BeadUpdated, routerWorkBead("w-1", "open", ""))
 
-	w.OnBeadEvent(evt, false, false)
+	w.OnBeadEvent(evt, false)
 	if !drainSignal(pokeCh) {
-		t.Fatal("legacy: a work event the v2 policy suppresses did not poke the reconciler")
+		t.Fatal("legacy: a work event the planner's filter drops did not poke the reconciler")
 	}
-	w.OnBeadEvent(evt, true, false)
+	w.OnBeadEvent(evt, true)
 	if drainSignal(pokeCh) {
 		t.Fatal("legacy: a replay poked the reconciler")
+	}
+	w.OnEventGap()
+	if drainSignal(pokeCh) || drainSignal(dispatchCh) {
+		t.Fatal("legacy: an event gap signaled the reconciler")
+	}
+	if !w.Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) || !drainSignal(pokeCh) || drainSignal(dispatchCh) {
+		t.Fatal("legacy: the supervisor reload's enqueue is not the allocator poke")
 	}
 }
 
@@ -160,47 +168,33 @@ func TestControllerWiringWakesItsOwnSignals(t *testing.T) {
 	}
 }
 
-// TestControllerWakeRouterSeam pins the seam the v2 switch uses: with a
-// router installed, keyed enqueues and event gaps reach the router and never
-// the legacy signals, while a maintenance wake still pokes the tick.
-func TestControllerWakeRouterSeam(t *testing.T) {
-	var allocWakes []routeReason
-	var resyncs []string
-	router := newReconcileRouter("sessions", routerSink{
-		addSession:    func(rowKey, routeReason) {},
-		wakeAllocator: func(r routeReason) { allocWakes = append(allocWakes, r) },
-		requestResync: func(reason string) { resyncs = append(resyncs, reason) },
-	}, io.Discard)
+// TestControllerWakePlannerSeam pins the seam the v2 switch uses: with a
+// planner installed, every enqueue (keys or none, the control-dispatch key
+// included) and event gaps mark the planner dirty under their reasons and
+// never the legacy signals, while a maintenance wake still pokes the tick.
+func TestControllerWakePlannerSeam(t *testing.T) {
+	p := newTestPlanner()
 	pokeCh, dispatchCh := make(chan struct{}, 1), make(chan struct{}, 1)
-	w := &controllerWake{pokeCh: pokeCh, controlDispatcherCh: dispatchCh, router: router}
+	w := &controllerWake{pokeCh: pokeCh, controlDispatcherCh: dispatchCh, planner: p}
 
-	if !w.Enqueue(routeReasonSupervisor, reconcilekey.Allocator()) {
-		t.Error("a routed enqueue reported nothing landed")
+	if !w.Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) {
+		t.Error("a planner enqueue reported nothing landed")
 	}
 	w.Enqueue(wakeReasonSocket, reconcilekey.ControlDispatch())
 	w.Enqueue(wakeReasonAPI)
-	w.Enqueue(wakeReasonFollowUp, reconcilekey.Allocator())
+	w.Enqueue(wakeReasonFollowUp, reconcilekey.Session("gc-1"), reconcilekey.Allocator())
 	w.OnEventGap()
 	if drainSignal(pokeCh) || drainSignal(dispatchCh) {
-		t.Fatal("a routed enqueue also signaled the legacy reconciler")
+		t.Fatal("a planner enqueue also signaled the legacy reconciler")
 	}
-	// The operator intents (api, socket) and the supervisor reload bypass the
-	// backoff gate (amendment A2); the reason kinds are what the router logs.
-	want := []routeReason{
-		{Kind: routeReasonSupervisor, Urgent: true},
-		{Kind: routeReasonControlDispatch, Detail: "socket", Urgent: true},
-		{Kind: "api", Urgent: true},
-		{Kind: "follow-up"},
-	}
-	if fmt.Sprint(allocWakes) != fmt.Sprint(want) {
-		t.Errorf("router allocator wakes = %+v, want %+v (the caller's reason and its urgency must reach the router)", allocWakes, want)
-	}
-	if want := []string{routeReasonSupervisor, "bead-event-gap"}; strings.Join(resyncs, ",") != strings.Join(want, ",") {
-		t.Errorf("router resyncs = %v, want %v", resyncs, want)
+	for _, reason := range []string{wakeReasonSupervisor, wakeReasonSocket, wakeReasonAPI, wakeReasonFollowUp, "event-gap"} {
+		if n := plannerWakes(p, reason); n != 1 {
+			t.Errorf("planner wakes for %s = %d, want 1", reason, n)
+		}
 	}
 	w.WakeMaintenance()
 	if !drainSignal(pokeCh) {
-		t.Error("a maintenance wake did not poke the tick with a router installed")
+		t.Error("a maintenance wake did not poke the tick with a planner installed")
 	}
 }
 
@@ -245,14 +239,14 @@ var wakeSources = []wakeSource{
 	},
 	{
 		site:   "api_state.go:applyBeadEventToStores",
-		call:   "OnBeadEvent(evt, snapshot, appliedToSessions)",
+		call:   "OnBeadEvent(evt, snapshot)",
 		inputs: []wakeInput{{snapshot: false}, {snapshot: true}},
 		before: func(p, d chan<- struct{}, in wakeInput) {
 			if !in.snapshot {
 				legacyEnqueue(p, d, allocatorKey...) // was cs.Enqueue(reconcilekey.Allocator())
 			}
 		},
-		after: func(w *controllerWake, in wakeInput) { w.OnBeadEvent(events.Event{}, in.snapshot, false) },
+		after: func(w *controllerWake, in wakeInput) { w.OnBeadEvent(events.Event{}, in.snapshot) },
 	},
 	{
 		site:   "api_state.go:mutateAndPoke",
@@ -301,9 +295,9 @@ var wakeSources = []wakeSource{
 	},
 	{
 		site:   "cmd_supervisor.go:runSupervisor",
-		call:   "Enqueue(routeReasonSupervisor, reconcilekey.Allocator())",
+		call:   "Enqueue(wakeReasonSupervisor, reconcilekey.Allocator())",
 		before: func(p, d chan<- struct{}, _ wakeInput) { legacyEnqueue(p, d, allocatorKey...) }, // was v.cs.Enqueue(reconcilekey.Allocator())
-		after:  func(w *controllerWake, _ wakeInput) { w.Enqueue(routeReasonSupervisor, reconcilekey.Allocator()) },
+		after:  func(w *controllerWake, _ wakeInput) { w.Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) },
 	},
 	{
 		site:   "city_runtime.go:handleReloadRequest",
@@ -724,15 +718,8 @@ func (*blockingWatcher) Close() error { return nil }
 // keeps breaking at its cursor) instead of after the retry delay.
 func TestBeadEventWatcherResumesBrokenTailFromCursor(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var gapCount atomic.Int32
-		gaps := gapCount.Load
-		router := newReconcileRouter("sessions", routerSink{
-			requestResync: func(reason string) {
-				if reason == "bead-event-gap" {
-					gapCount.Add(1)
-				}
-			},
-		}, io.Discard)
+		p := newTestPlanner()
+		gaps := func() uint64 { return plannerWakes(p, "event-gap") }
 		other := func(seq uint64) events.Event { return events.Event{Seq: seq, Type: "test.other"} }
 		ep := &scriptedEventProvider{watches: []scriptedWatch{
 			{events: []events.Event{other(5), other(6)}}, // the tail breaks after 6: resumed
@@ -740,7 +727,7 @@ func TestBeadEventWatcherResumesBrokenTailFromCursor(t *testing.T) {
 			{events: []events.Event{other(7), other(4)}}, // seq regresses (a gap), then the tail breaks: resumed
 			{err: errors.New("watch failed")},            // the resume fails: a gap
 		}}
-		cs := &controllerState{eventProv: ep, beadEventStartSeq: 3, beadEventStartSeqOK: true, wake: &controllerWake{router: router}}
+		cs := &controllerState{eventProv: ep, beadEventStartSeq: 3, beadEventStartSeqOK: true, wake: &controllerWake{planner: p}}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

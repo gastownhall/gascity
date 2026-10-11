@@ -92,14 +92,13 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -135,14 +134,13 @@ func TestSweepUndesiredPoolSessionBeads_DefersWhenLivenessUnavailable(t *testing
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		newSessionBeadSnapshot([]beads.Bead{bead}),
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		&sweepUnavailableLivenessProvider{Fake: runtime.NewFake()},
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 while runtime liveness is unavailable", closed)
@@ -156,12 +154,11 @@ func TestSweepUndesiredPoolSessionBeads_DefersWhenLivenessUnavailable(t *testing
 	}
 }
 
-// wispBlockingStore blocks every wisp-tier read until unblocked, signaling each
-// attempt on hit. The undesired-pool-session sweep's per-candidate wisp probe
-// (sessionHasOpenAssignedWispWork -> List(TierWisps)) is the distinctive read it
-// makes; blocking only TierWisps isolates the sweep from the other boot-path
-// reads (which use TierIssues/Live), so we can prove the boot tick does NOT wait
-// on the sweep while the steady-state tick does.
+// wispBlockingStore blocks every read of the wisp tier until unblocked,
+// signaling each attempt on hit. The undesired-pool-session sweep's guard
+// reads the tick's SeatWork, whose read lists both tiers (TierBoth); the
+// other boot-path reads use TierIssues, so blocking the wisp tier proves the
+// boot tick does NOT wait on the sweep while the steady-state tick does.
 type wispBlockingStore struct {
 	beads.Store
 	block <-chan struct{}
@@ -169,7 +166,7 @@ type wispBlockingStore struct {
 }
 
 func (w *wispBlockingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if q.TierMode == beads.TierWisps {
+	if q.TierMode == beads.TierWisps || q.TierMode == beads.TierBoth {
 		select {
 		case w.hit <- struct{}{}:
 		default:
@@ -229,7 +226,10 @@ func TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep(t *testing.T) 
 
 	// Boot tick must NOT block on the wisp-tier sweep read.
 	bootDone := make(chan struct{})
-	go func() { cr.beadReconcileTick(context.Background(), result(), snap(), nil, true); close(bootDone) }()
+	go func() {
+		cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result(), snap(), nil, true)
+		close(bootDone)
+	}()
 	select {
 	case <-bootDone:
 	case <-store.hit:
@@ -239,7 +239,7 @@ func TestCityRuntimeBeadReconcileTick_BootDoesNotBlockOnWispSweep(t *testing.T) 
 	}
 
 	// Steady-state tick MUST reach the wisp-tier sweep read.
-	go cr.beadReconcileTick(context.Background(), result(), snap(), nil, false)
+	go cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result(), snap(), nil, false)
 	select {
 	case <-store.hit:
 		// good: the steady-state tick ran the sweep and reached the wisp read.
@@ -283,6 +283,38 @@ func TestPoolSweepWouldDrain(t *testing.T) {
 	}
 }
 
+// Kills a sweep that reads the wall clock: a pending create the injected
+// clock still leases, a creating row it does not yet call stale, and a
+// just-started row it still protects are spared, and the close stamps the
+// injected clock's time.
+func TestSweepUndesiredPoolSessionBeads_StampsItsClock(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)}
+	row := func(name string, meta ...string) beads.Bead {
+		m := map[string]string{"session_name": name, "template": "worker", "agent_name": "worker", "pool_slot": "1", poolManagedMetadataKey: boolMetadata(true), "state": "asleep"}
+		for i := 0; i+1 < len(meta); i += 2 {
+			m[meta[i]] = meta[i+1]
+		}
+		b, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel, "agent:worker"}, Metadata: m})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return b
+	}
+	bead := row("worker-swept")
+	justNow := clk.Now().Add(-time.Second).Format(time.RFC3339)
+	leased := row("worker-leased", "pending_create_claim", "true", "pending_create_started_at", justNow)
+	creating := row("worker-creating", "state", "creating", "pending_create_started_at", justNow)
+	started := row("worker-started", "state", "active", "state_reason", "creation_complete", "creation_complete_at", justNow)
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
+	if closed := sweepUndesiredPoolSessionBeads(beads.SessionStore{Store: store}, testSeatWork("", cfg, store, nil), newSessionBeadSnapshot([]beads.Bead{bead, leased, creating, started}), nil, cfg, runtime.NewFake(), false, clk); closed != 1 {
+		t.Fatalf("closed = %d, want 1 (the leased, creating and just-started rows spared)", closed)
+	}
+	if got, _ := store.Get(bead.ID); got.Metadata["closed_at"] != "2020-01-02T03:04:05Z" {
+		t.Fatalf("closed_at = %q, want the injected clock's 2020-01-02T03:04:05Z", got.Metadata["closed_at"])
+	}
+}
+
 func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -310,9 +342,12 @@ func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			ProcessNames:      []string{"agent-cli"},
+		}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{
@@ -323,6 +358,7 @@ func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
 		}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 when process-name liveness recovers IsRunning false negative", closed)
@@ -368,14 +404,13 @@ func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *tes
 	sp.SetActivity("worker-bd-running", time.Now())
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -410,14 +445,13 @@ func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testin
 	}
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		newSessionBeadSnapshot([]beads.Bead{bead}),
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		&sweepLivenessProvider{Fake: runtime.NewFake(), running: map[string]bool{"worker-bd-observed": true}},
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 when runtime liveness reports the pool session as running", closed)
@@ -465,14 +499,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t
 	sp := runtime.NewFake()
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -1564,8 +1597,18 @@ type blockingOrderDispatcher struct {
 	mu         sync.Mutex
 	drainCalls int
 	ctxErrs    []error
+	exits      []blockingDrainExit
 	release    chan struct{}
 	drained    chan struct{}
+}
+
+// blockingDrainExit records how one drain call ended: the deadline its
+// context carried, measured from drain entry, and the context error that
+// released it (nil when od.release released it instead).
+type blockingDrainExit struct {
+	hasDeadline   bool
+	deadlineAfter time.Duration
+	err           error
 }
 
 func newBlockingOrderDispatcher() *blockingOrderDispatcher {
@@ -1578,17 +1621,34 @@ func newBlockingOrderDispatcher() *blockingOrderDispatcher {
 func (b *blockingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
 
 func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
+	entered := time.Now()
+	exit := blockingDrainExit{}
+	if deadline, ok := ctx.Deadline(); ok {
+		exit.hasDeadline = true
+		exit.deadlineAfter = deadline.Sub(entered)
+	}
 	b.mu.Lock()
 	b.drainCalls++
 	b.ctxErrs = append(b.ctxErrs, ctx.Err())
 	b.mu.Unlock()
 	b.drained <- struct{}{}
+	drained := false
 	select {
 	case <-b.release:
-		return true
+		drained = true
 	case <-ctx.Done():
-		return false
+		exit.err = ctx.Err()
 	}
+	b.mu.Lock()
+	b.exits = append(b.exits, exit)
+	b.mu.Unlock()
+	return drained
+}
+
+func (b *blockingOrderDispatcher) drainExits() []blockingDrainExit {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]blockingDrainExit(nil), b.exits...)
 }
 
 func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
@@ -2467,14 +2527,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsCreatingState(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — creating state must be preserved", closed)
@@ -2521,14 +2580,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentlyCreated(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — bead within staleCreatingStateTimeout window must survive", closed)
@@ -2570,14 +2628,13 @@ func TestSweepUndesiredPoolSessionBeads_SweepsStaleCreatingState(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — stale creating bead must be sweepable", closed)
@@ -2612,14 +2669,13 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — bead beyond postCreateProtectionTimeout must be sweepable", closed)
@@ -2652,14 +2708,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentCreationCompleteAfterWakeReco
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — bead within postCreateProtectionTimeout must survive even after wake bookkeeping lands", closed)
@@ -2694,14 +2749,13 @@ func TestSweepUndesiredPoolSessionBeads_SweepsActiveWithoutCreationCompleteAt(t 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — bead without creation_complete_at must be sweepable", closed)
@@ -2742,14 +2796,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsAwakeStateInPreWakeWindow(t *testin
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — state=awake in pre-wake window must receive same protection as state=active", closed)
@@ -2792,14 +2845,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecoveredActiveBead(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — recovered active bead with fresh marker must survive pre-wake", closed)
@@ -2844,14 +2896,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsFreshRestartAfterPriorCrash(t *test
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — fresh restart after prior crash must survive the pre-wake window", closed)
@@ -2891,14 +2942,13 @@ func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — crashed bead with stale creation_complete_at must be swept", closed)
@@ -2928,14 +2978,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — pending_create_claim must be preserved", closed)
@@ -2979,14 +3028,13 @@ func TestSweepUndesiredPoolSessionBeads_SweepsExpiredPendingCreateClaimLease(t *
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1 — expired pending_create_claim lease must be reaped", closed)
@@ -3019,14 +3067,13 @@ func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingSta
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0 — fresh pending_create_started_at must keep old creating bead alive", closed)
@@ -3071,14 +3118,13 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1", closed)
@@ -3130,14 +3176,13 @@ func TestSweepUndesiredPoolSessionBeads_ClosesMissingOrStaleSessionName(t *testi
 			}
 
 			closed := sweepUndesiredPoolSessionBeads(
-				"",
-				beads.SessionStore{Store: store},
-				nil,
+				beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 				newSessionBeadSnapshot([]beads.Bead{bead}),
 				nil,
 				&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 				sp,
 				false,
+				clock.Real{},
 			)
 			if closed != 1 {
 				t.Fatalf("closed = %d, want 1 for unrecoverable pool session name", closed)
@@ -3177,14 +3222,13 @@ func TestSweepUndesiredPoolSessionBeads_KeepsAssignedSessionsOpen(t *testing.T) 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		false,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -3221,14 +3265,13 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPartialAssignedSnapshot(t *testing.
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
-		"",
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork("", &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}, store, nil),
 		sessionBeads,
 		nil,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 		true,
+		clock.Real{},
 	)
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
@@ -3286,7 +3329,7 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 		ScaleCheckCounts:  map[string]int{"worker": 0},
 		StoreQueryPartial: true,
 	}
-	cr.beadReconcileTick(context.Background(), partialResult, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), partialResult, newSessionBeadSnapshot([]beads.Bead{session}), nil, false)
 
 	afterPartial, err := store.Get(session.ID)
 	if err != nil {
@@ -3306,7 +3349,7 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 			workBead("ga-live", "worker", "worker-bd-123", "in_progress", 5),
 		},
 	}
-	cr.beadReconcileTick(context.Background(), recoveredResult, cr.loadSessionBeadSnapshot(), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), recoveredResult, cr.loadSessionBeadSnapshot(), nil, false)
 
 	afterRecovered, err := store.Get(session.ID)
 	if err != nil {
@@ -3392,7 +3435,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 			workBead("w-idle", "worker", "", "open", 5),
 		},
 	}
-	cr.beadReconcileTick(context.Background(), result, cr.loadSessionBeadSnapshot(), nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, cr.loadSessionBeadSnapshot(), nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -3517,7 +3560,7 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTri
 		stdout:              &stdout,
 		stderr:              io.Discard,
 	}
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	got, err := cityStore.Get(sessionBead.ID)
 	if err != nil {
@@ -3614,7 +3657,7 @@ func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSess
 	if !result.ScaleCheckPartialTemplates["worker"] || result.ScaleCheckPartialTemplates["helper"] {
 		t.Fatalf("ScaleCheckPartialTemplates = %v, want only worker", result.ScaleCheckPartialTemplates)
 	}
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
 		t.Fatalf("affected worker session was scheduled for drain: reason=%s", drain.reason)
@@ -3680,7 +3723,7 @@ func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialPreservesDormantAffectedP
 		t.Fatalf("affected dormant worker session not preserved in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
 	}
 
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 
 	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
 		t.Fatalf("affected dormant worker session was scheduled for drain: reason=%s", drain.reason)
@@ -3733,7 +3776,7 @@ func TestCityRuntimeBeadReconcileTick_StoreQueryPartialDoesNotReleaseAssignedWor
 		stderr:              io.Discard,
 	}
 
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 		State:              map[string]TemplateParams{},
 		ScaleCheckCounts:   map[string]int{"worker": 0},
 		AssignedWorkBeads:  []beads.Bead{work},
@@ -3784,7 +3827,7 @@ func TestCityRuntimeBeadReconcileTick_SessionQueryPartialDoesNotReleaseAssignedW
 		stderr:              io.Discard,
 	}
 
-	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), DesiredStateResult{
 		State:              map[string]TemplateParams{},
 		ScaleCheckCounts:   map[string]int{"worker": 0},
 		AssignedWorkBeads:  []beads.Bead{work},
@@ -3932,7 +3975,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, sessionBeads, nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -4005,7 +4048,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
-	cr.beadReconcileTick(context.Background(), result, sessionBeads, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, sessionBeads, nil, false)
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -5285,19 +5328,57 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 
 	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
 	lastProviderName := "fake"
+	t.Cleanup(func() { close(od.release) })
 	start := time.Now()
-	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	reloaded := make(chan struct{})
+	go func() {
+		defer close(reloaded)
+		cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	}()
+	awaitClose(t, reloaded, "reloadConfig with a dispatcher that never drains")
 	elapsed := time.Since(start)
-	// elapsed is the subject under test (it proves reloadConfig actually
-	// bounds its wait on od.release rather than hanging on it forever), so
-	// this stays an explicit deadline rather than a hangBudget wait. The
-	// upper bound carries a generous tail to absorb CI scheduler jitter on
-	// top of the real reloadOrderDrainTimeout floor; the lower bound has no
-	// slop since contention only ever slows this down, never speeds it up.
-	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+3*time.Second {
-		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
+	// The claim under test is that reload stops waiting on a dispatcher that
+	// never drains once reloadOrderDrainTimeout expires. That is proven by
+	// facts about the one drain call, not by the wall-clock length of the
+	// whole reloadConfig call (config read, order scan, watcher restart),
+	// which stretches arbitrarily under CPU contention without saying
+	// anything about the drain bound (ga-96smfk.64):
+	//   - reloadConfig returned (awaitClose above) while od.release was
+	//     still open, since it is closed only at cleanup, so reload did not
+	//     wait for the stuck work;
+	//   - the drain ctx carried a deadline no later than
+	//     reloadOrderDrainTimeout after drain entry, so the bound is the
+	//     reload budget, not something longer;
+	//   - that deadline is what released the drain (DeadlineExceeded), so
+	//     the bound actually fired rather than some other cancellation;
+	//   - the undrained dispatcher was retained for the shutdown drain and
+	//     replaced as the live dispatcher.
+	exits := od.drainExits()
+	if len(exits) != 1 {
+		t.Fatalf("drain calls completed = %d, want exactly 1", len(exits))
 	}
-	close(od.release)
+	exit := exits[0]
+	if !exit.hasDeadline {
+		t.Fatal("reload drain ctx has no deadline, want it bounded by reloadOrderDrainTimeout")
+	}
+	if exit.deadlineAfter <= 0 || exit.deadlineAfter > reloadOrderDrainTimeout {
+		t.Fatalf("reload drain deadline = %s after drain entry, want within (0, %s]", exit.deadlineAfter, reloadOrderDrainTimeout)
+	}
+	if !errors.Is(exit.err, context.DeadlineExceeded) {
+		t.Fatalf("reload drain released by %v, want context.DeadlineExceeded from the drain bound", exit.err)
+	}
+	if len(cr.retiredOrderDispatchers) != 1 || cr.retiredOrderDispatchers[0] != orderDispatcher(od) {
+		t.Fatalf("retired order dispatchers = %#v, want the undrained dispatcher retained for shutdown", cr.retiredOrderDispatchers)
+	}
+	if cr.od == orderDispatcher(od) {
+		t.Fatal("reload kept the undrained dispatcher live, want it replaced")
+	}
+	// Contention only ever slows reload down, so the drain wait is a hard
+	// floor. There is no wall-clock ceiling: awaitClose above is the hang
+	// detector.
+	if elapsed < reloadOrderDrainTimeout {
+		t.Fatalf("reload elapsed = %s, want at least the %s drain wait", elapsed, reloadOrderDrainTimeout)
+	}
 }
 
 func TestCityRuntimeRunReloadsConfigBeforeStartupReconcile(t *testing.T) {
@@ -7808,7 +7889,7 @@ func TestCityRuntimeReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 	ticket, _ := guard.Admit("upstream:broker", row.ID, "worker")
 	ticket.Resolve(verdictCapacity)
 
-	if n := cr.reapStaleSessionBeads(); n != 0 {
+	if n := cr.reapStaleSessionBeads(newSeatWork(cr.workLegs())); n != 0 {
 		t.Fatalf("reaped %d rows, want the row held while its endpoint refuses", n)
 	}
 }

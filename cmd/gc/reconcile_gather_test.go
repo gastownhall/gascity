@@ -66,9 +66,11 @@ func newGatherFixture(t *testing.T, rows ...beads.Bead) *gatherFixture {
 		Recording:    f.rec.Load,
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(f.cache) },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			f.resolves.Add(1)
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				f.resolves.Add(1)
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			}}
 		},
 		LookPath: func(name string) (string, error) { f.looks.Add(1); return "/bin/" + name, nil },
 	}
@@ -198,6 +200,14 @@ func TestGatherBootStateComputed(t *testing.T) {
 			obs.PublishInventory(obsPass(clk, 1, 1, partialSingle()), nil)
 			f.env.Observations = func() *ObservationCache { return obs }
 		}},
+		{name: "inventory partial, server confirmed dead", want: bootState{CachePrimed: true, InventoryComplete: true, RecordingSeen: true}, arrange: func(_ *testing.T, f *gatherFixture) {
+			clk := &clock.Fake{Time: gatherNow}
+			obs := NewObservationCache(clk, time.Minute, "e1")
+			dead := partialSingle()
+			dead.ServerAbsent, dead.ConfirmedDead = true, true
+			obs.PublishInventory(obsPass(clk, 1, 1, dead), nil)
+			f.env.Observations = func() *ObservationCache { return obs }
+		}},
 		{name: "no inventory pass", want: bootState{CachePrimed: true, RecordingSeen: true}, arrange: func(_ *testing.T, f *gatherFixture) {
 			f.env.Observations = nil
 		}},
@@ -238,6 +248,18 @@ func laneFedRig(t *testing.T, f *gatherFixture) {
 	f.cur.Store(&reconcileEnv{Gen: 1, Cfg: &cfg, SP: f.sp})
 	rig := beads.NewMemStore()
 	f.env.RigStores = func() map[string]beads.Store { return map[string]beads.Store{"rig-a": rig} }
+}
+
+// Kills a census-only row given a writer (AL1): with a rig leg in the census,
+// gather builds the sessions leg's store alone, so an effect on any other
+// leg's row refuses no-writer.
+func TestGatherBuildsOnlyTheSessionsLegsWriter(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	laneFedRig(t, f)
+	w := f.gather(t)
+	if len(w.Census.Legs) != 2 || len(w.LegStores) != 1 || w.LegStores[w.Census.sessionsLeg()] != beads.Store(f.cache) {
+		t.Fatalf("legs %v, leg stores %v, want two census legs and the sessions leg's store alone", w.Census.Legs, w.LegStores)
+	}
 }
 
 // Kills a K1 env that loses the sessions snapshot (the stamp step would run

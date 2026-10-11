@@ -7903,6 +7903,10 @@ func TestDryRunCrossRigSection(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = seededStore("FE-123")
+	// The target reads rig:hello-world; align StoreRef so the cross-store
+	// guard (now also run in dry-run, #6075) does not refuse the route.
+	// This test exercises only the prefix-based Cross-rig preview.
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-123")
 	opts.DryRun = true
 	code := doSling(opts, deps, q, stdout, stderr)
@@ -7945,6 +7949,10 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// The target reads rig:hello-world; align StoreRef so the cross-store
+	// guard (now also run in dry-run, #6075) does not refuse the route.
+	// This test exercises only the prefix-based Cross-rig preview.
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-1")
 	opts.DryRun = true
 	code := doSlingBatch(opts, deps, q, stdout, stderr)
@@ -7961,6 +7969,65 @@ func TestDryRunBatchCrossRigSection(t *testing.T) {
 	}
 	if !strings.Contains(out, `rig prefix "hw"`) {
 		t.Errorf("stdout missing rig prefix: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+	q := &fakeQuerier{bead: beads.Bead{ID: "FE-123", Type: "task", Status: "open"}}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("FE-123")
+	opts := testOpts(a, "FE-123")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code == 0 {
+		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-store route") {
+		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunBatchRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["FE-1"] = beads.Bead{ID: "FE-1", Type: "convoy", Status: "open"}
+	q.childrenOf["FE-1"] = []beads.Bead{
+		{ID: "FE-2", Status: "open"},
+		{ID: "FE-3", Status: "open"},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "FE-1")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code == 0 {
+		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing cross-store route") {
+		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)

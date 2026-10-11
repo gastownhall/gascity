@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -44,6 +45,9 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// Also before dispatch: every MySQL connection config copies the driver
 	// logger when it is built (mysql_driver_log.go).
 	installMySQLDriverLogger()
+	// A test-only cadence hook (internal/clock.BackstopSpeedupEnv) announces
+	// itself before anything else runs, active or ignored.
+	clock.AnnounceBackstopSpeedup(stderr)
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}
@@ -1836,9 +1840,21 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
+	if observeOpenedStore != nil {
+		result.Store = observeOpenedStore(scopeRoot, result.Store)
+	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
 }
+
+// observeOpenedStore is a test seam at the single store-open point. When set,
+// it receives every store this process opens, with the scope root it was
+// opened for, and returns the store callers will use. It runs inside the
+// bead-policy wrapper, so policy behavior and unwrapBeadPolicyStore see exactly
+// what they see in production. It is nil in production; request-budget tests
+// set it to count every operation a hook issues. Tests that set it must stay
+// serial.
+var observeOpenedStore func(scopeRoot string, store beads.Store) beads.Store
 
 // loadCityConfigForStoreOpen loads the city config for a store open that was
 // handed none. A missing city.toml is not an error: most opens through the

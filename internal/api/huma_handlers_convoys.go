@@ -518,19 +518,25 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			continue
 		}
 
-		var ids []string
+		// open is the subset the close may stamp: the tree is listed with
+		// IncludeClosed, and a store that batches the close without reading each
+		// status first writes the skip onto every id it is handed, rewriting the
+		// outcome of a step that already finished.
+		var open []string
 		seen := make(map[string]struct{}, 4)
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
+		addBead := func(b beads.Bead) {
+			if b.ID == "" {
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := seen[b.ID]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			seen[b.ID] = struct{}{}
+			if b.Status != "closed" {
+				open = append(open, b.ID)
+			}
 		}
 		addRoot := func(root beads.Bead) {
 			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
@@ -541,7 +547,7 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 			}
 			rootSeen[root.ID] = struct{}{}
 			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
+			addBead(root)
 		}
 		if root, err := info.store.Get(workflowID); err == nil {
 			addRoot(root)
@@ -566,14 +572,17 @@ func (s *Server) humaDeleteWorkflow(workflowID string) (*OKResponse, error) {
 				continue
 			}
 			for _, b := range all {
-				addID(b.ID)
+				addBead(b)
 			}
 		}
-		if len(ids) == 0 {
+		if len(seen) == 0 {
 			continue
 		}
 		found = true
-		info.store.CloseAll(ids, map[string]string{ //nolint:errcheck
+		if len(open) == 0 {
+			continue
+		}
+		info.store.CloseAll(open, map[string]string{ //nolint:errcheck
 			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 		})
@@ -658,19 +667,27 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			continue
 		}
 
-		var ids []string
+		// ids is the whole tree, which Phase 2 deletes. open is the subset Phase
+		// 1 may stamp: the tree is listed with IncludeClosed, and a store that
+		// batches the close without reading each status first writes the skip
+		// onto every id it is handed, rewriting the outcome of a step that
+		// already finished.
+		var ids, open []string
 		seen := make(map[string]struct{}, 4)
 		rootIDs := make([]string, 0, 2)
 		rootSeen := make(map[string]struct{}, 2)
-		addID := func(id string) {
-			if id == "" {
+		addBead := func(b beads.Bead) {
+			if b.ID == "" {
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := seen[b.ID]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			seen[b.ID] = struct{}{}
+			ids = append(ids, b.ID)
+			if b.Status != "closed" {
+				open = append(open, b.ID)
+			}
 		}
 		addRoot := func(root beads.Bead) {
 			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
@@ -681,7 +698,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 			}
 			rootSeen[root.ID] = struct{}{}
 			rootIDs = append(rootIDs, root.ID)
-			addID(root.ID)
+			addBead(root)
 		}
 		if root, err := info.store.Get(workflowID); err == nil {
 			addRoot(root)
@@ -711,7 +728,7 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 				continue
 			}
 			for _, b := range all {
-				addID(b.ID)
+				addBead(b)
 			}
 		}
 		if len(ids) == 0 {
@@ -720,13 +737,15 @@ func (s *Server) humaHandleWorkflowDelete(_ context.Context, input *WorkflowDele
 		found = true
 
 		// Phase 1: Batch close all open beads.
-		n, closeErr := info.store.CloseAll(ids, map[string]string{
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-			"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-		})
-		closed += n
-		if closeErr != nil {
-			pa.record("store "+info.scopeRef+" close", closeErr)
+		if len(open) > 0 {
+			n, closeErr := info.store.CloseAll(open, map[string]string{
+				beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+				"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
+			})
+			closed += n
+			if closeErr != nil {
+				pa.record("store "+info.scopeRef+" close", closeErr)
+			}
 		}
 
 		// Phase 2: Delete if requested.

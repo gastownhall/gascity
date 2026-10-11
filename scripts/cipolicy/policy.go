@@ -16,7 +16,13 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	//
+	// Triggers bumped for merge-queue readiness (TESTING.md "Merge queue"):
+	// merge_group [checks_requested], so Check and CI / required report on a
+	// queue entry's merge-group commit. Reviewed delta: one trigger, no new
+	// job, step command or permission; scripts/ci_merge_queue_test.go pins
+	// what each event expression yields on it.
+	expectedCITriggersHash = "869922e05434e56d0b7fe8245e29529edc9616efac89ce4ba068edf7faa3f69b"
 	// Bumped for the beads-topology-acceptance job: the bd/dolt-backed topology
 	// shapes had never executed in CI — every job lacked a bd with
 	// --proxied-server, so each test skipped and a suite that ran nothing
@@ -236,7 +242,76 @@ const (
 	// Bazel's unit lane runs the same typecheck, Vitest, build, drift and
 	// Playwright steps (//internal/api/dashboardspa/...). Reviewed delta:
 	// removed job, steps and need; no new job, trigger or permission.
-	expectedCIExecutionHash     = "d4d8abba7a6b922694306ef6d10b435cf43fe5e901533b759c7b428341ada997"
+	// Bumped again (ga-96smfk.7, bd contract cells moved to Bazel): the
+	// contract-acceptance-previous and contract-acceptance-current jobs are
+	// removed, and Check and ci-preflight no longer need them (nor allow the
+	// current cell's skip). bazel.yml's unit lane runs the same tests against
+	// pinned bd release archives: //test/acceptance:bd_cli_contract_prev_test
+	// and :bd_cli_contract_current_test, and
+	// //internal/beads:bd_conditional_release_contract_test. Reviewed delta:
+	// two removed jobs and their fan-in references; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.11, beads topology acceptance moved to Bazel):
+	// the beads-topology-acceptance and beads-proxied-native-acceptance jobs
+	// are removed, with the changes job's beads_topology filter and output
+	// that only they read, and ci-required no longer needs them (nor allows
+	// their skip). bazel.yml's required acceptance lane runs the same tests
+	// against the pinned bd and dolt, under GC_REQUIRE_ACCEPTANCE_TOOLING
+	// and GC_ACCEPTANCE_TOPOLOGY_MATRIX: //test/acceptance:acceptance_test
+	// and :acceptance_solo_tests. Reviewed delta: two removed jobs, one
+	// filter and output, and their fan-in references; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.10, K8s session suite moved to Bazel): the
+	// k8s-session job, its `k8s` changes filter/output and its ci-required
+	// need and allowed skip are removed. Its one step (TestK8sSessionConformance)
+	// only ran with the GC_K8S_AVAILABLE secret, which was never set, so it
+	// executed nothing; the suite now runs against the emulated pod API in
+	// //test/containerhost in bazel.yml's gating integration-packages lane.
+	// Reviewed delta: one job and one filter removed; no new job, trigger,
+	// step command or permission.
+	//
+	// Bumped again (ga-96smfk.10, openclaw-bridge Node suite moved to
+	// Bazel): the openclaw-bridge job, its openclaw_bridge changes
+	// filter/output and its ci-required need and allowed skip are removed.
+	// The same node --test files run as //contrib/openclaw-bridge's js_tests
+	// under rules_js in bazel.yml's gating unit lane. Reviewed delta: one job
+	// and one filter removed; no new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.38, OpenAPI breaking-change gate moved to
+	// Bazel): the preflight-generated job and its need in Check and
+	// ci-preflight are removed. //cmd/openapi-breaking:openapi-breaking_test
+	// (in bazel.yml's gating unit lane) runs the gate with the pinned oasdiff
+	// against the PR base commit's spec, which the lane writes with git show
+	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
+	// new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.12, final cutover: every suite of this tree
+	// under Bazel): preflight-static (no steps left but setup),
+	// preflight-acceptance (Tier A: bazel.yml's acceptance lane plus the
+	// untagged helpers in the unit lane), the push-only unit cover jobs
+	// (bazel-nightly.yml's `bazel coverage //...` -> Codecov flag
+	// bazel-unit), the push-only integration-rest-full shards
+	// (bazel-nightly.yml's //test/integration lane), release-config
+	// (//:goreleaser_check_test) and the ci-preflight / ci-integration
+	// rollups are removed, with the changes job's cmd_gc_process and
+	// integration filters and outputs that only they read. Check and
+	// ci-required fan in the remaining gating jobs; credential-provider-
+	// windows moves to runner_policy.py's Blacksmith Windows runner.
+	// Reviewed delta: jobs, filters and needs removed, one runs-on and one
+	// runner-policy output; no new trigger, step command or permission.
+	//
+	// Bumped again (merge-queue readiness): the changes job's paths-filter
+	// takes base/ref from merge_group.base_sha/head_sha, empty on every other
+	// event (the action's defaults). Reviewed delta: two `with` inputs; no
+	// new job, step command or permission.
+	//
+	// Bumped again (installation rate limit): the changes job's paths-filter
+	// gets `token: ''`, so pull requests diff with git instead of calling the
+	// pulls/files API on the shared github.token budget. Reviewed delta: one
+	// `with` input; no new job, step command or permission.
+	expectedCIExecutionHash     = "094fa149515765ad86669145929368481d2c8112e58396b4083a6947b6ec2564"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -266,7 +341,12 @@ const (
 	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
 	// one test split out of TestBeadsProxiedDefault that reads
 	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "81df6767fb4a45226bfdf50a367a369c86f525510772a313d0ce3fa744295153"
+	// Bumped again (ga-96smfk.59): integration-sqlite-coordstore is removed.
+	// It selected GC_BEADS=sqlite, a provider #3151 removed (gc now
+	// hard-errors on it), so it failed every night; no job may select a
+	// provider now. Reviewed delta: one job removed; no new job, trigger or
+	// permission.
+	expectedNightlyExecutionHash = "cb54a44e7bfc392a047849ab6cfe695dcbffec56e127b5a84d427e3c1d4bef8c"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.
@@ -275,11 +355,6 @@ const (
 
 var requiredFilterPaths = map[string][]string{
 	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
-	"k8s": {
-		"internal/session/**",
-		"contrib/session-scripts/gc-session-k8s*",
-		"test/integration/session_k8s_test.go",
-	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",
@@ -288,36 +363,12 @@ var requiredFilterPaths = map[string][]string{
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
 	},
-	// beads-topology-acceptance is the only job that stands up the proxied
-	// shapes for real, and ci-required allows its skip, so the paths that must
-	// trigger it are policy rather than convention. The internal/** entry is
-	// the dependency graph of the binaries the job builds:
-	// `go list -deps ./test/acceptance/... ./cmd/gc`.
-	"beads_topology": {
-		"go.mod",
-		"go.sum",
-		"deps.env",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/bd/**",
-		"test/acceptance/**",
-		".github/workflows/ci.yml",
-	},
 	"packs": {
 		"examples/gastown/**",
 		"internal/config/pack.go",
 		"internal/config/compose.go",
 		"cmd/gc/embed_builtin_packs.go",
 		"scripts/update-bundled-gastown-pack",
-	},
-	"cmd_gc_process": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/gastown/**",
 	},
 	"credential_provider": {
 		"go.mod",
@@ -326,19 +377,6 @@ var requiredFilterPaths = map[string][]string{
 		"internal/testenv/**",
 		"internal/testutil/**",
 	},
-	"integration": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"**/*.go",
-		"scripts/test-integration-shard",
-		"scripts/test-go-test-shard",
-		"scripts/runtime-tmux-tests.manifest",
-		"scripts/go-test-observable",
-		"examples/gastown/**",
-	},
-	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},
 	"shared": {
 		"go.mod",
 		"go.sum",
@@ -505,7 +543,7 @@ func validatePRProviderOwnership(workflow map[string]any) error {
 func validateNightlyProviderOwnership(workflow map[string]any) error {
 	if match, ok := findEnvField(workflow, "nightly"); ok {
 		return fmt.Errorf(
-			"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+			"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 			match.path,
 			match.name,
 		)
@@ -526,13 +564,10 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 		if !ok {
 			return fmt.Errorf("nightly job %q must be a mapping", name)
 		}
-		if name == "integration-sqlite-coordstore" {
-			continue
-		}
 		path := "nightly.jobs." + name
 		if match, found := findJobProviderSelector(projectJob(job), path); found {
 			return fmt.Errorf(
-				"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+				"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 				match.path,
 				match.name,
 			)

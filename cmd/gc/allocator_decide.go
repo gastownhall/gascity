@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -156,7 +155,6 @@ type decidePass struct {
 	snap *selectionSnapshot
 	obs  map[rowKey]rowObservation
 
-	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
 	// C2.11, C2.13).
 	none map[rowKey]string
@@ -209,6 +207,8 @@ type selection struct {
 
 // decideAllocation is the allocator's whole decision for one pass. It is
 // pure: identical inputs give identical outputs.
+//
+//gc:pure
 func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock
@@ -248,7 +248,6 @@ func newDecidePass(in allocInputs) *decidePass {
 		selected: make(map[rowKey]*selection),
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
-		p.sessionsLeg = c.Legs[0].Ref
 		p.obs = observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)
 	}
 	return p
@@ -280,19 +279,15 @@ func (p *decidePass) finish() allocDecision {
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
 // in occupancy. A pending create (one holding pending_create_claim) is a
-// rollback candidate only when its own runtime is absent, absent-unconfirmed
-// or a name another row holds. Unknown liveness keeps it managed, and so does
+// rollback candidate only past A10's never-started deadline, with no lease
+// predicate (v5 P4, SC A5), and only when its own runtime is absent,
+// absent-unconfirmed or a name another row holds. Unknown liveness keeps it managed, and so does
 // a dead pane: legacy's IsRunning reads a corpse as not running, but v2's
 // start path recycles it. A creating row with no claim is never one (v5 C3,
 // B5): it stays managed and reusable, as legacy's is, and A6 heals it.
 // Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
-	var startupTimeout time.Duration
-	if p.in.Cfg != nil {
-		startupTimeout = p.cfg.Session.StartupTimeoutDuration()
-	}
-	clk := &clock.Fake{Time: p.in.Now}
 	keys := make([]rowKey, 0, len(c.Rows))
 	for k := range c.Rows {
 		keys = append(keys, k)
@@ -322,18 +317,18 @@ func (p *decidePass) classifyRows() {
 		}
 		p.occupancy = append(p.occupancy, row.Info)
 		info := row.Info
-		notRunning := observed && (o.Liveness == livenessAbsent || o.Liveness == livenessAbsentUnconfirmed || o.Liveness == livenessOccupied)
+		notRunning := observed && (o.Liveness == livenessGone || o.Liveness == livenessOccupied)
 		// A guarded endpoint the pass has no view of holds (fail closed).
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
 		switch {
-		case k.Leg != p.sessionsLeg:
+		case k.Leg != c.sessionsLeg():
 			p.none[k] = reasonCensusOnly
 		case row.UnknownState:
 			p.none[k] = reasonUnknownState
 		case isFailedCreateSessionInfo(info):
 			p.none[k] = reasonFailedCreate
-		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
+		case notRunning && pendingCreateNeverStartedExpiredAt(info, p.in.Now) && // A10's never-started deadline, no lease (v5 P4, SC A5)
 			!endpointHolds:
 			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
@@ -481,7 +476,7 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 		return reasonObservationUncertain
 	case !p.in.CitySuspended:
 		return ""
-	case pendingCreateSessionStillLeasedInfo(info, p.cfg, &clock.Fake{Time: p.in.Now}):
+	case pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork
@@ -559,13 +554,13 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 			ref.DetachedAt = obs.LastActivity.UTC().Format(time.RFC3339Nano)
 		}
 	}
-	if !configWakeSuppressedInfo(ref, policy, nil, &clock.Fake{Time: p.in.Now}) {
+	if suppressed, _ := configWakeSuppressedAt(ref, policy, nil, p.in.Now); !suppressed {
 		return false
 	}
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "")
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, explicitSleepIntentInfo(info), explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
@@ -605,7 +600,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Desired, e.Reason = desireSleep, firstNonEmpty(d.Reason, reasonNoWake)
 		default:
 			e.Desired, e.Reason = desireDrain, firstNonEmpty(d.Reason, reasonNoWake)
-			e.DrainReason = drainOrphaned
+			e.DrainReason, e.OpenWork = drainOrphaned, p.openAssignedWork(info)
 			if p.agentSuspended(e.Template) {
 				e.DrainReason = drainSuspended
 			}
@@ -726,8 +721,8 @@ type runtimeNameState uint8
 
 const (
 	nameUnknown runtimeNameState = iota
-	// nameAbsent: listed No, or not listed by a fresh pass that can stand
-	// for absence (absent-unconfirmed).
+	// nameAbsent: not listed by a fresh pass that every backend listed
+	// completely and attested (readPresence's gone).
 	nameAbsent
 	// nameCorpse: listed, but its pane is not running. Legacy's IsRunning
 	// reads it as not running, so it frees a singleton's name.
@@ -743,34 +738,24 @@ type runtimeNameReading struct {
 	obs   RuntimeObservation
 }
 
-// readRuntimeName reads a runtime name from I3 by name, with P3-3's
-// presence rules (inventoryAbsence, listedObservation): a name a fresh pass
-// listed on an unprimed backend is present.
+// readRuntimeName reads a runtime name from I3 by name, in observeRow's
+// presence order (readPresence; POOL-052): a name a fresh pass listed on an
+// unprimed backend is present, and only a complete pass proves it absent.
 func readRuntimeName(snap *ObservationSnapshot, name string, now time.Time, maxAge time.Duration) runtimeNameReading {
 	name = strings.TrimSpace(name)
 	if name == "" || snap == nil {
 		return runtimeNameReading{state: nameUnknown}
 	}
-	listed, provable := inventoryAbsence(snap, now, maxAge)
-	r := runtimeNameReading{state: nameUnknown}
-	switch f := snap.Fact(name, FactListed, now, maxAge); {
-	case f.Value == ObsNo:
-		r.state = nameAbsent
-		return r
-	case f.Value == ObsYes:
-		r.obs, _ = snap.Observation(name, now, maxAge)
-	case listed[name]:
-		r.obs = listedObservation(snap, name, now, maxAge)
-	case provable:
-		r.state = nameAbsent
-		return r
-	default:
-		return r
-	}
+	listed, complete := inventoryAbsence(snap, now, maxAge)
+	obs, present, gone, _ := readPresence(snap, name, listed, complete, now, maxAge)
+	r := runtimeNameReading{state: nameUnknown, obs: obs}
 	switch {
-	case r.obs.Running.Value == ObsNo:
+	case gone:
+		r.state = nameAbsent
+	case !present:
+	case obs.Running.Value == ObsNo:
 		r.state = nameCorpse
-	case r.obs.ProcessAlive.Value == ObsNo:
+	case obs.ProcessAlive.Value == ObsNo:
 		r.state = nameZombie
 	default:
 		r.state = nameAlive

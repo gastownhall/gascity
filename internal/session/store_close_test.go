@@ -399,3 +399,50 @@ func TestCloseSurfacesANonFenceAtomicCloseError(t *testing.T) {
 		t.Fatalf("atomic/plain close calls = %d/%d, want 1/0", tracing.atomicCalls, tracing.plainCloseCalls)
 	}
 }
+
+// TestCloseWithMetadataIfMatchIsOneAttemptAtTheReadRevision pins the v2
+// transaction's close verb: it closes at the revision it read, with the
+// patch decide returned; a write that lands between the read and the close
+// loses the fence and writes nothing, with no retry; decide's refusal and
+// an already closed row write nothing; and a store with no atomic closer is
+// refused without the split-write fallback.
+func TestCloseWithMetadataIfMatchIsOneAttemptAtTheReadRevision(t *testing.T) {
+	patch := MetadataPatch{"close_reason": "orphaned"}
+	decide := func(Info, PersistedResponse) (MetadataPatch, bool) { return patch, true }
+
+	backing := beads.NewAtomicCloseMemStore()
+	created := seedOpenSession(t, backing, "s-close")
+	if closed, err := NewStore(beads.SessionStore{Store: backing}).CloseWithMetadataIfMatch(created.ID, decide); !closed || err != nil {
+		t.Fatalf("close = (%v, %v), want closed", closed, err)
+	}
+	if got, _ := backing.Get(created.ID); got.Status != "closed" || got.Metadata["close_reason"] != "orphaned" {
+		t.Fatalf("row = %q %v, want closed with the patch", got.Status, got.Metadata)
+	}
+	if closed, err := NewStore(beads.SessionStore{Store: backing}).CloseWithMetadataIfMatch(created.ID, decide); closed || err != nil {
+		t.Fatalf("already closed: close = (%v, %v), want (false, nil)", closed, err)
+	}
+
+	backing = beads.NewAtomicCloseMemStore()
+	created = seedOpenSession(t, backing, "s-race")
+	tracing := &closeInterferenceStore{Store: backing}
+	tracing.interfere = func(id string) error { return backing.SetMetadata(id, unrelatedKey, "1") }
+	if closed, err := NewStore(beads.SessionStore{Store: tracing}).CloseWithMetadataIfMatch(created.ID, decide); closed || err != nil || tracing.atomicCalls != 1 {
+		t.Fatalf("a write in between: close = (%v, %v) after %d atomic calls, want (false, nil) after one", closed, err, tracing.atomicCalls)
+	}
+	if got, _ := backing.Get(created.ID); got.Status != "open" {
+		t.Fatalf("row %q after a lost fence, want open", got.Status)
+	}
+	refuse := func(Info, PersistedResponse) (MetadataPatch, bool) { return nil, false }
+	if closed, err := NewStore(beads.SessionStore{Store: backing}).CloseWithMetadataIfMatch(created.ID, refuse); closed || err != nil {
+		t.Fatalf("decide refused: close = (%v, %v), want (false, nil)", closed, err)
+	}
+
+	plain := beads.NewMemStore()
+	created = seedOpenSession(t, plain, "s-plain")
+	if closed, err := NewStore(beads.SessionStore{Store: plain}).CloseWithMetadataIfMatch(created.ID, decide); closed || !beads.IsConditionalWriteUnsupported(err) {
+		t.Fatalf("no atomic closer: close = (%v, %v), want ErrConditionalWriteUnsupported", closed, err)
+	}
+	if got, _ := plain.Get(created.ID); got.Status != "open" || got.Metadata["close_reason"] != "" {
+		t.Fatalf("row = %q %v, want untouched (no fallback)", got.Status, got.Metadata)
+	}
+}

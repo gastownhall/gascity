@@ -39,7 +39,7 @@ import (
 // can live in a rig store exactly as every ga-* bead does in production.
 func freshCycleReproEnv(t *testing.T, sessionMeta map[string]string) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
-	env := newRestartRequestTestEnv()
+	env := newRestartRequestTestEnv(t)
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
 		Rigs:          []config.Rig{{Name: "gascity", Prefix: "ga"}},
@@ -122,9 +122,10 @@ func reconcileFreshCycleRepro(env *restartRequestTestEnv, sessions, assignedWork
 	}
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	_ = reconcileSessionBeadsAtPath(
-		context.Background(), "", sessions, env.desiredState, cfgNames, env.cfg, env.sp, env.store,
+		context.Background(), env.city, sessions, env.desiredState, cfgNames, env.cfg, env.sp, env.store,
 		nil, assignedWork, rigStores, nil, env.dt, poolDesired, false, nil, "", nil,
 		env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
 	)
 }
 

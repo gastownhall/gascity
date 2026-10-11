@@ -510,6 +510,45 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for SlingChildOutcomeOutcome.
+const (
+	Failed  SlingChildOutcomeOutcome = "failed"
+	Routed  SlingChildOutcomeOutcome = "routed"
+	Skipped SlingChildOutcomeOutcome = "skipped"
+)
+
+// Valid indicates whether the value is a known member of the SlingChildOutcomeOutcome enum.
+func (e SlingChildOutcomeOutcome) Valid() bool {
+	switch e {
+	case Failed:
+		return true
+	case Routed:
+		return true
+	case Skipped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SlingResponseStatus.
+const (
+	Partial SlingResponseStatus = "partial"
+	Slung   SlingResponseStatus = "slung"
+)
+
+// Valid indicates whether the value is a known member of the SlingResponseStatus enum.
+func (e SlingResponseStatus) Valid() bool {
+	switch e {
+	case Partial:
+		return true
+	case Slung:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StatusConditionalWriteStoreVerdictLatch.
 const (
 	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
@@ -983,60 +1022,60 @@ type AgentOutputResponse struct {
 
 // AgentPatch defines model for AgentPatch.
 type AgentPatch struct {
-	AppendFragments         *[]string         `json:"AppendFragments"`
-	Args                    *[]string         `json:"Args"`
-	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
-	Attach                  *bool             `json:"Attach"`
-	AutoReclaimStaleClaims  *bool             `json:"AutoReclaimStaleClaims"`
-	ContextAdvisory         ContextAdvisory   `json:"ContextAdvisory"`
-	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
-	DependsOn               *[]string         `json:"DependsOn"`
-	Dir                     string            `json:"Dir"`
-	Env                     map[string]string `json:"Env"`
-	EnvRemove               *[]string         `json:"EnvRemove"`
-	HooksInstalled          *bool             `json:"HooksInstalled"`
-	IdleTimeout             *string           `json:"IdleTimeout"`
-	InjectAssignedSkills    *bool             `json:"InjectAssignedSkills"`
-	InjectFragments         *[]string         `json:"InjectFragments"`
-	InjectFragmentsAppend   *[]string         `json:"InjectFragmentsAppend"`
-	InstallAgentHooks       *[]string         `json:"InstallAgentHooks"`
-	InstallAgentHooksAppend *[]string         `json:"InstallAgentHooksAppend"`
-	Lifecycle               *string           `json:"Lifecycle"`
-	MCP                     *[]string         `json:"MCP"`
-	MCPAppend               *[]string         `json:"MCPAppend"`
-	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`
-	MaxSessionAge           *string           `json:"MaxSessionAge"`
-	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`
-	MinActiveSessions       *int64            `json:"MinActiveSessions"`
-	MouseMode               *string           `json:"MouseMode"`
-	Name                    string            `json:"Name"`
-	Nudge                   *string           `json:"Nudge"`
-	OptionDefaults          map[string]string `json:"OptionDefaults"`
-	OverlayDir              *string           `json:"OverlayDir"`
-	Pool                    PoolOverride      `json:"Pool"`
-	PreStart                *[]string         `json:"PreStart"`
-	PreStartAppend          *[]string         `json:"PreStartAppend"`
-	PromptTemplate          *string           `json:"PromptTemplate"`
-	Provider                *string           `json:"Provider"`
-	ResumeCommand           *string           `json:"ResumeCommand"`
-	Rig                     string            `json:"Rig"`
-	ScaleCheck              *string           `json:"ScaleCheck"`
-	Scope                   *string           `json:"Scope"`
-	Session                 *string           `json:"Session"`
-	SessionLive             *[]string         `json:"SessionLive"`
-	SessionLiveAppend       *[]string         `json:"SessionLiveAppend"`
-	SessionSetup            *[]string         `json:"SessionSetup"`
-	SessionSetupAppend      *[]string         `json:"SessionSetupAppend"`
-	SessionSetupScript      *string           `json:"SessionSetupScript"`
-	Skills                  *[]string         `json:"Skills"`
-	SkillsAppend            *[]string         `json:"SkillsAppend"`
-	SleepAfterIdle          *string           `json:"SleepAfterIdle"`
-	StartCommand            *string           `json:"StartCommand"`
-	Suspended               *bool             `json:"Suspended"`
-	TmuxAlias               *string           `json:"TmuxAlias"`
-	Upstream                *string           `json:"Upstream"`
-	WakeMode                *string           `json:"WakeMode"`
-	WorkDir                 *string           `json:"WorkDir"`
+	AppendFragments         *[]string          `json:"AppendFragments"`
+	Args                    *[]string          `json:"Args"`
+	AssignedWorkDeferLimit  *int64             `json:"AssignedWorkDeferLimit"`
+	Attach                  *bool              `json:"Attach"`
+	AutoReclaimStaleClaims  *bool              `json:"AutoReclaimStaleClaims"`
+	ContextAdvisory         *ContextAdvisory   `json:"ContextAdvisory,omitempty"`
+	DefaultSlingFormula     *string            `json:"DefaultSlingFormula"`
+	DependsOn               *[]string          `json:"DependsOn"`
+	Dir                     string             `json:"Dir"`
+	Env                     *map[string]string `json:"Env,omitempty"`
+	EnvRemove               *[]string          `json:"EnvRemove"`
+	HooksInstalled          *bool              `json:"HooksInstalled"`
+	IdleTimeout             *string            `json:"IdleTimeout"`
+	InjectAssignedSkills    *bool              `json:"InjectAssignedSkills"`
+	InjectFragments         *[]string          `json:"InjectFragments"`
+	InjectFragmentsAppend   *[]string          `json:"InjectFragmentsAppend"`
+	InstallAgentHooks       *[]string          `json:"InstallAgentHooks"`
+	InstallAgentHooksAppend *[]string          `json:"InstallAgentHooksAppend"`
+	Lifecycle               *string            `json:"Lifecycle"`
+	MCP                     *[]string          `json:"MCP"`
+	MCPAppend               *[]string          `json:"MCPAppend"`
+	MaxActiveSessions       *int64             `json:"MaxActiveSessions"`
+	MaxSessionAge           *string            `json:"MaxSessionAge"`
+	MaxSessionAgeJitter     *string            `json:"MaxSessionAgeJitter"`
+	MinActiveSessions       *int64             `json:"MinActiveSessions"`
+	MouseMode               *string            `json:"MouseMode"`
+	Name                    string             `json:"Name"`
+	Nudge                   *string            `json:"Nudge"`
+	OptionDefaults          *map[string]string `json:"OptionDefaults,omitempty"`
+	OverlayDir              *string            `json:"OverlayDir"`
+	Pool                    *PoolOverride      `json:"Pool,omitempty"`
+	PreStart                *[]string          `json:"PreStart"`
+	PreStartAppend          *[]string          `json:"PreStartAppend"`
+	PromptTemplate          *string            `json:"PromptTemplate"`
+	Provider                *string            `json:"Provider"`
+	ResumeCommand           *string            `json:"ResumeCommand"`
+	Rig                     string             `json:"Rig"`
+	ScaleCheck              *string            `json:"ScaleCheck"`
+	Scope                   *string            `json:"Scope"`
+	Session                 *string            `json:"Session"`
+	SessionLive             *[]string          `json:"SessionLive"`
+	SessionLiveAppend       *[]string          `json:"SessionLiveAppend"`
+	SessionSetup            *[]string          `json:"SessionSetup"`
+	SessionSetupAppend      *[]string          `json:"SessionSetupAppend"`
+	SessionSetupScript      *string            `json:"SessionSetupScript"`
+	Skills                  *[]string          `json:"Skills"`
+	SkillsAppend            *[]string          `json:"SkillsAppend"`
+	SleepAfterIdle          *string            `json:"SleepAfterIdle"`
+	StartCommand            *string            `json:"StartCommand"`
+	Suspended               *bool              `json:"Suspended"`
+	TmuxAlias               *string            `json:"TmuxAlias"`
+	Upstream                *string            `json:"Upstream"`
+	WakeMode                *string            `json:"WakeMode"`
+	WorkDir                 *string            `json:"WorkDir"`
 }
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
@@ -1631,7 +1670,7 @@ type ConversationTranscriptRecord struct {
 
 	// Kind Direction of a transcript entry.
 	Kind     TranscriptMessageKind `json:"Kind"`
-	Metadata map[string]string     `json:"Metadata"`
+	Metadata *map[string]string    `json:"Metadata,omitempty"`
 
 	// Provenance Provenance of a transcript entry (freshly observed vs. replayed from persisted history).
 	Provenance        TranscriptProvenance `json:"Provenance"`
@@ -1707,15 +1746,15 @@ type Cursors struct {
 
 // DeliveryContextRecord defines model for DeliveryContextRecord.
 type DeliveryContextRecord struct {
-	BindingGeneration int64             `json:"BindingGeneration"`
-	Conversation      ConversationRef   `json:"Conversation"`
-	ID                string            `json:"ID"`
-	LastMessageID     string            `json:"LastMessageID"`
-	LastPublishedAt   time.Time         `json:"LastPublishedAt"`
-	Metadata          map[string]string `json:"Metadata"`
-	SchemaVersion     int64             `json:"SchemaVersion"`
-	SessionID         string            `json:"SessionID"`
-	SourceSessionID   string            `json:"SourceSessionID"`
+	BindingGeneration int64              `json:"BindingGeneration"`
+	Conversation      ConversationRef    `json:"Conversation"`
+	ID                string             `json:"ID"`
+	LastMessageID     string             `json:"LastMessageID"`
+	LastPublishedAt   time.Time          `json:"LastPublishedAt"`
+	Metadata          *map[string]string `json:"Metadata,omitempty"`
+	SchemaVersion     int64              `json:"SchemaVersion"`
+	SessionID         string             `json:"SessionID"`
+	SourceSessionID   string             `json:"SourceSessionID"`
 }
 
 // Dep defines model for Dep.
@@ -2254,12 +2293,12 @@ type InboundEventPayload struct {
 
 // InboundResult defines model for InboundResult.
 type InboundResult struct {
-	Binding         SessionBindingRecord         `json:"Binding"`
-	GroupRoute      GroupRouteDecision           `json:"GroupRoute"`
-	Message         ExternalInboundMessage       `json:"Message"`
-	TargetAgentName string                       `json:"TargetAgentName"`
-	TargetSessionID string                       `json:"TargetSessionID"`
-	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+	Binding         *SessionBindingRecord         `json:"Binding,omitempty"`
+	GroupRoute      *GroupRouteDecision           `json:"GroupRoute,omitempty"`
+	Message         ExternalInboundMessage        `json:"Message"`
+	TargetAgentName string                        `json:"TargetAgentName"`
+	TargetSessionID string                        `json:"TargetSessionID"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 }
 
 // ListBodyAgentPatch defines model for ListBodyAgentPatch.
@@ -2884,9 +2923,9 @@ type OutboundEventPayload struct {
 
 // OutboundResult defines model for OutboundResult.
 type OutboundResult struct {
-	DeliveryContext DeliveryContextRecord        `json:"DeliveryContext"`
-	Receipt         PublishReceipt               `json:"Receipt"`
-	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
+	DeliveryContext *DeliveryContextRecord        `json:"DeliveryContext,omitempty"`
+	Receipt         PublishReceipt                `json:"Receipt"`
+	TranscriptEntry *ConversationTranscriptRecord `json:"TranscriptEntry,omitempty"`
 }
 
 // OutputTurn defines model for OutputTurn.
@@ -3084,21 +3123,21 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	ACPArgs              *[]string         `json:"ACPArgs"`
-	ACPCommand           *string           `json:"ACPCommand"`
-	AcceptStartupDialogs *bool             `json:"AcceptStartupDialogs"`
-	Args                 *[]string         `json:"Args"`
-	ArgsAppend           *[]string         `json:"ArgsAppend"`
-	Base                 *string           `json:"Base"`
-	Command              *string           `json:"Command"`
-	Env                  map[string]string `json:"Env"`
-	EnvRemove            *[]string         `json:"EnvRemove"`
-	Name                 string            `json:"Name"`
-	OptionsSchemaMerge   *string           `json:"OptionsSchemaMerge"`
-	PromptFlag           *string           `json:"PromptFlag"`
-	PromptMode           *string           `json:"PromptMode"`
-	ReadyDelayMs         *int64            `json:"ReadyDelayMs"`
-	Replace              bool              `json:"Replace"`
+	ACPArgs              *[]string          `json:"ACPArgs"`
+	ACPCommand           *string            `json:"ACPCommand"`
+	AcceptStartupDialogs *bool              `json:"AcceptStartupDialogs"`
+	Args                 *[]string          `json:"Args"`
+	ArgsAppend           *[]string          `json:"ArgsAppend"`
+	Base                 *string            `json:"Base"`
+	Command              *string            `json:"Command"`
+	Env                  *map[string]string `json:"Env,omitempty"`
+	EnvRemove            *[]string          `json:"EnvRemove"`
+	Name                 string             `json:"Name"`
+	OptionsSchemaMerge   *string            `json:"OptionsSchemaMerge"`
+	PromptFlag           *string            `json:"PromptFlag"`
+	PromptMode           *string            `json:"PromptMode"`
+	ReadyDelayMs         *int64             `json:"ReadyDelayMs"`
+	Replace              bool               `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
@@ -3259,12 +3298,12 @@ type ProxiedEndpointStamp struct {
 
 // PublishReceipt defines model for PublishReceipt.
 type PublishReceipt struct {
-	Conversation ConversationRef   `json:"Conversation"`
-	Delivered    bool              `json:"Delivered"`
-	FailureKind  string            `json:"FailureKind"`
-	MessageID    string            `json:"MessageID"`
-	Metadata     map[string]string `json:"Metadata"`
-	RetryAfter   int64             `json:"RetryAfter"`
+	Conversation ConversationRef    `json:"Conversation"`
+	Delivered    bool               `json:"Delivered"`
+	FailureKind  string             `json:"FailureKind"`
+	MessageID    string             `json:"MessageID"`
+	Metadata     *map[string]string `json:"Metadata,omitempty"`
+	RetryAfter   int64              `json:"RetryAfter"`
 }
 
 // ReadinessItem defines model for ReadinessItem.
@@ -3393,15 +3432,15 @@ type RigCreateSucceededPayload struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	BeadsProxiedIdleTimeout *string           `json:"BeadsProxiedIdleTimeout"`
-	DefaultBranch           *string           `json:"DefaultBranch"`
-	DefaultMergeStrategy    *string           `json:"DefaultMergeStrategy"`
-	FormulaVars             map[string]string `json:"FormulaVars"`
-	Name                    string            `json:"Name"`
-	Path                    *string           `json:"Path"`
-	Prefix                  *string           `json:"Prefix"`
-	Suspended               *bool             `json:"Suspended"`
-	SuspendedOnStart        *bool             `json:"SuspendedOnStart"`
+	BeadsProxiedIdleTimeout *string            `json:"BeadsProxiedIdleTimeout"`
+	DefaultBranch           *string            `json:"DefaultBranch"`
+	DefaultMergeStrategy    *string            `json:"DefaultMergeStrategy"`
+	FormulaVars             *map[string]string `json:"FormulaVars,omitempty"`
+	Name                    string             `json:"Name"`
+	Path                    *string            `json:"Path"`
+	Prefix                  *string            `json:"Prefix"`
+	Suspended               *bool              `json:"Suspended"`
+	SuspendedOnStart        *bool              `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
@@ -3776,15 +3815,27 @@ type SessionLifecyclePayload struct {
 type SessionMessageInputBody struct {
 	// Message Message text to send.
 	Message string `json:"message"`
+
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionMessageSucceededPayload defines model for SessionMessageSucceededPayload.
 type SessionMessageSucceededPayload struct {
+	// Queued True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
+	Queued bool `json:"queued"`
+
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
 
 	// SessionId Session ID that received the message.
 	SessionId string `json:"session_id"`
+
+	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
+	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
+
+	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	WillStart *bool `json:"will_start,omitempty"`
 }
 
 // SessionPatchBody defines model for SessionPatchBody.
@@ -4814,6 +4865,9 @@ type SessionSubmitInputBody struct {
 
 	// Message Message text to submit.
 	Message string `json:"message"`
+
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.
@@ -4829,6 +4883,12 @@ type SessionSubmitSucceededPayload struct {
 
 	// SessionId Session ID that received the submission.
 	SessionId string `json:"session_id"`
+
+	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
+	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
+
+	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	WillStart *bool `json:"will_start,omitempty"`
 }
 
 // SessionTranscriptConversationResponse defines model for SessionTranscriptConversationResponse.
@@ -4954,6 +5014,46 @@ type SlingBatchSummary struct {
 	Total int64 `json:"total"`
 }
 
+// SlingChildConflict defines model for SlingChildConflict.
+type SlingChildConflict struct {
+	// BlockingWorkflowIds Live workflow roots that refused the launch.
+	BlockingWorkflowIds *[]string `json:"blocking_workflow_ids"`
+
+	// Hint Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+	Hint string `json:"hint"`
+
+	// SourceBeadId Source bead whose live workflow refused the launch.
+	SourceBeadId string `json:"source_bead_id"`
+}
+
+// SlingChildOutcome defines model for SlingChildOutcome.
+type SlingChildOutcome struct {
+	// BeadId Child bead ID.
+	BeadId   string              `json:"bead_id"`
+	Conflict *SlingChildConflict `json:"conflict,omitempty"`
+
+	// Formula Formula attached to the child, when one was.
+	Formula *string `json:"formula,omitempty"`
+
+	// MoleculeId Root of the formula wisp attached to the child, when a non-graph formula was attached.
+	MoleculeId *string `json:"molecule_id,omitempty"`
+
+	// Outcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+	Outcome SlingChildOutcomeOutcome `json:"outcome"`
+
+	// Reason Why routing the child failed. Present only for outcome failed.
+	Reason *string `json:"reason,omitempty"`
+
+	// Status The child's bead status when it was skipped because it was not open.
+	Status *string `json:"status,omitempty"`
+
+	// WorkflowId Graph workflow launched for the child, when one was.
+	WorkflowId *string `json:"workflow_id,omitempty"`
+}
+
+// SlingChildOutcomeOutcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+type SlingChildOutcomeOutcome string
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
 	// AttachedBeadId Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -5008,6 +5108,9 @@ type SlingResponse struct {
 	Batch          *SlingBatchSummary `json:"batch,omitempty"`
 	Bead           *string            `json:"bead,omitempty"`
 
+	// Children One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+	Children *[]SlingChildOutcome `json:"children,omitempty"`
+
 	// ConvoyId Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
 	ConvoyId *string `json:"convoy_id,omitempty"`
 
@@ -5017,14 +5120,19 @@ type SlingResponse struct {
 	Mode         *string `json:"mode,omitempty"`
 
 	// MoleculeId Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
-	MoleculeId *string   `json:"molecule_id,omitempty"`
-	RootBeadId *string   `json:"root_bead_id,omitempty"`
-	Run        *RunRef   `json:"run,omitempty"`
-	Status     string    `json:"status"`
-	Target     string    `json:"target"`
-	Warnings   *[]string `json:"warnings,omitempty"`
-	WorkflowId *string   `json:"workflow_id,omitempty"`
+	MoleculeId *string `json:"molecule_id,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	Run        *RunRef `json:"run,omitempty"`
+
+	// Status slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+	Status     SlingResponseStatus `json:"status"`
+	Target     string              `json:"target"`
+	Warnings   *[]string           `json:"warnings,omitempty"`
+	WorkflowId *string             `json:"workflow_id,omitempty"`
 }
+
+// SlingResponseStatus slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+type SlingResponseStatus string
 
 // Status defines model for Status.
 type Status struct {
@@ -34834,6 +34942,7 @@ type PostV0CityByCityNameAgentByBaseByActionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON501 *ErrorModel
@@ -34995,6 +35104,7 @@ type PostV0CityByCityNameAgentByDirByBaseByActionResponse struct {
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
 	ApplicationproblemJSON422 *ErrorModel
 	ApplicationproblemJSON500 *ErrorModel
 	ApplicationproblemJSON501 *ErrorModel
@@ -41457,6 +41567,13 @@ func ParsePostV0CityByCityNameAgentByBaseByActionResponse(rsp *http.Response) (*
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -41815,6 +41932,13 @@ func ParsePostV0CityByCityNameAgentByDirByBaseByActionResponse(rsp *http.Respons
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest ErrorModel

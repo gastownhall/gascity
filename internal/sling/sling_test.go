@@ -2370,6 +2370,57 @@ func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
 	}
 }
 
+func TestDoSlingDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.NoFormula = true
+	opts.DryRun = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingBatchDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	deps, router, target := crossStoreSlingDeps(t)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	children := []beads.Bead{}
+	for _, title := range []string{"one", "two"} {
+		child, createErr := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if createErr != nil {
+			t.Fatalf("create child %s: %v", title, createErr)
+		}
+		children = append(children, child)
+	}
+	opts := SlingOpts{
+		Target:        target,
+		BeadOrFormula: convoy.ID,
+		Force:         true,
+		DryRun:        true,
+		NoFormula:     true,
+	}
+
+	result, err := DoSlingBatch(opts, deps, store)
+
+	requireCrossStoreRouteError(t, err)
+	if result.Routed != 0 {
+		t.Fatalf("Routed = %d, want 0", result.Routed)
+	}
+	for _, child := range children {
+		requireNoCrossStoreRouteMutation(t, store, child.ID, "")
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
 func TestDoSlingBatchRefusesCrossStoreBeforeFormulaMutation(t *testing.T) {
 	deps, router, target := crossStoreSlingDeps(t)
 	store := deps.Store
@@ -4078,6 +4129,52 @@ func TestDoSlingBatchPartialFailure(t *testing.T) {
 		if c.BeadID == b2.ID && !c.Failed {
 			t.Errorf("expected child %s to be failed", b2.ID)
 		}
+	}
+}
+
+// A child refused because its source bead already has a live workflow keeps
+// that typed conflict on its result, so a caller holding only the per-child
+// results (POST /sling's partial response) can still name the blocking
+// workflows and the cleanup. Any other failure carries no conflict.
+func TestDoSlingBatchPartialFailureKeepsChildConflict(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var children []beads.Bead
+	for _, title := range []string{"routed", "conflicted", "plain"} {
+		child, err := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		children = append(children, child)
+	}
+	routed, conflicted, plain := children[0], children[1], children[2]
+	conflict := &sourceworkflow.ConflictError{SourceBeadID: conflicted.ID, WorkflowIDs: []string{"wf-1"}}
+	runner.on(conflicted.ID, fmt.Errorf("routing %s: %w", conflicted.ID, conflict))
+	runner.on(plain.ID, errors.New("runner failed"))
+
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+	if err == nil {
+		t.Fatal("expected an error for a partial failure")
+	}
+	byID := map[string]SlingChildResult{}
+	for _, c := range result.Children {
+		byID[c.BeadID] = c
+	}
+	if got := byID[conflicted.ID]; !got.Failed || got.Conflict != conflict {
+		t.Fatalf("conflicted child: failed=%v conflict=%#v, want failed with the runner's ConflictError", got.Failed, got.Conflict)
+	}
+	if got := byID[plain.ID]; !got.Failed || got.Conflict != nil {
+		t.Fatalf("plainly failed child: failed=%v conflict=%#v, want failed with no conflict", got.Failed, got.Conflict)
+	}
+	if got := byID[routed.ID]; !got.Routed || got.Conflict != nil {
+		t.Fatalf("routed child: routed=%v conflict=%#v, want routed with no conflict", got.Routed, got.Conflict)
 	}
 }
 

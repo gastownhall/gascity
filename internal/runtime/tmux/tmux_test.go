@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -1298,7 +1299,10 @@ func startDescendantTestProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHasDescendantWithNames$")
-	cmd.Env = append(os.Environ(), "GC_TMUX_DESCENDANT_HELPER=1")
+	// Without Bazel's test-runner variables: under sharding the helper would
+	// inherit this shard's filter, run no test and exit at once, leaving no
+	// descendant to find.
+	cmd.Env = append(bazeltest.HelperProcessEnv(os.Environ()), "GC_TMUX_DESCENDANT_HELPER=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start descendant helper: %v", err)
 	}
@@ -3222,6 +3226,42 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 			[]string{"❯ "},
 			"\nfirst line of reminder\nsecond line",
 			true,
+		},
+		{
+			"composer still holds the paste collapsed into a staged placeholder",
+			[]string{"● Done.", "────", "❯\u00a0[Pasted text #1 +42 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"placeholder only echoed in the transcript above a bare composer",
+			[]string{"❯\u00a0[Pasted text #1 +44 lines]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex placeholder echoed in the transcript above a bare composer",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"codex composer still staged below a transcript line starting with the ready prompt",
+			[]string{"  ❯ make test", "  ok  ./...", "› [Pasted Content 1234 chars]", "", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			false,
+		},
+		{
+			"bare codex composer below a ready-prompt transcript line and an echoed placeholder",
+			[]string{"  ❯ make test", "› [Pasted Content 999 chars]", "• Done.", "› ", "  gpt-5.5 low · /tmp/probe"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"staged composer below a codex placeholder echoed in the transcript",
+			[]string{"› [Pasted Content 100 chars]", "● Done.", "────", "❯\u00a0[Pasted text #2 +7 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			"reminder: please respond to the review",
+			false,
 		},
 	}
 	for _, tt := range tests {

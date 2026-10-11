@@ -5,16 +5,20 @@ go_library(
     srcs = [
         "acp.go",
         "activity_publisher.go",
+        "capture.go",
         "conn.go",
         "cutover.go",
+        "events.go",
         "lifecycle_lock.go",
         "proctable.go",
         "protocol.go",
         "seams.go",
+        "turns.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/acp",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/fsys",
         "//internal/runtime",
         "//internal/runtime/proctable",
@@ -27,7 +31,10 @@ go_test(
         "acp_test.go",
         "activity_test.go",
         "capacity_test.go",
+        "capture_test.go",
         "conformance_test.go",
+        "events_protocol_test.go",
+        "events_test.go",
         "meta_privacy_test.go",
         "pipe_error_test.go",
         "proctable_integration_test.go",
@@ -39,6 +46,7 @@ go_test(
         "startup_test.go",
         "stop_grace_test.go",
         "testenv_import_test.go",
+        "turns_test.go",
     ],
     data = select({
         "//:gotags_integration": [
@@ -57,6 +65,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/auto",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",

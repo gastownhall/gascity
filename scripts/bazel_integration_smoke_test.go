@@ -49,3 +49,36 @@ func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewFormulasRunTheShardScriptsFormulaTestsUnderBazel:
+// review-formulas.yml runs scripts/test-integration-shard's formula_tests
+// (the review-formulas-* shards) as one Bazel run of
+// //test/integration:integration_test under .bazelrc
+// test:integration-review-formulas, never as go test on the runner.
+func TestReviewFormulasRunTheShardScriptsFormulaTestsUnderBazel(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, "scripts/test-integration-shard")
+	want := "^(" + strings.Join(shardScriptTests(t, script, "formula_tests"), "|") + ")$"
+	if got := bazelRCFlagValue(readFile(t, root, ".bazelrc"), "test:integration-review-formulas --test_filter"); got != want {
+		t.Errorf(".bazelrc test:integration-review-formulas --test_filter\n  %s\nwant (from scripts/test-integration-shard formula_tests)\n  %s", got, want)
+	}
+
+	wf := readCriticalPathWorkflow(t, "review-formulas.yml")
+	var runsBazel bool
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, "test-integration-shard") || strings.Contains(step.Run, "make test-integration") || strings.Contains(step.Run, "go test") {
+				t.Errorf("review-formulas.yml %s step %q runs %q on the runner; the formula tests run under Bazel", jobName, step.Name, strings.TrimSpace(step.Run))
+			}
+			if strings.Contains(step.Run, "bazel test --config=ci --config=integration-review-formulas") && strings.Contains(step.Run, "//test/integration:integration_test") {
+				runsBazel = true
+			}
+		}
+	}
+	if !runsBazel {
+		t.Error("review-formulas.yml runs no `bazel test --config=ci --config=integration-review-formulas //test/integration:integration_test`")
+	}
+	if got := wf.Jobs["review-formulas"].Name; got != "Integration / review-formulas" {
+		t.Errorf("review-formulas.yml fan-in name = %q, want %q (scripts/prwatchdog watches it)", got, "Integration / review-formulas")
+	}
+}

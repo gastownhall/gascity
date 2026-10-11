@@ -166,6 +166,17 @@ func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
 	}
 }
 
+// ClearWakeRequestPatch drops a pending wake request (CONTRACT v5.7 D7). Its
+// consumers write it in the CAS that satisfies the request, and `gc session
+// suspend` and `gc session kill` in their own write, as newer operator intent.
+func ClearWakeRequestPatch() MetadataPatch {
+	return MetadataPatch{"wake_request": "", "wake_requested_at": ""}
+}
+
+// IndefiniteHoldDuration is the "suspended indefinitely" held_until horizon:
+// 100 years is effectively forever without risking time arithmetic overflow.
+const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
@@ -215,7 +226,7 @@ type PreWakePatchInput struct {
 // caller that carries the marker only while the claim is held always carries
 // the start of the current episode. A marker that does not parse is replaced.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
-	startedAt := pendingCreateStartedAt(input.Now)
+	startedAt := input.Now.UTC().Format(time.RFC3339) // every caller passes Now (R12: no clock fallback)
 	if episode := strings.TrimSpace(input.EpisodePendingCreateStartedAt); episode != "" {
 		if t, err := time.Parse(time.RFC3339, episode); err == nil && !t.IsZero() {
 			startedAt = episode
@@ -406,7 +417,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	// prior interval on a reused session bead; a recovery re-confirmation of an
 	// already-running runtime leaves the in-flight interval's epoch untouched.
 	if input.StartsAwakeInterval {
-		patch["awake_started_at"] = awakeIntervalStartedAt(input.Now)
+		patch["awake_started_at"] = input.Now.UTC().Format(time.RFC3339Nano) // every caller passes Now (R12: no clock fallback)
 	}
 	// Priming confirmation pair (both-or-neither). Stamped atomically with
 	// started_config_hash so priming inherits its crash semantics and lifetime.
@@ -425,15 +436,6 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 		"drain_at":     now.UTC().Format(time.RFC3339),
 	}
 }
-
-// Row-bound drain-ack keys (reconciler v2, CONTRACT D5). `gc runtime
-// drain-ack` writes them by CAS in a v2 city only: DrainAckIncarnationKey
-// holds the row's generation as the CLI read it, DrainAckAtKey the RFC 3339
-// time of the ack. v2's PreWake clears both; legacy reads neither.
-const (
-	DrainAckIncarnationKey = "drain_ack_incarnation"
-	DrainAckAtKey          = "drain_ack_at"
-)
 
 // DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
 // running asynchronously and waiting for controller finalization.

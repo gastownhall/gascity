@@ -353,7 +353,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailed(reqID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -743,7 +743,7 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
-	message := input.Body.Message
+	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
@@ -752,11 +752,11 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
 			return
 		}
-		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent)
+		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, resume)
 		if submitErr != nil {
 			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
 		} else {
-			s.emitSessionSubmitSucceeded(reqID, id, outcome.Queued, string(intent))
+			s.emitSessionSubmitSucceeded(reqID, id, outcome, string(intent))
 		}
 	}()
 
@@ -806,13 +806,14 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
-	message := input.Body.Message
+	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
 
 		type messageResult struct {
 			sessionID string
+			outcome   messageOutcome
 			errorCode string
 			err       error
 		}
@@ -843,7 +844,8 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
-			if err := s.sendUserMessageToSession(ctx, store.Store, id, message); err != nil {
+			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
+			if err != nil {
 				code := "message_failed"
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					code = "timeout"
@@ -851,7 +853,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
 				return
 			}
-			sendResult(messageResult{sessionID: id})
+			sendResult(messageResult{sessionID: id, outcome: outcome})
 		}()
 
 		timer := time.NewTimer(sessionMessageAsyncTimeout)
@@ -863,7 +865,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 				return
 			}
-			s.emitSessionMessageSucceeded(reqID, result.sessionID)
+			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome)
 		case <-timer.C:
 			cancel()
 			select {
@@ -873,7 +875,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 					return
 				}
-				s.emitSessionMessageSucceeded(reqID, result.sessionID)
+				s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome)
 				return
 			default:
 			}
@@ -926,7 +928,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	}
 
 	mgr := s.sessionManager(store.Store)
-	if err := mgr.Kill(id); err != nil {
+	if err := mgr.Kill(context.Background(), s.actor(session.ActorOperator), id); err != nil {
 		if errors.Is(err, session.ErrSessionClosed) {
 			out := &OKWithIDResponse{}
 			out.Body.Status = "ok"
@@ -1009,8 +1011,8 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 	if err != nil {
 		return nil, err
 	}
-	// Publish the session.pending_cleared now rather than on the next tick.
-	s.pokePendingMonitor()
+	// Publish the session.pending_cleared now rather than on the next pass.
+	s.pokePendingInteractions(id)
 
 	out := &SessionRespondOutput{}
 	out.Body.Status = "accepted"
@@ -1033,7 +1035,7 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionIDI
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
-	if err := mgr.Suspend(id); err != nil {
+	if err := mgr.Suspend(ctx, s.actor(session.ActorOperator), id, false); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
 	out := &OKResponse{}
@@ -1066,7 +1068,7 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	closeResult, err := handle.CloseDetailed(ctx)
+	closeResult, err := handle.CloseDetailed(ctx, s.actor(session.ActorOperator))
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
@@ -1132,33 +1134,24 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
-	// The wake is recorded and its holds are cleared, but a demand-only
-	// singleton's pool session starts only from pool demand: refuse instead of
-	// starting it, as `gc session wake` does (#6858).
-	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
-		s.state.Enqueue(reconcilekey.Session(id))
-		return nil, apierr.DemandOnlySingleton.Msg(msg)
+	// The wake is recorded; the controller starts the session, as for gc
+	// session wake. The API never starts a runtime in the controller process
+	// beside the controller's own start (CONTRACT v5.9 D8 rule 6). When the
+	// controller will not start it, the one will-not-start predicate `gc
+	// session wake` uses says why, as 409 (the demand-only singleton, #6858,
+	// included).
+	s.state.Enqueue(reconcilekey.Session(id))
+	woken := res.Info // the predicate reads the row after the wake
+	if info, err := session.NewStore(store).Get(id); err == nil {
+		woken = info
 	}
-	// The wake is recorded (wake_request=explicit). While the name's on_death
-	// hook is queued or running, the reconciler owns the start, as it does
-	// for gc session wake: its start path waits for the hook.
-	if gate, ok := s.state.(OnDeathHookGate); ok && sessionName != "" && gate.OnDeathHookPending(sessionName) {
-		s.state.Enqueue(reconcilekey.Session(id))
-		out := &OKWithIDResponse{}
-		out.Body.Status = "ok"
-		out.Body.ID = id
-		return out, nil
+	why := demandOnlySingletonWakeRefusal(s.state.Config(), woken)
+	if refuser, ok := s.state.(WakeStartRefuser); ok {
+		why, _ = refuser.WakeStartRefusal(woken)
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
-	if err != nil {
-		return nil, humaSessionManagerError(err)
+	if why != "" {
+		return nil, apierr.WakeWillNotStart.Msg("wake recorded for session " + id + ", but it will not start: " + strings.TrimPrefix(why, "wake recorded for session "+id+", but it will not start: "))
 	}
-	go func() {
-		if err := handle.Start(context.Background()); err != nil {
-			log.Printf("gc api: waking session %s: %v", id, err)
-		}
-	}()
-
 	out := &OKWithIDResponse{}
 	out.Body.Status = "ok"
 	out.Body.ID = id

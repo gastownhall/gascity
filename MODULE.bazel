@@ -50,12 +50,26 @@ bazel_dep(name = "bazel_lib", version = "3.7.2")
 # to the host compiler; scripts/bazel_hermetic_cc_test.go guards both.
 deb_sysroot = use_repo_rule("//third_party/cc_toolchain:deb_sysroot.bzl", "deb_sysroot")
 
+# Where every pinned Ubuntu 24.04 package below comes from, tried in order
+# (the sha256 pins, not the source, decide what is accepted):
+#   - gascity's own content-addressed mirror, a release holding each pinned
+#     .deb as <sha256>.deb (tools/cc_toolchain/mirror_debs.sh publishes it),
+#     so a cold fetch does not depend on Canonical's servers;
+#   - the snapshot these packages were pinned from (immutable, but a single
+#     host that returns 503 for minutes at a time);
+#   - Launchpad's librarian, which keeps every file ever published to the
+#     primary archive, superseded versions included;
+#   - archive.ubuntu.com, which drops superseded versions.
+NOBLE_DEB_URLS = [
+    "https://github.com/gastownhall/gascity/releases/download/toolchain-noble-debs-20261001/{sha256}.deb",
+    "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/{path}",
+    "https://launchpad.net/ubuntu/+archive/primary/+files/{file}",
+    "https://archive.ubuntu.com/ubuntu/{path}",
+]
+
 deb_sysroot(
     name = "cc_sysroot_noble_amd64",
-    mirrors = [
-        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
-        "https://archive.ubuntu.com/ubuntu/",
-    ],
+    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a",
         "pool/main/g/gcc-13/libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "ee5633e863e19c3381ed97842ce35ed32ede96a3d1ae4e94c051d3036fe21347",
@@ -190,7 +204,7 @@ register_toolchains("@llvm_toolchain//:all")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.26.6",
+    version = "1.26.9",
 )
 use_repo(go_sdk, "go_sdk")
 
@@ -201,6 +215,22 @@ use_repo(go_sdk, "go_sdk")
 go_sdk.nogo(
     includes = ["//:__subpackages__"],
     nogo = "//tools/nogo",
+)
+
+# gazelle compiles fetch_repo and gazelle, which every go_deps repository
+# runs, with `go build` in a repository rule before any go_deps fetch can
+# start (13-24 s of every CI lane's loading). This substitute serves those
+# reproducible binaries from the repository cache by pinned sha256 and builds
+# them from source on a miss (tools/bazel/rules/go_repository_tools.bzl).
+gazelle_non_module_deps = use_extension("@gazelle//internal/bzlmod:non_module_deps.bzl", "non_module_deps")
+
+go_repository_tools = use_repo_rule("//tools/bazel/rules:go_repository_tools.bzl", "go_repository_tools")
+
+go_repository_tools(name = "gazelle_go_repository_tools")
+
+override_repo(
+    gazelle_non_module_deps,
+    bazel_gazelle_go_repository_tools = "gazelle_go_repository_tools",
 )
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
@@ -354,6 +384,17 @@ go_deps.module_override(
     path = "github.com/mgechev/revive",
 )
 
+# staticcheck's unused analyzer calls objectpath.For per exported field and
+# method, re-walking the whole package each time: quadratic in package size.
+# On //cmd/gc:gc_test (~1500 files) that one analyzer took ~140 s and set the
+# unit lane's critical path. The patch shares one objectpath.Encoder per
+# analysis, which memoizes the walk; the reported objects are unchanged.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:honnef_unused_objectpath_encoder.patch"],
+    path = "honnef.co/go/tools",
+)
+
 # nogo does not analyze the standard library, so ctrlflow has no noReturn
 # facts for t.Fatal, log.Fatal, os.Exit, ...; without them staticcheck's
 # SA5011 reports every nil check followed by t.Fatal. The patch makes
@@ -379,6 +420,17 @@ exports_files(["bd"])
 """,
 )
 
+# deps.env BD_PREV_VERSION, the minimum-supported bd: the "previous" cell of
+# the bd CLI contract (//test/acceptance:bd_cli_contract_prev_test).
+http_archive(
+    name = "bd_bin_v1_0_4",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.0.4/beads_1.0.4_linux_amd64.tar.gz"],
+    sha256 = "643e602e27f666c8726abff0f22001e2b5883988fa960204bde20a3129d448a5",
+    build_file_content = """
+exports_files(["bd"])
+""",
+)
+
 http_archive(
     name = "dolt_bin_v2_2_0",
     urls = ["https://github.com/dolthub/dolt/releases/download/v2.2.0/dolt-linux-amd64.tar.gz"],
@@ -388,13 +440,48 @@ exports_files(["dolt-linux-amd64/bin/dolt"])
 """,
 )
 
+# The OpenAPI breaking-change gate's comparator (//cmd/openapi-breaking),
+# the release Makefile's OASDIFF_VERSION installs for `make
+# openapi-breaking-check-go` (scripts/oasdiff_pin_test.go keeps them equal).
+http_archive(
+    name = "oasdiff_bin",
+    urls = ["https://github.com/oasdiff/oasdiff/releases/download/v1.33.0/oasdiff_1.33.0_linux_amd64.tar.gz"],
+    sha256 = "43a4e328e2d13ba1552d760aa68d2485c75c5621f309f6ff64ae895188345247",
+    build_file_content = """
+exports_files(["oasdiff"])
+""",
+)
+
+# GoReleaser for //:goreleaser_check_test (`goreleaser check` over
+# .goreleaser.yml, formerly ci.yml's "Release config" job). release.yml runs
+# the latest v2 ("~> v2"); bump this pin with each GoReleaser v2 release so
+# the check sees the deprecations the release run will.
+http_archive(
+    name = "goreleaser_bin",
+    urls = ["https://github.com/goreleaser/goreleaser/releases/download/v2.18.2/goreleaser_Linux_x86_64.tar.gz"],
+    sha256 = "0a96edc9d9bc594e4a41cc4d59467c182062910ab24d9d1f6dd7b667d32606d3",
+    build_file_content = """
+exports_files(["goreleaser"])
+""",
+)
+
+# The gate's base spec: the PR base commit's internal/api/openapi.json in
+# bazel.yml's unit lane, the committed spec elsewhere
+# (tools/bazel/rules/openapi_base_spec.bzl).
+openapi_base_spec = use_repo_rule("//tools/bazel/rules:openapi_base_spec.bzl", "openapi_base_spec")
+
+openapi_base_spec(
+    name = "openapi_base_spec",
+    revision = "//internal/api:openapi.json",
+)
+
 # JavaScript: ONE Node.js toolchain and ONE npm mechanism (rules_js) for
 # every Node workspace Bazel builds or tests. Workers have no npm and fork
 # lanes no network, so packages come only from committed, integrity-pinned
 # lockfiles fetched here.
 #
 # Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
-# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.19.0).
+# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.22.3).
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "22.23.2")
 
@@ -433,7 +520,22 @@ npm.npm_translate_lock(
     run_lifecycle_hooks = False,
     verify_node_modules_ignored = "//:.bazelignore",
 )
-use_repo(npm, "npm_dashboard")
+
+# contrib/openclaw-bridge (//contrib/openclaw-bridge:openclaw_bridge_test).
+# Install scripts stay off: openclaw's postinstall only prunes/patches
+# packaged plugin dist the bridge does not import, and the suite is the same
+# under `npm ci --ignore-scripts`.
+npm.npm_translate_lock(
+    name = "npm_openclaw",
+    data = [
+        "//contrib/openclaw-bridge:package.json",
+        "//contrib/openclaw-bridge:pnpm-workspace.yaml",
+    ],
+    pnpm_lock = "//contrib/openclaw-bridge:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm_dashboard", "npm_openclaw")
 
 # pnpm itself, for `pnpm import` (make dashboard-lock).
 pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
@@ -476,10 +578,7 @@ exports_files(["chromium_headless_shell-1228/chrome-headless-shell-linux64/chrom
 # put on LD_LIBRARY_PATH by the test. glibc and libstdc++ come from the host.
 deb_sysroot(
     name = "chromium_runtime_noble_amd64",
-    mirrors = [
-        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
-        "https://archive.ubuntu.com/ubuntu/",
-    ],
+    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/a/alsa-lib/libasound2t64_1.2.11-1ubuntu0.3_amd64.deb": "5d17bfb5683eb99f1be951fe48e1be5bf3c52391913b6b74a8aecf9b4f5e779f",
         "pool/main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb": "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",

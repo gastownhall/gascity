@@ -15,7 +15,7 @@
 # at runtime. Use GC_DOCKER_HOME_MOUNT or your own volume mounts to
 # provide them. Never bake credentials into the image.
 
-FROM node:20-slim
+FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 ARG CLAUDE_CODE_VERSION=2.1.101
 
@@ -27,12 +27,21 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install Claude Code globally (used as subprocess by Agent SDK).
+# Install Claude Code globally, for anything that runs `claude` directly
+# (e.g. a shell in the container). The Agent SDK does not use it: it runs
+# its own native Claude Code binary, whose version is the SDK's
+# `claudeCodeVersion` rather than CLAUDE_CODE_VERSION (see the check below).
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-# Install project dependencies.
-COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+# Install project dependencies exactly as locked in package-lock.json.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# The Agent SDK ships that binary only in optional per-platform packages,
+# and npm still succeeds when an optional package fails to download or
+# has no build for this platform. Fail the build here, not on the first
+# query() at runtime.
+RUN test -x "node_modules/@anthropic-ai/claude-agent-sdk-linux-$(node -p process.arch)/claude"
 
 # Copy app files.
 COPY chat.mjs transport.mjs ./

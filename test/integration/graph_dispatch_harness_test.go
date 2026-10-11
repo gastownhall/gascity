@@ -5,6 +5,8 @@ package integration
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -166,11 +168,166 @@ func TestGraphDispatchHookFallbackForNamedWorker(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command("bash", "-c", fn+"\nshould_use_hook_fallback\n")
-			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...)
-			got := cmd.Run() == nil // exit 0 => fallback selected
+			_, err := runGraphDispatchShell(fn+"\nshould_use_hook_fallback\n", append([]string{"PATH=" + os.Getenv("PATH")}, tc.env...))
+			got := err == nil // exit 0 => fallback selected
 			if got != tc.want {
 				t.Fatalf("should_use_hook_fallback(env=%v) selected=%v, want %v", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// runGraphDispatchShell runs script under bash with exactly env and returns
+// its combined output; a non-zero exit is the returned error.
+func runGraphDispatchShell(script string, env []string) (string, error) {
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// graphDispatchFuncs returns the named top-level functions of the graph
+// worker script, concatenated so a test can run them without the main loop.
+func graphDispatchFuncs(t *testing.T, names ...string) string {
+	t.Helper()
+	script := agentScript("graph-dispatch.sh")
+	var fns strings.Builder
+	for _, name := range names {
+		fns.WriteString(extractShellFunc(t, script, name))
+		fns.WriteString("\n")
+	}
+	return fns.String()
+}
+
+// fakeBdDir writes a bd stub that prints stdout and exits with code, and
+// returns a PATH that resolves bd to it ahead of the real tools (jq, timeout).
+func fakeBdDir(t *testing.T, stdout string, code int) string {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Fatalf("the graph worker script needs jq: %v", err)
+	}
+	dir := t.TempDir()
+	body := "#!/bin/sh\ncat <<'JSON'\n" + stdout + "\nJSON\nexit " + strconv.Itoa(code) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "bd"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// TestGraphDispatchReadBeadStateReadsAllFieldsInOneCall pins read_bead_state,
+// which replaced three separate bd show calls (status, gc.outcome, assignee)
+// in the graph worker: every field lands in its own variable, including when
+// a field in the middle is empty, and a failed read leaves all three empty.
+func TestGraphDispatchReadBeadStateReadsAllFieldsInOneCall(t *testing.T) {
+	fns := graphDispatchFuncs(t, "json_payload", "read_bead_state")
+	cases := []struct {
+		name   string
+		stdout string
+		code   int
+		want   string
+	}{
+		{
+			name:   "object with every field",
+			stdout: `{"id":"gc-1","status":"closed","assignee":"worker","metadata":{"gc.outcome":"pass"}}`,
+			want:   "closed|pass|worker",
+		},
+		{
+			name:   "empty outcome keeps the assignee in place",
+			stdout: `[{"id":"gc-1","status":"in_progress","assignee":"worker","metadata":{}}]`,
+			want:   "in_progress||worker",
+		},
+		{
+			name:   "no metadata and no assignee",
+			stdout: "warning: noise before the payload\n" + `[{"id":"gc-1","status":"open"}]`,
+			want:   "open||",
+		},
+		{
+			name:   "failed read",
+			stdout: "Error: no issue found",
+			code:   1,
+			want:   "||",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runGraphDispatchShell("set -euo pipefail\n"+fns+
+				`read_bead_state gc-1; printf '%s|%s|%s' "$BEAD_STATUS" "$BEAD_OUTCOME" "$BEAD_ASSIGNEE"`,
+				[]string{"PATH=" + fakeBdDir(t, tc.stdout, tc.code)})
+			if err != nil {
+				t.Fatalf("read_bead_state: %v\n%s", err, out)
+			}
+			if out != tc.want {
+				t.Fatalf("read_bead_state = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestGraphDispatchRoutedQueueServesOnlyUnheldWork pins fetch_routed_queue,
+// the graph worker's between-hook-polls read of its learned route: it serves
+// what the routed tier of the default work query serves (the bd flags cover
+// unassigned and non-epic), so a bead on a hold:* dispatch label is dropped,
+// and an empty or failed read reports no work.
+func TestGraphDispatchRoutedQueueServesOnlyUnheldWork(t *testing.T) {
+	fns := graphDispatchFuncs(t, "json_payload", "fetch_routed_queue")
+	cases := []struct {
+		name   string
+		stdout string
+		code   int
+		want   string // ids served, comma-separated; "" means the call fails
+	}{
+		{
+			name:   "unheld work is served",
+			stdout: `[{"id":"gc-1","labels":["pool:worker"]},{"id":"gc-2"},{"id":"gc-3","labels":["hold:external"]}]`,
+			want:   "gc-1,gc-2",
+		},
+		{name: "only held work", stdout: `[{"id":"gc-3","labels":["hold:external"]}]`},
+		{name: "empty queue", stdout: `[]`},
+		{name: "bd failure", stdout: "Error: database unreachable", code: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runGraphDispatchShell("set -euo pipefail\n"+fns+
+				`if q=$(fetch_routed_queue worker); then printf '%s' "$q" | jq -r '[.[].id] | join(",")'; else echo FAIL; fi`,
+				[]string{"PATH=" + fakeBdDir(t, tc.stdout, tc.code)})
+			if err != nil {
+				t.Fatalf("fetch_routed_queue: %v\n%s", err, out)
+			}
+			got := strings.TrimSpace(out)
+			want := tc.want
+			if want == "" {
+				want = "FAIL"
+			}
+			if got != want {
+				t.Fatalf("fetch_routed_queue served %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestGraphDispatchHookPollCadence pins when the graph worker runs gc hook:
+// on every iteration until it has learned a route, then on a dispatch wake or
+// once HOOK_POLL_INTERVAL seconds have passed since the last hook poll.
+func TestGraphDispatchHookPollCadence(t *testing.T) {
+	fn := graphDispatchFuncs(t, "hook_poll_due")
+	cases := []struct {
+		name  string
+		setup string
+		woke  string
+		want  bool
+	}{
+		{name: "no route learned", setup: `LEARNED_ROUTE=""; LAST_HOOK_POLL=$SECONDS`, woke: "false", want: true},
+		{name: "first poll after learning", setup: `LEARNED_ROUTE=worker; LAST_HOOK_POLL=""`, woke: "false", want: true},
+		{name: "dispatch wake", setup: `LEARNED_ROUTE=worker; LAST_HOOK_POLL=$SECONDS`, woke: "true", want: true},
+		{name: "recent hook poll", setup: `LEARNED_ROUTE=worker; LAST_HOOK_POLL=$SECONDS`, woke: "false", want: false},
+		{name: "interval elapsed", setup: `LEARNED_ROUTE=worker; LAST_HOOK_POLL=$((SECONDS - 3))`, woke: "false", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := runGraphDispatchShell(fn+"HOOK_POLL_INTERVAL=3\n"+tc.setup+"\nhook_poll_due "+tc.woke+"\n",
+				[]string{"PATH=" + os.Getenv("PATH")})
+			if got := err == nil; got != tc.want {
+				t.Fatalf("hook_poll_due = %v, want %v", got, tc.want)
 			}
 		})
 	}

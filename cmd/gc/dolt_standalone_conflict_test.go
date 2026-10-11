@@ -49,24 +49,10 @@ func writeManagedBdCityFixture(t *testing.T, cityPath string) {
 
 func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("requires bash for exec -a")
-	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll(dataDir): %v", err)
 	}
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve test binary: %v", err)
-	}
-	cmd := exec.Command(testBinary)
-	cmd.Args = []string{"dolt", "sql-server", "--data-dir", dataDir}
-	cmd.Env = append(os.Environ(), fakeDoltSQLServerMarkerEnv+"=1")
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start fake dolt sql-server: %v", err)
-	}
+	cmd := startFakeDoltSQLServerWithArgs(t, []string{"dolt", "sql-server", "--data-dir", dataDir})
 	t.Cleanup(func() {
 		killErr := cmd.Process.Kill()
 		if killErr != nil {

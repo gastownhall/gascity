@@ -340,11 +340,15 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 				// work-query stays gated: it lacks NamedSessionRoutedDemand's
 				// deliberate UsesCanonicalSingletonPoolIdentity() scoping, so
 				// exempting it would risk a herd-wake on multi-instance pools.
-				// Finally, when a drained holder has both signals, named-demand
-				// from blocked work wins the reason switch above; promote it to
-				// routed-demand so the live routed signal is not masked and the
-				// ga-j4lqwa.1 strand cannot survive in the combined case.
-				if bead.Drained && reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
+				// Finally, when a holder has both signals, named-demand from
+				// blocked work wins the reason switch above; promote it to
+				// routed-demand so the live routed signal is not masked. A
+				// drained holder needs the label for the exemption below (or the
+				// ga-j4lqwa.1 strand survives), and an idle-latched one needs it
+				// for wakeDemandOverridesSleepSuppression (or the template
+				// wedges with its standby alias-suppressed). Every other reason
+				// consumer treats the two labels alike.
+				if reason == "named-demand" && input.NamedSessionRoutedDemand[ns.Identity] {
 					reason = "routed-demand"
 				}
 				drainedExempt := reason == "routed-demand"

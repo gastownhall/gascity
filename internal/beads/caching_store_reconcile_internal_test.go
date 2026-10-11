@@ -188,6 +188,9 @@ func TestCachingStoreReconciliationPreservesConcurrentEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
+	if err := mem.Update(original.ID, UpdateOpts{Title: &eventBead.Title}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 	cs.ApplyEvent("bead.updated", payload)
 	close(backing.release)
 	<-done

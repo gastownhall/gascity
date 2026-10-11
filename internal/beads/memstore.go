@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +21,11 @@ type MemStore struct {
 	beads []Bead
 	deps  []Dep
 	seq   int
+
+	// storageOnly marks a MemStore serving as another store's storage (the
+	// native store's test double): it reports no session writes, which the
+	// store above it reports, so each write is reported once.
+	storageOnly bool
 
 	// DisableConditionalWrites makes the ConditionalWriter methods return
 	// ErrConditionalWriteUnsupported while leaving every other interface intact,
@@ -118,6 +124,9 @@ func cloneBead(b Bead) Bead {
 func (m *MemStore) Create(b Bead) (Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.storageOnly {
+		noteSessionCreate(b)
+	}
 
 	explicit := strings.TrimSpace(b.ID)
 	if m.HonorExplicitIDs && explicit != "" {
@@ -127,8 +136,15 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		// Honoring a pinned "<prefix>-<n>" consumes that suffix, exactly as
 		// SQLiteStore.normalizeCreate's ensureSequenceAtLeast does: without it
 		// the very next store-minted id re-issues the pinned one.
-		if n := numericIDSuffix(explicit); n > m.seq {
-			m.seq = n
+		prefix := m.IDPrefix
+		if prefix == "" {
+			prefix = "gc"
+		}
+		// A suffix past math.MaxInt is out of mintIDLocked's reach, so skip it
+		// instead of letting int(n) wrap seq negative on a 32-bit int (CodeQL
+		// go/incorrect-integer-conversion).
+		if n, ok := parseSQLiteAutoIDSuffix(prefix, explicit); ok && n > 0 && n <= math.MaxInt && n > int64(m.seq) {
+			m.seq = int(n)
 		}
 		b.ID = explicit
 	} else {
@@ -228,6 +244,7 @@ func isOwnershipTransition(oldStatus, oldAssignee string, opts UpdateOpts) bool 
 // caller must hold m.mu. It is shared by Update and UpdateIfMatch so both bump
 // identically.
 func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
+	m.noteSession(m.beads[i], opts.Metadata)
 	oldStatus, oldAssignee := m.beads[i].Status, m.beads[i].Assignee
 	if opts.Title != nil {
 		m.beads[i].Title = *opts.Title
@@ -354,6 +371,7 @@ func (m *MemStore) Reopen(id string) error {
 			}
 			wasClosed := m.beads[i].Status == "closed"
 			setBeadStatus(&m.beads[i], "open")
+			dropCloseReasonMetadata(&m.beads[i])
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {
@@ -382,6 +400,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		if !idSet[m.beads[i].ID] || m.beads[i].Status == "closed" {
 			continue
 		}
+		m.noteSession(m.beads[i], metadata)
 		setBeadStatus(&m.beads[i], "closed")
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
@@ -589,6 +608,7 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			m.noteSession(b, map[string]string{key: value})
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -610,6 +630,7 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
 		if b.ID == id {
+			m.noteSession(b, kvs)
 			if b.Metadata == nil {
 				m.beads[i].Metadata = make(map[string]string)
 			}
@@ -776,4 +797,12 @@ func (m *MemStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 		}
 	}
 	return result, nil
+}
+
+// noteSession reports a write to the session hooks unless m is another
+// store's storage.
+func (m *MemStore) noteSession(b Bead, kvs map[string]string) {
+	if !m.storageOnly {
+		noteSessionKeys(b, kvs)
+	}
 }

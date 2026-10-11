@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 )
 
 // GraphApplyHandle returns a cache-coherent graph-apply handle when the
@@ -90,7 +89,7 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startS
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.Lock()
 	raced := c.racedWritesLocked(ids, startSeq)
 	c.noteLocalMutationLocked(ids...)

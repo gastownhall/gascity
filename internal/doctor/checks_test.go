@@ -1137,6 +1137,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// An orphan whose tmux server dies between Fix's listing and its Stop is gone,
+// which is all Fix is for; a stop that failed to remove the session is still
+// reported, even when a missing-server answer is joined beside it.
+func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate orphan: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session stale-worker: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.StopErrors["stale-worker"] = tc.stopErr
+
+			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "stale-worker"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "stale-worker", n)
+			}
+		})
+	}
+}
+
 // TestOrphanSessionsCheck_FixSkipsWhenControllerRunning is required by
 // ga-bq9vdi (GH#5742): OrphanSessionsCheck.Fix() kills sessions via the raw
 // runtime.Provider, racing the controller's own health patrol while it's

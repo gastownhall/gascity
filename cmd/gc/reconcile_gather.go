@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -41,17 +42,24 @@ type gatherEnv struct {
 	Env                func() *reconcileEnv
 	// Sessions is the sessions-class store: the census's leading leg and the
 	// demand gather's city store.
-	Sessions     func() beads.Store
-	RigStores    func() map[string]beads.Store
-	Recording    func() *externalReadsRecording // K1's latest; nil before the first
+	Sessions   func() beads.Store
+	RigStores  func() map[string]beads.Store
+	Recording  func() *externalReadsRecording // K1's latest; nil before the first
+	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
+	// Nudges and WorkStore are the nudges-class and city work stores C8's
+	// steps write through. WorkStore is also the work leg of the pass's
+	// WorkLegs, which the live work read (L5) plans over.
+	Nudges       func() beads.NudgesStore
+	WorkStore    func() beads.Store
 	Observations func() *ObservationCache
 	Capacity     func() *endpointCapacityGuard
 	Health       func() *providerHealthSnapshot
 	Episodes     func() (map[string]session.StartupHealthEpisode, error)
 	Suspension   func() suspensionstate.State
-	// ResolveTemplate is resolveTemplateForSessionBeadInfo for one row under
-	// env, memoized per generation (templateMemo).
-	ResolveTemplate func(env *reconcileEnv, info session.Info) (TemplateParams, error)
+	// Templates builds env's template resolver, at now. Gather calls it once
+	// per env generation, when the memo is rebuilt, and memoizes what it
+	// resolves (templateMemo). Nil resolves nothing.
+	Templates func(env *reconcileEnv, now time.Time) templateResolver
 	// LookPath is the transport check's provider binary lookup; nil checks
 	// nothing, as validateAgentSessionTransport does.
 	LookPath config.LookPathFunc
@@ -61,9 +69,10 @@ type gatherEnv struct {
 // World is one pass's inputs (architecture §1.2), immutable once gathered:
 // every map is the pass's own or never mutated after publish.
 type World struct {
-	Now    time.Time
-	Env    *reconcileEnv
-	Census *sessionCensus
+	Now      time.Time
+	CityPath string // the runtime name locks' city (lockRuntimeName)
+	Env      *reconcileEnv
+	Census   *sessionCensus
 	// Mislabelled are the canonical rows with no template and no session
 	// name: beads labeled gc:session that are not sessions. Arm A1 makes
 	// each None with one trace (CONTRACT v5 AL1).
@@ -78,7 +87,8 @@ type World struct {
 	InFlight    inflightView
 	Bucket      bucketState
 	Boot        bootState
-	Paused      bool // starts paused for a provider swap (P7)
+	Paused      bool            // starts paused for a provider swap (P7)
+	SoftReload  *softReloadView // the open soft reload this pass read, for A8 (M2)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -86,8 +96,34 @@ type World struct {
 	Episodes          map[string]session.StartupHealthEpisode
 	SleepPolicies     map[string]resolvedSessionSleepPolicy // by bead ID
 	TransportRefused  map[string]string                     // by qualified name
-	ReadyWaits        map[string]bool                       // nil until P4.3
+	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
+	// ExecutionStalled are the execution backstop's drain requests by row
+	// ID, for arm A16 (C7b1).
+	ExecutionStalled map[string]executionStalledRequest
+	// LegStores holds the sessions leg's store by its ref, which effects
+	// reach only as a fenced writer (newEffectPass). No other leg's store is
+	// here: a census-only row has no writer (AL1, armCensusOnly).
+	LegStores map[string]beads.Store
+	// InputAges are the inputs' ages at Now, for the pass record.
+	InputAges map[string]time.Duration
+	// SessionsStore and RigStores are the stores the census was planned
+	// over, which only creates reach (newCreatePass). The sessions leg's
+	// ref is Census.sessionsLeg().
+	SessionsStore beads.Store
+	RigStores     map[string]beads.Store
+	// OperatorSuspend is the explicit operator suspend cause (city, rig,
+	// agent or session) of each canonical row inside INC-003's grace, the
+	// only rows that read it: such a row gets no grace (v5.4 D2). Gather
+	// reads it, since operatorSuspendCause reads the environment.
+	OperatorSuspend map[rowKey]string
+	// WorkLegs are the city work legs the effects' live work read (L5) plans
+	// over: minted from the city work store, never the sessions store
+	// (NEW2-1). Effects reach them only as effectReads.
+	WorkLegs WorkLegs
+	// fresh is one row's fresh runtime read, which the fresh accessors read
+	// in its pass's stead (withRuntime): set only inside an effect.
+	fresh *freshRow
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -104,7 +140,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()
@@ -116,7 +152,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	store, rigs := e.Sessions(), e.RigStores()
 	cache, ok := demandLabelKey(store).(interface{ IsLive() bool }) // a *beads.CachingStore
-	w.Boot = bootState{CachePrimed: ok && cache.IsLive(), InventoryComplete: w.Obs.AllPrimed()}
+	w.Boot = bootState{CachePrimed: ok && cache.IsLive(), InventoryComplete: w.Obs.allPrimedOrConfirmedDead()}
 	if !w.Boot.CachePrimed {
 		p.boot = w.Boot
 		return w, errGatherCacheUnprimed
@@ -129,7 +165,22 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
+	w.ExecutionStalled = p.executionStalled(w.Census)
+	if e.ReadyWaits != nil {
+		w.ReadyWaits = e.ReadyWaits()
+	}
+	w.SessionsStore, w.RigStores = store, rigs
+	if e.WorkStore != nil { // without one, the zero WorkLegs answers every work read unknown
+		w.WorkLegs = workLegsFromCensus(e.CityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: e.WorkStore()}), rigs)
+	}
+	w.LegStores = map[string]beads.Store{legs[0].ref: legs[0].store}
+	all := make(map[string]beads.Store, len(legs))
+	for _, l := range legs {
+		all[l.ref] = l.store
+	}
+	w.InputAges = inputAges(now, all, w.Obs, rec)
 	rows := w.Census.Canonical()
+	w.OperatorSuspend = operatorSuspendCauses(cfg, e.CityPath, rows, st, now)
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {
 			if w.Mislabelled == nil {
@@ -160,13 +211,29 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		// A failed read fails open, as legacy does on a load error (SESS-607).
 		w.Episodes, _ = e.Episodes()
 	}
-	p.memo.refresh(e, env, rows, w.Mislabelled)
+	p.memo.refresh(e, env, now, rows, w.Mislabelled)
 	w.SleepPolicies, w.TransportRefused, w.Templates = p.memo.sleepPolicies(cfg, env, rows), p.memo.transport, p.memo.templates.Load()
 
 	laneFed := len(externalReadLegs(k1Env(e, env, w.SuspendedRigPaths, dg), io.Discard)) > 0
 	w.Boot.RecordingSeen = rec != nil || !laneFed
 	p.boot = w.Boot
 	return w, nil
+}
+
+// operatorSuspendCauses is operatorSuspendCause for each of rows woken
+// within INC-003's grace of now, keeping the causes only. The rig resolver
+// is costly on path-style dirs, so no other row pays for it.
+func operatorSuspendCauses(cfg *config.City, cityPath string, rows []censusRow, st suspensionstate.State, now time.Time) map[rowKey]string {
+	causes := make(map[rowKey]string)
+	for _, row := range rows {
+		if !wakeGracePreservesUndesiredRow(row.Info, now) {
+			continue
+		}
+		if cause := operatorSuspendCause(cfg, cityPath, row.Info, st); cause != "" {
+			causes[row.Key] = cause
+		}
+	}
+	return causes
 }
 
 // gatherGates reads each endpoint's breaker the pass may act on: every
@@ -240,7 +307,15 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	if err != nil {
 		return externalReadsEnv{}, err
 	}
-	return k1Env(e, env, suspended, censusDemandEnv(census, store, rigs)), nil
+	k1 := k1Env(e, env, suspended, censusDemandEnv(census, store, rigs))
+	k1.SP = env.SP
+	if e.Nudges != nil {
+		k1.Nudges = e.Nudges()
+	}
+	if e.WorkStore != nil {
+		k1.WorkStore = e.WorkStore()
+	}
+	return k1, nil
 }
 
 // censusDemandEnv is the demand gather's stores and its two session inputs
@@ -257,27 +332,104 @@ func censusDemandEnv(c *sessionCensus, store beads.Store, rigs map[string]beads.
 	return demandGatherEnv{CityStore: store, RigStores: rigs, OpenSessions: open, Sessions: newSessionBeadSnapshotFromInfos(sessionsLeg)}
 }
 
-// templateMemoKey is what one row's template resolution reads: its template
-// and the identity fields resolveTemplateForSessionBeadInfo and
-// canonicalSessionIdentityWithConfigInfo read off the row.
+// templateMemoKey is what one row's template resolution reads off the row:
+// the row's ID (the session bead ID and pool-name ownership), the template
+// and identity fields its kind's path reads (rowTemplateResolver), the
+// trigger fields resolveTemplateForSessionBeadInfo stamps, and whether a
+// pool seat's unassigned alias defers (poolRuntimeAliasIsDeferredInfo, which
+// the realize path reads off the state, the claim and an alias conflict).
 type templateMemoKey struct {
-	Template, SessionName, AgentName, PoolSlot, NamedIdentity string
-	Named                                                     bool
-	TriggerBeadID, TriggerStoreRef, Pack                      string
+	ID, Template, CommonName, SessionName, SessionNameExplicit, AgentName, Alias string
+	Origin, ManualMetadata, PoolSlot, NamedIdentity                              string
+	Named, PoolManaged, DependencyOnly                                           bool
+	TriggerBeadID, TriggerStoreRef, Pack                                         string
+	AliasDeferred                                                                bool
 }
 
 func templateMemoKeyOf(info session.Info) templateMemoKey {
 	return templateMemoKey{
-		Template: info.Template, SessionName: info.SessionNameMetadata, AgentName: info.AgentName, PoolSlot: info.PoolSlot,
-		NamedIdentity: info.ConfiguredNamedIdentity, Named: info.ConfiguredNamedSession,
-		TriggerBeadID: info.TriggerBeadID, TriggerStoreRef: info.TriggerBeadStoreRef, Pack: info.Pack,
+		ID: info.ID, Template: info.Template, CommonName: info.CommonName, SessionName: info.SessionNameMetadata,
+		SessionNameExplicit: info.SessionNameExplicit, AgentName: session.AgentNameInfo(info), Alias: info.Alias,
+		Origin: info.SessionOrigin, ManualMetadata: info.ManualSessionMetadata, PoolSlot: info.PoolSlot,
+		NamedIdentity: info.ConfiguredNamedIdentity, Named: info.ConfiguredNamedSession, PoolManaged: info.PoolManaged,
+		DependencyOnly: info.DependencyOnly,
+		TriggerBeadID:  info.TriggerBeadID, TriggerStoreRef: info.TriggerBeadStoreRef, Pack: info.Pack,
+		AliasDeferred: poolRuntimeAliasIsDeferredInfo(info),
 	}
 }
 
-// templateResolution is one memoized resolution, its error included.
+// templateResolution is one memoized resolution, its error included. Agent
+// is the configured agent whose side effects a launch installs.
 type templateResolution struct {
-	TP  TemplateParams
-	Err error
+	TP    TemplateParams
+	Agent *config.Agent
+	Err   error
+}
+
+// templateResolver is one env generation's template resolution: Resolve
+// resolves one row (on the planner goroutine), and Install installs a
+// resolved agent's side effects before its launch (on an effect's).
+type templateResolver struct {
+	Resolve func(info session.Info) templateResolution
+	// ResolveAt resolves one row with its beacon at now: the launch's
+	// resolution of the row it starts, as legacy binds, then resolves, at
+	// the tick (on an effect's goroutine).
+	ResolveAt func(info session.Info, now time.Time) templateResolution
+	Install   func(agent *config.Agent, tp TemplateParams)
+	// Retry asks for a new resolver on the next pass: this one's params
+	// failed to load the city's or a rig's skill catalog, which legacy loads
+	// again each tick.
+	Retry bool
+}
+
+// newTemplateResolver resolves rows under bp, one env generation's build
+// params, as legacy resolves each kind for a start: a configured named row
+// through resolveConfiguredNamedSessionTemplate (legacy's preserved-named
+// resolution without its trigger rebind, a blind write that A6/POOL-056
+// owns), and a manual or pool row through the overlay's
+// resolveDiscoveredSessionTemplate. Resolving writes no store; it does
+// legacy's local work-dir staging. Each row resolves against a snapshot of
+// itself alone, so its session bead ID is its own without a store read.
+// Resolutions serialize on templateResolveMu, the planner's and the
+// launches' alike, as legacy resolves on one goroutine.
+func newTemplateResolver(bp *agentBuildParams) templateResolver {
+	resolveAt := func(info session.Info, now time.Time) templateResolution {
+		templateResolveMu.Lock()
+		defer templateResolveMu.Unlock()
+		row := *bp
+		row.sessionBeads = newSessionBeadSnapshotFromInfos([]session.Info{info})
+		if !now.IsZero() {
+			row.beaconTime = now
+		}
+		cfg := bp.city
+		if isNamedSessionInfo(info) {
+			identity := namedSessionIdentityInfo(info)
+			spec, ok := findNamedSessionSpec(cfg, bp.cityName, identity)
+			if !ok || spec.Agent == nil {
+				return templateResolution{Err: fmt.Errorf("configured named session %q not found", identity)}
+			}
+			tp, err := resolveConfiguredNamedSessionTemplate(&row, spec, identity, info)
+			return templateResolution{TP: tp, Agent: spec.Agent, Err: err}
+		}
+		agent := findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg))
+		if agent == nil {
+			return templateResolution{Err: fmt.Errorf("template %q not configured", info.Template)}
+		}
+		if slot, _ := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); (slot > 0 || agent.UsesCanonicalSingletonPoolIdentity()) && info.PoolManaged && !isManualSessionInfoForAgent(info, agent) {
+			// A wanted pool seat: legacy's realize path (realizePoolDesiredSessions).
+			resolveAgent, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, slot)
+			tp, err := resolveTemplateForSessionBeadInfo(&row, resolveAgent, qualifiedInstance, buildFingerprintExtra(resolveAgent), info)
+			if err == nil {
+				applyPoolInstanceIdentity(&tp, agent, qualifiedInstance, poolSlot, info)
+			}
+			return templateResolution{TP: tp, Agent: resolveAgent, Err: err}
+		}
+		tp, err := resolveDiscoveredSessionTemplate(&row, cfg, agent, info)
+		return templateResolution{TP: tp, Agent: agent, Err: err}
+	}
+	install := func(agent *config.Agent, tp TemplateParams) { installAgentSideEffects(bp, agent, tp, bp.stderr) }
+	resolve := func(info session.Info) templateResolution { return resolveAt(info, time.Time{}) }
+	return templateResolver{Resolve: resolve, ResolveAt: resolveAt, Install: install, Retry: bp.skillCatalogFailed || len(bp.failedRigSkillCatalogs) > 0}
 }
 
 // templateMemo is one generation's template resolutions (S-17). It is
@@ -285,8 +437,29 @@ type templateResolution struct {
 // memo, so an effect may read the one it was handed from any goroutine.
 // Readers must not edit an entry's TemplateParams.
 type templateMemo struct {
-	Gen     uint64
-	entries map[templateMemoKey]templateResolution
+	Gen       uint64
+	entries   map[templateMemoKey]templateResolution
+	install   func(agent *config.Agent, tp TemplateParams)
+	resolveAt func(info session.Info, now time.Time) templateResolution
+}
+
+// launchTemplate is info's template resolved at now, for its launch, and
+// false when the memo has no resolver or the resolution failed.
+func (m *templateMemo) launchTemplate(info session.Info, now time.Time) (templateResolution, bool) {
+	if m == nil || m.resolveAt == nil {
+		return templateResolution{}, false
+	}
+	res := m.resolveAt(info, now)
+	return res, res.Err == nil
+}
+
+// installSideEffects installs agent's side effects for a launch of tp
+// (installAgentSideEffects, which legacy runs every tick); a memo with no
+// resolver installs none.
+func (m *templateMemo) installSideEffects(agent *config.Agent, tp TemplateParams) {
+	if m != nil && m.install != nil {
+		m.install(agent, tp)
+	}
 }
 
 // lookup returns info's resolution, and false when the memo has none.
@@ -308,14 +481,18 @@ type gatherMemo struct {
 	gen       uint64
 	sleep     map[sleepMemoKey]resolvedSessionSleepPolicy
 	transport map[string]string // immutable once built: World shares it
+	resolver  templateResolver
 	templates atomic.Pointer[templateMemo]
 }
 
-// refresh starts a new generation's memos when env is new, then resolves the
-// templates of rows the memo lacks and publishes a fresh memo holding the
-// pass's rows' entries.
-func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, rows []censusRow, mislabelled map[rowKey]bool) {
-	if m.sleep == nil || m.gen != env.Gen {
+// refresh starts a new generation's memos when env is new, building its
+// template resolver at now (again on a later pass when the resolver asks
+// to: its skill catalog failed to load), then resolves the templates of
+// rows the memo lacks or holds only an error for, and publishes a fresh
+// memo holding the pass's rows' entries.
+func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows []censusRow, mislabelled map[rowKey]bool) {
+	newGen := m.sleep == nil || m.gen != env.Gen
+	if newGen {
 		m.gen, m.sleep = env.Gen, make(map[sleepMemoKey]resolvedSessionSleepPolicy)
 		m.transport = make(map[string]string)
 		for i := range env.Cfg.Agents {
@@ -324,16 +501,22 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, rows []censusRow, m
 				m.transport[a.QualifiedName()] = err.Error()
 			}
 		}
-		m.templates.Store(&templateMemo{Gen: env.Gen})
 	}
-	if e.ResolveTemplate == nil {
+	if newGen || m.resolver.Retry {
+		m.resolver = templateResolver{}
+		if e.Templates != nil {
+			m.resolver = e.Templates(env, now)
+		}
+		m.templates.Store(&templateMemo{Gen: env.Gen, install: m.resolver.Install, resolveAt: m.resolver.ResolveAt})
+	}
+	if m.resolver.Resolve == nil {
 		return
 	}
 	cur := m.templates.Load()
 	next := make(map[templateMemoKey]templateResolution, len(rows))
 	missed := false
 	for _, row := range rows {
-		if mislabelled[row.Key] || findAgentByTemplate(env.Cfg, normalizedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
+		if mislabelled[row.Key] || findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
 			continue
 		}
 		k := templateMemoKeyOf(row.Info)
@@ -341,14 +524,14 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, rows []censusRow, m
 			continue
 		}
 		r, ok := cur.entries[k]
-		if !ok {
+		if !ok || r.Err != nil { // an error is not kept: legacy resolves again each tick
 			missed = true
-			r.TP, r.Err = e.ResolveTemplate(env, row.Info)
+			r = m.resolver.Resolve(row.Info)
 		}
 		next[k] = r
 	}
 	if missed || len(next) != len(cur.entries) {
-		m.templates.Store(&templateMemo{Gen: env.Gen, entries: next})
+		m.templates.Store(&templateMemo{Gen: env.Gen, entries: next, install: cur.install, resolveAt: cur.resolveAt})
 	}
 }
 

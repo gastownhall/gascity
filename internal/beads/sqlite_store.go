@@ -415,15 +415,7 @@ func sqliteStoreDSN(path string, readOnly bool) string {
 // It is a begin mode, not a pragma, so it does not ride the per-connection
 // pragma budget, and it is deliberately off the read pool and read-only DSN.
 func sqliteStoreWriterDSN(path string) string {
-	dsn := sqliteStoreDSNWithMode(path, "")
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	query := parsed.Query()
-	query.Set("_txlock", "immediate")
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return sqliteStoreDSNWithOptions(path, "", "immediate")
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
@@ -431,6 +423,12 @@ func sqliteStorePrivateRecoveryDSN(path string) string {
 }
 
 func sqliteStoreDSNWithMode(path, mode string) string {
+	return sqliteStoreDSNWithOptions(path, mode, "")
+}
+
+// sqliteStoreDSNWithOptions is the one DSN builder. txlock, when set, is the
+// modernc _txlock begin mode ("immediate" for the write connection only).
+func sqliteStoreDSNWithOptions(path, mode, txlock string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
@@ -485,6 +483,9 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 
 	if mode != "" {
 		query.Set("mode", mode)
+	}
+	if txlock != "" {
+		query.Set("_txlock", txlock)
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
@@ -650,6 +651,7 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	return s.create(b, false)
 }
 
@@ -1170,6 +1172,7 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
 // and unfenced paths cannot drift.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	noteSessionKeys(b, opts.Metadata) // every SQLite update applies its opts here
 	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
@@ -1227,6 +1230,12 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
+	return s.rewriteBead(id, func(b Bead) Bead { return applySQLiteUpdateOpts(b, opts) })
+}
+
+// rewriteBead replaces id's row with apply's edit of it in one transaction,
+// bumping the claim fence when the edit moves ownership.
+func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1242,7 +1251,7 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 			return err
 		}
 		before := b
-		b = applySQLiteUpdateOpts(b, opts)
+		b = apply(b)
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
@@ -1336,7 +1345,13 @@ func (s *SQLiteStore) Reopen(id string) error {
 		return nil
 	}
 	status := "open"
-	return s.Update(id, UpdateOpts{Status: &status})
+	return s.rewriteBead(id, func(row Bead) Bead {
+		row = applySQLiteUpdateOpts(row, UpdateOpts{Status: &status})
+		// The old close's reason must not feed the next close, whatever
+		// status the bead is reopened from (dropCloseReasonMetadata).
+		dropCloseReasonMetadata(&row)
+		return row
+	})
 }
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.
@@ -1776,6 +1791,14 @@ func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
 // Tx executes fn in one SQLite transaction. Every write is rolled back when
 // the callback returns an error, so callers can safely compose Create, Update,
 // metadata updates, and Close as one all-or-nothing operation.
+//
+// Except on read-only and private-recovery stores, which keep a deferred
+// begin, the transaction takes the write lock as it begins (BEGIN IMMEDIATE,
+// see sqliteStoreWriterDSN), so write contention surfaces there, before fn
+// runs, and a contended begin is retried like every other write. fn itself
+// runs at most once: an error from fn or from the commit is returned without
+// running fn again. Under contention fn can start well after Tx is called, so
+// state read before Tx may have changed by the time fn runs.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1784,9 +1807,15 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 		return errors.New("beads tx: nil callback")
 	}
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite tx: begin: %w", err)
+	var tx *sql.Tx
+	if err := retryOnBusy(func() error {
+		var err error
+		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
+			return fmt.Errorf("sqlite tx: begin: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
@@ -1822,6 +1851,7 @@ type sqliteStoreTx struct {
 // the exemption runs through CreateWithForeignID on the store, not inside a
 // caller's transaction, so adding one would open a bypass nothing asks for.
 func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
+	noteSessionCreate(b)
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}
@@ -2131,23 +2161,4 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 
 func ptrTo(v string) *string {
 	return &v
-}
-
-// numericIDSuffix parses the trailing numeric portion of a bead ID like
-// "gc-42" and returns 42. Returns 0 if the ID has no numeric suffix or the
-// suffix does not fit in an int. It is a loose parser for MemStore's pinned-id
-// bookkeeping; the SQLite allocator uses the strict parseSQLiteAutoIDSuffix.
-func numericIDSuffix(id string) int {
-	i := len(id)
-	for i > 0 && id[i-1] >= '0' && id[i-1] <= '9' {
-		i--
-	}
-	if i == len(id) {
-		return 0
-	}
-	n, err := strconv.Atoi(id[i:])
-	if err != nil {
-		return 0
-	}
-	return n
 }

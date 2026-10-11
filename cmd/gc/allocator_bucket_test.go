@@ -301,7 +301,7 @@ func TestCityInFlightCensusLagModel(t *testing.T) {
 				case e.outcome == 0:
 					census[e.key] = bringUpRow{Key: e.key, Token: e.token, PendingCreate: true}
 				case e.outcome >= 2:
-					s.Ambiguous, ambiguous[e.token] = true, now
+					s.Outcome, ambiguous[e.token] = settledAmbiguous, now
 					if e.outcome == 2 {
 						installs[e.key] = e.lag
 					}

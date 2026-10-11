@@ -20,7 +20,8 @@ import (
 // These tests are the falsifiable-check floor demanded by the bead: each MUST
 // fail on unpatched source (mail Assignee comes back "") and pass once
 // excludeMailMessageBeads (work_assignment.go) filters mail beads out of
-// OpenAssignedToBasic/OpenAssignedTo before ReleaseWorkBead ever sees them.
+// OpenAssignedTo, and the seat work index skips them, before ReleaseWorkBead
+// ever sees them.
 
 // TestReleaseWorkFromClosedSessionBeadLeavesMailBeadUntouched is the close-path
 // falsifiable case: an unread self-handoff-shaped mail wisp, still open,
@@ -55,7 +56,7 @@ func TestReleaseWorkFromClosedSessionBeadLeavesMailBeadUntouched(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBead(store, sessionBead, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(mailBead.ID)
 	if err != nil {
@@ -113,7 +114,7 @@ func TestReleaseWorkFromClosedSessionBeadStillReleasesRealWork(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBead(store, sessionBead, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {
@@ -179,7 +180,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadLeavesMailBeadUntouched(t *testi
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs("", nil, store, nil), store, sessionBead, "fallback/worker", &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {

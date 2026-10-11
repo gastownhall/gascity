@@ -14,11 +14,6 @@ type Liveness struct {
 	Running bool
 	// Alive reports that the configured agent process is alive.
 	Alive bool
-	// Complete reports whether this is a fresh, authoritative absence/presence
-	// observation. Callers that may destroy durable state must not infer death
-	// from an incomplete observation. Only an incarnation-bound read
-	// ([IncarnationLivenessObserver]) sets it.
-	Complete bool
 	// Corpse reports that the name is listed but no pane of it is alive: a
 	// remain-on-exit corpse. Running and Alive are then false. Only tmux keeps
 	// corpses.
@@ -48,50 +43,38 @@ func (l Liveness) Present() bool {
 	return l.Running || l.Corpse
 }
 
-// LivenessTarget identifies the runtime and durable session whose liveness is
-// being observed.
-type LivenessTarget struct {
-	SessionID    string
-	SessionName  string
-	ProcessNames []string
-	// IncarnationStartedAt bounds inaccessible-process uncertainty. A provider
-	// may ignore a process only when it can prove the process predates this
-	// session incarnation. Zero keeps the unbounded, fail-closed behavior.
-	IncarnationStartedAt time.Time
-}
-
 // LivenessObserver is implemented by providers that can observe runtime and
 // agent-process liveness in one provider-native pass.
 type LivenessObserver interface {
 	ObserveLiveness(name string, processNames []string) Liveness
 }
 
-// IncarnationLivenessObserver is implemented by providers that can prove a
-// new, complete liveness observation for an exact session incarnation
-// ([LivenessTarget]). [FreshLivenessObserver] bounds a read by time; this
-// read also matches the incarnation's own processes and reports in
-// Liveness.Complete whether an absence is authoritative.
-type IncarnationLivenessObserver interface {
-	ObserveFreshLiveness(LivenessTarget) Liveness
-}
-
-// LivenessInvalidator is implemented by providers that cache runtime
-// liveness. It discards cached liveness before a caller needs a fresh
-// observation for one session.
-type LivenessInvalidator interface {
-	InvalidateLiveness(name string)
-}
-
 // ServerDeathConfirmer is the optional provider capability that reports a
 // confirmed-dead runtime server: its socket is missing, or refuses on a stable
 // inode, and no listener is bound to its path, so no session of it can exist
-// and an empty listing is complete (v5 O1, F3). Only tmux implements it.
+// and an empty listing is complete (v5 O1, F3). Only tmux implements it; the
+// auto and hybrid composites forward it through [ServersConfirmedDead].
 //
 // Ask it only right after a ListRunning that failed for a missing server, and
 // use the verdict only for that pass: a server can start at any moment, so a
 // verdict carried across passes would read a live fleet as gone.
 type ServerDeathConfirmer interface {
 	ServerConfirmedDead() bool
+}
+
+// ServersConfirmedDead answers [ServerDeathConfirmer] for a composite: false
+// as soon as one backend that implements it does not confirm its server dead.
+// A composite has at most one tmux leaf in practice, so this forwards to it; a
+// composite with none answers true and so keeps the rule of a provider without
+// the capability. The inventory lane walks composites to their leaves and
+// never asks a composite.
+func ServersConfirmedDead(backends ...Provider) bool {
+	for _, b := range backends {
+		if confirmer, ok := b.(ServerDeathConfirmer); ok && !confirmer.ServerConfirmedDead() {
+			return false
+		}
+	}
+	return true
 }
 
 // LivenessObserverWithError is the optional provider capability for liveness
@@ -135,22 +118,6 @@ func ObserveLiveness(sp Provider, name string, processNames []string) Liveness {
 		running = true
 	}
 	return normalizeLiveness(Liveness{Running: running, Alive: alive})
-}
-
-// ObserveFreshLiveness returns a fresh liveness observation when the provider
-// supports one. Providers without that capability retain any positive
-// liveness evidence, but their absence is deliberately incomplete.
-func ObserveFreshLiveness(sp Provider, target LivenessTarget) Liveness {
-	target.SessionName = strings.TrimSpace(target.SessionName)
-	if sp == nil || target.SessionName == "" {
-		return Liveness{}
-	}
-	if observer, ok := sp.(IncarnationLivenessObserver); ok {
-		return normalizeLiveness(observer.ObserveFreshLiveness(target))
-	}
-	observation := normalizeLiveness(ObserveLiveness(sp, target.SessionName, target.ProcessNames))
-	observation.Complete = false
-	return observation
 }
 
 func hasProcessNameHints(processNames []string) bool {

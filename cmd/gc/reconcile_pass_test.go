@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"reflect"
 	"slices"
 	"strings"
@@ -104,7 +105,9 @@ func TestDecideRowPanicHoldsRow(t *testing.T) {
 	if got := intentKeys(rec.Admitted); !slices.Equal(got, []string{"row-heal:gc-2"}) {
 		t.Fatalf("admitted = %v, want gc-2's heal only", got)
 	}
-	if !slices.Contains(rec.Rows, rowTrace{Key: rowKey{Leg: rowLeg, ID: "gc-1"}, Reason: decidePanic, Outcome: outcomeNone}) {
+	if !slices.ContainsFunc(rec.Rows, func(r rowTrace) bool {
+		return r.Key == rowKey{Leg: rowLeg, ID: "gc-1"} && r.Template == "worker" && r.Reason == decidePanic && r.Outcome == outcomeNone
+	}) {
 		t.Fatalf("rows traced = %+v, want gc-1 held with reason panic", rec.Rows)
 	}
 	if !strings.Contains(stderr.String(), "gc-1") || !strings.Contains(stderr.String(), "boom") {
@@ -193,14 +196,14 @@ func TestPassIsDeterministic(t *testing.T) {
 }
 
 // Kills admission's planner state dropped or a row deadline lost: the pass
-// stores the bucket and the fair seed admission returned (an admitted pool
-// create advances the seed), and reports the earliest row deadline as the
-// next pass.
+// stores the fair seed admission returned (an admitted pool create advances
+// the seed; a trace-only pass keeps no bucket, TestTracePassKeepsNoTokenDebit),
+// and reports the earliest row deadline as the next pass.
 func TestPassCarriesAdmissionStateAndDeadlines(t *testing.T) {
 	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "asleep", "held_until", rowAt(time.Minute)), routedDemandBead("gc-r1"), routedDemandBead("gc-r2"))
 	res := f.p.tracePass(f.env, gatherNow)
-	if f.p.fairSeed != 1 || f.p.bucket.LastRefill.IsZero() {
-		t.Fatalf("planner state after a pass with pool creates = seed %d, bucket %+v; want seed 1 and a refilled bucket", f.p.fairSeed, f.p.bucket)
+	if f.p.fairSeed != 1 {
+		t.Fatalf("planner state after a pass with pool creates = seed %d; want seed 1", f.p.fairSeed)
 	}
 	if want := gatherNow.Add(time.Minute + time.Second); !res.Next.Equal(want) {
 		t.Fatalf("next pass = %v, want gc-1's hold expiry %v", res.Next, want)
@@ -223,5 +226,63 @@ func TestPassAppliesBootGate(t *testing.T) {
 	rec := f.passRecord(t)
 	if len(rec.Admitted) != 0 || len(rec.Deferred) != 1 || rec.Deferred[0].Cause != causeBootGate {
 		t.Fatalf("admitted %v, deferred %+v; want the stop deferred by the boot gate", intentKeys(rec.Admitted), rec.Deferred)
+	}
+}
+
+// Kills the trace-only pass keeping admission's token debit, or scheduling a
+// pass for a refill (C2c1's relay): nothing submits what it admits, so a kept
+// debit would run the bucket dry on phantom starts. With one token and three
+// creates owed, the pass admits one and waits the rest on the budget, yet
+// the planner's bucket is untouched and the pass asks for no follow-up.
+func TestTracePassKeepsNoTokenDebit(t *testing.T) {
+	f := newGatherFixture(t, routedDemandBead("gc-r1"), routedDemandBead("gc-r2"), routedDemandBead("gc-r3"))
+	cfg := *f.cur.Load().Cfg
+	cfg.Daemon.MaxWakesPerTick = intPtr(1)
+	f.cur.Store(&reconcileEnv{Gen: 1, Cfg: &cfg, SP: f.sp})
+	res := f.p.tracePass(f.env, gatherNow)
+	rec := f.p.out.record.Load()
+	if rec.Err != "" || len(rec.Admitted) != 1 || len(rec.Deferred) == 0 {
+		t.Fatalf("admitted %v deferred %v (err %q), want one create through and the rest held", intentKeys(rec.Admitted), intentKeys(rec.Deferred), rec.Err)
+	}
+	if f.p.bucket != (bucketState{}) || !res.Next.IsZero() {
+		t.Fatalf("bucket = %+v, next pass at %v; want the bucket untouched and no refill pass", f.p.bucket, res.Next)
+	}
+}
+
+// Kills effects that ignore the D-14 gate's other half, an unregistered kind
+// that is submitted (and backs its row off) instead of traced, and an
+// effect that never clears its entry: with effects on but no create runner
+// wired, the pass defers the creates with cause no-effect before admission,
+// submits gc-1's heal under an in-flight entry, keeps admission's bucket,
+// and the heal's settlement clears the entry. Nothing backs the creates off.
+func TestPassWithEffectsSubmitsRegisteredKindsOnly(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "asleep", expiredHold...), routedDemandBead("gc-r1"), routedDemandBead("gc-r2"))
+	x := newEffectExecutor(f.p.settlements.post, io.Discard)
+	f.p.effects = x
+	rec := f.passRecord(t)
+	if got := intentKeys(rec.Admitted); !slices.Equal(got, []string{"row-heal:gc-1"}) {
+		t.Fatalf("admitted = %v, want gc-1's heal only", got)
+	}
+	var noEffect int
+	for _, it := range rec.Deferred {
+		if it.Kind == intentCreate && it.Cause == causeNoEffect {
+			noEffect++
+		}
+	}
+	if noEffect != 2 {
+		t.Fatalf("deferred = %+v, want both creates with cause %q", rec.Deferred, causeNoEffect)
+	}
+	if f.p.bucket == (bucketState{}) {
+		t.Fatal("the planner kept no bucket with effects on")
+	}
+	x.stop(time.Now().Add(time.Minute)) // returns once the heal settled
+	f.p.drainSettlements(gatherNow)
+	if v := f.inflight.view(); len(v.Entries) != 0 {
+		t.Fatalf("in flight after the heal settled = %+v, want none", v.Entries)
+	}
+	for k := range f.p.backoff.Snapshot() {
+		if !strings.HasPrefix(k, "row:") {
+			t.Fatalf("backoff record %s, want none for the deferred creates", k)
+		}
 	}
 }

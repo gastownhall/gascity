@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -45,8 +44,9 @@ import (
 // Prime's concurrent-mutation path and PrimeActive fence on the write's
 // writeSeq as well as its beadSeq, so none of them can install a row read
 // before the write. An event with no cached row to merge onto is fenced on
-// writeSeq and deletedSeq, and a conflicting event is verified against the
-// backing while beadSeq is present or the local write is younger than
+// writeSeq and deletedSeq. A field-changing bead.updated is always verified
+// against the backing; a conflicting dependency-only update or bead.created is
+// verified while beadSeq is present or the local write is younger than
 // recentWriteVerifyWindow (see CacheRevision for the remaining known limits).
 // The refetched row feeds the change notification verbatim.
 var (
@@ -65,8 +65,10 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 		return Bead{}, ErrConditionalWriteUnsupported
 	}
 	before := h.cache.currentMutationSeq()
+	generation := h.cache.beginCloseIntent(id)
 	closed, err := closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
 	if err != nil {
+		h.cache.endCloseIntent(id, generation)
 		h.cache.applyConditionalWriteFailure(id, err)
 		return Bead{}, err
 	}
@@ -75,7 +77,7 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 	// the backing write (ev.prior), and the evicted row, if any, is still the
 	// one at expectedRevision (a reconcile can absorb an external change
 	// without a seq bump).
-	ev, own := h.cache.evictForConditionalClose(id)
+	ev, own := h.cache.evictForConditionalClose(id, generation)
 	if closed.ID == id && closed.Status == "closed" && ev.prior <= before &&
 		(!ev.cached || ev.revision == expectedRevision) {
 		h.cache.installAfterConditionalWrite(id, ev, closed)
@@ -195,7 +197,14 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	var generation uint64
+	if updateCloses(opts) {
+		generation = c.beginCloseIntent(id)
+	}
 	if err := writer.UpdateIfMatch(id, expectedRevision, opts); err != nil {
+		if updateCloses(opts) {
+			c.endCloseIntent(id, generation)
+		}
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
@@ -205,14 +214,14 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	// close, announced as bead.closed when it owns the close, as Update does.
 	eventType := "bead.updated"
 	var ev conditionalEviction
-	if opts.Status != nil && *opts.Status == "closed" {
+	if updateCloses(opts) {
 		var own bool
-		ev, own = c.evictForConditionalClose(id)
+		ev, own = c.evictForConditionalClose(id, generation)
 		if own {
 			eventType = "bead.closed"
 		}
 	} else {
-		ev = c.evictForConditionalWrite(id)
+		ev = c.evictForConditionalUpdate(id, opts)
 	}
 	fresh, err := c.refetchAfterConditionalWrite(id, ev, func(b Bead) bool {
 		return ev.postWriteRevision(b, expectedRevision) && updateReflected(b, opts)
@@ -239,11 +248,13 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
+	generation := c.beginCloseIntent(id)
 	if err := writer.CloseIfMatch(id, expectedRevision); err != nil {
+		c.endCloseIntent(id, generation)
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
-	ev, own := c.evictForConditionalClose(id)
+	ev, own := c.evictForConditionalClose(id, generation)
 	fresh, err := c.refetchAfterConditionalWrite(id, ev, func(b Bead) bool {
 		return ev.postWriteRevision(b, expectedRevision) && b.Status == "closed"
 	})
@@ -280,7 +291,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	seq := c.noteLocalMutationLocked(id)
 	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
@@ -400,17 +411,30 @@ func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 	return c.evictForConditionalWriteLocked(id)
 }
 
-// evictForConditionalClose is evictForConditionalWrite for a fenced write that
-// left id closed. Under the same lock it first claims the bead.closed
-// announcement (claimCloseLocked) from the row it is about to evict, and
-// reports whether the write owns it: a close a concurrent read already
-// installed and announced is not announced again, and one a read queued is
-// announced by the write instead of the queue. A read after the eviction finds
-// no held row, so it queues nothing.
-func (c *CachingStore) evictForConditionalClose(id string) (conditionalEviction, bool) {
+// evictForConditionalUpdate is evictForConditionalWrite for a fenced update
+// that does not close id. One that sets another status reopens the bead, so a
+// close after it is a new one, even when no refetch installs the reopened row
+// (noteNotClosedLocked).
+func (c *CachingStore) evictForConditionalUpdate(id string, opts UpdateOpts) conditionalEviction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	own := c.claimCloseLocked(id, true, false)
+	if opts.Status != nil {
+		c.noteNotClosedLocked(id)
+	}
+	return c.evictForConditionalWriteLocked(id)
+}
+
+// evictForConditionalClose is evictForConditionalWrite for a fenced write that
+// left id closed, whose close intent began in generation. Under the same lock
+// it first claims the bead.closed announcement (claimCloseIntentLocked) from
+// the row it is about to evict, and reports whether the write owns it: a close
+// a concurrent read already installed and announced is not announced again,
+// and one a read queued is announced by the write instead of the queue. A read
+// after the eviction finds no held row, so it queues nothing.
+func (c *CachingStore) evictForConditionalClose(id string, generation uint64) (conditionalEviction, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	own := c.claimCloseIntentLocked(id, generation, true, false)
 	return c.evictForConditionalWriteLocked(id), own
 }
 
@@ -434,7 +458,7 @@ func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEvic
 	delete(c.deps, id)
 	c.dirty[id] = struct{}{}
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return ev
 }
@@ -521,8 +545,8 @@ func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEvi
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps
 	}
-	c.absorbFreshLocked(id, row, time.Now(), opts)
-	c.markFreshLocked(time.Now())
+	c.absorbFreshLocked(id, row, c.clockNow(), opts)
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 }
 

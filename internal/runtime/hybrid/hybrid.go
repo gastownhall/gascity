@@ -26,9 +26,7 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.IncarnationLivenessObserver   = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
@@ -37,6 +35,12 @@ var (
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.DialogProvider                = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -97,6 +101,13 @@ func (p *Provider) Stop(name string) error {
 	return p.route(name).Stop(name)
 }
 
+// ServerConfirmedDead implements [runtime.ServerDeathConfirmer] by forwarding
+// to the backends that confirm server death (local tmux), so StopForCleanup
+// keeps its confirmed-dead rule for a missing-server answer Stop returns.
+func (p *Provider) ServerConfirmedDead() bool {
+	return runtime.ServersConfirmedDead(p.local, p.remote)
+}
+
 // Interrupt delegates to the routed backend.
 func (p *Provider) Interrupt(name string) error {
 	return p.route(name).Interrupt(name)
@@ -105,14 +116,6 @@ func (p *Provider) Interrupt(name string) error {
 // IsRunning delegates to the routed backend.
 func (p *Provider) IsRunning(name string) bool {
 	return p.route(name).IsRunning(name)
-}
-
-// InvalidateLiveness forwards to the backend selected for name when it caches
-// liveness observations.
-func (p *Provider) InvalidateLiveness(name string) {
-	if invalidator, ok := p.route(name).(runtime.LivenessInvalidator); ok {
-		invalidator.InvalidateLiveness(name)
-	}
 }
 
 // IsDeadRuntimeSession delegates to the routed backend when it can positively
@@ -153,14 +156,6 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // IsRunning+ProcessAlive fold.
 func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
 	return runtime.ObserveLiveness(p.route(name), name, processNames)
-}
-
-// ObserveFreshLiveness forwards a decisive liveness observation to only the
-// backend selected for the target session. An unselected backend cannot prove
-// this target absent, so unsupported selected backends remain incomplete.
-func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
-	selected := p.route(target.SessionName)
-	return runtime.ObserveFreshLiveness(selected, target)
 }
 
 // ObserveLivenessWithError forwards the optional error-bearing observation to
@@ -248,6 +243,60 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 		return ip.Respond(name, response)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// DismissKnownDialogs delegates to the routed backend when it can dismiss
+// startup dialogs.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
+		return dp.DismissKnownDialogs(ctx, name, timeout)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// GetAllEnvironment delegates to the routed backend when it has a batched
+// environment read.
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	if ep, ok := p.route(name).(runtime.EnvironmentBatchProvider); ok {
+		return ep.GetAllEnvironment(name)
+	}
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrEnvironmentBatchUnsupported, name)
+}
+
+// ConfigureServer configures the server of every backend that has one.
+func (p *Provider) ConfigureServer() error {
+	return runtime.ConfigureServers(p.Backends())
+}
+
+// TeardownServer tears down the server of every backend that has one, so a
+// full stop through the composite still ends the local tmux server.
+func (p *Provider) TeardownServer() error {
+	return runtime.TeardownServers(p.Backends())
+}
+
+// SessionRoster merges the backends' rosters ([runtime.MergeSessionRosters]).
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return runtime.MergeSessionRosters(p, p.Backends())
+}
+
+// KillCorpseObject forwards to the routed backend when it kills session
+// objects by id (local tmux). The route is a pure function of the name, so no
+// other backend can host the object.
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillCorpseObject(name, objectID, created)
+}
+
+// KillZombieObject forwards like KillCorpseObject.
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillZombieObject(name, objectID, created, panePID)
 }
 
 // SetMeta delegates to the routed backend.

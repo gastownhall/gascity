@@ -14,15 +14,10 @@ import (
 // fold.
 type livenessObserverStub struct {
 	*runtime.Fake
-	obs           runtime.Liveness
-	invalidations []string
+	obs runtime.Liveness
 }
 
 func (s *livenessObserverStub) ObserveLiveness(string, []string) runtime.Liveness { return s.obs }
-
-func (s *livenessObserverStub) InvalidateLiveness(name string) {
-	s.invalidations = append(s.invalidations, name)
-}
 
 type errorBearingLivenessObserverStub struct {
 	*runtime.Fake
@@ -68,21 +63,6 @@ func TestProvider_ObserveLivenessFallsThroughOnStaleRoute(t *testing.T) {
 
 	if got := p.ObserveLiveness("acpsess", []string{"claude"}); got != acp.obs {
 		t.Errorf("stale-route ObserveLiveness = %+v; want %+v (fallthrough to ACP backend lost)", got, acp.obs)
-	}
-}
-
-func TestProvider_InvalidatesLivenessOnBothBackends(t *testing.T) {
-	def := &livenessObserverStub{Fake: runtime.NewFake()}
-	acp := &livenessObserverStub{Fake: runtime.NewFake()}
-	p := New(def, acp)
-
-	p.InvalidateLiveness("stale-route")
-
-	if got := def.invalidations; len(got) != 1 || got[0] != "stale-route" {
-		t.Fatalf("default invalidations = %#v, want exact name once", got)
-	}
-	if got := acp.invalidations; len(got) != 1 || got[0] != "stale-route" {
-		t.Fatalf("ACP invalidations = %#v, want exact name once", got)
 	}
 }
 

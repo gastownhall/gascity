@@ -354,6 +354,8 @@ lint:
 	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) //...
 
 ## lint-changed: run nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|tracked|worktree)
+# testdata paths are dropped with sed, not a case statement: macOS /bin/sh
+# (bash 3.2) cannot parse a case pattern's ')' inside $(...).
 lint-changed:
 	@case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
@@ -378,9 +380,8 @@ lint-changed:
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	selected="$$(printf '%s\n' "$$files" | sed '/^$$/d' | while IFS= read -r file; do \
+	selected="$$(printf '%s\n' "$$files" | sed -e '/^$$/d' -e '/^testdata\//d' -e '/\/testdata\//d' | while IFS= read -r file; do \
 		dir="$$(dirname "$$file")"; \
-		case "$$dir/" in testdata/*|*/testdata/*) continue ;; esac; \
 		if [ ! -f "$$dir/BUILD.bazel" ]; then echo "missing $$dir"; \
 		elif [ "$$dir" = "." ]; then echo "//:all"; \
 		else echo "//$$dir:all"; fi; \
@@ -437,6 +438,13 @@ fmt: $(GOLANGCI_LINT)
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
+##
+## The pane shell is pinned to /bin/sh rather than forwarded. A test that opens
+## a tmux or herdr pane runs that shell in it, and the invoking user's zsh under
+## a fresh HOME (a release gate, CI) opens its new-user wizard, which swallows
+## the typed text (ga-yghhjf). The nested env -i blocks in
+## scripts/test-local-parallel, scripts/test-go-test-shard and
+## scripts/test-integration-shard mirror the pin (see scripts/AGENTS.md).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -447,7 +455,7 @@ TEST_ENV = env -i \
 	HOME="$$HOME" \
 	USER="$$USER" \
 	LOGNAME="$$LOGNAME" \
-	SHELL="$$SHELL" \
+	SHELL=/bin/sh \
 	GIT_CONFIG_NOSYSTEM=1 \
 	GIT_CONFIG_GLOBAL="$$(scripts/test-gitconfig-path)" \
 	LANG="$$LANG" \
@@ -1015,10 +1023,23 @@ install-oasdiff:
 	fi
 
 ## openapi-breaking-check: fail when internal/api/openapi.json breaks clients of
-## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main).
+## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main):
+## //cmd/openapi-breaking:openapi-breaking_test with that commit's spec as
+## GC_OPENAPI_BREAKING_BASE_SPEC, as bazel.yml's unit lane runs it on PRs.
 ## Waive intentional breaks in internal/api/openapi-breaking.toml.
 .PHONY: openapi-breaking-check
-openapi-breaking-check: install-oasdiff
+openapi-breaking-check: bazel-tmpdir
+	@base="$${OPENAPI_BREAKING_BASE:-$$(git merge-base HEAD origin/main)}" || exit 1; \
+	spec="$$(mktemp "$${TMPDIR:-/tmp}/openapi-base.XXXXXX")" || exit 1; \
+	trap 'rm -f "$$spec"' EXIT; \
+	git show "$$base:internal/api/openapi.json" > "$$spec" || exit 1; \
+	echo "openapi-breaking-check: base $$base"; \
+	GC_OPENAPI_BREAKING_BASE_SPEC="$$spec" $(BAZEL_TEST) //cmd/openapi-breaking:openapi-breaking_test
+
+## openapi-breaking-check-go: the same gate with plain go test / go run and the
+## Makefile's OASDIFF_VERSION.
+.PHONY: openapi-breaking-check-go
+openapi-breaking-check-go: install-oasdiff
 	GC_REQUIRE_OASDIFF=1 OASDIFF=$(OASDIFF) go test -count=1 ./cmd/openapi-breaking
 	OASDIFF=$(OASDIFF) go run ./cmd/openapi-breaking
 
@@ -1055,17 +1076,17 @@ test-mail-wisp-insert:
 test-mcp-mail:
 	$(TEST_ENV) GC_TEST_MCP_MAIL=1 go test ./internal/mail/exec/ -run TestMCPMailConformanceLive -v -count=1
 
-## test-openclaw-bridge: install + run the contrib/openclaw-bridge Node test suite
+## test-openclaw-bridge: run the contrib/openclaw-bridge Node test suite (rules_js)
 test-openclaw-bridge:
-	cd contrib/openclaw-bridge && npm ci --no-audit --no-fund && npm test
+	$(BAZEL_TEST) //contrib/openclaw-bridge/...
 
 ## test-docker: run the Docker session adapter against the emulated container host
 test-docker:
-	$(BAZEL_TEST) --config=integration //test/containerhost:containerhost_test
+	$(BAZEL_TEST) --config=integration --test_filter='^TestDockerSession' //test/containerhost:containerhost_test
 
-## test-k8s: run K8s session provider conformance tests
+## test-k8s: run the K8s session adapter against the emulated container host's pod API
 test-k8s:
-	$(TEST_ENV) go test -tags integration ./test/integration/ -run TestK8sSessionConformance -v -count=1
+	$(BAZEL_TEST) --config=integration --test_filter='^TestK8sSession' //test/containerhost:containerhost_test
 
 ## setup: install tools and git hooks
 ## .githooks is the single core.hooksPath owner; its hooks chain every

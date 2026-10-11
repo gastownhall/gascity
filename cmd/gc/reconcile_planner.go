@@ -8,6 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // The v2 planner loop (architecture §1.3, §1.5): one goroutine that schedules
@@ -45,23 +48,55 @@ type passRecord struct {
 
 // settlement is an effect's report that it finished. Seq echoes the
 // in-flight entry's submit. A create's names its entry by Token, since the
-// create has no row until it lands; Ambiguous says its write call errored
-// after the row may have landed (CONTRACT v5 P5). A zero At is stamped with
-// the drain time. C4a adds the outcome the backoff table needs.
+// create has no row until it lands. A zero At is stamped with the drain time.
 type settlement struct {
-	Key       rowKey
-	Kind      string
-	Err       error
-	Seq       uint64
-	Token     string
-	Ambiguous bool
-	At        time.Time
+	Key     rowKey
+	Kind    string
+	Reason  string // the intent's reason, which the pass record counts by
+	Seq     uint64
+	Token   string
+	Outcome settleOutcome
+	// Cause is a refusal's or failure's cause. The backoff table keeps it
+	// verbatim: admit reads causeFinalizePrefix (P4), and the allocation
+	// createStageFence (F3).
+	Cause string
+	// BackoffKey is the record a refusal or failure backs off and a landing
+	// or no-op resets, under Fingerprint: the row's when empty; a create's
+	// createBackoffKey under its ConfigRev, set only when it landed or was
+	// refused at a stage.
+	BackoffKey, Fingerprint string
+	Facts                   effectFacts // applied once drained (applyFacts)
+	Err                     error
+	At                      time.Time
+	// Late marks what an effect returned after the executor settled it: the
+	// drain applies only its facts.
+	Late bool
+	// Closed marks an effect whose close section's close landed: what
+	// around reads to run a post-close cascade once, never for an earlier
+	// write or a row another writer closed.
+	Closed bool
 }
+
+// drainTransition is one RecordDrainTransition.
+type drainTransition struct{ Name, Reason, Transition string }
+
+// settleOutcome is how an effect ended (CONTRACT v5 S1, P5).
+type settleOutcome uint8
+
+const (
+	settledLanded    settleOutcome = iota + 1
+	settledFailed                  // ran and failed; a panic or deadline included
+	settledRefused                 // refused before or instead of writing, with a cause
+	settledAmbiguous               // its write began and may have landed, or a create was abandoned
+	settledNoop                    // nothing to do: a start's already-running
+)
 
 // plannerInflight is the in-flight map the planner owns: *inflightMap
 // (reconcile_inflight.go), or a test's fake.
 type plannerInflight interface {
+	add(inflightEntry) uint64
 	settle(settlement)
+	clearVisible(inflightCensus, time.Time) []clearRecord
 	view() inflightView
 }
 
@@ -73,17 +108,31 @@ type bootState struct {
 	CachePrimed, InventoryComplete, RecordingSeen bool
 }
 
+func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && b.RecordingSeen }
+
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, fairSeed, boot, last, rowTrace and memo; other goroutines
-// reach the planner through markDirty, the settlement queue, the start pause
-// and stop, and read what a pass publishes through out.
+// backoff, bucket, fairSeed, boot, last, rowTrace, idleProbes, memo and
+// stalled; other goroutines reach the planner through markDirty, the
+// settlement queue, the execution-stalled inbox, the start pause and stop,
+// and read what a pass publishes through out.
 type planner struct {
 	clock       plannerClock
+	seam        txSeamFunc           // every pass's (effectPass.seam): stagingSeam's, or a test's
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
 	pass        passFunc
 	stopEffects func(deadline time.Time) // the executor's stop
+	effects     *effectExecutor          // submits what admission lets through; nil while trace-only
+	creates     *createEffects           // runs create effects on effects; nil defers creates (no-effect)
+	rec         events.Recorder          // settlements' events; nil records none
 	stderr      io.Writer
 	metrics     *passMetrics
+	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
+
+	// observations is the cache a fresh read's Noted fact is written to; nil
+	// notes none. capacity is the endpoint breaker a start admits its ticket
+	// on; nil admits without one.
+	observations func() *ObservationCache
+	capacity     func() *endpointCapacityGuard
 
 	inflight plannerInflight
 	backoff  *backoffTable
@@ -92,8 +141,19 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
-	memo     gatherMemo
-	out      passOutputs
+	// idleProbes are the idle begins submitted to prove an agent idle, by
+	// row, which paceIdleProbes holds a patrol apart.
+	idleProbes map[rowKey]idleProbe
+	memo       gatherMemo
+	out        passOutputs
+	obs        passObserver
+
+	// stalled holds the execution-stalled requests by row ID for arm A16
+	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	softReload    atomic.Pointer[softReloadRequest] // the open soft reload (M2)
+	stalled       map[string]executionStalledRequest
+	stalledMu     sync.Mutex
+	stalledPosted []executionStalledRequest
 
 	dirty       chan struct{} // capacity 1: marks fold until the loop reads one
 	settlements settlementQueue
@@ -127,6 +187,43 @@ func (p *planner) markDirty(reason string) {
 	case p.dirty <- struct{}{}:
 	default:
 	}
+}
+
+// postExecutionStalled hands the planner an execution-stalled request
+// (NUDGE-022) from another goroutine, and asks for a pass.
+func (p *planner) postExecutionStalled(r executionStalledRequest) {
+	p.stalledMu.Lock()
+	p.stalledPosted = append(p.stalledPosted, r)
+	p.stalledMu.Unlock()
+	p.markDirty("execution-stalled")
+}
+
+// executionStalled folds the posted requests into the planner's, newest per
+// row, forgets rows a complete c holds closed, and returns the pass's copy.
+func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalledRequest {
+	p.stalledMu.Lock()
+	posted := p.stalledPosted
+	p.stalledPosted = nil
+	p.stalledMu.Unlock()
+	if p.stalled == nil {
+		p.stalled = make(map[string]executionStalledRequest)
+	}
+	for _, r := range posted {
+		p.stalled[r.ID] = r
+	}
+	if len(p.stalled) == 0 {
+		return nil
+	}
+	complete, ok := c.complete()
+	out := make(map[string]executionStalledRequest, len(p.stalled))
+	for id, r := range p.stalled {
+		if ok && complete.ClosedID(id) {
+			delete(p.stalled, id)
+			continue
+		}
+		out[id] = r
+	}
+	return out
 }
 
 // pauseStarts and resumeStarts bracket a provider swap; the pass reads
@@ -183,31 +280,127 @@ func (p *planner) run(ctx context.Context) {
 	}
 }
 
-// runPass applies the settlements posted since the last pass to the in-flight
-// map, then runs the pass. A panic in either is recovered in safeTick's style:
-// the pass is skipped and logged, and a follow-up pass is owed.
+// runPass applies the settlements posted since the last pass
+// (drainSettlements), then runs the pass. A panic in either is recovered in
+// safeTick's style: the pass is skipped and logged, a follow-up pass is
+// owed, and the first of a run of panicking passes alerts. Then the pass is
+// observed (observePass).
 func (p *planner) runPass(now time.Time) (res passResult) {
 	defer func() {
 		r := recover()
 		if r != nil {
 			fmt.Fprintf(p.stderr, "v2 planner: pass panicked: %v (type=%T)\n%s\n", r, r, debug.Stack()) //nolint:errcheck // best-effort stderr
 			p.markDirty("panic")
+			if !p.last.Panicked {
+				p.alert(alertPassPanic, "", fmt.Sprintf("pass panicked: %v", r))
+			}
 		}
 		p.last = passRecord{Start: now, Duration: p.clock.Now().Sub(now), Panicked: r != nil, Result: res}
 		p.metrics.recordPass(now, p.last.Duration, r != nil, res.Counts)
+		p.observePass(now)
 	}()
 	p.drainSettlements(now)
 	return p.pass(now)
 }
 
-// drainSettlements applies the settlements posted so far to the in-flight
-// map, stamping a zero At with now.
+// drainSettlements applies the settlements posted so far, stamping a zero
+// At with now: first every one to the in-flight map, so no later step's
+// panic can leave a settled effect counted in flight; then to the backoff
+// table and the pass record's counters; then their facts (applyFacts). A
+// late settlement applies only its facts.
 func (p *planner) drainSettlements(now time.Time) {
-	for _, s := range p.settlements.drain() {
-		if s.At.IsZero() {
-			s.At = now
+	items := p.settlements.drain()
+	for i := range items {
+		if items[i].At.IsZero() {
+			items[i].At = now
 		}
-		p.inflight.settle(s)
+		if !items[i].Late {
+			p.inflight.settle(items[i])
+		}
+	}
+	for _, s := range items {
+		if !s.Late {
+			p.backoffSettled(s)
+			p.observeSettlement(s)
+			p.softReload.Load().settle(s)
+		}
+	}
+	for _, s := range items {
+		p.applyFacts(s.Facts, s.At)
+	}
+}
+
+// applyFacts applies an effect's facts, on time or late alike: its events to
+// the recorder, each recovered alone; its drain transition and its
+// quarantine to legacy's telemetry; its worktree verdict to the work item's
+// backoff record (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+func (p *planner) applyFacts(f effectFacts, at time.Time) {
+	for _, ev := range f.Events {
+		if p.rec != nil {
+			p.record(ev)
+		}
+	}
+	if t := f.Transition; t != nil {
+		recordDrainTransition(context.Background(), t.Name, t.Reason, t.Transition)
+	}
+	if f.Quarantined != "" {
+		recordAgentQuarantine(context.Background(), f.Quarantined)
+	}
+	switch {
+	case f.Work == nil:
+	case f.Work.Refused:
+		p.backoff.Refuse(workBackoffKey(f.Work.BeadID), at, time.Time{}, createStageWorktree, f.Work.Fingerprint)
+	default:
+		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
+	}
+	if n := f.Noted; n != nil && p.observations != nil {
+		if cache := p.observations(); cache != nil {
+			// Listed, running and the agent alive, at the read's issue time,
+			// so a later inventory pass overrides it either way (v5 O4).
+			for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
+				cache.Note(n.Name, kind, ObsYes, n.At, SourceProbe, "")
+			}
+		}
+	}
+}
+
+// recordDrainTransition and recordAgentQuarantine are legacy's drain and
+// quarantine telemetry; a test reads them.
+var (
+	recordDrainTransition = telemetry.RecordDrainTransition
+	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+)
+
+// record records ev, counting the stop-outstanding alerts (v5 D6) for the
+// pass record; a panicking recorder is logged and skips this event only.
+func (p *planner) record(ev events.Event) {
+	if ev.Type == events.SessionDrainStopEscalated {
+		p.metrics.count(&p.metrics.series, "stop_escalations")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(p.stderr, "v2 planner: recording %s panicked: %v\n", ev.Type, r) //nolint:errcheck // best-effort stderr
+		}
+	}()
+	p.rec.Record(ev)
+}
+
+// backoffSettled applies s to the backoff table (P4): a landing or no-op
+// resets its record; a refusal (a landing with a cause, a heal written in a
+// refusal's stead, included), failure or ambiguous outcome (an abandoned
+// write) backs it off with its cause, except a swap pause and an endpoint-gate
+// refusal, deferrals the gate itself paces.
+func (p *planner) backoffSettled(s settlement) {
+	key := s.BackoffKey
+	if key == "" && s.Key.ID != "" {
+		key = rowBackoffKey(s.Key)
+	}
+	switch {
+	case key == "":
+	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
+		p.backoff.Succeed(key)
+	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
+		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }
 
@@ -260,10 +453,13 @@ func (q *settlementQueue) drain() []settlement {
 	return items
 }
 
-// plannerClock is the planner's clock, faked in tests.
+// plannerClock is the planner's clock, faked in tests. WithDeadline is
+// context.WithDeadline on this clock: the executor hands effects a real
+// deadline, which start-path code keys on.
 type plannerClock interface {
 	Now() time.Time
 	NewTimer(d time.Duration) plannerTimer
+	WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc)
 }
 
 // plannerTimer is a one-shot timer. Reset discards a pending fire, as
@@ -277,6 +473,10 @@ type plannerTimer interface {
 type realPlannerClock struct{}
 
 func (realPlannerClock) Now() time.Time { return time.Now() }
+
+func (realPlannerClock) WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(parent, t)
+}
 
 func (realPlannerClock) NewTimer(d time.Duration) plannerTimer {
 	return realPlannerTimer{time.NewTimer(d)}
