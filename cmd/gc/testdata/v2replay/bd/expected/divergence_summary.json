@@ -5,6 +5,7 @@
   "v2_intents": 1,
   "legacy_no_action_records": {},
   "divergences_by_family": {
-    "unexplained": 2
+    "harness gap": 1,
+    "unexplained": 1
   }
 }

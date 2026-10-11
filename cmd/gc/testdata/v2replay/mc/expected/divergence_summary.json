@@ -9,7 +9,8 @@
   },
   "divergences_by_family": {
     "deferred arm": 3,
-    "unexplained": 3,
+    "harness gap": 1,
+    "unexplained": 2,
     "v5 §12.2": 1
   }
 }

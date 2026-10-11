@@ -1099,6 +1099,14 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "held_until", at(time.Hour), "last_woke_at", at(-time.Hour))}, Work: assigned,
 			Explain: started("gc-1", "s-gc-1", "worker-1", map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}),
 		},
+		// The replay's mc-p2 (C5b-2) with the demand its export lacks: a seat
+		// whose user hold expired, its in-progress work assigned to it,
+		// wakes in both copies (resume tier).
+		{
+			Name: "a seat whose user hold expired resumes for its work", Behaviors: []string{"SESS-009"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "held_until", at(-time.Hour), "sleep_reason", "user-hold")}, Work: assigned,
+			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
+		},
 		// A10's rollback (C5a2's effect): legacy rolls an undesired pending
 		// create back past its deadline; v2's arm waits for the effect.
 		{

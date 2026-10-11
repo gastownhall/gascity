@@ -433,7 +433,8 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 }
 
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
-// by item, a deferred arm, INC-003, unknown-never-destroys, or unexplained.
+// by item, a deferred arm, INC-003, unknown-never-destroys, a harness gap
+// (by what the export cannot carry), or unexplained.
 // arms are the legacy records' owning arms. The two evidence families need
 // as many rows of the template showing the cause as legacy acted beyond v2.
 // C8.9's fresh attach and pending reads run in the effect, which a trace-only
@@ -473,6 +474,11 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 		}
 	}
 	switch {
+	case d.Class == "start" && d.V2 == 0:
+		// A start rests on demand, and the export carries no work beads: the
+		// replay feeds every leg empty demand, so AL1 wants no seat legacy
+		// woke for its work (C5b: mc's resume-tier polecat, bd's worker).
+		return "harness gap", "no exported demand"
 	case d.Class == "drain" && min(undesired, undesiredRecords) >= short:
 		return "INC-003", ""
 	case replayDestructive[d.Class] && unknown >= short:
@@ -562,7 +568,7 @@ func TestReplayFamilies(t *testing.T) {
 	at := time.Date(2026, 10, 5, 0, 2, 0, 0, time.UTC)
 	k := rowKey{Leg: rowLeg, ID: "r1"}
 	info := map[string]session.Info{"r1": {Template: "t", LastWokeAt: at.Add(-time.Minute).Format(time.RFC3339)}}
-	built := map[string]bool{"A20": true, "A21": true}
+	built := map[string]bool{"A18": true, "A20": true, "A21": true}
 	for _, tc := range []struct {
 		name, arm, class, record, reason string
 		v2                               int
@@ -570,7 +576,8 @@ func TestReplayFamilies(t *testing.T) {
 	}{
 		{"v2 only", "A20", "heal", "", "", 1, "unexplained", ""},
 		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, "v5 §12.2", "1"},
-		{"deferred", "A18", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A18"},
+		{"deferred", "A17", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A17"},
+		{"a start with no exported demand", "A18", "start", "x/start_candidate/wake", "", 0, "harness gap", "no exported demand"},
 		{"INC-003", "A20", "drain", "x/drain/orphaned", "", 0, "INC-003", ""},
 		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, "unknown-never-destroys", ""},
 		{"idle drain", "A20", "drain", "x/drain/idle", "", 0, "unexplained", ""},
