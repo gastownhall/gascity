@@ -1576,6 +1576,90 @@ func TestRuntimeHandlePendingStatusKeysOnSentinel(t *testing.T) {
 	}
 }
 
+// respondErrorProvider is a runtime fake whose Respond fails with err.
+type respondErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *respondErrorProvider) Respond(string, runtime.InteractionResponse) error {
+	return p.err
+}
+
+// TestRuntimeHandleReportsInteractionRefusalsInSessionVocabulary pins that a
+// runtime-only handle reports the provider's interaction refusals as
+// session.Manager does, so a caller mapping the session sentinels (the API
+// answers them 409) treats both handle kinds alike while the runtime sentinel
+// stays matchable. Any other error passes through untranslated.
+func TestRuntimeHandleReportsInteractionRefusalsInSessionVocabulary(t *testing.T) {
+	ctx := context.Background()
+	sp := &respondErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, "bogus"),
+	}
+	if err := sp.Start(ctx, "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.NudgeErrors = map[string]error{"legacy-worker": fmt.Errorf("%w: legacy-worker", runtime.ErrNudgeRefusedPendingInteraction)}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: "stub", Transport: "acp"})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+	idleBoundaryHandle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: "claude"})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle(claude): %v", err)
+	}
+	actor := testOperator(t)
+	deliveries := []struct {
+		name string
+		run  func() error
+	}{
+		{"Message", func() error {
+			_, err := handle.Message(ctx, actor, MessageRequest{Text: "hello"})
+			return err
+		}},
+		{"Nudge default", func() error {
+			_, err := handle.Nudge(ctx, actor, NudgeRequest{Text: "hello"})
+			return err
+		}},
+		{"Nudge immediate", func() error {
+			_, err := handle.Nudge(ctx, actor, NudgeRequest{Text: "hello", Delivery: NudgeDeliveryImmediate})
+			return err
+		}},
+		{"Nudge wait-idle", func() error {
+			_, err := handle.Nudge(ctx, actor, NudgeRequest{Text: "hello", Delivery: NudgeDeliveryWaitIdle})
+			return err
+		}},
+		{"Nudge wait-idle at an idle boundary", func() error {
+			_, err := idleBoundaryHandle.Nudge(ctx, actor, NudgeRequest{Text: "hello", Delivery: NudgeDeliveryWaitIdle})
+			return err
+		}},
+	}
+	for _, d := range deliveries {
+		err := d.run()
+		if !errors.Is(err, sessionpkg.ErrPendingInteraction) || !errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			t.Errorf("%s = %v, want session.ErrPendingInteraction wrapping runtime.ErrNudgeRefusedPendingInteraction", d.name, err)
+		}
+	}
+	err = handle.Respond(ctx, InteractionResponse{Action: "bogus"})
+	if !errors.Is(err, sessionpkg.ErrInteractionMismatch) || !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
+		t.Errorf("Respond = %v, want session.ErrInteractionMismatch wrapping runtime.ErrInteractionResponseInvalid", err)
+	}
+
+	other := errors.New("session unavailable")
+	sp.NudgeErrors = map[string]error{"legacy-worker": other}
+	sp.err = other
+	_, err = handle.Nudge(ctx, actor, NudgeRequest{Text: "hello"})
+	if !errors.Is(err, other) || errors.Is(err, sessionpkg.ErrPendingInteraction) {
+		t.Errorf("Nudge with another failure = %v, want it untranslated", err)
+	}
+	err = handle.Respond(ctx, InteractionResponse{Action: "approve"})
+	if !errors.Is(err, other) || errors.Is(err, sessionpkg.ErrInteractionMismatch) {
+		t.Errorf("Respond with another failure = %v, want it untranslated", err)
+	}
+}
+
 func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {

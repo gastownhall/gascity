@@ -630,9 +630,11 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt cancels the session's outstanding permission requests and sends
-// SIGINT to its process. Best-effort: returns nil if the session doesn't
-// exist.
+// Interrupt sends SIGINT to the named session's process. When this provider
+// instance owns the connection, it first cancels the outstanding permission
+// requests. Another process interrupts through the control socket, which only
+// signals; held requests are then canceled when the turn ends or the agent
+// exits. Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
@@ -729,7 +731,7 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
 			return fmt.Errorf("%w: %s", err, name)
 		}
-		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
+		return fmt.Errorf("agent %q busy, %w", name, err)
 	}
 
 	sc.mu.Lock()

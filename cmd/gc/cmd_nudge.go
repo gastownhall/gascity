@@ -1894,7 +1894,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	})
 	if err != nil {
 		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-		if errors.Is(err, runtime.ErrSessionNotFound) {
+		if queuedNudgeDeliveryRefused(err) {
 			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
 				return false, errors.Join(bookkeepErr, recErr)
 			}
@@ -1925,6 +1925,17 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+}
+
+// queuedNudgeDeliveryRefused reports whether a failed delivery must release its
+// claims and retry, rather than count toward failedQueuedNudge's attempt cap. A
+// vanished session and a seat holding a pending interaction are refusals, not
+// delivery failures: nothing was typed, and charging them would dead-letter a
+// good nudge for arriving at the wrong moment.
+func queuedNudgeDeliveryRefused(err error) bool {
+	return errors.Is(err, runtime.ErrSessionNotFound) ||
+		errors.Is(err, session.ErrPendingInteraction) ||
+		errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction)
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {

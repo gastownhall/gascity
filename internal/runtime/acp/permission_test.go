@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -400,6 +402,28 @@ func TestPermissionRespondActions(t *testing.T) {
 	}
 }
 
+// TestPermissionRespondLiteralOptionIDBeatsAlias offers options whose ids are
+// the reserved action words, each on a different kind than its alias selects,
+// so reading the action as the alias picks another option or cancels.
+func TestPermissionRespondLiteralOptionIDBeatsAlias(t *testing.T) {
+	collisions := `[` +
+		`{"optionId":"deny","name":"Allow once","kind":"allow_once"},` +
+		`{"optionId":"deny_always","name":"Always allow","kind":"allow_always"},` +
+		`{"optionId":"approve","name":"Reject","kind":"reject_once"},` +
+		`{"optionId":"approve_always","name":"Always reject","kind":"reject_always"},` +
+		`{"optionId":"cancel","name":"Skip","kind":"reject_once"}]`
+	for _, action := range []string{"approve", "approve_always", "deny", "deny_always", "cancel"} {
+		t.Run(action, func(t *testing.T) {
+			f := startPermissionFake(t, map[string]string{"GC_PERM_OPTIONS": collisions}, "7")
+			pending := f.prompt(t)
+			if err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: pending.RequestID, Action: action}); err != nil {
+				t.Fatalf("Respond(%q): %v", action, err)
+			}
+			assertOutcome(t, f.waitReplies(t, 1)[0], "7", selected(action))
+		})
+	}
+}
+
 func TestPermissionRespondEmptyRequestIDTargetsOldest(t *testing.T) {
 	f := startPermissionFake(t, nil, "7")
 	f.prompt(t)
@@ -571,13 +595,15 @@ func TestNudgeRefusedWhilePermissionPending(t *testing.T) {
 	f.p.cfg.NudgeBusyTimeout = time.Hour
 	f.prompt(t)
 
-	start := time.Now()
-	err := f.p.Nudge(f.name, runtime.TextContent("more"))
-	if !errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
-		t.Fatalf("Nudge while a permission is pending = %v, want ErrNudgeRefusedPendingInteraction", err)
-	}
-	if elapsed := time.Since(start); elapsed > protocolUnitWait {
-		t.Fatalf("Nudge took %s to refuse", elapsed)
+	result := make(chan error, 1)
+	go func() { result <- f.p.Nudge(f.name, runtime.TextContent("more")) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			t.Fatalf("Nudge while a permission is pending = %v, want ErrNudgeRefusedPendingInteraction", err)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("Nudge did not refuse while a permission was pending")
 	}
 	if pending, err := f.p.Pending(f.name); err != nil || pending == nil {
 		t.Fatalf("Pending after refused Nudge = %#v, %v; want the permission still pending", pending, err)
@@ -626,6 +652,91 @@ func TestNudgeWaitingForIdleRefusedWhenPermissionArrives(t *testing.T) {
 	assertOutcome(t, f.waitReplies(t, 1)[0], "11", selected("yes"))
 }
 
+// TestNudgeWaitingForIdleRechecksWhenTurnEnds pins the idle wake-up of a
+// nudge already waiting for a busy turn: it re-checks instead of returning at
+// once, so it refuses when the agent asked for permission after the turn
+// ended but before the waiter ran, and it goes ahead when nothing is held.
+// Each case settles the turn in one critical section, as the read loop does,
+// so the waiter observes everything settle does at once.
+func TestNudgeWaitingForIdleRechecksWhenTurnEnds(t *testing.T) {
+	endTurn := func(sc *sessionConn) {
+		sc.endTurnLocked(turnOutcome{state: turnCompleted, stopReason: "end_turn"}, time.Now())
+		sc.markIdleLocked()
+	}
+	cases := []struct {
+		name   string
+		settle func(sc *sessionConn)
+		want   error
+	}{
+		{
+			name: "permission asked after the turn ended",
+			settle: func(sc *sessionConn) {
+				endTurn(sc)
+				sc.addPermissionLocked(pendingPermission{id: json.RawMessage("9"), seq: 1})
+			},
+			want: runtime.ErrNudgeRefusedPendingInteraction,
+		},
+		{
+			name:   "nothing held",
+			settle: endTurn,
+			want:   nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := newSessionConn(nil, nil, nil, 10, nil)
+			if !sc.setActivePrompt(1) {
+				t.Fatal("setActivePrompt on a live connection = false")
+			}
+			result := make(chan error, 1)
+			go func() { result <- sc.waitNudgeable(time.Hour) }()
+			// The waiter arms permissionHeld just before it parks.
+			waitUntil(t, "the nudge to start waiting", func() bool {
+				sc.mu.Lock()
+				defer sc.mu.Unlock()
+				return sc.permissionHeld != nil
+			})
+			sc.mu.Lock()
+			tc.settle(sc)
+			sc.mu.Unlock()
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("waiting nudge after the turn ended = %v, want %v", err, tc.want)
+				}
+			case <-time.After(protocolUnitWait):
+				t.Fatal("waiting nudge did not return when the turn ended")
+			}
+		})
+	}
+}
+
+// TestNudgeBusyTimeoutWrapsErrNudgeBusy pins the busy refusal: a nudge that
+// waits out the busy timeout fails with an error matching errNudgeBusy, and
+// the message stays "agent <name> busy, timed out waiting for idle".
+func TestNudgeBusyTimeoutWrapsErrNudgeBusy(t *testing.T) {
+	f := startPermissionFake(t, nil) // the prompt asks nothing, so its turn stays busy
+	f.p.cfg.NudgeBusyTimeout = 50 * time.Millisecond
+	if err := f.p.Nudge(f.name, runtime.TextContent("start")); err != nil {
+		t.Fatalf("first Nudge: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- f.p.Nudge(f.name, runtime.TextContent("queued")) }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errNudgeBusy) {
+			t.Fatalf("Nudge behind a busy turn = %v, want errNudgeBusy", err)
+		}
+		if want := fmt.Sprintf("agent %q busy, timed out waiting for idle", f.name); err.Error() != want {
+			t.Fatalf("Nudge error = %q, want %q", err, want)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("Nudge behind a busy turn did not time out")
+	}
+}
+
 func TestInterruptCancelsOutstandingPermissions(t *testing.T) {
 	f := startPermissionFake(t, nil, "7")
 	f.prompt(t)
@@ -639,31 +750,248 @@ func TestInterruptCancelsOutstandingPermissions(t *testing.T) {
 	assertOutcome(t, f.waitReplies(t, 1)[0], "7", outcomeCancelled)
 }
 
-// TestMalformedPermissionRequestAnsweredInvalidParams feeds the read loop a
-// permission request whose params cannot be decoded; gc answers -32602 and
-// holds nothing.
-func TestMalformedPermissionRequestAnsweredInvalidParams(t *testing.T) {
-	stdinR, stdinW := io.Pipe()
-	t.Cleanup(func() { _ = stdinR.Close() })
-	sc := newSessionConn(nil, stdinW, nil, 10, nil)
-	go sc.readLoop(strings.NewReader(`{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"options":"nope"}}` + "\n"))
+// permissionConn drives a sessionConn's read loop over pipes: the test writes
+// agent stdout lines to agent and reads gc's replies from replies. stdin is
+// the agent's stdin as gc writes it, where a test can inject write failures.
+type permissionConn struct {
+	sc      *sessionConn
+	agent   *io.PipeWriter
+	stdin   *faultyStdin
+	replies <-chan string
+}
 
-	line, err := bufio.NewReader(stdinR).ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading reply: %v", err)
+// errStdinBroken is the write error tests inject through faultyStdin.
+var errStdinBroken = errors.New("agent stdin broken")
+
+// faultyStdin is an agent stdin whose writes a test can fail: while fault is
+// set, each write calls it first and, if it returns an error, fails with that
+// error without writing anything.
+type faultyStdin struct {
+	io.WriteCloser
+	mu    sync.Mutex
+	fault func() error
+}
+
+func (s *faultyStdin) setFault(fault func() error) {
+	s.mu.Lock()
+	s.fault = fault
+	s.mu.Unlock()
+}
+
+func (s *faultyStdin) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	fault := s.fault
+	s.mu.Unlock()
+	if fault != nil {
+		if err := fault(); err != nil {
+			return 0, err
+		}
 	}
-	var reply struct {
-		ID    json.RawMessage `json:"id"`
-		Error JSONRPCError    `json:"error"`
+	return s.WriteCloser.Write(p)
+}
+
+// startPermissionConn starts a read loop for a connection whose session is
+// "s1", the id the inline fakes announce.
+func startPermissionConn(t *testing.T) *permissionConn {
+	t.Helper()
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	stdin := &faultyStdin{WriteCloser: stdinW}
+	sc := newSessionConn(nil, stdin, nil, 10, nil)
+	sc.sessionID = "s1"
+	replies := make(chan string, 4)
+	go func() {
+		defer close(replies)
+		scanner := bufio.NewScanner(stdinR)
+		for scanner.Scan() {
+			replies <- scanner.Text()
+		}
+	}()
+	go sc.readLoop(stdoutR)
+	t.Cleanup(func() {
+		_ = stdoutW.Close()
+		_ = stdinR.Close()
+	})
+	return &permissionConn{sc: sc, agent: stdoutW, stdin: stdin, replies: replies}
+}
+
+// own registers the connection with a new provider, as Start does, so a test
+// can drive it through Pending and Respond.
+func (c *permissionConn) own(t *testing.T) (*Provider, string) {
+	t.Helper()
+	p := newTestProvider(t)
+	name := testName()
+	p.mu.Lock()
+	p.conns[name] = c.sc
+	p.mu.Unlock()
+	return p, name
+}
+
+// heldCount reports how many permission requests the connection holds.
+func (c *permissionConn) heldCount() int {
+	c.sc.mu.Lock()
+	defer c.sc.mu.Unlock()
+	return len(c.sc.permissions)
+}
+
+// permissionRequestLine is an agent stdout line asking permission for session
+// s1 under JSON-RPC id id, offering an allow_once "yes" and a reject_once "no".
+func permissionRequestLine(id int) string {
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c%d"},"options":[{"optionId":"yes","name":"Allow","kind":"allow_once"},{"optionId":"no","name":"Reject","kind":"reject_once"}]}}`, id, id)
+}
+
+// send writes one line of agent stdout.
+func (c *permissionConn) send(t *testing.T, line string) {
+	t.Helper()
+	if _, err := io.WriteString(c.agent, line+"\n"); err != nil {
+		t.Fatalf("writing agent line: %v", err)
 	}
-	if err := json.Unmarshal([]byte(line), &reply); err != nil {
-		t.Fatalf("decoding %q: %v", line, err)
+}
+
+// reply waits for the next line gc writes to the agent's stdin.
+func (c *permissionConn) reply(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	timer := time.NewTimer(protocolUnitWait)
+	defer timer.Stop()
+	select {
+	case line, ok := <-c.replies:
+		if !ok {
+			t.Fatal("agent stdin closed before a reply")
+		}
+		var rec map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decoding reply %q: %v", line, err)
+		}
+		return rec
+	case <-timer.C:
+		t.Fatal("no reply written to the agent's stdin")
 	}
-	if string(reply.ID) != "5" || reply.Error.Code != -32602 {
-		t.Fatalf("reply = %s, want id 5 with error -32602", line)
+	return nil
+}
+
+// TestInvalidPermissionRequestAnsweredInvalidParams feeds the read loop
+// permission requests gc cannot hold: undecodable params, no option to
+// choose, or no or another session than the connection's. Each is answered
+// -32602 and nothing is held.
+func TestInvalidPermissionRequestAnsweredInvalidParams(t *testing.T) {
+	const options = `"options":[{"optionId":"yes","name":"Allow","kind":"allow_once"}]`
+	cases := []struct{ name, params string }{
+		{"undecodable params", `{"options":"nope"}`},
+		{"no options", `{"sessionId":"s1","toolCall":{"toolCallId":"c1"},"options":[]}`},
+		{"no session", `{"toolCall":{"toolCallId":"c1"},` + options + `}`},
+		{"other session", `{"sessionId":"s2","toolCall":{"toolCallId":"c1"},` + options + `}`},
 	}
-	<-sc.readDone
-	if got := sc.oldestPermission(); got != nil {
-		t.Fatalf("malformed request held as pending: %#v", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := startPermissionConn(t)
+			c.send(t, `{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":`+tc.params+`}`)
+			reply := c.reply(t)
+			var rpcErr JSONRPCError
+			if err := json.Unmarshal(reply["error"], &rpcErr); err != nil {
+				t.Fatalf("reply %v has no JSON-RPC error: %v", reply, err)
+			}
+			if string(reply["id"]) != "5" || rpcErr.Code != jsonRPCInvalidParams {
+				t.Fatalf("reply = %v, want id 5 with error -32602", reply)
+			}
+			if got := c.sc.oldestPermission(); got != nil {
+				t.Fatalf("invalid request held as pending: %#v", got)
+			}
+		})
+	}
+}
+
+// TestValidPermissionRequestHeldWithoutReply is the control for the invalid
+// cases: a well-formed request for the connection's session is held, and the
+// only reply is the cancel sent when the agent's stdout closes.
+func TestValidPermissionRequestHeldWithoutReply(t *testing.T) {
+	c := startPermissionConn(t)
+	c.send(t, `{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1"},"options":[{"optionId":"yes","name":"Allow","kind":"allow_once"}]}}`)
+	waitUntil(t, "the request to be held", func() bool { return c.sc.oldestPermission() != nil })
+	_ = c.agent.Close()
+	assertOutcome(t, c.reply(t), "5", outcomeCancelled)
+}
+
+// TestPermissionRespondWriteFailureKeepsPending pins that an answer gc cannot
+// write is not lost: Respond returns the write error naming the request, the
+// request stays pending ahead of the later one, and a retried answer reaches
+// the agent. The later request is still held and canceled when the agent's
+// output ends.
+func TestPermissionRespondWriteFailureKeepsPending(t *testing.T) {
+	c := startPermissionConn(t)
+	p, name := c.own(t)
+	c.send(t, permissionRequestLine(5))
+	c.send(t, permissionRequestLine(6))
+	waitUntil(t, "both requests to be held", func() bool { return c.heldCount() == 2 })
+	first, err := p.Pending(name)
+	if err != nil || first == nil {
+		t.Fatalf("Pending = %#v, %v; want request 5", first, err)
+	}
+	assertRequestID(t, first.RequestID, "5")
+
+	c.stdin.setFault(func() error { return errStdinBroken })
+	err = p.Respond(name, runtime.InteractionResponse{Action: "approve"})
+	if !errors.Is(err, errStdinBroken) || !strings.Contains(err.Error(), first.RequestID) {
+		t.Fatalf("Respond with a broken stdin = %v, want the write error naming %s", err, first.RequestID)
+	}
+	still, err := p.Pending(name)
+	if err != nil || still == nil || still.RequestID != first.RequestID {
+		t.Fatalf("Pending after the failed write = %#v, %v; want %s still oldest", still, err, first.RequestID)
+	}
+
+	c.stdin.setFault(nil)
+	if err := p.Respond(name, runtime.InteractionResponse{Action: "deny"}); err != nil {
+		t.Fatalf("Respond after the write recovered: %v", err)
+	}
+	assertOutcome(t, c.reply(t), "5", selected("no"))
+	_ = c.agent.Close()
+	assertOutcome(t, c.reply(t), "6", outcomeCancelled)
+}
+
+// TestPermissionRespondWriteFailureAfterDrainDropsRequest pins the other side
+// of keeping a request whose answer failed: when the agent's output ends while
+// the answer is being written, drainPending has nothing left to cancel, and
+// the failed answer must not put the request back on a connection where
+// nothing would answer or clear it.
+func TestPermissionRespondWriteFailureAfterDrainDropsRequest(t *testing.T) {
+	c := startPermissionConn(t)
+	p, name := c.own(t)
+	c.send(t, permissionRequestLine(5))
+	waitUntil(t, "the request to be held", func() bool { return c.heldCount() == 1 })
+
+	writing := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c.stdin.setFault(func() error {
+		select {
+		case writing <- struct{}{}:
+		default:
+		}
+		<-release
+		return errStdinBroken
+	})
+	result := make(chan error, 1)
+	go func() { result <- p.Respond(name, runtime.InteractionResponse{Action: "approve"}) }()
+	select {
+	case <-writing:
+	case <-time.After(protocolUnitWait):
+		t.Fatal("Respond never wrote the answer")
+	}
+	_ = c.agent.Close()
+	select {
+	case <-c.sc.readDone:
+	case <-time.After(protocolUnitWait):
+		t.Fatal("read loop did not drain after the agent's output ended")
+	}
+	close(release)
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errStdinBroken) {
+			t.Fatalf("Respond = %v, want the write error", err)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("Respond did not return after its write failed")
+	}
+	if got := c.sc.oldestPermission(); got != nil {
+		t.Fatalf("failed answer restored the request on a drained connection: %#v", got)
 	}
 }

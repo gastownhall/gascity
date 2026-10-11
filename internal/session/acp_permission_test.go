@@ -323,13 +323,22 @@ func TestACPLiveOnlyNudgeRefusedWhilePermissionPending(t *testing.T) {
 	s.ask(t)
 	pending := s.waitPending(t)
 
-	start := time.Now()
-	delivered, err := s.mgr.SendLiveOnly(context.Background(), s.id, "queued nudge")
-	if !errors.Is(err, ErrPendingInteraction) || delivered {
-		t.Fatalf("SendLiveOnly = %v, %v; want not delivered with ErrPendingInteraction", delivered, err)
+	type sendResult struct {
+		delivered bool
+		err       error
 	}
-	if elapsed := time.Since(start); elapsed > acpStallBound {
-		t.Fatalf("SendLiveOnly took %s to refuse", elapsed)
+	result := make(chan sendResult, 1)
+	go func() {
+		delivered, err := s.mgr.SendLiveOnly(context.Background(), s.id, "queued nudge")
+		result <- sendResult{delivered, err}
+	}()
+	select {
+	case r := <-result:
+		if !errors.Is(r.err, ErrPendingInteraction) || r.delivered {
+			t.Fatalf("SendLiveOnly = %v, %v; want not delivered with ErrPendingInteraction", r.delivered, r.err)
+		}
+	case <-time.After(acpStallBound):
+		t.Fatal("SendLiveOnly did not refuse while a permission was pending")
 	}
 	s.respondQuickly(t, pending)
 }

@@ -263,7 +263,7 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 		return MessageResult{}, err
 	}
 	if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-		return MessageResult{}, err
+		return MessageResult{}, runtimeInteractionError(err)
 	}
 	result = MessageResult{Queued: false}
 	return result, nil
@@ -304,13 +304,13 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if err := h.nudgeNow(req.Text); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
@@ -365,9 +365,12 @@ func (h *RuntimeHandle) Pending(ctx context.Context) (*PendingInteraction, error
 // PendingStatus returns the pending interaction plus whether the provider
 // supports it. Support is keyed on the provider's answer, not on the interface:
 // a provider that implements InteractionProvider but answers
-// runtime.ErrInteractionUnsupported (acp) is unsupported. A vanished session
-// has no prompt. Any other probe error is returned, so callers can tell "could
-// not tell" from "nothing pending". The mapping mirrors session.Manager.PendingByName.
+// runtime.ErrInteractionUnsupported (a router whose backend has no
+// interactions) is unsupported. A vanished session reports no prompt, and so
+// does a session this provider instance does not own (ACP answers that with
+// runtime.ErrSessionNotFound). Any other probe error is returned, so callers
+// can tell "could not tell" from "nothing pending". The mapping mirrors
+// session.Manager.PendingByName.
 func (h *RuntimeHandle) PendingStatus(context.Context) (*PendingInteraction, bool, error) {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
@@ -435,12 +438,27 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 	if !ok {
 		return runtime.ErrInteractionUnsupported
 	}
-	return ip.Respond(h.sessionName, runtime.InteractionResponse{
+	return runtimeInteractionError(ip.Respond(h.sessionName, runtime.InteractionResponse{
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
 		Metadata:  cloneStringMap(req.Metadata),
-	})
+	}))
+}
+
+// runtimeInteractionError reports the runtime's interaction refusals in the
+// session vocabulary, as session.Manager does, so a caller maps them the same
+// way for a runtime-only handle: a nudge refused while an interaction is
+// pending is session.ErrPendingInteraction, and a response the provider
+// rejects is session.ErrInteractionMismatch. The runtime error stays wrapped.
+func runtimeInteractionError(err error) error {
+	switch {
+	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
+		return fmt.Errorf("%w: %w", sessionpkg.ErrPendingInteraction, err)
+	case errors.Is(err, runtime.ErrInteractionResponseInvalid):
+		return fmt.Errorf("%w: %w", sessionpkg.ErrInteractionMismatch, err)
+	}
+	return err
 }
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
@@ -459,7 +477,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	}
 	if h.transport == "acp" {
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
-			return NudgeResult{}, err
+			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		return NudgeResult{Delivered: true}, nil
 	}
@@ -495,7 +513,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
-		return NudgeResult{}, err
+		return NudgeResult{}, runtimeInteractionError(err)
 	}
 	return NudgeResult{Delivered: true}, nil
 }

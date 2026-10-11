@@ -52,6 +52,8 @@ type sessionConn struct {
 	// permissionNonce makes permission RequestIDs unique to this
 	// connection; set when the first request is held.
 	permissionNonce string
+	// permissionSeq numbers held requests in arrival order.
+	permissionSeq uint64
 	// permissionHeld, when non-nil, is closed the next time a permission
 	// request is held, waking waitNudgeable.
 	permissionHeld chan struct{}
@@ -160,13 +162,6 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 
 	// Response (has ID, no method): route to waiter.
 	if msg.ID != nil && msg.Method == "" {
-		// The turn is over once its prompt is answered, so no permission the
-		// agent asked for during it can still be granted. Cancel them before
-		// the turn reads as idle. Only this loop adds permissions, so none
-		// can arrive in between.
-		if sc.isActivePrompt(*msg.ID) {
-			sc.cancelOutstandingPermissions()
-		}
 		sc.mu.Lock()
 		ch, ok := sc.pending[*msg.ID]
 		if ok {
@@ -174,7 +169,12 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		}
 		// Settle the turn if this is the active prompt response.
 		var usageErr error
+		var canceled []pendingPermission
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
+			// The turn is over once its prompt is answered, so no
+			// permission the agent asked for during it can still be
+			// granted. Cancel them as the turn reads as idle.
+			canceled = sc.takePermissionsLocked()
 			outcome := promptOutcome(msg)
 			if outcome.usageErr != nil && !sc.usageWarned {
 				sc.usageWarned = true
@@ -184,6 +184,7 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 			sc.markIdleLocked()
 		}
 		sc.mu.Unlock()
+		sc.replyCanceled(canceled)
 		if usageErr != nil {
 			fmt.Fprintf(os.Stderr, "acp: dropping undecodable prompt usage (logged once per session): %v\n", usageErr)
 		}
@@ -346,9 +347,11 @@ func (sc *sessionConn) setActivePrompt(id int64) bool {
 // call multiple times — the first call settles the turn and closed channels
 // are deleted from the map.
 func (sc *sessionConn) drainPending(cause error) {
-	sc.cancelOutstandingPermissions()
 	sc.mu.Lock()
 	sc.drained = true
+	// Taken under the lock that sets drained, so a request restorePermission
+	// puts back is either canceled here or dropped there.
+	canceled := sc.takePermissionsLocked()
 	sc.endTurnLocked(turnOutcome{state: turnFailed, err: drainFailure(cause)}, time.Now())
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
@@ -356,6 +359,7 @@ func (sc *sessionConn) drainPending(cause error) {
 		delete(sc.pending, id)
 	}
 	sc.mu.Unlock()
+	sc.replyCanceled(canceled)
 }
 
 // abandonPrompt fails the turn for prompt id, which was never delivered to
@@ -367,13 +371,6 @@ func (sc *sessionConn) abandonPrompt(id int64, cause error) {
 		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
-}
-
-// isActivePrompt reports whether id is the in-flight session/prompt.
-func (sc *sessionConn) isActivePrompt(id int64) bool {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	return sc.activePromptID != 0 && id == sc.activePromptID
 }
 
 // isBusy reports whether a prompt response is pending.

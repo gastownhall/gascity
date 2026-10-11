@@ -73,6 +73,17 @@ func (p *providerMissNudgeProvider) NudgeNow(name string, content []runtime.Cont
 	return fmt.Errorf("%w: provider does not own %q", runtime.ErrSessionNotFound, name)
 }
 
+// pendingInteractionNudgeProvider refuses every nudge the way the ACP
+// provider does while a permission request is held.
+type pendingInteractionNudgeProvider struct {
+	*runtime.Fake
+}
+
+func (p *pendingInteractionNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	_ = p.Fake.Nudge(name, content)
+	return fmt.Errorf("%w: %s", runtime.ErrNudgeRefusedPendingInteraction, name)
+}
+
 type missingNudgeBeadStore struct {
 	*beads.MemStore
 	missingID string
@@ -3204,6 +3215,88 @@ func TestTryDeliverQueuedNudgesByPollerKeepsACPProviderMissRecoverable(t *testin
 	}
 	if pending[0].Attempts != 0 {
 		t.Fatalf("attempts = %d, want 0 for transient ACP provider miss", pending[0].Attempts)
+	}
+}
+
+func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "check hook output", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	fake := &pendingInteractionNudgeProvider{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		transport:   "acp",
+		agent:       config.Agent{Name: "worker", Session: "acp"},
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: "sess-worker",
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	// One pass past the attempt cap: a refusal charged as a failed attempt
+	// would back the item off after the first pass and dead-letter it here.
+	passes := defaultQueuedNudgeMaxAttempts + 1
+	for i := 0; i < passes; i++ {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
+		if err != nil {
+			t.Fatalf("tryDeliverQueuedNudgesByPoller pass %d: %v", i+1, err)
+		}
+		if delivered {
+			t.Fatalf("delivered = true on pass %d, want the refused nudge left queued", i+1)
+		}
+	}
+
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTarget: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(pending), len(inFlight), len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0: a pending-interaction refusal is not a delivery failure", pending[0].Attempts)
+	}
+
+	var nudgeCalls int
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls++
+		}
+	}
+	if nudgeCalls != passes {
+		t.Fatalf("nudge calls = %d, want %d: each pass should retry the refused nudge", nudgeCalls, passes)
+	}
+}
+
+func TestQueuedNudgeDeliveryRefused(t *testing.T) {
+	runtimeRefusal := fmt.Errorf("%w: sess-worker", runtime.ErrNudgeRefusedPendingInteraction)
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"provider does not own the session", fmt.Errorf("%w: provider does not own %q", runtime.ErrSessionNotFound, "sess-worker"), true},
+		{"runtime pending-interaction refusal", runtimeRefusal, true},
+		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true},
+		{"session pending-interaction refusal", session.ErrPendingInteraction, true},
+		{"busy timeout", errors.New(`agent "sess-worker" busy, timed out waiting for idle`), false},
+		{"submit delivered but unobserved", fmt.Errorf("nudging: %w", tmux.ErrNudgeSubmitDeliveredUnobserved), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := queuedNudgeDeliveryRefused(tc.err); got != tc.want {
+				t.Fatalf("queuedNudgeDeliveryRefused(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
