@@ -529,7 +529,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	assigned, refs, stores := result.AssignedWorkBeads, result.AssignedWorkStoreRefs, result.AssignedWorkStores
 	preWake, preWakeRefs := filterAssignedWorkBeadsForSessionWake(cfg, w.cityPath, w.store, open, assigned, refs)
 	result.AssignedWorkBeads = assigned
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(w.store, beads.SessionStore{Store: w.store}, cfg, w.cityPath, open, result, w.rigs, protectedWakeWorkKeys(preWake, preWakeRefs), nil); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(w.store, beads.SessionStore{Store: w.store}, cfg, w.cityPath, open, result, w.rigs, protectedWakeWorkKeys(preWake, preWakeRefs), nil, nil); len(released) > 0 {
 		emitDeadAssigneeReopenedEvents(w.rec, assigned, released, now)
 		assigned, refs, stores = filterReleasedAssignedWorkSnapshot(assigned, refs, stores, released)
 	}

@@ -59,7 +59,7 @@ func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.In
 				continue
 			case seat == "" || assignee == "" || assignee != strings.TrimSpace(b.Metadata[beadmeta.StrandedAssigneeMetadataKey]) || live[seat]:
 				// Taken by hand, or the seat is open again: the stamp is stale.
-				clearStrandedStamp(store, b.ID)
+				clearStrandedStamp(store, b.ID, seat, live[seat])
 				continue
 			case heldElsewhere(assignee, seat):
 				continue
@@ -91,10 +91,17 @@ func stampStranded(store beads.Store, id, seat, assignee string) error {
 }
 
 // clearStrandedStamp clears claim id's stale stamp, best-effort: one the
-// detector finds again next scan, and clears then.
-func clearStrandedStamp(store beads.Store, id string) {
+// detector finds again next scan, and clears then. It judges staleness again
+// on the live row, since the scan read a list a cache may lag: the stamp must
+// still name seat, and the claim have left the assignee it stamped, or seat
+// be open again (reopened). A fresh stamp a later close wrote survives.
+func clearStrandedStamp(store beads.Store, id, seat string, reopened bool) {
 	_ = fencedClaimMeta(store, id, func(b beads.Bead) map[string]string {
-		if strings.TrimSpace(b.Metadata[beadmeta.StrandedMetadataKey]) == "" {
+		stamped := strings.TrimSpace(b.Metadata[beadmeta.StrandedAssigneeMetadataKey])
+		switch {
+		case strings.TrimSpace(b.Metadata[beadmeta.StrandedMetadataKey]) == "",
+			strings.TrimSpace(b.Metadata[beadmeta.StrandedSessionMetadataKey]) != seat,
+			!reopened && seat != "" && stamped != "" && strings.TrimSpace(b.Assignee) == stamped:
 			return nil
 		}
 		return map[string]string{beadmeta.StrandedMetadataKey: "", beadmeta.StrandedSessionMetadataKey: "", beadmeta.StrandedAssigneeMetadataKey: ""}

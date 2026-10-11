@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -208,7 +209,7 @@ func TestReleasePathsKeepEveryStrand(t *testing.T) {
 		if err := c.store.Close(c.seat.ID); err != nil {
 			t.Fatal(err)
 		}
-		releaseOrphanedPoolAssignments(c.store, beads.SessionStore{Store: c.store}, c.cfg, c.path, nil, assigned, nil, nil, nil, nil, nil)
+		releaseOrphanedPoolAssignments(c.store, beads.SessionStore{Store: c.store}, c.cfg, c.path, nil, assigned, nil, nil, nil, nil, nil, nil)
 		c.assertStrandTable(t, "open")
 	})
 	t.Run("retired session", func(t *testing.T) {
@@ -835,5 +836,100 @@ func TestDeadAssigneeKeepLogDedupes(t *testing.T) {
 		if !none.log("w-1", "gc-dead", "moved") {
 			t.Fatal("a nil log deduped")
 		}
+	}
+}
+
+// Kills the read-error check dropped from onlyStrandedWork, which the hit
+// check masks when the failing leg reads no hits (X13): one readable leg
+// holds only an unserved claim, a second is dark, and unknown never closes.
+func TestOnlyStrandedWorkRefusesADarkLeg(t *testing.T) {
+	cfg := servingRigsCity(declaredRigsConfig("frontend"), "repo/worker")
+	info := session.Info{ID: "gc-1", SessionNameMetadata: "s-1", Template: "repo/worker"}
+	city := beads.NewMemStore()
+	createWork(t, city, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+	rigs := map[string]beads.Store{"frontend": failingListStore{Store: beads.NewMemStore()}}
+	if onlyStrandedWork(testSeatWork("", cfg, city, rigs), info) {
+		t.Fatal("a dark leg read stranded-only")
+	}
+}
+
+// Kills the live confirm dropped from onlyStrandedWork (X11): the tick's
+// read saw only an unserved claim, and a served claim assigned after it
+// refuses the close.
+func TestOnlyStrandedWorkConfirmsLive(t *testing.T) {
+	cfg := servingCity("repo/worker")
+	info := session.Info{ID: "gc-1", SessionNameMetadata: "s-1", Template: "repo/worker"}
+	store := beads.NewMemStore()
+	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+	sw := testSeatWork("", cfg, store, nil)
+	if _, err := sw.snapshot(seatWorkQuery{scope: releaseScope(info, cfg), statuses: seatWorkStatuses}, false); err != nil {
+		t.Fatal(err)
+	}
+	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
+	if onlyStrandedWork(sw, info) {
+		t.Fatal("a served claim assigned after the tick's read did not hold the close")
+	}
+}
+
+// Kills a stamp written at the wrong revision or blind (X07, X08): on stores
+// whose conditional writes are required or auto, an orphan close over an
+// unserved claim stamps it, and the detector clears the stamp once the
+// claim is taken by hand.
+func TestStrandedStampUnderConditionalWrites(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	for _, mode := range []gate.Mode{gate.Require, gate.Auto} {
+		t.Run(string(mode), func(t *testing.T) {
+			store := beads.NewMemStore()
+			if err := beads.StampOpenedStore(store, "MemStore", mode, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{Workspace: config.Workspace{Name: "probe-town"}, Agents: []config.Agent{persistentWorker()}}
+			seat, err := store.Create(beads.Bead{Title: "seat", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "s-1", "template": "repo/worker", "state": "asleep"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim := createWork(t, store, "in_progress", seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+			sw := testSeatWork(t.TempDir(), cfg, store, nil)
+			sw.alerts = &strandedClaimAlerts{rec: events.NewFake()}
+			if !closeBead(store, sw, seedSessionInfo(seat), "orphaned", now, io.Discard) {
+				t.Fatal("the orphan close did not land")
+			}
+			if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedSessionMetadataKey] != seat.ID || got.Metadata[beadmeta.StrandedAssigneeMetadataKey] != seat.ID {
+				t.Fatalf("claim stamp %v, want stamped for %s", got.Metadata, seat.ID)
+			}
+			// The stamp is a fenced write: a store refusing blind writes takes it.
+			other := createWork(t, store, "in_progress", seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+			if err := stampStranded(blindWriteRefusingStore{inner: store}, other.ID, seat.ID, seat.ID); err != nil {
+				t.Fatalf("stamp through a blind-write-refusing store: %v", err)
+			}
+			julian := "julian"
+			if err := store.Update(claim.ID, beads.UpdateOpts{Assignee: &julian}); err != nil {
+				t.Fatal(err)
+			}
+			detectStrandedClaims(testWorkLegs("", cfg, store, nil), store, nil, &strandedClaimAlerts{rec: events.NewFake(), scanned: now.Add(-strandedRealertEvery)}, now)
+			if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
+				t.Fatalf("stamp %q after the claim was taken by hand, want cleared", got.Metadata[beadmeta.StrandedMetadataKey])
+			}
+		})
+	}
+}
+
+// Kills a stale-stamp clear judged on a lagging read alone: the live row
+// carries a fresh stamp for the claim's current assignee (a later close),
+// which a clear for another seat, or for a seat not reopened whose assignee
+// still holds the claim, leaves alone.
+func TestClearStrandedStampRechecksTheLiveRow(t *testing.T) {
+	store := beads.NewMemStore()
+	claim := createWork(t, store, "in_progress", "gc-2", map[string]string{
+		beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: "gc-2", beadmeta.StrandedAssigneeMetadataKey: "gc-2",
+	})
+	clearStrandedStamp(store, claim.ID, "gc-1", false)
+	clearStrandedStamp(store, claim.ID, "gc-2", false)
+	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "true" {
+		t.Fatalf("stamp %v, want the fresh stamp kept", got.Metadata)
+	}
+	clearStrandedStamp(store, claim.ID, "gc-2", true)
+	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
+		t.Fatalf("stamp %v, want cleared once its seat reopened", got.Metadata)
 	}
 }
