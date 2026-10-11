@@ -19,6 +19,7 @@ go_library(
 
 go_test(
     name = "exec_test",
+    shard_count = 3,
     srcs = [
         "capacity_test.go",
         "cutover_test.go",

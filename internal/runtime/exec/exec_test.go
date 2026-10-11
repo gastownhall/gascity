@@ -1019,7 +1019,7 @@ case "$op" in
   watch-startup)
     printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
     i=0
-    while [ "$i" -lt 2000 ]; do
+    while [ "$i" -lt 100 ]; do
       printf '%s\n' '{"content":"user@host $"}'
       i=$((i+1))
     done
@@ -1638,22 +1638,22 @@ func TestProvider_StartUsesLongerTimeout(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	// Script that sleeps 2s for start (simulating readiness polling),
+	// Script that sleeps 150ms for start (simulating readiness polling),
 	// and sleeps 60s for everything else.
 	script := writeScript(t, dir, `
 case "$1" in
   start)
     cat > /dev/null
-    sleep 2
+    sleep 0.15
     ;;
-  *) sleep 60 ;;
+  *) exec sleep 60 ;;
 esac
 `)
 	p := NewProvider(script)
-	// Default timeout too short for the 2s sleep.
-	p.timeout = 500 * time.Millisecond
+	// Default timeout too short for the 150ms sleep.
+	p.timeout = 50 * time.Millisecond
 	// But startTimeout is long enough.
-	p.startTimeout = 5 * time.Second
+	p.startTimeout = 2 * time.Second
 
 	err := p.Start(context.Background(), "test-sess", runtime.Config{Command: "echo hi"})
 	if err != nil {
@@ -1668,8 +1668,8 @@ esac
 	if err == nil {
 		t.Fatal("Stop should timeout with short timeout")
 	}
-	if elapsed > 5*time.Second {
-		t.Errorf("Stop timeout took %v, expected ~500ms", elapsed)
+	if elapsed > 1*time.Second {
+		t.Errorf("Stop timeout took %v, expected ~50ms", elapsed)
 	}
 }
 
