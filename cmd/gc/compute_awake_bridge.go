@@ -295,16 +295,20 @@ func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *conf
 	if template == "" {
 		template = info.Template
 	}
-	if template != "" && poolDesired[template] > 0 {
-		// Pool demand keeps a non-interactive session awake over its idle
-		// latch (wakeDemandOverridesSleepSuppression), and a session whose
-		// effective sleep policy is off has no idle window, so the attachment
-		// of either cannot change the decision. The effective policy is the
-		// one the suppression reads: it is also off for an interactive
-		// template on a runtime without full sleep capability
-		// (interactive_capability_insufficient). An interactive session that
-		// can idle-sleep honors its idle window against pool demand, and only
-		// an attachment holds it then: probe it.
+	// A row carrying the reconciler's idle-stop-pending marker is probed
+	// whatever its class: the marker outranks pool demand, and only an
+	// attachment cancels the idle drain it records
+	// (wakeDemandOverridesSleepSuppression).
+	if template != "" && poolDesired[template] > 0 && !session.DispositionOfInfo(info).IdleStop {
+		// Otherwise pool demand keeps a non-interactive session awake over
+		// its idle latch, and a session whose effective sleep policy is off
+		// has no idle window, so the attachment of either does not change
+		// the decision. The effective policy is the one the suppression
+		// reads: it is also off for an interactive template on a runtime
+		// without full sleep capability (interactive_capability_insufficient).
+		// An interactive session that can idle-sleep honors its idle window
+		// against pool demand, and only an attachment holds it then: probe
+		// it.
 		policy := resolveSessionSleepPolicyInfo(info, cfg, sp)
 		if policy.Class == config.SessionSleepNonInteractive || !policy.enabled() {
 			return false

@@ -875,6 +875,53 @@ func TestAllocator_ConfigSleepSuppressionYieldsToAttached(t *testing.T) {
 	}
 }
 
+// Kills: the attached rule reading the awake set's reason label, and an
+// uncertain attach outranking the policy. A durable wait registered without a
+// wait hold that turns ready relabels the attached wake "wait-ready"; past its
+// idle window the attached live row still wakes, and its detached control,
+// whose wait is ready too, config-sleeps. One whose attach the pass cannot
+// read keeps, as it does without the wait: the relabel must not turn the
+// unread attach into a wake. Inside its idle window that row's ready wait
+// wakes it, so classify's uncertain-attach keep must not widen past the
+// "attached" label to every decision the attach touched.
+func TestAllocator_ConfigSleepSuppressionYieldsToAttachedWithReadyWait(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "chat"}}}
+	manual := func(id string) beads.Bead {
+		return sessionRow(id, "template", "chat", "state", "active", "session_name", "s-"+id, "manual_session", "true")
+	}
+	f := newAllocFixture(t, cfg).sessions(manual("gc-attached"), manual("gc-detached"), manual("gc-unsure"), manual("gc-unsure-busy")).
+		alive("s-gc-attached", InventoryAttrs{AttachedKnown: true, Attached: true}).
+		alive("s-gc-detached", InventoryAttrs{AttachedKnown: true}).
+		alive("s-gc-unsure", InventoryAttrs{AttachedKnown: true}).
+		fact("s-gc-unsure", FactAttached, ObsUnknown).
+		alive("s-gc-unsure-busy", InventoryAttrs{AttachedKnown: true}).
+		fact("s-gc-unsure-busy", FactAttached, ObsUnknown)
+	stale := allocNow.Add(-5 * time.Minute)
+	f.activity = map[string]time.Time{
+		"s-gc-attached": stale, "s-gc-detached": stale, "s-gc-unsure": stale,
+		"s-gc-unsure-busy": allocNow.Add(-30 * time.Second),
+	}
+	policy := resolvedSessionSleepPolicy{Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}
+	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{
+		"gc-attached": policy, "gc-detached": policy,
+		"gc-unsure": policy, "gc-unsure-busy": policy,
+	}
+	f.in.ReadyWaits = map[string]bool{"gc-attached": true, "gc-detached": true, "gc-unsure": true, "gc-unsure-busy": true}
+	d := f.decideSelecting("gc-attached", "gc-detached", "gc-unsure", "gc-unsure-busy")
+	if e := entryOf(t, d, "gc-attached"); e.Desired != desireWake {
+		t.Errorf("attached live row with a ready wait past its idle window = %s/%s, want a wake", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-detached"); e.Desired != desireSleep || e.Reason != reasonConfigSleep {
+		t.Errorf("detached live row with a ready wait past its idle window = %s/%s, want %s/%s", e.Desired, e.Reason, desireSleep, reasonConfigSleep)
+	}
+	if e := entryOf(t, d, "gc-unsure"); e.Desired != desireKeep || e.Reason != reasonObservationUncertain {
+		t.Errorf("live row with an uncertain attach and a ready wait past its idle window = %s/%s, want %s/%s", e.Desired, e.Reason, desireKeep, reasonObservationUncertain)
+	}
+	if e := entryOf(t, d, "gc-unsure-busy"); e.Desired != desireWake || e.Reason != "wait-ready" {
+		t.Errorf("live row with an uncertain attach and a ready wait inside its idle window = %s/%s, want %s/wait-ready", e.Desired, e.Reason, desireWake)
+	}
+}
+
 // Kills: stage 6b dropping legacy's explicit-wake override
 // (wakeDemandOverridesSleepSuppression). A durable explicit wake request that
 // is still pending outranks the idle latch, whatever reason the awake set

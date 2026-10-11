@@ -557,6 +557,15 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 	if suppressed, _ := configWakeSuppressedAt(ref, policy, nil, p.in.Now); !suppressed {
 		return false
 	}
+	// An uncertain attach reads attached for the awake set (C2.9), and
+	// classify keeps the wake that rests on it. It must not outrank the policy
+	// as well: a ready wait relabels that wake to "wait-ready", which classify
+	// does not hold, so the row would wake on an attach no one read. Left
+	// suppressed, it sleeps, and keepReason keeps it. observeRow never sets
+	// Uncertain with Attached, so a known attach still overrides.
+	if o.Uncertain {
+		d.Attached = false
+	}
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)

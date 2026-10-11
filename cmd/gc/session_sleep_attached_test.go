@@ -19,7 +19,7 @@ import (
 func TestReconcileSessionBeads_AttachedInteractiveSessionDoesNotIdleSleep(t *testing.T) {
 	// No pool demand for the template, as for a manual `gc session new`
 	// session.
-	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{})
+	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{}, false)
 }
 
 // The same holds for a template with pool demand. Pool demand does not keep an
@@ -27,10 +27,18 @@ func TestReconcileSessionBeads_AttachedInteractiveSessionDoesNotIdleSleep(t *tes
 // pool sibling can take the work), so only the attachment can hold it, and the
 // attach probe must run for it.
 func TestReconcileSessionBeads_AttachedInteractivePoolSessionDoesNotIdleSleep(t *testing.T) {
-	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{"worker": 1})
+	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{"worker": 1}, false)
 }
 
-func assertAttachedInteractiveSessionStaysAwake(t *testing.T, poolDesired map[string]int) {
+// The same holds once a durable wait on the session turns ready. `gc session
+// wait` without --sleep registers the wait with no wait hold, so the attach
+// still wakes the session, and the ready wait relabels that wake
+// "wait-ready". The attachment must still hold the session awake.
+func TestReconcileSessionBeads_AttachedSessionWithReadyWaitDoesNotIdleSleep(t *testing.T) {
+	assertAttachedInteractiveSessionStaysAwake(t, map[string]int{}, true)
+}
+
+func assertAttachedInteractiveSessionStaysAwake(t *testing.T, poolDesired map[string]int, readyWait bool) {
 	t.Helper()
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
@@ -46,8 +54,12 @@ func assertAttachedInteractiveSessionStaysAwake(t *testing.T, poolDesired map[st
 	env.sp.SetAttached("worker", true)
 	env.sp.SetActivity("worker", env.clk.Time.Add(-2*time.Minute))
 	env.sp.WaitForIdleErrors["worker"] = nil
+	var readyWaitSet map[string]bool
+	if readyWait {
+		readyWaitSet = map[string]bool{session.ID: true}
+	}
 
-	runAttachedSessionPasses(t, env, session.ID, poolDesired)
+	runAttachedSessionPasses(t, env, session.ID, poolDesired, readyWaitSet)
 	assertNoIdleSleep(t, env, session.ID)
 }
 
@@ -57,13 +69,31 @@ func assertAttachedInteractiveSessionStaysAwake(t *testing.T, poolDesired map[st
 // bookkeeping, not anyone's request to sleep, so the attachment cancels the
 // drain and clears it.
 func TestReconcileSessionBeads_AttachAfterIdleVerdictCancelsIdleDrain(t *testing.T) {
-	env := newReconcilerTestEnv(t)
-	env.cfg = &config.City{
+	assertAttachCancelsIdleDrain(t, &config.City{
 		SessionSleep: config.SessionSleepConfig{
 			InteractiveResume: "60s",
 		},
 		Agents: []config.Agent{{Name: "worker"}},
-	}
+	}, map[string]int{})
+}
+
+// The same holds for a non-interactive session with pool demand. Pool demand
+// keeps it awake over its idle latch but not over the marker, so only the
+// attachment can cancel the drain, and the attach probe must run for it.
+func TestReconcileSessionBeads_AttachAfterIdleVerdictCancelsNonInteractivePoolIdleDrain(t *testing.T) {
+	noAttach := false
+	assertAttachCancelsIdleDrain(t, &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			NonInteractive: "60s",
+		},
+		Agents: []config.Agent{{Name: "worker", Attach: &noAttach}},
+	}, map[string]int{"worker": 1})
+}
+
+func assertAttachCancelsIdleDrain(t *testing.T, cfg *config.City, poolDesired map[string]int) {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	env.cfg = cfg
 	env.addDesired("worker", "worker", true)
 	session := env.createSessionBead("worker", "worker")
 	ts := env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339)
@@ -78,14 +108,14 @@ func TestReconcileSessionBeads_AttachAfterIdleVerdictCancelsIdleDrain(t *testing
 	env.sp.SetActivity("worker", env.clk.Time.Add(-2*time.Minute))
 	env.sp.WaitForIdleErrors["worker"] = nil
 
-	runAttachedSessionPasses(t, env, session.ID, map[string]int{})
+	runAttachedSessionPasses(t, env, session.ID, poolDesired, nil)
 	assertNoIdleSleep(t, env, session.ID)
 }
 
 // runAttachedSessionPasses runs three reconcile passes over the session, as
 // three controller ticks would, letting any idle probe a pass launched report
 // before the next pass reads it.
-func runAttachedSessionPasses(t *testing.T, env *reconcilerTestEnv, beadID string, poolDesired map[string]int) {
+func runAttachedSessionPasses(t *testing.T, env *reconcilerTestEnv, beadID string, poolDesired map[string]int, readyWaitSet map[string]bool) {
 	t.Helper()
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	for i := 0; i < 3; i++ {
@@ -99,7 +129,7 @@ func runAttachedSessionPasses(t *testing.T, env *reconcilerTestEnv, beadID strin
 		env.sp.WaitForIdleGates["worker"] = gate
 		reconcileSessionBeadsAtPath(
 			context.Background(), env.city, []beads.Bead{fresh}, env.desiredState, cfgNames, env.cfg, env.sp,
-			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+			env.store, nil, nil, nil, readyWaitSet, env.dt, poolDesired, false, nil, "",
 			nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 			withAsyncDrainAckStopTracker(env.stops),
 		)
@@ -125,15 +155,18 @@ func assertNoIdleSleep(t *testing.T, env *reconcilerTestEnv, beadID string) {
 }
 
 // The attached rule of wakeDemandOverridesSleepSuppression, for every sleep
-// class and against the sleep intents: an attachment overrides the idle
-// latch and the reconciler's own idle-stop-pending marker, and loses to any
+// class and against the sleep intents as explicitSleepIntentInfo reads them
+// off the session: an attachment overrides the idle latch and the
+// reconciler's own idle-stop-pending marker, padded or not, and loses to any
 // other sleep intent.
 func TestReconcilerWakeDemandOverridesSleepSuppressionForAttached(t *testing.T) {
-	attached := AwakeDecision{ShouldWake: true, Reason: "attached"}
+	attached := AwakeDecision{ShouldWake: true, Reason: "attached", Attached: true}
 	attachedEval := wakeEvaluation{Reasons: []WakeReason{WakeAttached}}
-	// The awake set may label the wake otherwise while attachment is one of
-	// its reasons.
-	relabeled := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
+	// A ready wait relabels an attached wake "wait-ready" and keeps the
+	// attach on the decision; awakeSetToWakeEvals then reports only WakeWait.
+	waitReady := AwakeDecision{ShouldWake: true, Reason: "wait-ready", Attached: true}
+	waitEval := wakeEvaluation{Reasons: []WakeReason{WakeWait}}
+	unattached := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
 	for _, class := range []config.SessionSleepClass{
 		config.SessionSleepInteractiveResume,
 		config.SessionSleepInteractiveFresh,
@@ -149,13 +182,19 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForAttached(t *testing.T) 
 		}{
 			{"attached", attached, attachedEval, "", true},
 			{"attached reason only", attached, wakeEvaluation{}, "", true},
-			{"attached among reasons", relabeled, attachedEval, "", true},
+			{"attached, relabeled by a ready wait", waitReady, waitEval, "", true},
+			{"ready wait without attach", AwakeDecision{ShouldWake: true, Reason: "wait-ready"}, waitEval, "", false},
 			{"attached over idle-stop-pending", attached, attachedEval, sleepIntentIdle, true},
+			{"relabeled attach over idle-stop-pending", waitReady, waitEval, sleepIntentIdle, true},
+			{"attached over padded idle-stop-pending", attached, attachedEval, " " + sleepIntentIdle + "\n", true},
+			{"relabeled attach over padded idle-stop-pending", waitReady, waitEval, " " + sleepIntentIdle + "\n", true},
 			{"user-hold wins over attached", attached, attachedEval, "user-hold", false},
+			{"user-hold wins over relabeled attach", waitReady, waitEval, "user-hold", false},
 			{"explicit sleep intent wins over attached", attached, attachedEval, "drain", false},
-			{"idle-stop-pending without attach", relabeled, wakeEvaluation{}, sleepIntentIdle, false},
+			{"idle-stop-pending without attach", unattached, wakeEvaluation{}, sleepIntentIdle, false},
 		} {
-			got := wakeDemandOverridesSleepSuppression(tc.decision, tc.eval, policy, nil, "worker", tc.intent, false)
+			intent := explicitSleepIntentInfo(sessionpkg.Info{SleepIntent: tc.intent})
+			got := wakeDemandOverridesSleepSuppression(tc.decision, tc.eval, policy, nil, "worker", intent, false)
 			if got != tc.want {
 				t.Errorf("%s/%s: override = %v, want %v", class, tc.name, got, tc.want)
 			}
@@ -165,25 +204,30 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForAttached(t *testing.T) 
 
 // With pool demand, the attach probe runs only where the attachment can
 // change the decision: an interactive template whose effective sleep policy
-// can idle-sleep. A non-interactive template, a policy that is off, and an
-// interactive template on a runtime without full sleep capability (its
-// effective policy is off) keep the desired fast path free of attach probes.
+// can idle-sleep, and any row carrying the reconciler's idle-stop-pending
+// marker, which outranks pool demand and yields only to an attachment. A
+// non-interactive template, a policy that is off, and an interactive
+// template on a runtime without full sleep capability (its effective policy
+// is off) otherwise keep the desired fast path free of attach probes.
 func TestShouldProbeAttachmentForAwakeInputWithPoolDemand(t *testing.T) {
 	noAttach := false
-	info := sessionpkg.Info{MetadataState: "active", Template: "worker", SessionNameMetadata: "worker"}
 	poolDesired := map[string]int{"worker": 1}
 	for _, tc := range []struct {
-		name       string
-		agent      config.Agent
-		capability runtime.SessionSleepCapability
-		want       bool
+		name        string
+		agent       config.Agent
+		capability  runtime.SessionSleepCapability
+		sleepIntent string
+		want        bool
 	}{
-		{"interactive, full capability", config.Agent{Name: "worker"}, runtime.SessionSleepCapabilityFull, true},
-		{"interactive, timed_only capability", config.Agent{Name: "worker"}, runtime.SessionSleepCapabilityTimedOnly, false},
-		{"interactive, policy off", config.Agent{Name: "worker", SleepAfterIdle: config.SessionSleepOff}, runtime.SessionSleepCapabilityFull, false},
-		{"non-interactive", config.Agent{Name: "worker", Attach: &noAttach}, runtime.SessionSleepCapabilityFull, false},
+		{"interactive, full capability", config.Agent{Name: "worker"}, runtime.SessionSleepCapabilityFull, "", true},
+		{"interactive, timed_only capability", config.Agent{Name: "worker"}, runtime.SessionSleepCapabilityTimedOnly, "", false},
+		{"interactive, policy off", config.Agent{Name: "worker", SleepAfterIdle: config.SessionSleepOff}, runtime.SessionSleepCapabilityFull, "", false},
+		{"non-interactive", config.Agent{Name: "worker", Attach: &noAttach}, runtime.SessionSleepCapabilityFull, "", false},
+		{"non-interactive, idle-stop-pending", config.Agent{Name: "worker", Attach: &noAttach}, runtime.SessionSleepCapabilityFull, sleepIntentIdle, true},
+		{"non-interactive, user-hold", config.Agent{Name: "worker", Attach: &noAttach}, runtime.SessionSleepCapabilityFull, "user-hold", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			info := sessionpkg.Info{MetadataState: "active", Template: "worker", SessionNameMetadata: "worker", SleepIntent: tc.sleepIntent}
 			cfg := &config.City{
 				SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s", NonInteractive: "60s"},
 				Agents:       []config.Agent{tc.agent},
