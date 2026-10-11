@@ -62,12 +62,12 @@ func consumeUserHoldLife(Disposition, Disposition, Info) MetadataPatch {
 // stops the runtime it launched.
 func (m *Manager) consumeUserHold(d Decided, now time.Time) error {
 	store := m.PersistedStore()
-	res, _, err := store.ApplyDisposition(d, ActorOperator, DispEvent{Kind: EvResume}, consumeUserHoldLife, now)
+	w, err := store.ApplyDisposition(d, ActorOperator, DispEvent{Kind: EvResume}, consumeUserHoldLife, now)
 	var refused *ErrDispositionRefused
 	switch {
 	case err != nil && !errors.As(err, &refused):
 		return fmt.Errorf("%w: consuming the user hold: %w", ErrStateSync, err)
-	case err == nil && res == CommitLanded:
+	case err == nil && w.Result == CommitLanded:
 		return nil
 	}
 	b, rerr := store.freshBead(d.info.ID)

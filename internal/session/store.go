@@ -424,42 +424,35 @@ func (s *Store) Sleep(id, reason string, now time.Time) error {
 	return err
 }
 
-// operatorSuspendAttempts bounds the suspend's CAS retries: an operator's
+// operatorSuspendAttempts bounds an operator's or agent's own disposition
+// write (ApplyDispositionFresh), and the failed-stop rollback: an operator's
 // write competes with every controller write to the row.
 const operatorSuspendAttempts = 8
 
 // OperatorSuspend writes an operator's suspend: the disposition table's
-// Suspend cell, decided on a fresh read of the row and written with
-// operatorSuspendLife's lifecycle by ApplyDisposition. A suspend already in
-// force is left as it is. A row closed since the caller read it is refused
-// with an illegal-transition error and written nothing; a row whose
-// incarnation moved, or a CAS lost on every attempt, writes nothing and
-// returns an error to retry. It returns the disposition the row was left
-// with.
-func (s *Store) OperatorSuspend(id string, now time.Time) (Disposition, error) {
-	d, err := s.DecideFresh(id, FactsOperatorAct)
-	if err != nil {
-		return Disposition{}, err
-	}
-	res, to, err := s.ApplyDisposition(d, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
+// Suspend cell, decided on each fresh read of the row, with its lifecycle
+// (operatorSuspendLife). Every suspend writes, a suspend already in force
+// included: it is stamped again, so an operator's resume that read the old
+// stamp refuses its consume. A row closed since the caller read it is refused
+// with an illegal-transition error and written nothing; a CAS lost on every
+// attempt writes nothing and returns an error to retry. It returns what it
+// wrote, for a failed stop's rollback.
+func (s *Store) OperatorSuspend(id string, now time.Time) (DispositionWrite, error) {
+	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
 	switch {
 	case err != nil:
-		return Disposition{}, err
-	case res == CommitClosed:
-		return Disposition{}, &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
-	case res != CommitLanded:
-		return Disposition{}, fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
+		return DispositionWrite{}, err
+	case w.Result == CommitClosed:
+		return DispositionWrite{}, &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+	case w.Result != CommitLanded:
+		return DispositionWrite{}, fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
 	}
-	return to, nil
+	return w, nil
 }
 
-// operatorSuspendLife is the lifecycle of an operator's suspend that took
-// hold: state=suspended stamped now, and the pending wake cleared as newer
-// intent (D7). A suspend already in force writes none.
-func operatorSuspendLife(from, to Disposition, _ Info) MetadataPatch {
-	if from.Operator == OperatorSuspended && from.Until.Equal(to.Until) {
-		return nil
-	}
+// operatorSuspendLife is the lifecycle of an operator's suspend:
+// state=suspended, and the pending wake cleared as newer intent (D7.3).
+func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
 	patch := ClearWakeRequestPatch()
 	patch["state"] = string(StateSuspended)
 	patch["slept_at"] = ""

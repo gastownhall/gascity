@@ -48,12 +48,14 @@ func writeSessionKillFence(store beads.Store, sessionID string, now time.Time) (
 		}
 		// The kill is the disposition's Kill cell: an operator suspend goes
 		// whole, its held_until with it, so no heartbeat-shaped hold is left
-		// behind; a wait or a heartbeat stays.
-		class, _, err := session.MoveDisposition(b.Metadata, session.Info{MetadataState: b.Metadata["state"]},
-			session.ActorOperator, session.DispEvent{Kind: session.EvKill}, nil, now)
+		// behind; a wait or a heartbeat stays. Its encoding is merged whole
+		// (lossless: a key the kill leaves keeps its text), over
+		// KillPendingPatch's own class keys.
+		killed, err := session.DecodeDisposition(b.Metadata).Apply(session.ActorOperator, session.DispEvent{Kind: session.EvKill}, session.State(b.Metadata["state"]), now)
 		if err != nil {
 			return nil, false
 		}
+		class := killed.Encode()
 		write := make(map[string]string, len(patch)+len(class))
 		for key, value := range patch {
 			write[key] = value

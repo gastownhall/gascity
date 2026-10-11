@@ -141,27 +141,24 @@ func doRuntimeHeartbeat(sessStore beads.Store, duration time.Duration, display, 
 		return 1
 	}
 
-	// The disposition's Heartbeat cell, decided from a fresh read and fenced:
-	// an operator's suspend owns held_until, and a heartbeat never shortens
-	// it or a later heartbeat.
+	// The disposition's Heartbeat cell, decided on a fresh read and fenced:
+	// it replaces held_until, as legacy's did, so a heartbeat-shaped ∞ heals;
+	// an operator's suspend owns held_until and is left as it is.
 	now := time.Now()
-	front := sessionFrontDoor(sessStore)
-	d, err := front.DecideFresh(sessionID, session.FactsOperatorAct)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	res, held, err := front.ApplyDisposition(d, session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: now.Add(duration)}, nil, now)
-	heldUntil := held.Heartbeat.UTC().Format(time.RFC3339)
+	w, err := sessionFrontDoor(sessStore).ApplyDispositionFresh(sessionID, session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: now.Add(duration)}, nil, now)
+	heldUntil := w.To.Heartbeat.UTC().Format(time.RFC3339)
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: %v\n", err) //nolint:errcheck
 		return 1
-	case held.KeepsSlot():
-		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is suspended by an operator; its hold is left as it is\n", display) //nolint:errcheck
+	case w.Result == session.CommitClosed:
+		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is closed\n", display) //nolint:errcheck
 		return 1
-	case res != session.CommitLanded:
+	case w.Result != session.CommitLanded:
 		fmt.Fprintf(stderr, "gc runtime heartbeat: setting hold: lost to concurrent writes; retry\n") //nolint:errcheck
+		return 1
+	case w.To.KeepsSlot():
+		fmt.Fprintf(stderr, "gc runtime heartbeat: session %q is suspended by an operator; its hold is left as it is\n", display) //nolint:errcheck
 		return 1
 	}
 
