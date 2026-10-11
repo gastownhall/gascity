@@ -33,8 +33,8 @@ sandboxed under `/tmp/gc-openclaw-bridge-demo` and torn down on exit.
 
 ## What is openclaw's vs ours
 
-From the published `openclaw` npm package (pinned in `package-lock.json`), the
-bridge imports and runs as-is:
+From the published `@openclaw/imessage` npm package and its `openclaw` peer
+(both pinned in `package-lock.json`), the bridge imports and runs as-is:
 
 | openclaw export | role |
 |---|---|
