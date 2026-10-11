@@ -1,13 +1,17 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -18,8 +22,14 @@ import (
 // are wire names (mdash). Alerts go to stderr and to the event log as
 // reconciler.alert, and the record counts them.
 
-// stopOutstandingAge is when a signaled stop counts as outstanding (v5 D6).
-const stopOutstandingAge = 30 * time.Minute
+// stopOutstandingAge is when a signaled stop counts as outstanding (v5 D6);
+// stopEscalationRepeat how often its alert repeats while it lasts.
+const (
+	stopOutstandingAge    = 30 * time.Minute
+	stopEscalationRepeat  = 15 * time.Minute
+	stopEscalationReason  = "stop_outstanding"
+	stopEscalationNoCause = "none" // no refusal recorded: the verb has not run
+)
 
 // Alert kinds: reconciler.alert's "alert" and the record's "alerts" keys.
 const (
@@ -47,6 +57,15 @@ type passObserver struct {
 	lastKey         string
 	lastEmit        time.Time
 	identity        identityObserver // arm A3's alerts (reconcile_observe_identity.go)
+	// escalated is each outstanding stop's last alert, by (row, incarnation)
+	// (v5 D6): kept while the stop stays outstanding.
+	escalated map[stopEscalationKey]time.Time
+}
+
+// stopEscalationKey is one row incarnation's stop request.
+type stopEscalationKey struct {
+	k   rowKey
+	inc int64
 }
 
 // alert writes an operator alert to stderr, records it as a
@@ -124,9 +143,12 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 	rows := w.Census.Canonical()
 	c.Rows, c.InputAges = len(rows), w.InputAges
 	unknown := make(map[rowKey]string)
+	escalated := make(map[stopEscalationKey]time.Time)
+	own := w.Census.sessionsLeg() // a rig leg's rows are other cities' too, which v2 never stops (A1)
 	for _, row := range rows {
-		if stopOutstanding(row.Info, w.Now) {
+		if row.Key.Leg == own && stopOutstanding(row.Info, w.Now) {
 			c.StopOutstanding++
+			p.escalateStop(w, row, escalated)
 		}
 		if !row.UnknownState {
 			continue
@@ -138,6 +160,7 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 		}
 	}
 	p.obs.unknown = unknown
+	p.obs.escalated = escalated
 	dups := make(map[string]bool, len(duplicates))
 	for _, d := range duplicates {
 		dups[d] = true
@@ -146,6 +169,64 @@ func (p *planner) observeWorld(w *World, duplicates []string, c *passCounts) {
 		}
 	}
 	p.obs.duplicates = dups
+}
+
+// escalateStop is D6's stop-outstanding alert for row, whose signaled stop
+// is outstanding: session.drain_stop_escalated, in legacy's payload shape
+// (recordDrainAckEscalation) with reason stop_outstanding/<the stop verb's
+// last refusing cause>, at once and then at most every
+// stopEscalationRepeat per (row, incarnation), and never under legacy's
+// quiet hold (stopQuietHold), which keeps the memory: once the hold clears,
+// a stop past either threshold alerts at once. It is never force_terminated:
+// v2 has no force path (§12.2 #1). The memory is the planner's, so a restart
+// alerts again at once.
+func (p *planner) escalateStop(w *World, row censusRow, escalated map[stopEscalationKey]time.Time) {
+	k := stopEscalationKey{k: row.Key, inc: row.Incarnation}
+	last, alerted := p.obs.escalated[k]
+	if alerted {
+		escalated[k] = last
+	}
+	if alerted && w.Now.Sub(last) < stopEscalationRepeat || stopQuietHold(w, row) {
+		return
+	}
+	escalated[k] = w.Now
+	reason := stopEscalationReason + "/" + cmp.Or(p.backoff.Record(rowBackoffKey(row.Key)).Cause, stopEscalationNoCause)
+	var cfg *config.City
+	if w.Env != nil {
+		cfg = w.Env.Cfg
+	}
+	info := row.Info
+	template := cmp.Or(normalizedSessionTemplateInfo(info, cfg), info.Template)
+	recordDrainTransition(context.Background(), info.SessionNameMetadata, reason, "escalate")
+	ev := events.Event{
+		Type: events.SessionDrainStopEscalated, Ts: w.Now.UTC(), Actor: "gc", Subject: template, SessionID: info.ID,
+		Message: fmt.Sprintf("drain-ack stop-pending escalation (%s): the stop is still outstanding", reason),
+		Payload: api.SessionLifecyclePayloadJSON(info.ID, template, reason),
+	}
+	if p.rec == nil {
+		p.metrics.count(&p.metrics.series, "stop_escalations")
+		return
+	}
+	p.record(ev)
+}
+
+// stopQuietHold is legacy's quiet hold on its escalation
+// (drainAckEscalationQuietHold) as the pass observes the row: a human
+// attached, or the pane active within drainAckEscalationQuietGrace, or
+// activity the pass cannot read, which may be a busy pane. Legacy stays
+// silent then, and so does D6's alert (owner rulings at the C6b2c review).
+// Legacy escalates only a runtime still alive, so a row whose runtime reads
+// gone, which has no pane to be busy, never holds.
+func stopQuietHold(w *World, row censusRow) bool {
+	o := w.Observed[row.Key]
+	if o.Liveness == livenessGone {
+		return false
+	}
+	if o.Attached {
+		return true
+	}
+	obs := readRuntimeName(w.Obs, row.Info.SessionName, w.Now, w.ObsMaxAge).obs
+	return !obs.LastActivityKnown || w.Now.Sub(obs.LastActivity) < drainAckEscalationQuietGrace
 }
 
 // stopOutstanding reports a signaled stop (legacy's stop-pending projection)
