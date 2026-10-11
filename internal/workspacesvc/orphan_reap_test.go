@@ -54,17 +54,18 @@ func spawnOrphanForTest(t *testing.T, argv []string, extraEnv []string) int {
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 
+	subreaper := detectUserSubreaperPID(os.Getpid())
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		ppid, err := processParentPIDForTest(pid)
 		if err != nil {
 			t.Fatalf("orphan %d exited before re-parenting: %v", pid, err)
 		}
-		if ppid == 1 {
+		if ppid == 1 || (subreaper != 0 && ppid == subreaper) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Skipf("orphan %d re-parented to %d, not init; host has a child subreaper", pid, ppid)
+			t.Skipf("orphan %d re-parented to %d, not init or subreaper %d", pid, ppid, subreaper)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -212,6 +213,12 @@ func TestReapOrphanedServiceProcessesMatchesWhitespaceOnlyCommandArgs(t *testing
 	}
 }
 
+func testOrphanIdentity(serviceName, stateRoot string, command []string) orphanIdentity {
+	id := newOrphanIdentity(serviceName, stateRoot, command)
+	id.subreaperPID = detectUserSubreaperPID(os.Getpid())
+	return id
+}
+
 // TestFindOrphanedServiceProcessesSkipsWhenSweeperIsInit covers the pid-1
 // guard: when the sweeping process is itself init (gc as a container
 // entrypoint), ppid 1 marks live supervised children rather than orphans, so
@@ -220,7 +227,7 @@ func TestFindOrphanedServiceProcessesSkipsWhenSweeperIsInit(t *testing.T) {
 	marker := fmt.Sprintf("86342.0%d", os.Getpid())
 	stateRoot := t.TempDir()
 	command := []string{"sleep", marker}
-	id := newOrphanIdentity("orphan-reap-test", stateRoot, command)
+	id := testOrphanIdentity("orphan-reap-test", stateRoot, command)
 	pid := spawnOrphanForTest(t, command, []string{
 		"GC_SERVICE_NAME=orphan-reap-test",
 		"GC_SERVICE_STATE_ROOT=" + stateRoot,
@@ -264,16 +271,16 @@ func TestLiveMatchingOrphansDropsIdentityMismatch(t *testing.T) {
 	})
 
 	for name, id := range map[string]orphanIdentity{
-		"command mismatch":    newOrphanIdentity("orphan-reap-test", stateRoot, []string{"sleep", "not-" + marker}),
-		"service mismatch":    newOrphanIdentity("some-other-service", stateRoot, command),
-		"state-root mismatch": newOrphanIdentity("orphan-reap-test", stateRoot+"-other-city", command),
+		"command mismatch":    testOrphanIdentity("orphan-reap-test", stateRoot, []string{"sleep", "not-" + marker}),
+		"service mismatch":    testOrphanIdentity("some-other-service", stateRoot, command),
+		"state-root mismatch": testOrphanIdentity("orphan-reap-test", stateRoot+"-other-city", command),
 	} {
 		if got := liveMatchingOrphans([]int{pid}, id); len(got) != 0 {
 			t.Errorf("%s: liveMatchingOrphans kept pid %d: %v", name, pid, got)
 		}
 	}
 
-	if got := liveMatchingOrphans([]int{pid}, newOrphanIdentity("orphan-reap-test", stateRoot, command)); len(got) != 1 {
+	if got := liveMatchingOrphans([]int{pid}, testOrphanIdentity("orphan-reap-test", stateRoot, command)); len(got) != 1 {
 		t.Fatalf("liveMatchingOrphans dropped live matching pid %d: %v", pid, got)
 	}
 }
