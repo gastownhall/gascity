@@ -68,18 +68,20 @@ package main
 //
 // # The identity set is the whole ballgame
 //
-// The assigned-work gate probes session.AssigneeIdentities, NOT the narrower
-// config-aware set (sessionAssignmentIdentifiersForConfigInfo). That set honors
-// a session's current stable alias ("nux") but drops a rebinding pool-slot alias
-// and every prior alias in alias_history; an agent that claimed work under one
-// of those holds it under an identifier the narrow set cannot see, so a narrow
-// probe would report "no assigned work" for a busy agent and authorize killing it.
+// The assigned-work gate probes the seat's RefuseScope (refuseScope, O4):
+// session.AssigneeIdentities, NOT the narrower config-aware set
+// (sessionAssignmentIdentifiersForConfigInfo). That set honors a session's
+// current stable alias ("nux") but drops every prior alias in alias_history;
+// an agent that claimed work under one holds it under an identifier the narrow
+// set cannot see, so a narrow probe would report "no assigned work" for a busy
+// agent and authorize killing it.
 //
-// The drain-ack CLOSE gate deliberately does NOT adopt this wide set. A
-// transient pool SLOT alias ("gascity/gc.run-operator-1") is a rebinding chair
-// rather than an owner, and no guard may honor one, or a rebind lets a fresh
-// session shield or inherit a dead session's claim (#4981/#5241, pinned by
-// TestAssignmentGuardsIgnoreTransientPoolSlotAliases). The two gates can differ
+// Neither gate honors a transient pool SLOT alias
+// ("gascity/gc.run-operator-1"): it is a rebinding chair rather than an owner,
+// and a rebind would let a fresh session shield or inherit a dead session's
+// claim (#4981/#5241, pinned by
+// TestAssignmentGuardsIgnoreTransientPoolSlotAliases). The drain-ack CLOSE
+// gate does NOT adopt the wide set either. The two gates can differ
 // because their errors are not symmetric: over-refusing a KILL leaves a row
 // wedged exactly as it is today, while over-honoring ownership at the CLOSE
 // keeps dead rows open forever. Erring wide belongs in front of the kill only.
@@ -167,9 +169,9 @@ const (
 //
 // Deliberately wider than sessionAssignmentIdentifiersForConfigInfo, which
 // honors only the current stable alias and therefore cannot see work claimed
-// under a rebinding pool-slot alias or a prior alias. Being a superset it can
-// only ever find MORE work, so it can only refuse more kills and more closes —
-// never authorize either.
+// under a prior alias. Being a superset it can only ever find MORE work, so it
+// can only refuse more kills and more closes — never authorize either.
+// refuseScope drops a transient slot seat's aliases from it (O4).
 func drainAckAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []string {
 	configured := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	wide := sessionpkg.AssigneeIdentities(info)
@@ -190,14 +192,8 @@ func drainAckAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []string
 // wedged exactly as it is today, while under-refusing ends a live agent's turn.
 // Erring toward "this session still holds work" is the only safe direction in
 // front of a kill.
-func sessionHasOpenAssignedWorkForEscalation(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	rigStores map[string]beads.Store,
-	info sessionpkg.Info,
-) (bool, error) {
-	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, drainAckAssigneeIdentities(info, cfg))
+func sessionHasOpenAssignedWorkForEscalation(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return seatHasWorkForCloseGate(sw, refuseScope(info, sw.Legs().cfg))
 }
 
 // drainAckEscalationDue reports whether a wedged row has exceeded its bound, and
@@ -336,7 +332,7 @@ func escalateWedgedDrainAckStopPending(
 	cfg *config.City,
 	sp runtime.Provider,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
@@ -413,7 +409,7 @@ func escalateWedgedDrainAckStopPending(
 	// expensive probe, so it runs last, and it fails closed on an unreadable
 	// store: a smaller answer presented as authoritative reads as "holds
 	// nothing", which is exactly the error that authorizes a wrongful kill.
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForEscalation(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForEscalation(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: checking assigned work for %s: %v; not escalating\n", drainAckEscalationLabel, name, err) //nolint:errcheck
 		return false

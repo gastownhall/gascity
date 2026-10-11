@@ -52,7 +52,7 @@ func TestReleaseWorkFromClosedSessionBeadRestoresPoolRouteForUnroutedWork(t *tes
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, workLegs{}, sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestReleaseWorkFromClosedSessionBeadRestoresRunTargetForWorkflowKind(t *tes
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, workLegs{}, sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -146,7 +146,7 @@ func TestReleaseWorkFromClosedSessionBeadLeavesExistingRouteUntouched(t *testing
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, workLegs{}, sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -186,7 +186,7 @@ func TestReleaseWorkFromClosedSessionBeadWithoutTemplateStillReleases(t *testing
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, workLegs{}, sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {

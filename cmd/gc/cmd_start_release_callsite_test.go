@@ -201,3 +201,92 @@ prefix = "rb"
 		}
 	}
 }
+
+// The one-shot pass reads work through the city's work legs over the work
+// store it opened, never the relocated sessions binding: an orphaned session
+// whose claim lives on the city work store is kept open, not closed over it.
+func TestStartStandalone_ReadsWorkThroughTheCityWorkStore(t *testing.T) {
+	cityPath := t.TempDir()
+	clearInheritedBeadsEnv(t)
+	t.Chdir(t.TempDir())
+	cityTOML := `[workspace]
+name = "oneshot-worklegs-city"
+provider = "shell"
+
+[providers.shell]
+command = "echo"
+
+[beads]
+provider = "file"
+
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/session-class-store"
+
+[[agent]]
+name = "worker"
+scope = "city"
+max_active_sessions = 2
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	work, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessStore, relocated := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions)
+	if !relocated || sessStore == nil {
+		t.Fatal("sessions class did not relocate to the sqlite binding")
+	}
+	seat, err := sessStore.Create(beads.Bead{
+		Title: "session gone-1", Type: sessionBeadType, Status: "open",
+		Labels:   []string{sessionBeadLabel, "agent:gone"},
+		Metadata: map[string]string{"session_name": "gone-1", "template": "gone", "agent_name": "gone", "state": "asleep"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := work.Create(beads.Bead{Title: "held by the orphaned seat", Assignee: seat.ID, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := work.Update(claim.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatal(err)
+	}
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+	buildSessionProviderByName = func(_ *config.City, _ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doStartStandalone exit = %d\nstderr:\n%s", code, stderr.String())
+	}
+	got, err := sessStore.Get(seat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("the orphaned seat closed over its city-work-store claim\nstderr:\n%s", stderr.String())
+	}
+	if held, _ := work.Get(claim.ID); held.Assignee != seat.ID {
+		t.Fatalf("claim assignee = %q, want kept by %s", held.Assignee, seat.ID)
+	}
+}

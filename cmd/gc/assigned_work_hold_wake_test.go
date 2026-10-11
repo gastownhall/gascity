@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // Regression coverage for the hold-label wake/drain loop observed on
@@ -163,7 +164,7 @@ func TestDrainAckOpenArm_HeldOpenWorkIsProvablyNonClaimable(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			got, found, err := firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store, []string{"olivia"}, time.Now())
+			got, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(testSeatWork("", nil, store, nil), sessionpkg.Info{ID: "olivia"}, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -186,7 +187,7 @@ func TestDrainAckOpenArm_UnheldOpenWorkBesideHeldStillFires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, found, err := firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers(store, []string{"olivia"}, time.Now())
+	got, found, err := firstOpenClaimableAssignedWorkBeadForReachableStore(testSeatWork("", nil, store, nil), sessionpkg.Info{ID: "olivia"}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1884,13 +1884,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
 	//
-	// The scan leads with the WORK store here, unlike the reconciler's, which
-	// leads with the sessions-class store. On a split city that difference used
-	// to be the whole release tier for relocated work: claim-time class routing
-	// (claim_class_route.go) can leave an in_progress assignee in the graph
-	// binding, and a work-led scan cannot see it. The binding is now a leg of
-	// the sweep's own plan (assignedWorkSweepPlan), so this site hands in
-	// nothing and a city that relocates nothing still reads one store.
+	// The legs are the city's work legs over the work store this command
+	// opened: claim-time class routing (claim_class_route.go) can leave an
+	// in_progress assignee in the graph binding, which is a leg of the plan,
+	// and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
@@ -1898,7 +1895,8 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// The session bead lives in the sessions-class store (sessStore), which on a
 	// split city is not the work store the sweep leads with; the claim
 	// back-channel must be cleared where the session bead actually is.
-	unclaimWorkAssignedToRetiredSessionBeadVia(cityPath, cfg, store, sessStore, rigStores, closedSessionBead, "", stderr)
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
+	unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, "", stderr)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{

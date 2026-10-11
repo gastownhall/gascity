@@ -85,9 +85,9 @@ func TestAssignedWorkSweepPlanIsByteIdenticalOnASingleStoreCity(t *testing.T) {
 	work, alpha, bravo := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
 	cfg := residencyTestConfig()
 
-	plan, err := assignedWorkSweepPlan(cityPath, cfg, work, map[string]beads.Store{"bravo": bravo, "alpha": alpha}, nil)
+	plan, err := workLegsPlan(cityPath, cfg, work, map[string]beads.Store{"bravo": bravo, "alpha": alpha})
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work, alpha, bravo) {
 		t.Fatalf("sweep legs = %v, want [work, rig:alpha, rig:bravo] — the pre-S2 list verbatim", got)
@@ -104,9 +104,9 @@ func TestAssignedWorkSweepPlanCollapsesALeadingBindingLeg(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 	alpha := beads.NewMemStore()
 
-	plan, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), binding, map[string]beads.Store{"alpha": alpha}, nil)
+	plan, err := workLegsPlan(cityPath, residencyTestConfig(), binding, map[string]beads.Store{"alpha": alpha})
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, binding, alpha) {
 		t.Fatalf("sweep legs = %v, want [binding(leading), rig:alpha]: a leg that resolved back to the leading store must not be read twice", got)
@@ -125,9 +125,9 @@ func TestAssignedWorkSweepPlanAddsTheRealBindingToAWorkLedScan(t *testing.T) {
 	seedSplitRoutes(t, cityPath, binding)
 	work, alpha := beads.NewMemStore(), beads.NewMemStore()
 
-	plan, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, map[string]beads.Store{"alpha": alpha}, nil)
+	plan, err := workLegsPlan(cityPath, residencyTestConfig(), work, map[string]beads.Store{"alpha": alpha})
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work, alpha, binding) {
 		t.Fatalf("sweep legs = %v, want [work, rig:alpha, binding LAST] — a work-led release scan that cannot see the binding releases a routed claim by nothing", got)
@@ -147,7 +147,7 @@ func TestAssignedWorkSweepPlanFailsLoudOnARefusedCity(t *testing.T) {
 		entry.routes = refusingStorageRoutes("infra", errStorageRefusedForTest{})
 	})
 
-	if _, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), beads.NewMemStore(), nil, nil); err == nil {
+	if _, err := workLegsPlan(cityPath, residencyTestConfig(), beads.NewMemStore(), nil); err == nil {
 		t.Fatal("a refused city planned an assigned-work sweep; a work-only sweep on a refused city is the answer that looks like success and reads the wrong ledger")
 	}
 }
@@ -161,14 +161,14 @@ func TestAssignedWorkSweepPlanFailsLoudOnARefusedCity(t *testing.T) {
 // (mc-3ixn3.16): rig agents claim city-store beads, and a gate that skipped
 // that store decided "no work" on a leg the cascade then released from.
 func TestSessionAssignedWorkPlanReadsTheCensusLegsForARigBoundSeat(t *testing.T) {
-	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	cfg, cityPath, _ := rigScopedWakeFixture(t)
 	binding := beads.NewMemStore()
 	seedSplitRoutes(t, cityPath, binding)
 	rigStore, cityStore := beads.NewMemStore(), beads.NewMemStore()
 
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, infos[0])
+	plan, err := workLegsPlan(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore})
 	if err != nil {
-		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, cityStore, rigStore, binding) {
 		t.Fatalf("session legs = %v, want [city store, rig store, binding]", got)
@@ -177,13 +177,13 @@ func TestSessionAssignedWorkPlanReadsTheCensusLegsForARigBoundSeat(t *testing.T)
 
 // Control: the same session on a city that relocates nothing reads no binding.
 func TestSessionAssignedWorkPlanAddsNoBindingOnASingleStoreCity(t *testing.T) {
-	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	cfg, cityPath, _ := rigScopedWakeFixture(t)
 	seedNoRoutes(t, cityPath)
 	rigStore, cityStore := beads.NewMemStore(), beads.NewMemStore()
 
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, infos[0])
+	plan, err := workLegsPlan(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore})
 	if err != nil {
-		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, cityStore, rigStore) {
 		t.Fatalf("session legs = %v, want [city store, rig store]", got)
@@ -222,7 +222,7 @@ func TestRetiredSessionSweepReleasesABindingResidentClaim(t *testing.T) {
 		t.Fatalf("claim the step: %v", err)
 	}
 
-	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, work, nil, sessionBead, "", io.Discard)
+	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs(cityPath, cfg, work, nil), work, sessionBead, "", io.Discard)
 
 	got, err := binding.Get(step.ID)
 	if err != nil {
@@ -336,7 +336,7 @@ func TestCloseGateSeesALiveHoldersBindingResidentClaim(t *testing.T) {
 
 	// The work-led plane: the scan's leading store is NOT the binding.
 	has, err := sessionHasOpenAssignedWorkForReachableStore(
-		cityPath, cfg, beads.NewMemStore(), map[string]beads.Store{"riga": rigStore}, infos[0])
+		testSeatWork(cityPath, cfg, beads.NewMemStore(), map[string]beads.Store{"riga": rigStore}), infos[0])
 	if err != nil {
 		t.Fatalf("close gate: %v", err)
 	}
@@ -426,18 +426,18 @@ func TestRegisteredControllerRoutesAnswerResidencyWithoutASecondOpen(t *testing.
 	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
 
 	work := beads.NewMemStore()
-	plan, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
+	plan, err := workLegsPlan(cityPath, residencyTestConfig(), work, nil)
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work, binding) {
 		t.Fatalf("sweep legs = %v, want the REGISTERED binding behind the work leg", got)
 	}
 
 	unregisterResidencyRoutes(cityPath, routes)
-	plan, err = assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
+	plan, err = workLegsPlan(cityPath, residencyTestConfig(), work, nil)
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan after unregister: %v", err)
+		t.Fatalf("workLegsPlan after unregister: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work) {
 		t.Fatalf("sweep legs after unregister = %v, want the one-shot funnel's answer back", got)
@@ -469,9 +469,9 @@ func TestUnregisterResidencyRoutesOnlyDropsItsOwnRegistration(t *testing.T) {
 	unregisterResidencyRoutes(cityPath, loser)
 
 	work := beads.NewMemStore()
-	plan, err := assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
+	plan, err := workLegsPlan(cityPath, residencyTestConfig(), work, nil)
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work, winnerBinding) {
 		t.Fatalf("sweep legs = %v, want [work, the WINNER's binding] — a losing runtime's shutdown dropped a registration that was not its own, and the live one's release sweep is now binding-blind", got)
@@ -480,9 +480,9 @@ func TestUnregisterResidencyRoutesOnlyDropsItsOwnRegistration(t *testing.T) {
 	// And the winner's own unregister still works: ownership-safety must not
 	// turn into a registration that can never be released.
 	unregisterResidencyRoutes(cityPath, winner)
-	plan, err = assignedWorkSweepPlan(cityPath, residencyTestConfig(), work, nil, nil)
+	plan, err = workLegsPlan(cityPath, residencyTestConfig(), work, nil)
 	if err != nil {
-		t.Fatalf("assignedWorkSweepPlan after the owner unregistered: %v", err)
+		t.Fatalf("workLegsPlan after the owner unregistered: %v", err)
 	}
 	if got := planStores(t, plan); !sameStores(got, work) {
 		t.Fatalf("sweep legs = %v, want the funnel's answer back after the owner released its registration", got)
@@ -569,7 +569,7 @@ func TestCrossStoreCloseGateSeesABindingResidentClaim(t *testing.T) {
 		t.Fatalf("claim it: %v", err)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, beads.NewMemStore(), nil, sessionBead)
+	has, err := sessionHasOpenAssignedWorkForConfig(testSeatWork(cityPath, cfg, beads.NewMemStore(), nil), sessionBead)
 	if err != nil {
 		t.Fatalf("cross-store close gate: %v", err)
 	}
@@ -601,8 +601,7 @@ func TestAssignedWorkGateFailsClosedOnADegradedLeg(t *testing.T) {
 	}})[0]
 
 	has, err := sessionHasOpenAssignedWorkForReachableStore(
-		cityPath, cfg, beads.NewMemStore(),
-		map[string]beads.Store{"riga": failingListStore{}}, info)
+		testSeatWork(cityPath, cfg, beads.NewMemStore(), map[string]beads.Store{"riga": failingListStore{}}), info)
 	if err == nil {
 		t.Fatal("a rig store that could not be read reported \"no assigned work\" with no error; the drain arm reads that as a session holding nothing")
 	}

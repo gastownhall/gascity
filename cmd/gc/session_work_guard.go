@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -23,10 +22,8 @@ import (
 // Live-query failures fail closed: the bead stays open until assignment can be
 // re-verified.
 func closeSessionBeadIfUnassigned(
-	cityPath string,
 	store beads.Store,
-	rigStores map[string]beads.Store,
-	cfg *config.City,
+	sw *SeatWork,
 	session beads.Bead,
 	reason string,
 	now time.Time,
@@ -35,7 +32,7 @@ func closeSessionBeadIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(sw, session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
 		return false
@@ -46,7 +43,7 @@ func closeSessionBeadIfUnassigned(
 	if isFailedCreateSessionBead(session) {
 		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(session), now, stderr)
 	}
-	return closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, sessionInfoFromBead(session), reason, now, stderr, nil)
+	return closeBeadUnlessLateWork(store, sw, sessionInfoFromBead(session), reason, now, stderr, nil)
 }
 
 // closeSessionInfoIfUnassigned is the session.Info form of
@@ -57,10 +54,8 @@ func closeSessionBeadIfUnassigned(
 // sessionFrontDoor and run the extmsg/orphaned-work release cascade). Byte-
 // identical to the raw form for the GCSweep close op.
 func closeSessionInfoIfUnassigned(
-	cityPath string,
 	store beads.Store,
-	rigStores map[string]beads.Store,
-	cfg *config.City,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	reason string,
 	now time.Time,
@@ -69,7 +64,7 @@ func closeSessionInfoIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
@@ -80,7 +75,7 @@ func closeSessionInfoIfUnassigned(
 	if isFailedCreateSessionInfo(info) {
 		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, info, reason, now, stderr, nil)
+	return closeBeadUnlessLateWork(store, sw, info, reason, now, stderr, nil)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -101,10 +96,8 @@ func closeSessionInfoIfUnassigned(
 // other caller (failed-create close, generic idle/config-drift close) passes
 // false to keep its existing behavior unchanged.
 func closeSessionBeadIfReachableStoreUnassigned(
-	cityPath string,
-	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	reason string,
 	now time.Time,
@@ -118,7 +111,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if excludeOwnDrainStep {
 		assignedWorkProbe = sessionHasOpenAssignedWorkForReachableStoreForCloseGate
 	}
-	hasAssignedWork, err := assignedWorkProbe(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := assignedWorkProbe(sw, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
@@ -133,5 +126,5 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if excludeOwnDrainStep {
 		keep = notOwnDrainStep
 	}
-	return closeBeadUnlessLateWork(store, workLegs{cityPath, cfg, rigStores}, info, reason, now, stderr, keep)
+	return closeBeadUnlessLateWork(store, sw, info, reason, now, stderr, keep)
 }

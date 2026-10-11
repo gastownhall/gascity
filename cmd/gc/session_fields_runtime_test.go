@@ -140,7 +140,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			b := env.createSessionBead("worker", "worker")
 			must(t, rec.SetMetadataBatch(b.ID, session.DrainAckStopPendingPatch(env.clk.Now().UTC())))
 			rec.reset()
-			finalizeDrainAckStoppedSession(env.city, env.cfg, rec, nil, env.sessionInfo(b.ID), "worker", false,
+			finalizeDrainAckStoppedSession(env.cfg, rec, testSeatWork(env.city, env.cfg, rec, nil), env.sessionInfo(b.ID), "worker", false,
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 		}},
 		{"v2 named create", "agent_name alias canonical_instance_name command configured_named_identity configured_named_mode configured_named_session continuation_epoch generation instance_token live_hash pending_create_claim pending_create_started_at session_name session_origin state synced_at template work_dir", []string{"cmd/gc/allocator_create_named.go:createEffects.writeNamed"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -307,7 +307,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			b := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&b, pairs(meta))
 			env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
-			finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", false,
+			finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID), "worker", false,
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 			return fieldBead(t, env.store, b.ID).Metadata
 		}},

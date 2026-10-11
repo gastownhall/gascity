@@ -671,7 +671,7 @@ func TestFinalizeDrainAckStoppedSession_RecordsAgentStopMetric(t *testing.T) {
 		session.Metadata = patch.Apply(session.Metadata)
 
 		result := finalizeDrainAckStoppedSession(
-			env.city, env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
+			env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), sessiontest.SeedBead(t, session), identity, true,
 			newFakeDrainOps(), env.dt, env.clk, rec, &env.stderr,
 		)
 
@@ -1263,7 +1263,7 @@ func TestFinalizeDrainAckStoppedSession_WitnessBranchDoesNotRecordMetric(t *test
 	}
 
 	result := finalizeDrainAckStoppedSession(
-		env.city, env.cfg, env.store, nil, sessiontest.SeedBead(t, session), identity, true,
+		env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), sessiontest.SeedBead(t, session), identity, true,
 		newFakeDrainOps(), env.dt, env.clk, events.NewFake(), &env.stderr,
 	)
 

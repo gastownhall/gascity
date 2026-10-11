@@ -109,3 +109,23 @@ func TestWakeStartRefusal(t *testing.T) {
 		})
 	}
 }
+
+// The API wake reads assigned work through the city work store, not the
+// sessions binding it resolves sessions through: on a split city, work on the
+// work store overrides the idle latch.
+func TestWakeStartRefusalReadsTheWorkStoreOnASplitCity(t *testing.T) {
+	work, binding := beads.NewMemStore(), beads.NewMemStore()
+	agent := config.Agent{Name: "worker", SleepAfterIdle: "1m"}
+	cs := &controllerState{cityPath: t.TempDir(), cfg: &config.City{Agents: []config.Agent{agent}}, cityBeadStore: work, storageRoutes: splitRoutes(binding), sp: runtime.NewFake()}
+	if cs.SessionsBeadStore().Store != binding {
+		t.Fatal("fixture: the sessions store is not the binding")
+	}
+	if _, err := work.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: "gc-1"}); err != nil {
+		t.Fatal(err)
+	}
+	info := sessionpkg.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}
+	info.SleepPolicyFingerprint = resolveSessionSleepPolicyInfo(info, cs.cfg, cs.sp).Fingerprint
+	if got, _ := cs.WakeStartRefusal(info); got != "" {
+		t.Fatalf("WakeStartRefusal = %q, want none: the work store's claim overrides the latch", got)
+	}
+}

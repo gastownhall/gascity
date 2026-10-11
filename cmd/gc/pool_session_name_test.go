@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2631,14 +2632,14 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 }
 
 // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
-// calls GCSweepSessionBeads, letting the raw-bead fixtures exercise the WI-5 W4
+// calls gcSweepSessionBeadsAt, letting the raw-bead fixtures exercise the
 // typed signature.
 func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) []string {
 	var infos []session.Info
 	for _, b := range sessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return GCSweepSessionBeads("", nil, store, nil, infos)
+	return gcSweepSessionBeadsAt(store, testSeatWork("", nil, store, nil), infos, time.Now())
 }
 
 func TestDirectSessionBeadIDCandidates_DerivesModernPoolSessionBeadID(t *testing.T) {

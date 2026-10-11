@@ -56,7 +56,7 @@ func TestReleaseWorkFromClosedSessionBeadLeavesMailBeadUntouched(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, workLegs{}, sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(mailBead.ID)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestReleaseWorkFromClosedSessionBeadStillReleasesRealWork(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, workLegs{}, sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadLeavesMailBeadUntouched(t *testi
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs("", nil, store, nil), store, sessionBead, "fallback/worker", &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {

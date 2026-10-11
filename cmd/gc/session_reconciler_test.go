@@ -1612,7 +1612,7 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	session.Metadata = patch.Apply(session.Metadata)
 
 	finalized := finalizeDrainAckStopPendingSessions(
-		env.city, env.cfg, env.sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		env.city, env.cfg, env.sp, beads.SessionStore{Store: env.store}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: env.store}, nil), []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, nil, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 1 {
@@ -1703,7 +1703,7 @@ func TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor(t *testi
 	tracker := &asyncStartTracker{}
 	finalized := finalizeDrainAckStopPendingSessions(
 		env.city,
-		env.cfg, sp, beads.SessionStore{Store: env.store}, nil, []sessionpkg.Info{env.sessionInfo(session.ID)},
+		env.cfg, sp, beads.SessionStore{Store: env.store}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: env.store}, nil), []sessionpkg.Info{env.sessionInfo(session.ID)},
 		newFakeDrainOps(), env.dt, tracker, env.clk, env.rec, &env.stderr,
 	)
 	if finalized != 0 {
@@ -2509,7 +2509,7 @@ func TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError(t *
 
 	store := depListErrStore{Store: env.store, err: errors.New("dependency read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+	recordDrainAckAssignedWorkEvent(testSeatWork("", env.cfg, store, nil), info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -2617,7 +2617,7 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorStillEmitsInProgressStran
 
 	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+	recordDrainAckAssignedWorkEvent(testSeatWork("", env.cfg, store, nil), info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -2648,7 +2648,7 @@ func TestReconcileSessionBeads_DrainAckOpenArmReadErrorWithNoInProgressLogsError
 
 	store := readyOpenErrStore{Store: env.store, err: errors.New("graph readiness read failed")}
 	var stderr bytes.Buffer
-	recordDrainAckAssignedWorkEvent("", env.cfg, store, nil, info, "worker", "worker", "worker", time.Now(), fake, &stderr)
+	recordDrainAckAssignedWorkEvent(testSeatWork("", env.cfg, store, nil), info, "worker", "worker", "worker", time.Now(), fake, &stderr)
 
 	count := 0
 	for i := range fake.Events {
@@ -3711,10 +3711,7 @@ func emitStrandedDiagnosticForTest(t *testing.T, store beads.Store, session *bea
 		t.Fatalf("sessionFrontDoor.Get(%s): %v", session.ID, err)
 	}
 	emitSessionStrandedDiagnostic(
-		"",
-		nil,
-		store,
-		nil,
+		store, testSeatWork("", nil, store, nil),
 		info,
 		nil, // snapshot carrier not exercised here; ApplyOpenInfoPatch is nil-safe
 		"worker",
@@ -4306,7 +4303,7 @@ func TestCollectSessionAssignedWorkIncludesAssignedWisp(t *testing.T) {
 		t.Fatalf("Create wisp work: %v", err)
 	}
 
-	got, err := collectSessionAssignedWorkInfo("", nil, store, nil, sessionInfosFromBeads([]beads.Bead{session})[0])
+	got, err := collectSessionAssignedWorkInfo(testSeatWork("", nil, store, nil), sessionInfosFromBeads([]beads.Bead{session})[0])
 	if err != nil {
 		t.Fatalf("collectSessionAssignedWorkInfo: %v", err)
 	}
@@ -4375,7 +4372,7 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 	snap := newSessionBeadSnapshot([]beads.Bead{session})
 	emit := func() {
 		row := snap.OpenForReconcile()[0]
-		emitSessionStrandedDiagnostic("", env.cfg, failingStore, nil, row.Info, snap, "worker", rec, env.clk, &env.stderr)
+		emitSessionStrandedDiagnostic(failingStore, testSeatWork("", env.cfg, failingStore, nil), row.Info, snap, "worker", rec, env.clk, &env.stderr)
 	}
 
 	// First emit — diagnostic fires AND the durable SetMarker fails on the throttle key.
@@ -4444,7 +4441,7 @@ func TestReconcileSessionBeads_StrandedCarrierThreadedThroughTick(t *testing.T) 
 		for i := 0; i < 2; i++ {
 			reconcileSessionBeadsTracedWithNamedDemand(
 				context.Background(), env.city, snap.OpenForReconcile(), carrier, env.desiredState, map[string]bool{"worker": true},
-				env.cfg, env.sp, beads.SessionStore{Store: failing}, newFakeDrainOps(), nil, nil, nil,
+				env.cfg, env.sp, beads.SessionStore{Store: failing}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: failing}, nil), newFakeDrainOps(), nil, nil, nil,
 				env.dt, nil, map[string]int{"worker": 1}, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 				&env.stdout, &env.stderr, nil, env.startOptions...,
 			)
@@ -4501,7 +4498,7 @@ func TestReconcileSessionBeads_Phase0HealVisibleOnSnapshot(t *testing.T) {
 	poolDesired := map[string]int{"worker": 1}
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), env.city, snap.OpenForReconcile(), snap, env.desiredState, map[string]bool{"worker": true},
-		env.cfg, env.sp, beads.SessionStore{Store: env.store}, newFakeDrainOps(), nil, nil, nil,
+		env.cfg, env.sp, beads.SessionStore{Store: env.store}, testSeatWork(env.city, env.cfg, beads.SessionStore{Store: env.store}, nil), newFakeDrainOps(), nil, nil, nil,
 		env.dt, nil, poolDesired, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0,
 		&env.stdout, &env.stderr, nil, env.startOptions...,
 	)
@@ -4552,25 +4549,30 @@ func (s *listErrStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
+// assignOnListStore assigns open work to the session when the first list
+// for that session's own identity arrives, before answering it: the close-time
+// re-read's list. The tick's read lists every assignee at once and never
+// triggers it.
 type assignOnListStore struct {
 	beads.Store
 	sessionID string
-	calls     int
-	assigned  bool
+	assigned  sync.Once
 }
 
 func (s *assignOnListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	s.calls++
-	if !s.assigned && s.calls == 3 {
-		if _, err := s.Create(beads.Bead{
-			Title:    "raced assigned work",
-			Type:     "task",
-			Status:   "open",
-			Assignee: s.sessionID,
-		}); err != nil {
+	if q.Assignee == s.sessionID {
+		var err error
+		s.assigned.Do(func() {
+			_, err = s.Create(beads.Bead{
+				Title:    "raced assigned work",
+				Type:     "task",
+				Status:   "open",
+				Assignee: s.sessionID,
+			})
+		})
+		if err != nil {
 			return nil, err
 		}
-		s.assigned = true
 	}
 	return s.Store.List(q)
 }
@@ -4611,7 +4613,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		env.city, env.cfg, failingStore, nil, env.sessionInfo(session.ID), "worker", false,
+		env.cfg, failingStore, testSeatWork(env.city, env.cfg, failingStore, nil), env.sessionInfo(session.ID), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -4638,7 +4640,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		env.city, env.cfg, racingStore, nil, env.sessionInfo(session.ID), "worker", true,
+		env.cfg, racingStore, testSeatWork(env.city, env.cfg, racingStore, nil), env.sessionInfo(session.ID), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -6173,7 +6175,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	snap := newSessionBeadSnapshot(sessions)
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, snap.OpenForReconcile(), snap, dsResult.State, cfgNames, cfg, sp,
-		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
+		store, testSeatWork(cityPath, cfg, store, nil), nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.NamedSessionRoutedDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
@@ -7229,6 +7231,76 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	}
 	if strings.Contains(env.stdout.String(), "Draining session 'orphan': orphaned") {
 		t.Fatalf("expected no orphan drain log, got stdout:\n%s", env.stdout.String())
+	}
+}
+
+// The orphan drain begin ends a live runtime, so it reads the seat's
+// RefuseScope live (O4, D2(d)): a claim made since the tick's read, or held
+// under a prior alias, keeps the orphan running.
+func TestReconcileSessionBeads_OrphanDrainReadsTheRefuseScopeLive(t *testing.T) {
+	for _, tc := range []struct {
+		name, assignee string
+		late           bool // claimed after the tick's read
+	}{
+		{name: "claimed since the tick's read", assignee: "orphan", late: true},
+		{name: "a prior alias", assignee: "morsov"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+			_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
+			session := env.createSessionBead("orphan", "orphan")
+			env.markSessionActive(&session)
+			env.setSessionMetadata(&session, map[string]string{
+				"alias_history": "morsov",
+				"last_woke_at":  env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
+			})
+			sw := testSeatWork(env.city, env.cfg, env.store, nil)
+			claim := func() {
+				if _, err := env.store.Create(beads.Bead{Title: "claimed", Type: "task", Status: "open", Assignee: tc.assignee}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.late {
+				claim()
+			}
+			// An earlier question loads the tick's read.
+			if _, err := sessionHasOpenAssignedWorkForReachableStore(sw, env.sessionInfo(session.ID)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.late {
+				claim()
+			}
+			snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads([]beads.Bead{session}))
+			reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), env.city, snap.OpenForReconcile(), snap, env.desiredState,
+				configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store, sw, nil, nil, nil, nil, env.dt, nil,
+				map[string]int{}, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr)
+			if ds := env.dt.get(session.ID); ds != nil {
+				t.Fatalf("orphan drained over work under %q (%+v)", tc.assignee, ds)
+			}
+		})
+	}
+}
+
+// RefuseScope (O4) is the wide set, never a transient pool slot alias.
+func TestRefuseScopeDropsOnlyATransientSlotsAliases(t *testing.T) {
+	slotSeat := sessionpkg.Info{ID: "gc-1", SessionNameMetadata: "worker-gc-1", Template: "worker", Alias: "rig/worker-1", AliasHistory: []string{"rig/worker-0"}, PoolSlot: "1", PoolManaged: true}
+	named := slotSeat
+	named.Template, named.Alias, named.AliasHistory = "pooled", "nux", []string{"morsov"}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "pooled", Namepool: "names.txt"}}}
+	for _, tc := range []struct {
+		name string
+		info sessionpkg.Info
+		cfg  *config.City
+		want string
+	}{
+		{"a transient slot", slotSeat, cfg, "gc-1,worker-gc-1"},
+		{"a namepool seat", named, cfg, "gc-1,worker-gc-1,nux,morsov"},
+		{"an unresolved agent keeps its aliases", slotSeat, &config.City{}, "gc-1,worker-gc-1,rig/worker-1,rig/worker-0"},
+	} {
+		if got := strings.Join(refuseScope(tc.info, tc.cfg).scopeIDs(), ","); got != tc.want {
+			t.Errorf("%s: RefuseScope = %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }
 

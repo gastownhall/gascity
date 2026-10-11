@@ -137,6 +137,7 @@ func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
 		Census: readCensus(t, gatherNow, censusLegs(rowLeg, cache)), Mislabelled: map[rowKey]bool{},
 		LegStores: map[string]beads.Store{rowLeg: cache}, SessionsStore: cache,
 	}
+	w.WorkLegs = workLegsFromCensus(w.CityPath, w.Env.Cfg, cityWorkLeg{store: cache}, nil)
 	k.p = newEffectPass(w, &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}})
 	k.p.Clock, k.p.Runtime = newFakePlannerClock(gatherNow), k.leaf
 	k.p.seam = func(_ context.Context, at txSeam, _ intent, section, attempt int) error {
@@ -451,11 +452,11 @@ func TestTxReadsTheFenceLegs(t *testing.T) {
 	if f.Attach != "" || f.Pending != "" || f.Idle || f.Work.Free {
 		t.Fatalf("fence %+v (work %+v), want detached, nothing pending, active since the pass, work found", f, f.Work)
 	}
-	k.p.reads.city = blindWriteRefusingStore{inner: failingList{k.cache}}
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: failingList{k.cache}}}, nil)
 	if k.run(context.Background(), spec); f.Work.Free || f.Work.Err == nil {
 		t.Fatalf("failed work read: %+v, want work assumed, with its error", f.Work)
 	}
-	k.p.reads.city = nil
+	k.p.reads.legs = WorkLegs{}
 	if k.run(context.Background(), spec); f.Work.Free || !errors.Is(f.Work.Err, errNoReadStore) {
 		t.Fatalf("no store: %+v, want work assumed", f.Work)
 	}
@@ -1084,16 +1085,16 @@ func TestTxReadStoresNeedsForProbeResetAndCallSeam(t *testing.T) {
 	var reads effectReads
 	probe := probed(func(_ context.Context, r effectReads, _ txView) (int, error) { reads = r; return 7, nil }, func(txView, int, error) txStep { return txStep{} })
 	k.run(context.Background(), effectSpec{sections: []section{probe}})
-	if reads.city != nil {
+	if reads.legs.work != nil {
 		t.Fatal("a Probe reached the stores without capReadStores")
 	}
 	var leaked any
 	next := section{Decide: func(v txView) txStep { leaked = v.probe; return txStep{} }}
 	k.run(context.Background(), effectSpec{caps: capReadStores, sections: []section{probe, next}})
-	if reads.city == nil || leaked != nil {
+	if reads.legs.work == nil || leaked != nil {
 		t.Fatalf("stores %+v, next section's probe %v; want the stores granted and the result not carried", reads, leaked)
 	}
-	if _, err := reads.city.Create(beads.Bead{}); !errors.Is(err, errBlindWriteRefused) {
+	if _, err := reads.legs.work.Create(beads.Bead{}); !errors.Is(err, errBlindWriteRefused) {
 		t.Fatalf("the granted city store wrote: %v", err)
 	}
 	var sawWorld *World
@@ -1140,7 +1141,7 @@ func TestTxBoundedReadsFailClosed(t *testing.T) {
 	if s := k.run(context.Background(), effectSpec{sections: []section{sec}}); s.Outcome != settledNoop || probeErr == nil || !bounded {
 		t.Fatalf("settlement %+v, probe error %v, bounded %t; want the panic read as a failed, bounded Probe", s, probeErr, bounded)
 	}
-	k.p.reads.city = blindWriteRefusingStore{inner: panickingList{k.cache}}
+	k.p.reads.legs = workLegsFromCensus("", nil, cityWorkLeg{store: blindWriteRefusingStore{inner: panickingList{k.cache}}}, nil)
 	var w *txWork
 	k.run(context.Background(), effectSpec{needs: needs{Legs: legWork}, sections: []section{{Decide: func(v txView) txStep { w = v.Fence.Work; return txStep{} }}}})
 	if w == nil || w.Free || w.Err == nil {
@@ -1213,7 +1214,7 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 	var w beads.ConditionalWriter
 	var err error
 	sec := probed(func(_ context.Context, r effectReads, _ txView) (int, error) {
-		w, _, err = beads.ResolveConditionalWriter(r.city)
+		w, _, err = beads.ResolveConditionalWriter(r.legs.work)
 		return 0, nil
 	}, func(txView, int, error) txStep { return txStep{} })
 	var around effectReads
@@ -1221,8 +1222,8 @@ func TestTxReadStoresAreReadOnly(t *testing.T) {
 		around = a.reads
 		return run()
 	}})
-	if w != nil || around.city == nil {
-		t.Fatalf("the read-only city store resolved a conditional writer (%v); around got stores %t", err, around.city != nil)
+	if w != nil || around.legs.work == nil {
+		t.Fatalf("the read-only city store resolved a conditional writer (%v); around got stores %t", err, around.legs.work != nil)
 	}
 }
 

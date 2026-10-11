@@ -100,7 +100,7 @@ func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+		finalizeDrainAckStoppedSession(e.cfg, e.mem, testSeatWork(e.city, e.cfg, e.mem, nil), info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
 		assertDrainedUserHold(t, e.reload(t, e.seat.ID), string(session.SleepReasonIdle))
 		if starts := e.readyTicks(t, work, name, 3); starts != 0 || e.sp.IsRunning(name) {
 			t.Fatalf("drain-acked suspended seat started %d times (running=%v), want it held down", starts, e.sp.IsRunning(name))
@@ -173,7 +173,7 @@ func TestDrainAckFinalizeKeepsAHeldSeatOpen(t *testing.T) {
 		if err := front.ApplyPatch(b.ID, session.DrainAckStopPendingPatch(env.clk.Now())); err != nil {
 			t.Fatal(err)
 		}
-		finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", true,
+		finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID), "worker", true,
 			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr)
 		got, _ := env.store.Get(b.ID)
 		if closed := got.Status == "closed"; closed == held {

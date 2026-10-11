@@ -992,7 +992,7 @@ func TestReassignWorkAssignedToRetiredSessionBeadLogsAndContinuesPastARefusal(t 
 	second := seedClaimedBead(t, mem, "retired-session")
 
 	var stderr strings.Builder
-	reassignWorkAssignedToRetiredSessionBead("", nil, incapableWorkStore{Store: mem}, nil, beads.Bead{ID: "retired-session"}, "successor-session", &stderr)
+	reassignWorkAssignedToRetiredSessionBead(testWorkLegs("", nil, incapableWorkStore{Store: mem}, nil), incapableWorkStore{Store: mem}, beads.Bead{ID: "retired-session"}, "successor-session", &stderr)
 
 	for _, id := range []string{first.ID, second.ID} {
 		if !strings.Contains(stderr.String(), "reassigning work "+id+" from retired session retired-session") {

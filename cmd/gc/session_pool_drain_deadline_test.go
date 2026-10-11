@@ -1029,13 +1029,14 @@ func TestReconcileSessionBeads_DrainDeadlineRefusedCloseLeavesNoProvenance(t *te
 }
 
 // workAppearsAfterProbeStore models the agent claiming a bead in the window
-// between the retirement's work probe and its next fence: the first assignee
-// query answers honestly (no work), and creating the claim as a side effect of
-// that query means every later probe sees it.
+// between the retirement's work probe and its next fence: the pre-kill
+// probe's (session ID, in_progress) list answers honestly (no work), and the
+// claim it creates on returning is seen by every later probe. The probe reads
+// its lists concurrently, so the trigger is that one query, once.
 type workAppearsAfterProbeStore struct {
 	beads.Store
 	sessionID string
-	fired     bool
+	fired     sync.Once
 }
 
 func newWorkAppearsAfterProbeStore(inner beads.Store, sessionID string) *workAppearsAfterProbeStore {
@@ -1043,18 +1044,19 @@ func newWorkAppearsAfterProbeStore(inner beads.Store, sessionID string) *workApp
 }
 
 func (s *workAppearsAfterProbeStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if !s.fired && strings.TrimSpace(q.Assignee) != "" {
-		s.fired = true
-		items, err := s.Store.List(q)
+	if q.Assignee != s.sessionID || q.Status != "in_progress" {
+		return s.Store.List(q)
+	}
+	items, err := s.Store.List(q)
+	s.fired.Do(func() {
 		if _, createErr := s.Create(beads.Bead{
 			Title: "claimed during the retirement window", Type: "task",
 			Status: "in_progress", Assignee: s.sessionID,
 		}); createErr != nil {
 			panic("seeding raced work: " + createErr.Error())
 		}
-		return items, err
-	}
-	return s.Store.List(q)
+	})
+	return items, err
 }
 
 // Scope pin for the population this bound does NOT own. A seat in
@@ -1141,18 +1143,21 @@ type workAppearsAfterStopStore struct {
 	sp        *runtime.Fake
 	name      string
 	sessionID string
-	fired     bool
+	fired     sync.Once
 }
 
+// List creates the claim on the first (session ID, in_progress) list after
+// the stop, before answering it, so the probe after the stop sees it.
 func (s *workAppearsAfterStopStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if !s.fired && strings.TrimSpace(q.Assignee) != "" && !s.sp.IsRunning(s.name) {
-		s.fired = true
-		if _, err := s.Create(beads.Bead{
-			Title: "claimed after the stop", Type: "task",
-			Status: "in_progress", Assignee: s.sessionID,
-		}); err != nil {
-			panic("seeding post-stop work: " + err.Error())
-		}
+	if q.Assignee == s.sessionID && q.Status == "in_progress" && !s.sp.IsRunning(s.name) {
+		s.fired.Do(func() {
+			if _, err := s.Create(beads.Bead{
+				Title: "claimed after the stop", Type: "task",
+				Status: "in_progress", Assignee: s.sessionID,
+			}); err != nil {
+				panic("seeding post-stop work: " + err.Error())
+			}
+		})
 	}
 	return s.Store.List(q)
 }
