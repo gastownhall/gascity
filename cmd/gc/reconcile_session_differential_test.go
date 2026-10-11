@@ -206,11 +206,6 @@ var parityUnported = map[string]parityEntry{
 		"C7b2 (A14's named restart in place, SESS-557)", "legacy kills a drifted named row's runtime and restarts it in place in the tick (ConfigDriftResetPatch, the start and its commit); v2's A14 leaves the row alone until C7b2 brings the restart with its effect",
 		append([]string{"continuation_epoch", "generation", "state_reason", "creation_complete_at", "awake_started_at", "last_woke_at", "primed_at", "prompt_hash", "started_config_hash"}, parityStartKeys...),
 	},
-	"C7b2 live-apply": {"C7b2 (A14's live RunLive, SESS-565)", "legacy runs a live drift's session_live again (RunLive) and records the live hashes and session.updated; v2's A14 leaves the row alone until C7b2 brings RunLive with its effect", []string{"started_live_hash", "live_hash"}},
-	"C7b2 drift-repair": {
-		"C7b2 (A14's asleep named repair, SESS-566/568)", "legacy repairs an asleep named row's drift (resetConfiguredNamedSessionForConfigDriftInfo: the baseline cleared, the key rotated or cleared, the continuation reset); v2's A14 leaves the row alone until C7b2 brings the repair with its effect",
-		[]string{"started_config_hash", "started_live_hash", "live_hash", "session_key", "continuation_reset_pending", "restart_requested"},
-	},
 	// Unported with no fixture, since neither twin reads a provider-health
 	// registry (legacy's gate is nil there): legacy's ADR-0013 episode
 	// bookkeeping around A18's red skip, recordRedSkip, recordGreenTick and
@@ -257,7 +252,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	intentSignalFresh: regexp.MustCompile(`\bA20\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
-	intentRekey: regexp.MustCompile(`\bS4\b`),
+	intentRekey:     regexp.MustCompile(`\bS4\b`),
+	intentLiveApply: regexp.MustCompile(`\bA14 config drift\b`), // SESS-565's RunLive
 	// S1's start (C5a1's effect, A17/A18's kind) owns its Launch and
 	// PreWake rows; S1's adopt owns no row yet.
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),
@@ -853,6 +849,11 @@ func (w *v2World) once(t *testing.T) bool {
 	admitted := intentKeys(s.p.out.record.Load().Admitted)
 	for len(s.parked) > 0 {
 		s.release(0)
+	}
+	for _, st := range s.p.settlements.drain() { // the facts the next pass records first, recorded at their tick
+		s.p.applyFacts(st.Facts, s.clk.Now())
+		st.Facts = effectFacts{}
+		s.p.settlements.post(st)
 	}
 	if env, err = s.env.externalReadsEnv(); err != nil {
 		t.Fatalf("v2 lane env: %v", err)
@@ -1502,7 +1503,20 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "an asleep named row's drift is repaired", Behaviors: []string{"SESS-566", "SESS-568"}, City: chatOnDemand,
 			Rows:    []parityRow{onDemand("state", "asleep", "started_config_hash", drifted, "session_key", "conversation-1")},
-			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*repair": "C7b2 drift-repair"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		// A wanted one (always): legacy repairs it, its key rotated, then
+		// starts it on a fresh conversation; v2's start carries the repair in
+		// its PreWake (C7b2-1). A v5 hash is only rebaselined (SESS-567).
+		{
+			Name: "a wanted asleep named row's drift is repaired and started", Behaviors: []string{"SESS-566", "SESS-568"}, City: chat(false),
+			Rows:    []parityRow{onDemand("configured_named_mode", "always", "state", "asleep", "started_config_hash", drifted, "session_key", "conversation-1")},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "provider:RemoveMeta chat": "§12.2#38 start-meta-clears"},
+		},
+		{
+			Name: "a wanted asleep named row's v5 hash is rebaselined and started", Behaviors: []string{"SESS-567"}, City: chat(false),
+			Rows:    []parityRow{onDemand("configured_named_mode", "always", "state", "asleep", "started_config_hash", "v5:core")}, // a keyed start waits out a stale-key window the twin's clock never reaches
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "provider:RemoveMeta chat": "§12.2#38 start-meta-clears"},
 		},
 		// A16 (C7b1): C8's execution-stalled request, a drain no lens cancels.
 		// The twin runs no execution backstop: TestDecideRowExecutionStalled.

@@ -26,6 +26,7 @@ const (
 	intentAdopt           = "adopt"             // S1's adopt: commits a live runtime, never launches
 	intentCreate          = inflightCreate      // C1; a named create may reopen its closed row (C2)
 	intentRekey           = "rekey"             // S4
+	intentLiveApply       = "live-apply"        // A14's RunLive (SESS-565)
 	intentZombie          = "zombie"            // A12's classification (S5)
 	intentDrainBegin      = "drain-begin"       // D1, D2
 	intentDrainBeginFresh = "drain-begin-fresh" // a begin that reads fresh legs (F4) or re-proves idleness

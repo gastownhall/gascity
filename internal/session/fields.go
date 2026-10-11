@@ -198,7 +198,8 @@ func with(fields []Field, asClear bool, site Site, keys ...string) []Field {
 // fields is the registry, grouped by class, then v2's writers: A7's
 // identity (M1), A8's baseline (M2), and the create (C1) and named reopen
 // effects, which stamp a row's whole starting state.
-var fields = withObserved(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
+var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftRepair"),
+	"config_drift_deferred_at", "config_drift_deferred_key", "attached_config_drift_deferred_at", "attached_config_drift_deferred_key", "session_key"), false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
 	"template", "session_origin", "pool_managed", "pool_slot", "agent_name", "dependency_only", NamedSessionMetadataKey,
 	NamedSessionIdentityMetadata, NamedSessionModeMetadata, "alias", "alias_history", "pool_alias_conflict", "pool_alias_conflict_count",
 	"pool_alias_conflict_at", "synced_at", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
@@ -247,6 +248,8 @@ var observed = []struct {
 	{legacy(srcTransition, "CommitStartedPatch"), true, []string{"reset_committed_at"}},
 	{legacy(srcTransition, "ConfigDriftResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
 	{legacy(srcTransition, "ConfigDriftResetPatch"), true, []string{"restart_requested"}},
+	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "live_hash", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "started_config_hash", "started_live_hash", "startup_dialog_verified", "state"}},
+	{v2(srcTransition, "ConfigDriftAsleepResetPatch"), true, []string{"restart_requested"}},
 	{legacy(srcTransition, "PreWakePatch"), false, []string{"sleep_reason"}},
 	// A fresh wake's conversation reset (applyFreshWakeConversationReset),
 	// which v2's PreWake reuses: the baseline cleared for its commit.

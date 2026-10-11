@@ -185,6 +185,21 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = a7Rec.keys
 		}},
+		{"v2 A14 drift repair", "attached_config_drift_deferred_at attached_config_drift_deferred_key config_drift_deferred_at config_drift_deferred_key continuation_reset_pending last_woke_at live_hash pending_create_claim pending_create_started_at primed_at priming_attempted_at prompt_hash restart_requested session_key started_config_hash started_live_hash startup_dialog_verified state", []string{"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch", "cmd/gc/reconcile_arms_drift.go:rowFacts.driftRepair"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			withoutA7(t)
+			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
+			c, _ := baselineCase(t, livenessGone, desireKeep, nil, append([]string{
+				"state", "asleep", "started_config_hash", runtime.FingerprintVersion + ":stale", "restart_requested", "true",
+				"config_drift_deferred_key", "k", "config_drift_deferred_at", rowAt(-time.Hour), "attached_config_drift_deferred_key", "k", "attached_config_drift_deferred_at", rowAt(-time.Hour),
+			}, named...)...)
+			c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
+			c.a.Snapshot.Entries[c.k].InDesired = true
+			repairRec := newSessionKeyRecorder(c.store)
+			if it, st := c.run(t, gone().tmux(), repairRec); it.Reason != decideDriftRepair || st.Outcome != settledLanded {
+				t.Fatalf("the repair settled %+v for %+v", st, it)
+			}
+			rec.keys = repairRec.keys
+		}},
 		{"v2 A8 baseline effect", "core_hash_breakdown live_hash started_config_hash started_launch_hash started_live_hash started_provision_hash", []string{"cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v5:core")
 			baseRec := newSessionKeyRecorder(c.store)
@@ -390,6 +405,12 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{"restart_requested", "true"},
 			patchSite(func(session.Info) session.MetadataPatch {
 				return session.ConfigDriftResetPatch(session.StateAsleep, "key", now)
+			}),
+		},
+		"internal/session/lifecycle_transition.go:ConfigDriftAsleepResetPatch": {
+			[]string{"restart_requested", "true"},
+			patchSite(func(session.Info) session.MetadataPatch {
+				return session.ConfigDriftAsleepResetPatch("key")
 			}),
 		},
 		"internal/session/kill_fence.go:KillPendingPatch": {

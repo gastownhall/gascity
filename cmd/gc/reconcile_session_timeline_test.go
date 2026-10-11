@@ -905,7 +905,7 @@ func baselineTimeline() []timelineFixture {
 // its claim, so its stored hashes are this generation's: deferral keys left on
 // the converged seat are cleared (SESS-562); attached to a drift it stamps
 // its deferral (SESS-553), and detached inside five minutes it waits
-// (SESS-554). A live drift runs session_live again (SESS-565), C7b2's.
+// (SESS-554). A live drift runs session_live again (SESS-565).
 func driftTimeline() []timelineFixture {
 	one := func() *config.City {
 		cfg := tlCity()
@@ -930,7 +930,6 @@ func driftTimeline() []timelineFixture {
 	drifted := runtime.FingerprintVersion + ":drifted"
 	started := tlMerged(tlRestarted(), map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"})
 	standing := tlPol("gc-1")
-	liveApplied := map[string]string{"row:gc-1:started_live_hash": "C7b2 live-apply", "provider:RunLive s-gc-1": "C7b2 live-apply", "event:session.updated worker null": "C7b2 live-apply"}
 	deferrals := tlFixture("drift deferrals through time", one, []parityRow{row}, tlClaim("in_progress", "worker"), nil,
 		[]parityStep{
 			{Name: "deferral keys left on the converged seat", Advance: time.Minute, Op: set("config_drift_deferred_key", "k", "config_drift_deferred_at", tlAt(0), "attached_config_drift_deferred_key", "k", "attached_config_drift_deferred_at", tlAt(0))},
@@ -941,7 +940,7 @@ func driftTimeline() []timelineFixture {
 	live := tlFixture("a live drift on a seat", one, []parityRow{row}, tlClaim("in_progress", "worker"), nil,
 		[]parityStep{
 			{Name: "the live hash drifts", Advance: time.Minute, Op: set("started_live_hash", runtime.FingerprintVersion+":other")},
-		}, standing, map[string]map[string]string{"seed": started, "the live hash drifts": liveApplied})
+		}, standing, map[string]map[string]string{"seed": started})
 	live.Behaviors = []string{"SESS-565"}
 	return []timelineFixture{deferrals, live}
 }

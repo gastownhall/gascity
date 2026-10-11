@@ -377,7 +377,7 @@ var stateWriters = map[string]string{
 	"internal/session/lifecycle_transition.go:ClearWakeBlockersPatch":         "patch builder",
 	"internal/session/lifecycle_transition.go:ClosePatch":                     "patch builder",
 	"internal/session/lifecycle_transition.go:CommitStartedPatch":             "patch builder (S2's commit)",
-	"internal/session/lifecycle_transition.go:ConfigDriftResetPatch":          "patch builder",
+	"internal/session/lifecycle_transition.go:configDriftReset":               "patch builder", // ConfigDriftResetPatch's and ConfigDriftAsleepResetPatch's
 	"internal/session/lifecycle_transition.go:ConfirmStartedPatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:PreWakePatch":                   "patch builder (S1's PreWake)",
 	"internal/session/store.go:operatorSuspendLife":                           "patch builder (operator suspend)",

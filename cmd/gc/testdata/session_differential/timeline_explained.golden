@@ -91,13 +91,6 @@ provider:RemoveMeta s-gc-1 resolved
 row:gc-1:currently_processing_bead_id resolved
 row:gc-1:state resolved
 ## 1 the live hash drifts (+1m40s)
-@ +1m20s
-event:session.updated worker null legacy="1" v2="" [C7b2 live-apply]
-provider:RunLive s-gc-1 legacy="1" v2="" [C7b2 live-apply]
-row:gc-1:started_live_hash legacy="<changed>" v2="<changed>" [C7b2 live-apply]
-@ +1m30s
-event:session.updated worker null resolved
-provider:RunLive s-gc-1 resolved
 === a live quarantined row 29s after wake
 ## 0 seed (+0s)
 @ +0s

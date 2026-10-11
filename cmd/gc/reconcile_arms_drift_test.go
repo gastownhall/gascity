@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -65,8 +66,11 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "an active stop request holds the drain", meta: append([]string{"started_config_hash", stale}, intentAt(drainIdle, "3")...), alive: true},
 		{name: "a resolved drift clears its deferral keys", meta: []string{"started_config_hash", core, "started_live_hash", live, "attached_config_drift_deferred_key", key}, alive: true, wantKind: intentRowHeal, wantReason: decideDriftResolved},
 		{name: "a converged row", meta: []string{"started_config_hash", core, "started_live_hash", live}, alive: true},
-		{name: "a live drift's RunLive is C7b2's", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true},
-		{name: "an asleep named drift's repair is C7b2's", meta: append([]string{"state", "asleep", "started_config_hash", stale}, named...)},
+		{name: "a live drift runs session_live again", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true, wantKind: intentLiveApply, wantReason: decideLiveApply},
+		{name: "another version's live hash is A8's", meta: []string{"started_config_hash", core, "started_live_hash", "v5:other"}, alive: true},
+		{name: "an asleep named drift is repaired", meta: append([]string{"state", "asleep", "started_config_hash", stale}, named...), wantKind: intentRowHealFresh, wantReason: decideDriftRepair},
+		{name: "an asleep named v5 hash is A8's, never repaired", meta: append([]string{"state", "asleep", "started_config_hash", "v5:core"}, named...)},
+		{name: "an in-place restart leased in creating keeps its hash", meta: append([]string{"state", "creating", "started_config_hash", stale, "session_key", "k-1", "pending_create_claim", "true", "pending_create_started_at", rowAt(-10 * time.Second)}, named...)},
 		{name: "an asleep pool row's drift is no named repair", meta: []string{"state", "asleep", "started_config_hash", stale}},
 		{name: "no stored hash never drifts", meta: []string{"started_live_hash", live}, alive: true},
 		{name: "an undesired row", meta: []string{"started_config_hash", stale}, alive: true, undesired: true},
@@ -93,7 +97,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
 				w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: tc.attached, Uncertain: tc.unsure}}
 			})
-			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift}, it.Reason)
+			drift := slices.Contains([]string{decideDriftAttached, decideDriftPinned, decideDriftResolved, decideDrainBegin + drainConfigDrift, decideDriftRepair, decideLiveApply}, it.Reason)
 			if tc.wantKind == "" && drift || tc.wantKind != "" && (it.Kind != tc.wantKind || it.Reason != tc.wantReason) { // another arm may take a row A14 leaves
 				t.Fatalf("decideRow = (%q, %q) %v, want (%q, %q)", it.Kind, it.Reason, it.Patch, tc.wantKind, tc.wantReason)
 			}
@@ -172,5 +176,94 @@ func decideArm(arm func(*rowFacts) (intent, bool)) func(*testing.T, []string, fu
 		r.row, r.found = w.Census.Rows[k]
 		it, _ := arm(r)
 		return it, r.next
+	}
+}
+
+// Kills a drifted named row resuming its old conversation on the new
+// config, and a repair that pre-empts a wanted row's start (C7b2-1; the
+// #7603 wedge; SESS-566/568): an unwanted asleep named row is repaired
+// alone, its key cleared for a provider that takes none or minted by the
+// effect for one that does; a wanted one gets its start, the repair in the
+// start's patch with the key cleared, so the PreWake's set-once fill mints
+// the fresh conversation's, and the repair kept for when the start cannot
+// run.
+func TestDriftRepairComposesIntoTheStart(t *testing.T) {
+	withoutA7(t)
+	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	stale := runtime.FingerprintVersion + ":stale"
+	meta := []string{
+		"state", "asleep", "started_config_hash", stale, "session_key", "conversation-1",
+		"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always",
+	}
+	minting := TemplateParams{TemplateName: "worker", Command: "run", ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}
+	for _, tc := range []struct {
+		name  string
+		want  desire
+		start bool
+		tp    TemplateParams
+	}{{"unwanted", desireKeep, false, tp}, {"wanted", desireWake, true, tp}, {"unwanted, its provider minting", desireKeep, false, minting}, {"wanted, its provider minting", desireWake, true, minting}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := tc.tp
+			it, _ := decideDrain(t, meta, func(e *selectionEntry) {
+				e.InDesired, e.Desired, e.Liveness = true, tc.want, livenessGone
+			}, func(w *World) {
+				info := w.Census.Rows[rowKeyOf("gc-1")].Info
+				w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: runtime.NewFake()}
+				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+			})
+			repair := it
+			if tc.start {
+				if it.Kind != intentStart || it.Heal == nil || it.Heal.Reason != decideDriftRepair {
+					t.Fatalf("decideRow = (%q, %q), heal %+v; want the start carrying the repair", it.Kind, it.Reason, it.Heal)
+				}
+				repair = *it.Heal
+			} else if it.Kind != intentRowHealFresh || it.Reason != decideDriftRepair {
+				t.Fatalf("decideRow = (%q, %q), want the repair alone", it.Kind, it.Reason)
+			}
+			for k, v := range map[string]string{"started_config_hash": "", "continuation_reset_pending": "true"} {
+				if got, ok := it.Patch[k]; !ok || got != v {
+					t.Fatalf("patch %v, want %s=%q", it.Patch, k, v)
+				}
+			}
+			// The key: cleared where the start's PreWake mints it, or a provider
+			// that takes none launches bare; a lone repair for a minting
+			// provider leaves it to the effect's mint.
+			if key, ok := it.Patch["session_key"]; ok == (!tc.start && tc.tp.ResolvedProvider != nil) || key != "" {
+				t.Fatalf("patch %v: session_key %q (set %v) wrong for this case", it.Patch, key, ok)
+			}
+			if repair.Patch["state"] != "asleep" {
+				t.Fatalf("repair %v, want it asleep", repair.Patch)
+			}
+		})
+	}
+}
+
+// Kills a lone repair resuming its old conversation (SESS-568): for a
+// provider that takes a session id, the repair's write mints a new key in
+// its effect; another kind's write is left alone.
+func TestMintRepairKey(t *testing.T) {
+	info := session.Info{ID: "gc-1", SessionKey: "conversation-1"}
+	w := &World{Templates: &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: TemplateParams{ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}}}}}
+	step := mintRepairKey(txView{It: intent{Reason: decideDriftRepair}, World: w, Row: info}, txStep{Write: session.MetadataPatch{"state": "asleep"}})
+	if key := step.Write["session_key"]; key == "" || key == "conversation-1" {
+		t.Fatalf("repair write %v, want a fresh key", step.Write)
+	}
+	other := mintRepairKey(txView{It: intent{Reason: decideDeadRuntimeHeal}, World: w, Row: info}, txStep{Write: session.MetadataPatch{"state": "asleep"}})
+	if _, ok := other.Write["session_key"]; ok {
+		t.Fatalf("another heal's write %v, want no key", other.Write)
+	}
+}
+
+// Kills a failed RunLive recorded as applied (SESS-565: legacy logs, writes
+// nothing, and tries again): the record step fails with the cause and
+// writes no hash.
+func TestLiveAppliedStepFailsOnARunLiveError(t *testing.T) {
+	step := liveAppliedStep(txView{prevErr: errors.New("no pane")})
+	if step.Fail != causeRunLive || len(step.Write) != 0 {
+		t.Fatalf("step %+v, want failed with no write", step)
+	}
+	ok := liveAppliedStep(txView{prev: "v6:live", World: &World{Templates: &templateMemo{}}})
+	if ok.Write["started_live_hash"] != "v6:live" || len(ok.Facts.Events) != 1 {
+		t.Fatalf("step %+v, want the live hashes and session.updated", ok)
 	}
 }

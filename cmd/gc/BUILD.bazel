@@ -436,6 +436,7 @@ go_library(
         "reconcile_effect_close.go",
         "reconcile_effect_create.go",
         "reconcile_effect_drain.go",
+        "reconcile_effect_drift.go",
         "reconcile_effect_fence.go",
         "reconcile_effect_heal.go",
         "reconcile_effect_launch.go",

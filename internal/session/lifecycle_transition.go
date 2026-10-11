@@ -526,6 +526,23 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 // config drift. Creating claims a new runtime start; asleep stays dormant
 // until the next normal wake reason.
 func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) MetadataPatch {
+	patch := configDriftReset(nextState, sessionKey)
+	if nextState == StateCreating || nextState == StateStartPending {
+		patch["pending_create_claim"] = "true"
+		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
+	}
+	return patch
+}
+
+// ConfigDriftAsleepResetPatch is ConfigDriftResetPatch(StateAsleep, ...),
+// which reads no clock: the v2 asleep named repair's (SESS-568).
+func ConfigDriftAsleepResetPatch(sessionKey string) MetadataPatch {
+	return configDriftReset(StateAsleep, sessionKey)
+}
+
+// configDriftReset is a config-drift reset into nextState, its pending
+// create claim (a start's) aside.
+func configDriftReset(nextState State, sessionKey string) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
 		"last_woke_at":               "",
@@ -535,10 +552,6 @@ func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) Me
 		"pending_create_started_at":  "",
 	}
 	applyFreshWakeConversationReset(patch)
-	if nextState == StateCreating || nextState == StateStartPending {
-		patch["pending_create_claim"] = "true"
-		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
-	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}

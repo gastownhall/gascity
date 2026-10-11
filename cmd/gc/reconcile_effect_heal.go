@@ -45,7 +45,7 @@ var healSections = []section{{Decide: func(v txView) txStep {
 	if v.It.Reason == decideDeadRuntimeHeal && step.Class.Get("quarantined_until") != "" { // the death's accrual quarantines
 		step.Facts.Quarantined = sessionAgentMetricIdentityInfo(v.Row, v.World.Env.Cfg)
 	}
-	return step
+	return mintRepairKey(v, step)
 }}}
 
 // healCause names a fresh heal's refusal by its fresh read: a backend that
