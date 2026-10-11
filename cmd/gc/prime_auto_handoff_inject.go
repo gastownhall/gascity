@@ -39,8 +39,7 @@ func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, ho
 		if sessionStart != nil {
 			startMail = sessionStartMailInjection(sessionStart.store, sessionStart.liveInfo(), cityPath, stderr)
 		} else {
-			autoHandoff, ids, provider := sessionStartAutoHandoffInjection(stderr)
-			startMail = sessionStartMail{autoHandoff: autoHandoff, autoHandoffIDs: ids, ordinaryProvider: provider}
+			startMail = sessionStartMailFromCity(stderr)
 		}
 		injection.text += startMail.autoHandoff.text
 		if consumeHandoff {
@@ -184,11 +183,20 @@ func primeUnreadMailMessagesFromInbox(mp mail.Provider, inbox *beadmail.Inbox) [
 // handoff persists this continuation class through beadmail regardless of any
 // separately configured ordinary-mail provider.
 func sessionStartAutoHandoffInjection(stderr io.Writer) (primeHookContextInjection, map[string]bool, mail.Provider) {
+	startMail := sessionStartMailFromCity(stderr)
+	return startMail.autoHandoff, startMail.autoHandoffIDs, startMail.ordinaryProvider
+}
+
+// sessionStartMailFromCity is sessionStartMailInjection over a freshly opened
+// city store, for a caller that holds no store or proven session. The whole
+// sessionStartMail is returned, so a closed own session (ownSessionClosed)
+// still silences the ordinary-mail block.
+func sessionStartMailFromCity(stderr io.Writer) sessionStartMail {
 	store, cityPath, code := openCityStoreWithPath(io.Discard, "gc prime")
 	if store == nil || code != 0 {
-		return primeHookContextInjection{}, nil, nil
+		return sessionStartMail{}
 	}
-	return sessionStartAutoHandoffInjectionWithStore(store, cityPath, stderr)
+	return sessionStartMailInjection(store, nil, cityPath, stderr)
 }
 
 // sessionStartAutoHandoffInjectionWithStore is sessionStartAutoHandoffInjection

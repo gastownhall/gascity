@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -58,5 +60,29 @@ func TestPrimeUnreadMailFromInboxMatchesPerCandidateCheck(t *testing.T) {
 	}
 	if len(got) != 5 {
 		t.Fatalf("unread = %d messages, want the 5 addressed to the session's routes and GC_AGENT", len(got))
+	}
+}
+
+// TestSessionStartWithoutAProvenSessionServesNothingForAClosedSession pins the
+// SessionStart mail path for a caller that proved no session: when the hook's
+// own session bead is closed, the ordinary-mail block surfaces nothing either,
+// rather than falling back to the identity candidates, where GC_ALIAS reaches
+// whichever session holds the alias now.
+func TestSessionStartWithoutAProvenSessionServesNothingForAClosedSession(t *testing.T) {
+	f := newHookBudgetFixture(t)
+	f.sendMail(t, "status please")
+	store, err := openCityStoreAt(f.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if err := store.Close(f.sessionID); err != nil {
+		t.Fatalf("Close(session): %v", err)
+	}
+	resetHookBudgetProcessState(t)
+
+	var stderr bytes.Buffer
+	injection := primeHookContextSuffix(f.cityDir, nil, true, primeHookContext{HookEventName: "SessionStart"}, &stderr, false)
+	if strings.Contains(injection.text, "status please") {
+		t.Fatalf("SessionStart for a closed session surfaced its alias's mail:\n%s\nstderr=%s", injection.text, stderr.String())
 	}
 }

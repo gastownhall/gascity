@@ -11,8 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// Exact hook identity (engdocs/design/worker-hook-request-budget.md, "Exact
-// hook identity").
+// Exact hook identity.
 //
 // A session-side hook knows its own session bead id: template resolution
 // projects it as GC_SESSION_ID. One Get of that id is the whole identity — the

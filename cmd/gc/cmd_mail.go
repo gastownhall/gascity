@@ -575,6 +575,13 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 // Injecting hooks probe the API for degraded-read notices, then use the local
 // path because provider-backed mail may need to perform delivery side effects
 // after successful injection.
+//
+// Only the local path refuses a no-argument check whose own session
+// (GC_SESSION_ID) is closed (refuseClosedHookSession), so the two paths differ
+// there: an injecting check always takes the local path and refuses, while a
+// plain check routed to the API answers for the closed session's id. That read
+// archives nothing and does not fall back to GC_ALIAS, so it consumes and
+// leaks no successor's mail.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"

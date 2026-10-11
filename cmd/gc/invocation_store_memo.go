@@ -19,8 +19,7 @@ import (
 // A session-side hook (`gc mail check --inject`, `gc nudge drain --inject`,
 // `gc prime --hook`, ...) reaches its ledger through several helpers, and each
 // used to open the scope's store for itself. Against a remote ledger every open
-// is a handshake, so a hook paid one to five handshakes for one ledger
-// (engdocs/design/worker-hook-request-budget.md, "One store per invocation").
+// is a handshake, so a hook paid one to five handshakes for one ledger.
 //
 // While the memo is active, the shared open body (openStoreResultAtForCityScoped)
 // opens each scope once and hands every later caller a BORROWED handle: a fresh
