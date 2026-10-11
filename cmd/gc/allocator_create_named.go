@@ -150,7 +150,7 @@ func adoptLiveStamp(ctx context.Context, sp runtime.Provider, store beads.Store,
 		return fmt.Errorf("the runtime's lease: %w", err)
 	}
 	defer release()
-	if lease != nil && lease.Epoch() > 0 {
+	if lease.Epoch() > 0 {
 		// Under the record, the lease bounds the rest, not the effect's
 		// deadline: a token recorded on the row is stamped on the runtime.
 		var cancel context.CancelFunc
@@ -215,7 +215,7 @@ func recordRowToken(store beads.Store, lease *session.RuntimeLease, written sess
 		switch {
 		case row.Status == "closed" || generation != written.Generation:
 			return "", errors.New("recording instance_token: the row moved on after the create")
-		case lease != nil && !lease.HoldsMeta(row.Metadata):
+		case !lease.HoldsMeta(row.Metadata):
 			return "", errors.New("recording instance_token: the row no longer holds the runtime's lease")
 		case current == token:
 			return generation, nil
