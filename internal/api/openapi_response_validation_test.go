@@ -8,8 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pb33f/libopenapi"
-	validator "github.com/pb33f/libopenapi-validator"
+	"github.com/gastownhall/gascity/internal/api/apicontract"
 )
 
 // TestResponseBodiesMatchSpec drives a curated list of simple GET
@@ -30,13 +29,9 @@ func TestResponseBodiesMatchSpec(t *testing.T) {
 		t.Fatalf("read spec: %v", err)
 	}
 
-	doc, err := libopenapi.NewDocument(specBytes)
+	spec, err := apicontract.Load(specBytes)
 	if err != nil {
-		t.Fatalf("build document: %v", err)
-	}
-	v, errs := validator.NewValidator(doc)
-	if len(errs) > 0 {
-		t.Fatalf("construct validator: %v", errs)
+		t.Fatalf("load spec: %v", err)
 	}
 
 	state := newFakeState(t)
@@ -88,7 +83,6 @@ func TestResponseBodiesMatchSpec(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read body: %v", err)
 			}
-			resp.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
 
 			// Validate whatever the op returned against the spec —
 			// success OR declared error path. A spec-driven API has a
@@ -97,15 +91,8 @@ func TestResponseBodiesMatchSpec(t *testing.T) {
 			// that IS the signal the test is meant to catch.
 			t.Logf("%s → status %d", tc.path, resp.StatusCode)
 
-			ok, valErrs := v.ValidateHttpResponse(req, resp)
-			if !ok {
-				for _, ve := range valErrs {
-					t.Errorf("%s: %s — %s", tc.path, ve.Message, ve.Reason)
-					for _, se := range ve.SchemaValidationErrors {
-						t.Errorf("  %s at %s", se.Reason, se.FieldPath)
-					}
-				}
-				t.Fatalf("%s: response body does not match spec (see errors above). Body: %s", tc.path, string(bodyBytes))
+			if err := spec.ValidateResponse(req, resp, bodyBytes); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

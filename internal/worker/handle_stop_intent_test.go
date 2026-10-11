@@ -18,7 +18,7 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,

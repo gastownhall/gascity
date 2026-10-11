@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -45,8 +47,10 @@ type effectSpec struct {
 type caps uint8
 
 const (
-	capCreate     caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
-	capReadStores                  // the read-only city and rig stores (reads)
+	capCreate        caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
+	capReadStores                     // the read-only city and rig stores (reads)
+	capProviderStart                  // the start's provider, endpoint breaker and clock (a Call's)
+	capEpisode                        // the #46 startup-health episode record (a Call's)
 )
 
 // txCaps is what a body, Probe or Call holds: the handles its spec grants,
@@ -60,7 +64,21 @@ type txCaps struct {
 	exits   *[]func(final settlement) // onExit's, run at every exit
 	create  *createPass               // capCreate
 	creates *createEffects
-	reads   effectReads // capReadStores: read-only, blind writes refused
+	reads   effectReads         // capReadStores: read-only, blind writes refused
+	start   startCaps           // capProviderStart
+	episode startupHealthRecord // capEpisode
+}
+
+// startCaps are what the start's Calls hold to admit the endpoint ticket and
+// start a runtime: the composite provider, which the Call routes (RouteACP)
+// and resolves to its leaf itself, since capsFor runs before the name lock;
+// the breaker; the recorder and stderr its transitions go to; the clock.
+type startCaps struct {
+	sp       runtime.Provider
+	capacity *endpointCapacityGuard
+	rec      events.Recorder
+	stderr   io.Writer
+	clock    plannerClock
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
@@ -79,6 +97,13 @@ func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
 	}
 	if grant&capReadStores != 0 {
 		c.reads = p.reads
+	}
+	if grant&capProviderStart != 0 {
+		c.start = p.held.start
+		c.start.sp, c.start.clock = p.Runtime, p.Clock
+	}
+	if grant&capEpisode != 0 {
+		c.episode = p.held.episode
 	}
 	return c
 }
@@ -270,15 +295,20 @@ type section struct {
 	call   func(ctx context.Context, c txCaps, in any) (any, error)
 	// callKind is the Call's kind (called), when it has one.
 	callKind callKind
-	defs     []any // the kind's own Probe and Call, which the effect lint covers
+	// The kind's own Probe, Decide and Call as given to probed and called,
+	// which the effect lint covers; each set by one write, never read by the
+	// transaction.
+	probeDef, decideDef, callDef any
 }
 
 // probed is a section whose Probe, a bounded read under both locks after the
 // transaction's own reads (it sees the expected row), hands Decide its typed
 // result. A probe past fenceProbeTimeout answers errProbeExpired. Every decide
-// passed here is a v2purity root, as a section's Decide is:
+// passed here is a v2purity root, as a section's Decide is; the probe is
+// stored, reached only through a read of section.probe (or probeDef):
 //
 //gc:pure-param decide
+//gc:stored-param probe
 func probed[P any](probe func(context.Context, effectReads, txView) (P, error), decide func(txView, P, error) txStep) section {
 	return section{
 		probe: func(ctx context.Context, r effectReads, v txView) (any, error) { return probe(ctx, r, v) },
@@ -286,7 +316,8 @@ func probed[P any](probe func(context.Context, effectReads, txView) (P, error), 
 			p, _ := v.probe.(P)
 			return decide(v, p, v.probeErr)
 		},
-		defs: []any{probe, decide},
+		probeDef:  probe,
+		decideDef: decide,
 	}
 }
 
@@ -307,14 +338,17 @@ const (
 // called is sec with a provider Call after it, run under the name lock with
 // the mutation lock released, and only like a write (the context, then the
 // latch). It takes the step's Pass, typed In, and hands the next section's
-// Decide its result (callResult[Out]).
+// Decide its result (callResult[Out]). The call is stored, reached only
+// through a read of section.call (or callDef):
+//
+//gc:stored-param call
 func called[In, Out any](kind callKind, sec section, call func(context.Context, txCaps, In) (Out, error)) section {
 	sec.callKind = kind
 	sec.call = func(ctx context.Context, c txCaps, in any) (any, error) {
 		typed, _ := in.(In)
 		return call(ctx, c, typed)
 	}
-	sec.defs = append(sec.defs, call)
+	sec.callDef = call
 	return sec
 }
 
@@ -376,14 +410,26 @@ type effectFacts struct {
 	Events     []events.Event   // recorded once drained (session.woke, ...)
 	Transition *drainTransition // legacy's drain telemetry
 	Work       *workVerdict     // a worktree verdict for the work item's backoff
+	// Noted is a fresh read that found the row's runtime alive and Current,
+	// which the planner notes in the observation cache (v5 O4).
+	Noted *notedRuntime
 }
 
-func (f effectFacts) empty() bool { return len(f.Events) == 0 && f.Transition == nil && f.Work == nil }
+// notedRuntime is a runtime name a fresh read issued at At found alive.
+type notedRuntime struct {
+	Name string
+	At   time.Time
+}
+
+func (f effectFacts) empty() bool {
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil
+}
 
 func (f *effectFacts) merge(g effectFacts) {
 	f.Events = append(f.Events, g.Events...)
 	f.Transition = cmp.Or(g.Transition, f.Transition)
 	f.Work = cmp.Or(g.Work, f.Work)
+	f.Noted = cmp.Or(g.Noted, f.Noted)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -443,7 +489,7 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, names: processNamesFor(p.World, row.Info), facts0: row.Facts, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
 	t.needs.Lease = t.needs.Lease || spec.needs.Lease // a per-intent needsFor cannot drop the record
 	if t.needs.locksName(spec) {
 		var front *session.Store
@@ -501,6 +547,7 @@ type tx struct {
 	name    string                // the runtime name, when the name lock is held
 	lease   *session.RuntimeLease // the name's lease: its flock, and with needs.Lease the row's record
 	expect  session.Info          // the row the premise expects
+	names   []string              // its template's process names, keyed on the pass's row
 	facts0  session.Facts         // its premise facts
 	basis   rowBasis              // its incarnation and token
 	started bool                  // a callStart ran, and no callStop since
@@ -533,7 +580,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		// A provider call is a write: an effect the executor abandoned first
 		// never calls, and one abandoned during it is ambiguous.
 		if ctx.Err() != nil || !t.c.latch.begin() {
-			s = ended(ctx)
+			if s.Outcome != settledLanded || i != len(sections)-1 {
+				s = ended(ctx) // a landed last section stays landed: its Call never fails the effect
+			}
 			break
 		}
 		t.view.prev, t.view.prevErr = t.callWatched(ctx, sec)
@@ -670,7 +719,7 @@ func (t *tx) done(step txStep) settlement {
 func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 	t.view.Now = t.p.Clock.Now()
 	if t.needs.Runtime {
-		rt, cause := readRuntime(ctx, t.p.Runtime, processNamesFor(t.p.World, t.expect), t.name, t.view.Now, t.p.Clock.Now)
+		rt, cause := readRuntime(ctx, t.p.Runtime, t.names, t.name, t.view.Now, t.p.Clock.Now)
 		if cause != "" {
 			return refused(cause), false
 		}

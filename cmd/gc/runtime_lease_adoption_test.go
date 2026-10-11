@@ -597,7 +597,7 @@ func TestReaperDecidesAgainUnderTheLease(t *testing.T) {
 // relaunching and writing nothing, while another holder has the name's lease,
 // and relaunches under its own lease, released, otherwise.
 func TestLaunchDriftRelaunchTakesTheRuntimeLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"}
 	env.desiredState["worker"] = tp
@@ -644,7 +644,7 @@ func TestLaunchDriftRelaunchTakesTheRuntimeLease(t *testing.T) {
 // than busy (here the row closed) is no deferral: the relaunch falls back to
 // the full restart, so the drift is not stuck.
 func TestLaunchDriftRelaunchFallsBackOnANonBusyLeaseError(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker"}
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "claude"}); err != nil {

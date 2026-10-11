@@ -120,8 +120,8 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 		run   func(t *testing.T, rec *sessionKeyRecorder)
 	}
 	steps := []step{
-		{"legacy tick: start and wake", "awake_started_at continuation_epoch continuation_reset_pending core_hash_breakdown creation_complete_at detached_at effective_sleep_after_idle generation instance_token last_woke_at live_hash pending_create_started_at requested_sleep_after_idle reset_committed_at sleep_capability sleep_intent sleep_policy_fingerprint sleep_policy_source sleep_reason started_config_hash started_launch_hash started_live_hash started_provision_hash state state_reason wake_request wake_requested_at", []string{"internal/session/lifecycle_transition.go:PreWakePatch", "internal/session/lifecycle_transition.go:CommitStartedPatch", "cmd/gc/session_sleep.go:persistSleepPolicyMetadataInfo", "cmd/gc/session_sleep.go:reconcileDetachedAtInfo"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			env := newReconcilerTestEnv()
+		{"legacy tick: start and wake", "awake_started_at continuation_epoch continuation_reset_pending core_hash_breakdown creation_complete_at detached_at effective_sleep_after_idle generation instance_token last_woke_at live_hash pending_create_started_at requested_sleep_after_idle reset_committed_at runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_capability sleep_intent sleep_policy_fingerprint sleep_policy_source sleep_reason started_config_hash started_launch_hash started_live_hash started_provision_hash state state_reason wake_request wake_requested_at", []string{"internal/session/lifecycle_transition.go:PreWakePatch", "internal/session/lifecycle_transition.go:CommitStartedPatch", "cmd/gc/session_sleep.go:persistSleepPolicyMetadataInfo", "cmd/gc/session_sleep.go:reconcileDetachedAtInfo", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			env := newReconcilerTestEnv(t)
 			env.store = rec
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			env.addDesired("worker", "worker", false)
@@ -134,13 +134,13 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 		}},
 		{"legacy drain-ack finalize", "last_woke_at pending_create_claim pending_create_started_at slept_at state state_reason", []string{"cmd/gc/session_reconciler.go:finalizeDrainAckStoppedSession"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.store = rec
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			b := env.createSessionBead("worker", "worker")
 			must(t, rec.SetMetadataBatch(b.ID, session.DrainAckStopPendingPatch(env.clk.Now().UTC())))
 			rec.reset()
-			finalizeDrainAckStoppedSession("", env.cfg, rec, nil, env.sessionInfo(b.ID), "worker", false,
+			finalizeDrainAckStoppedSession(env.city, env.cfg, rec, nil, env.sessionInfo(b.ID), "worker", false,
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 		}},
 		{"v2 named create", "agent_name alias canonical_instance_name command configured_named_identity configured_named_mode configured_named_session continuation_epoch generation instance_token live_hash pending_create_claim pending_create_started_at session_name session_origin state synced_at template work_dir", []string{"cmd/gc/allocator_create_named.go:createEffects.writeNamed"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -199,9 +199,10 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 	// The operator's verbs, in an order each accepts, on one row.
 	var m *session.Manager
 	var id string
+	opCity := t.TempDir()
 	steps = append(steps, []step{
 		{"operator create (bead only)", "command continuation_epoch generation instance_token pending_create_claim pending_create_started_at provider resume_command resume_flag resume_style session_id_flag session_name session_origin state template work_dir", []string{"internal/session/manager.go:Manager.createBeadOnly"}, func(t *testing.T, rec *sessionKeyRecorder) {
-			m = session.NewManagerWithOptions(rec, runtime.NewFake())
+			m = session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(opCity))
 			_, err := m.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "test-cmd", WorkDir: t.TempDir(), Provider: "fake", BeadOnly: true})
 			must(t, err)
 			id = fieldRow(t, rec.MemStore, "state", "asleep", "sleep_reason", "idle") // the dormant row the later verbs act on
@@ -216,7 +217,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator fresh restart", "continuation_reset_pending restart_requested", []string{"internal/session/manager.go:Manager.RequestFreshRestart"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.RequestFreshRestart(id)) }},
-		{"operator suspend", "held_until sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.suspend"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.Suspend(id)) }},
+		{"operator suspend", "held_until runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.Suspend(id)) }},
 		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "cmd/gc/cmd_session_kill_fence.go:writeSessionKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			_, err := writeSessionKillFence(rec, id, now)
 			must(t, err)
@@ -301,12 +302,12 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 		run  func(*testing.T, []string) map[string]string
 	}{
 		"cmd/gc/session_reconciler.go:finalizeDrainAckStoppedSession": {[]string{"restart_requested", "true"}, func(t *testing.T, meta []string) map[string]string {
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			b := env.createSessionBead("worker", "worker")
 			env.setSessionMetadata(&b, pairs(meta))
 			env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
-			finalizeDrainAckStoppedSession("", env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", false,
+			finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", false,
 				newFakeDrainOps(), env.dt, env.clk, env.rec, io.Discard)
 			return fieldBead(t, env.store, b.ID).Metadata
 		}},
@@ -364,7 +365,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := session.NewManagerWithOptions(m, runtime.NewFake()).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(t.TempDir())).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata
@@ -386,7 +387,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				if err := session.NewManagerWithOptions(m, runtime.NewFake()).Suspend(id); err != nil {
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(t.TempDir())).Suspend(id); err != nil {
 					t.Fatal(err)
 				}
 				return fieldBead(t, m, id).Metadata

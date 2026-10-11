@@ -39,6 +39,8 @@ const (
 // ordinal, so a scenario lets the preflight answer and hangs the one under test.
 type postStartProvider struct {
 	*runtime.Fake
+	// city is the one city every attempt on this provider starts in.
+	city string
 	// startErr is what Start returns once the runtime exists and carries its
 	// identity: the shape of a start that failed late.
 	startErr error
@@ -203,10 +205,13 @@ func postStartBeadItem(t *testing.T, clk clock.Clock, workDir string) (beads.Sto
 // the result and the fake time the attempt took.
 func runPostStartAttempt(ctx context.Context, t *testing.T, item preparedStart, sp *postStartProvider, store beads.Store, startupTimeout time.Duration) (startResult, time.Duration) {
 	t.Helper()
+	if sp.city == "" {
+		sp.city = t.TempDir()
+	}
 	done := make(chan startResult, 1)
 	begin := time.Now()
 	go func() {
-		done <- runPreparedStartCandidate(ctx, item, "", sp, store, nil, startupTimeout, immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
+		done <- runPreparedStartCandidate(ctx, item, sp.city, sp, store, nil, startupTimeout, immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil)
 	}()
 	select {
 	case result := <-done:
@@ -574,6 +579,7 @@ func TestObserveSessionBoundedLimitsOutstandingObservationsPerCity(t *testing.T)
 // The async start goroutine holds its asyncStartLimiter slot until the commit
 // finishes, so a start that waits forever on a provider call holds it forever.
 func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t *testing.T) {
+	testCity := t.TempDir()
 	workDir := t.TempDir()
 	synctest.Test(t, func(t *testing.T) {
 		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
@@ -604,7 +610,7 @@ func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t
 					close(finishedC)
 				},
 			}},
-			"", sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
+			testCity, sp, store, nil, clk, rec, postStartTimeout, 1, ioDiscard{}, ioDiscard{}, nil, nil,
 			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
 		)
 		select {

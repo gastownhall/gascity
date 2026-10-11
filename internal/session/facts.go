@@ -74,6 +74,9 @@ const (
 	// FactsLegacyResetEvict is the eviction of a runtime a stalled
 	// continuation reset is waiting on.
 	FactsLegacyResetEvict FactsSite = "legacy.reset-evict"
+	// FactsLegacyExitAccrual is a tick's wake-failure or churn accrual for a
+	// dead runtime.
+	FactsLegacyExitAccrual FactsSite = "legacy.exit-accrual"
 )
 
 // factsSite is how a site compares Facts: without Drop's keys, or only
@@ -123,6 +126,10 @@ var factsSites = map[FactsSite]factsSite{
 	FactsLegacyDrainStop: {
 		Only:   []string{"state", "state_reason", "generation", "instance_token"},
 		Reason: "the async stop and the escalation kill the incarnation that is still stop-pending; the mark already judged the operator's intent, and a resume cannot take a stop-pending row out (ErrSessionStopping)",
+	},
+	FactsLegacyExitAccrual: {
+		Only:   []string{"generation", "instance_token", "last_woke_at", "sleep_reason"},
+		Reason: "the death is the decided incarnation's, inside the wake the tick read: an operator's kill clears last_woke_at and records sleep_reason=killed, a new start moves the incarnation, and either makes the dead runtime no crash and no churn of that wake (mc-uhvqj)",
 	},
 	FactsLegacyResetEvict: {
 		Only:   []string{"continuation_reset_pending", "reset_committed_at"},

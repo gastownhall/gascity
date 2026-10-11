@@ -397,7 +397,7 @@ func TestSessionMutationLocksSerializeSameSession(t *testing.T) {
 // republishes the pre-reset conversation identity.
 func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 	store := beads.NewMemStore()
-	m := NewManagerWithOptions(store, runtime.NewFake())
+	m := newTestManager(t, store, runtime.NewFake())
 	b, err := store.Create(beads.Bead{Title: "session", Metadata: map[string]string{
 		"continuation_epoch":         "3",
 		"continuation_reset_pending": "true",
@@ -444,7 +444,7 @@ func TestCommitPendingContinuationResetBumpsAndClears(t *testing.T) {
 // would rotate on one entry path and not the other.
 func TestRequestFreshRestartRecordsIntentAndConsumerRotatesOnce(t *testing.T) {
 	store := beads.NewMemStore()
-	m := NewManagerWithOptions(store, runtime.NewFake())
+	m := newTestManager(t, store, runtime.NewFake())
 	b, err := store.Create(beads.Bead{Title: "session", Type: BeadType, Metadata: map[string]string{
 		"state":              string(StateActive),
 		"continuation_epoch": "2",

@@ -110,7 +110,7 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -183,6 +183,7 @@ func TestSessionHandleStateReusesDerivedActivityAcrossPolls(t *testing.T) {
 	requestFactory := func() *Factory {
 		t.Helper()
 		factory, err := NewFactory(FactoryConfig{
+			CityPath:     t.TempDir(),
 			Store:        store,
 			Provider:     sp,
 			SearchPaths:  []string{searchBase},
@@ -1332,6 +1333,7 @@ func TestRuntimeHandleUsesWorkerBoundaryForLegacyRuntimeSession(t *testing.T) {
 	})
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1418,6 +1420,7 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 		t.Fatalf("Start: %v", err)
 	}
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1475,6 +1478,7 @@ func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
 				}
 				sp.StopErrors["legacy-worker"] = stop.stopErr
 				handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+					CityPath:     t.TempDir(),
 					Provider:     sp,
 					SessionName:  "legacy-worker",
 					ProviderName: "stub",
@@ -1754,6 +1758,7 @@ func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 	sp := runtime.NewFake()
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		CityPath:     t.TempDir(),
 		Provider:     sp,
 		SessionName:  "legacy-worker",
 		ProviderName: "stub",
@@ -1953,6 +1958,43 @@ func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError
 	for _, call := range sp.Calls {
 		if call.Method == "Nudge" || call.Method == "NudgeNow" {
 			t.Fatalf("calls = %#v, want no delivery after internal timeout", sp.Calls)
+		}
+	}
+}
+
+// A provider type that implements the idle wait but whose runtime cannot
+// provide one answers ErrInteractionUnsupported; that is the permanent
+// live_delivery_unsupported reason, not a missed idle boundary.
+// Kills: reporting it as no_idle_boundary, or delivering anyway.
+func TestRuntimeHandleNudgeWaitIdleInteractionUnsupportedReturnsProviderUnsupported(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = fmt.Errorf("routed backend: %w", runtime.ErrInteractionUnsupported)
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if result.Delivered || result.Undelivered != NudgeUndeliveredProviderUnsupported {
+		t.Fatalf("Nudge(wait_idle) = %+v, want undelivered %q", result, NudgeUndeliveredProviderUnsupported)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery when the idle wait is unsupported", sp.Calls)
 		}
 	}
 }
@@ -2436,7 +2478,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(
 		context.Background(), sessionpkg.CreateOptions{Template: "probe", Title: "Probe", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "legacy-agent", Env: nil, Resume: sessionpkg.ProviderResume{
@@ -2510,7 +2552,7 @@ func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder e
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:  manager,
 		Recorder: recorder,

@@ -114,7 +114,7 @@ func TestCloseRead_ACorpseCloseReleasesALateClaim(t *testing.T) {
 // The idle-timeout kill re-reads the seat's claims before it kills: a claim
 // made after the tick's gather read the index defers the kill.
 func TestCloseRead_IdleKillDefersForALateClaim(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	binding := &killRaceStore{Store: env.store}
 	env.store = binding
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -195,7 +195,7 @@ func TestCloseRead_AnUnreadableLocalLegRefusesTheClose(t *testing.T) {
 // still holding its own drain step, on the local binding, is retired rather
 // than refused by the re-read on every tick for good.
 func TestCloseRead_DrainDeadlineRetireIgnoresTheOwnDrainStep(t *testing.T) {
-	env := poolSeatEnv()
+	env := poolSeatEnv(t)
 	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
 	cityPath := t.TempDir()
 	registerWorkShapeWith(t, cityPath, "split", env.store, beads.NewMemStore())

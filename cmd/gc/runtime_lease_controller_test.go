@@ -129,11 +129,69 @@ func TestControllerStopSequencesDeferOnABusyLease(t *testing.T) {
 	}
 }
 
+// TestControllerStopSequencesRefuseWithoutACity: a controller stop sequence
+// handed no absolute city path has no runtime dir to lock in, so it takes no
+// lease and kills nothing, the escalation's process-table kill included: it
+// defers with ErrRuntimeLeaseNoCity.
+func TestControllerStopSequencesRefuseWithoutACity(t *testing.T) {
+	sessionpkg.ExpectNoCityRefusalsForTest(t)
+	for _, city := range []string{"", "relative/city"} {
+		if _, _, err := controllerStopLease(beads.NewMemStore(), city, "worker", "sess-1", io.Discard); !errors.Is(err, sessionpkg.ErrRuntimeLeaseNoCity) {
+			t.Fatalf("controllerStopLease(%q) = %v, want ErrRuntimeLeaseNoCity", city, err)
+		}
+		for _, seq := range []string{"async stop", "escalation"} {
+			t.Run(seq+"/"+city, func(t *testing.T) {
+				sp := runtime.NewFake()
+				if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "x"}); err != nil {
+					t.Fatal(err)
+				}
+				store := beads.NewMemStore()
+				gen := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
+				var stderr synchronizedBuffer
+				tracker := &asyncStartTracker{}
+				if seq == "async stop" {
+					queueDrainAckAsyncStop(city, store, sp, &config.City{}, gen, "worker", nil, tracker, nil, &stderr)
+				} else {
+					done, _ := tracker.startDrainAckStop("escalate:sess-1")
+					queueDrainAckForcedTermination(city, store, sp, &config.City{}, gen.Info(), "worker",
+						"agent_acked_runtime_survived", 1, time.Now(), []string{"claude"}, 0, done, nil, &stderr)
+				}
+				if !tracker.wait(5 * time.Second) {
+					t.Fatal("the stop sequence never finished")
+				}
+				got := stderr.String()
+				if !strings.Contains(got, "deferred") || !strings.Contains(got, sessionpkg.ErrRuntimeLeaseNoCity.Error()) || sp.CountCalls("Stop", "worker") != 0 || !sp.IsRunning("worker") {
+					t.Fatalf("stderr %q, stops %d; want deferred with ErrRuntimeLeaseNoCity and no stop", got, sp.CountCalls("Stop", "worker"))
+				}
+				if strings.Contains(got, "terminat") {
+					t.Fatalf("stderr %q: the escalation reached its process-table kill", got)
+				}
+			})
+		}
+	}
+}
+
+// TestTryRuntimeLeaseRefusesWithoutACity: a legacy starter or stopper handed
+// no absolute city path, the empty one included, is refused and holds
+// nothing: the empty path is not a "no city" that locks nothing.
+func TestTryRuntimeLeaseRefusesWithoutACity(t *testing.T) {
+	sessionpkg.ExpectNoCityRefusalsForTest(t)
+	store := beads.NewMemStore()
+	for _, city := range []string{"", "relative/city"} {
+		for _, id := range []string{"", "sess-1"} {
+			lease, release, err := tryRuntimeLease(store, city, "worker", id, sessionpkg.RuntimeLeaseTTL(0))
+			if !errors.Is(err, sessionpkg.ErrRuntimeLeaseNoCity) || lease != nil || release != nil {
+				t.Fatalf("tryRuntimeLease(%q, id %q) = (%v, release %t, %v), want ErrRuntimeLeaseNoCity holding nothing", city, id, lease, release != nil, err)
+			}
+		}
+	}
+}
+
 // TestConfigDriftResetDefersOnABusyLease: a config-drift reset whose stop is
 // refused by another holder's lease decides nothing this tick: no patch, the
 // runtime and the row as they were.
 func TestConfigDriftResetDefersOnABusyLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("mayor", "mayor")
 	if err := env.sp.Start(context.Background(), "mayor", runtime.Config{Command: "x"}); err != nil {
 		t.Fatal(err)
@@ -186,7 +244,7 @@ func TestChatAutoSuspendNeverWaits(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
-	info, err := sessionpkg.NewManagerWithOptions(store, sp).CreateSession(context.Background(), sessionpkg.CreateOptions{
+	info, err := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir())).CreateSession(context.Background(), sessionpkg.CreateOptions{
 		Template: "default", Title: "S1", Command: "echo s1", WorkDir: t.TempDir(), Provider: "test",
 		ExtraMeta: map[string]string{"session_origin": "manual"},
 	})
@@ -454,11 +512,9 @@ func TestDrainAckEscalationRechecksBeforeItsProcessKill(t *testing.T) {
 }
 
 // TestControllerStopsWorkWithoutTheTestOptOut drives the controller's stop
-// paths with this package's opt-out off (session.RefuseManagersWithoutCityForTest),
-// as production runs them: a path that lost its city path would fail with
-// ErrRuntimeLeaseNoCity and leave its runtime running.
+// paths as production runs them: a path that lost its city path would fail
+// with ErrRuntimeLeaseNoCity and leave its runtime running.
 func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
-	defer sessionpkg.RefuseManagersWithoutCityForTest()()
 	active := func(t *testing.T, env *reconcilerTestEnv, cfg *config.City) beads.Bead {
 		t.Helper()
 		env.cfg = cfg
@@ -483,7 +539,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 	}
 
 	t.Run("idle", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		env.setSessionMetadata(&b, map[string]string{"sleep_intent": "idle-stop-pending"})
 		it := newFakeIdleTracker()
@@ -492,7 +548,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		stopped(t, env)
 	})
 	t.Run("max-age", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker", MaxSessionAge: "5h"}}})
 		env.setSessionMetadata(&b, map[string]string{"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339)})
 		tr := newMaxSessionAgeTracker()
@@ -501,7 +557,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		stopped(t, env)
 	})
 	t.Run("restart-requested", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		env.setSessionMetadata(&b, map[string]string{"restart_requested": "true"})
 		reconcileAt(env, t.TempDir(), b, nil)
@@ -510,7 +566,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		}
 	})
 	t.Run("verifiedStop", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		if err := verifiedStop(t.TempDir(), sessionpkg.Decide(sessionInfoFromBead(mustGetBead(t, env.store, b.ID)), sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); err != nil {
 			t.Fatalf("verifiedStop: %v", err)
@@ -518,7 +574,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 		stopped(t, env)
 	})
 	t.Run("retire", func(t *testing.T) {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		b := active(t, env, &config.City{Agents: []config.Agent{{Name: "worker"}}})
 		if !stopRuntimeBeforeSessionBeadMutation(t.TempDir(), env.store, env.sp, env.cfg, mustGetBead(t, env.store, b.ID), "retired", &env.stderr) {
 			t.Fatalf("retire stop refused; stderr %q", env.stderr.String())
@@ -531,7 +587,7 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 // a row an operator suspended since the drain read it (an agent's heartbeat,
 // held_until alone, does not move the drain's basis).
 func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	b := env.createSessionBead("worker", "worker")

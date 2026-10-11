@@ -1128,6 +1128,24 @@ func buildPreparedStartWithWorkDirResolver(
 	workDirResolver taskWorkDirResolver,
 	dispatchSources dispatchOptionSources,
 ) (*preparedStart, sessionpkg.Info, error) {
+	return buildPreparedStartWithTranscript(candidate, cityPath, cfg, store, workDirResolver, dispatchSources, nil)
+}
+
+// buildPreparedStartWithTranscript is buildPreparedStartWithWorkDirResolver
+// with the v2 start effect's transcript option (S-1): nil for legacy. When
+// set, it is the transcript state of the candidate's session_key, which the
+// effect probed, cleared and filled in its PreWake CAS (CONTRACT v5 S1), so
+// the helper neither probes, clears nor mints the key, and folds the
+// concrete-pool work_dir repair in memory only: it writes nothing.
+func buildPreparedStartWithTranscript(
+	candidate startCandidate,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+	dispatchSources dispatchOptionSources,
+	transcript *sessTranscriptState,
+) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil {
@@ -1173,7 +1191,11 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
-	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
+	repairStore := store
+	if transcript != nil {
+		repairStore = nil
+	}
+	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, repairStore); err != nil {
 		return nil, candidate.info, err
 	}
 	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
@@ -1207,7 +1229,9 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
-	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
+	if transcript != nil {
+		transcriptState = *transcript
+	} else if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
 		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
 		if probeable {
@@ -1230,7 +1254,7 @@ func buildPreparedStartWithWorkDirResolver(
 			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(candidate.info.ID, sessFront))
 		}
 	}
-	if candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+	if transcript == nil && candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
 		if err != nil {
 			return nil, candidate.info, fmt.Errorf("generating session key: %w", err)
@@ -1397,19 +1421,7 @@ func preparedStartSessionWorkDir(info sessionpkg.Info) string {
 }
 
 func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPath string, cfg *config.City, store beads.Store) (bool, error) {
-	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
-	if !ok {
-		return false, nil
-	}
-	patch := sessionpkg.MetadataPatch{}
-	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
-	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
-	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
-		patch[beadmeta.WorkDirMetadataKey] = concreteDir
-	}
-	if samePreparedWorkDirPath(legacy, templateDir) {
-		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
-	}
+	patch := concretePoolWorkDirRepairPatch(*candidate, cityPath, cfg)
 	if len(patch) == 0 {
 		return false, nil
 	}
@@ -1423,6 +1435,26 @@ func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPa
 	}
 	candidate.info = info
 	return true, nil
+}
+
+// concretePoolWorkDirRepairPatch is the work_dir repair of a concrete pool
+// session still pointing at its template's directory: empty when nothing
+// needs repair. The v2 start effect folds it into its PreWake CAS.
+func concretePoolWorkDirRepairPatch(candidate startCandidate, cityPath string, cfg *config.City) sessionpkg.MetadataPatch {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	if !ok {
+		return nil
+	}
+	patch := sessionpkg.MetadataPatch{}
+	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
+	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
+	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
+		patch[beadmeta.WorkDirMetadataKey] = concreteDir
+	}
+	if samePreparedWorkDirPath(legacy, templateDir) {
+		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
+	}
+	return patch
 }
 
 func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath string, cfg *config.City, workDir string) error {
@@ -1665,17 +1697,6 @@ func taskWorkDirAssignees(candidate startCandidate, cfg *config.City) []string {
 		strings.TrimSpace(candidate.info.Alias),
 		candidate.logicalTemplate(cfg),
 	}
-}
-
-func executePreparedStartWave(
-	ctx context.Context,
-	prepared []preparedStart,
-	sp runtime.Provider,
-	store beads.Store,
-	startupTimeout time.Duration,
-	options ...startExecutionOption,
-) []startResult {
-	return executePreparedStartWaveForCity(ctx, prepared, "", sp, store, nil, startupTimeout, 1, options...)
 }
 
 func executePreparedStartWaveForCity(
@@ -2754,75 +2775,22 @@ func commitStartResultTraced(
 		commitStartFailure(result, sessFront, clk, rec, wave, stderr, trace)
 		return startCommitFailed
 	}
-	coreBreakdown := ""
-	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
-		coreBreakdown = string(bdj)
-	}
-	// Transition creating/asleep/drained beads to active once the runtime
-	// spawn has confirmed. Folded into this metadata batch so the state
-	// write is atomic with the hash writes, the pending_create_claim
-	// clear, and the creation_complete_at marker. This prevents the sweep
-	// from observing a transient state where the claim is gone but the
-	// post-create marker hasn't landed yet. See confirmPendingStart for
-	// the state gate.
-	// S19 priming confirmation pair (write-only in Stage 2): stamped only when
-	// this incarnation delivered the rendered startup prompt. result.err == nil
-	// here, so "start succeeded" already holds — the (Delivered && start
-	// succeeded) signal. Zero values ⇒ CommitStartedPatch emits no priming keys.
-	primedAt := time.Time{}
-	promptHash := ""
-	if result.prepared.promptDelivered {
-		primedAt = clk.Now()
-		promptHash = result.prepared.promptHash
-	}
-	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:      result.prepared.coreHash,
-		LiveHash:      result.prepared.liveHash,
-		ProvisionHash: result.prepared.provisionHash,
-		LaunchHash:    result.prepared.launchHash,
-		CoreBreakdown: coreBreakdown,
-		// The heal pass may already have projected "awake" onto this bead
-		// before the commit landed; confirm from there too so the commit still
-		// stamps state_reason=creation_complete (confirmStartCommitState).
-		ConfirmState:            confirmStartCommitState(info.MetadataState),
-		ClearSleepReason:        info.SleepReason != "",
-		ClearPendingCreateClaim: shouldRollbackPendingCreateInfo(info),
-		// A confirmed transition out of a dormant/creating state opens a new
-		// awake interval — stamp a fresh compute-usage epoch for it. Keyed on
-		// confirmPendingStart, not confirmStartCommitState: an already-awake
-		// bead keeps its in-flight interval (mirrors recoverRunningPendingCreate).
-		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
-		Now:                 clk.Now(),
-		PrimedAt:            primedAt,
-		PromptHash:          promptHash,
-	})
-	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
+	metadata := startCommitPatch(&result.prepared, info, clk.Now())
+	mcp, err := startCommitMCPPatch(&result.prepared, info)
 	if err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: encoding MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "metadata_encode_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	if storedMCPSnapshot != "" || info.MCPServersSnapshot != "" {
-		metadata[sessionpkg.MCPServersSnapshotMetadataKey] = storedMCPSnapshot
+	for k, v := range mcp {
+		metadata[k] = v
 	}
 	if err := sessionpkg.PersistRuntimeMCPServersSnapshot(result.prepared.cfg.Env["GC_CITY_PATH"], info.ID, result.prepared.cfg.MCPServers); err != nil {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		fmt.Fprintf(stderr, "session reconciler: storing runtime MCP snapshot for %s: %v\n", name, err) //nolint:errcheck
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
-	}
-	if result.prepared.candidate.tp.IsACP ||
-		info.MCPIdentity != "" ||
-		info.MCPServersSnapshot != "" {
-		storedMCPIdentity := firstNonEmptyGCString(
-			info.MCPIdentity,
-			info.ConfiguredNamedIdentity,
-			info.AgentName,
-		)
-		if storedMCPIdentity != "" || info.MCPIdentity != "" {
-			metadata[sessionpkg.MCPIdentityMetadataKey] = storedMCPIdentity
-		}
 	}
 	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease)
 	if err != nil {
@@ -2896,6 +2864,73 @@ func commitStartResultTraced(
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 	return startCommitSucceeded
+}
+
+// startCommitPatch is a successful start's commit patch for prepared on
+// info at now: the hashes, and the transition of creating/asleep/drained
+// beads to active, folded into one batch so the state write is atomic with
+// the hash writes, the pending_create_claim clear and the
+// creation_complete_at marker (the sweep never sees the claim gone before
+// the marker lands; confirmPendingStart gates the state). The v2 start
+// effect's commit writes the same patch (CONTRACT v5 S2).
+func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Time) sessionpkg.MetadataPatch {
+	coreBreakdown := ""
+	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
+		coreBreakdown = string(bdj)
+	}
+	// S19 priming confirmation pair (write-only in Stage 2): stamped only
+	// when this incarnation delivered the rendered startup prompt, on a start
+	// that succeeded. Zero values ⇒ CommitStartedPatch emits no priming keys.
+	primedAt := time.Time{}
+	promptHash := ""
+	if prepared.promptDelivered {
+		primedAt = now
+		promptHash = prepared.promptHash
+	}
+	return sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:      prepared.coreHash,
+		LiveHash:      prepared.liveHash,
+		ProvisionHash: prepared.provisionHash,
+		LaunchHash:    prepared.launchHash,
+		CoreBreakdown: coreBreakdown,
+		// The heal pass may already have projected "awake" onto this bead
+		// before the commit landed; confirm from there too so the commit still
+		// stamps state_reason=creation_complete (confirmStartCommitState).
+		ConfirmState:            confirmStartCommitState(info.MetadataState),
+		ClearSleepReason:        info.SleepReason != "",
+		ClearPendingCreateClaim: shouldRollbackPendingCreateInfo(info),
+		// A confirmed transition out of a dormant/creating state opens a new
+		// awake interval — stamp a fresh compute-usage epoch for it. Keyed on
+		// confirmPendingStart, not confirmStartCommitState: an already-awake
+		// bead keeps its in-flight interval (mirrors recoverRunningPendingCreate).
+		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
+		Now:                 now,
+		PrimedAt:            primedAt,
+		PromptHash:          promptHash,
+	})
+}
+
+// startCommitMCPPatch is a start commit's MCP keys for prepared on info: the
+// encoded servers snapshot, when there is one or info stored one, and the
+// MCP identity of an ACP session or one that recorded MCP state. The
+// caller persists the runtime snapshot before it commits. The v2 start
+// effect's launch commit writes the same keys.
+func startCommitMCPPatch(prepared *preparedStart, info sessionpkg.Info) (sessionpkg.MetadataPatch, error) {
+	snapshot, err := sessionpkg.EncodeMCPServersSnapshot(prepared.cfg.MCPServers)
+	if err != nil {
+		return nil, err
+	}
+	patch := sessionpkg.MetadataPatch{}
+	if snapshot != "" || info.MCPServersSnapshot != "" {
+		patch[sessionpkg.MCPServersSnapshotMetadataKey] = snapshot
+	}
+	if prepared.candidate.tp.IsACP || info.MCPIdentity != "" || info.MCPServersSnapshot != "" {
+		identity := firstNonEmptyGCString(info.MCPIdentity, info.ConfiguredNamedIdentity, info.AgentName)
+		if identity != "" || info.MCPIdentity != "" {
+			patch[sessionpkg.MCPIdentityMetadataKey] = identity
+		}
+	}
+	return patch, nil
 }
 
 // commitCapacityRefusal commits a start the serving endpoint refused. The
@@ -3212,7 +3247,7 @@ func recoverRunningPendingCreate(
 		return false, nil
 	}
 	var lease *sessionpkg.RuntimeLease
-	if name := strings.TrimSpace(info.SessionName); name != "" && filepath.IsAbs(cityPath) {
+	if name := strings.TrimSpace(info.SessionName); name != "" {
 		held, release, err := tryRuntimeLease(store, cityPath, name, info.ID, sessionpkg.RuntimeLeaseTTLFor(cfg))
 		if err != nil {
 			if trace != nil {
@@ -3840,23 +3875,6 @@ func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *session
 	return batch
 }
 
-func executePlannedStarts(
-	ctx context.Context,
-	candidates []startCandidate,
-	cfg *config.City,
-	desiredState map[string]TemplateParams,
-	sp runtime.Provider,
-	store beads.Store,
-	cityName string,
-	clk clock.Clock,
-	rec events.Recorder,
-	startupTimeout time.Duration,
-	stdout, stderr io.Writer,
-	options ...startExecutionOption,
-) int {
-	return executePlannedStartsTraced(ctx, candidates, cfg, desiredState, sp, store, cityName, "", clk, rec, startupTimeout, stdout, stderr, nil, options...)
-}
-
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -4036,10 +4054,10 @@ func executePlannedStartsTraced(
 				// commit (I-LEASE), and takes the row's record just before PreWake,
 				// after capacity admission and the circuit's open check. A name
 				// another holder has (an operator's attach or kill, another host)
-				// defers, writing nothing; the next pass reconsiders it. A city
-				// path that is not absolute (tests) has no runtime dir to lease in.
+				// defers, writing nothing; the next pass reconsiders it, as does a
+				// city path that is not absolute (ErrRuntimeLeaseNoCity).
 				leased := false
-				if name := strings.TrimSpace(candidate.info.SessionName); name != "" && filepath.IsAbs(cityPath) {
+				if name := strings.TrimSpace(candidate.info.SessionName); name != "" {
 					lease, dropLease, err := tryRuntimeLease(store, cityPath, name, "", 0)
 					if err != nil {
 						if release != nil {

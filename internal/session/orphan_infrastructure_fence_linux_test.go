@@ -75,7 +75,8 @@ func writeFakeProcess(t *testing.T, root string, pid, ppid int, argv, env []stri
 func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &procfsOrphanProvider{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp)
+	city := t.TempDir()
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -86,7 +87,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	sp.terminated = nil
 	sp.started = nil
 
-	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper"}
+	env := []string{"PATH=/usr/bin", "GC_SESSION_ID=" + info.ID, "GC_AGENT=helper", "GC_CITY_PATH=" + city}
 	root := t.TempDir()
 	const (
 		watchdogPID = 4100
@@ -98,7 +99,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	writeFakeProcess(t, root, doltPID, watchdogPID, []string{"dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml"}, env)
 	writeFakeProcess(t, root, proxyPID, 1, []string{"/usr/local/bin/bd", proctable.BDProxyChildVerb, "--root", "/city/.beads/proxy"}, env)
 	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
-	t.Cleanup(proctable.SetScanRootForTesting(root))
+	proctable.SetScanRootForTesting(t, root)
 
 	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator); err != nil {
 		t.Fatalf("Start: %v", err)

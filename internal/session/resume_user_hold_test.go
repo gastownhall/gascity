@@ -93,7 +93,7 @@ func TestOperatorResumeConsumesUserHold(t *testing.T) {
 					t.Errorf("hold consumed before the runtime started: %v", meta)
 				}
 			}
-			if err := resume(NewManagerWithOptions(store, sp), b.ID); err != nil {
+			if err := resume(newTestManager(t, store, sp), b.ID); err != nil {
 				t.Fatalf("resume: %v", err)
 			}
 			meta := heldKeys(t, store, b.ID)
@@ -115,7 +115,7 @@ func TestBackgroundSendKeepsUserHold(t *testing.T) {
 	store := beads.NewMemStore()
 	b := userHeldRow(t, store)
 	sp := runtime.NewFake()
-	out, err := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir())).Send(context.Background(), b.ID, "hello", "claude", runtime.Config{}, ResumeIfUnheld)
+	out, err := newTestManager(t, store, sp).Send(context.Background(), b.ID, "hello", "claude", runtime.Config{}, ResumeIfUnheld)
 	if err != nil || !out.Queued || sp.CountCalls("Start", "s-held") != 0 {
 		t.Fatalf("Send = %+v, %v with %d starts; want queued, nothing started", out, err, sp.CountCalls("Start", "s-held"))
 	}
@@ -131,7 +131,7 @@ func liveHeldSession(t *testing.T, state State) (*Manager, *runtime.Fake, beads.
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	sp.WaitForIdleErrors = map[string]error{}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -221,7 +221,7 @@ func TestUserHoldConsumeRefusalNeverStopsTheRuntime(t *testing.T) {
 					t.Error(err)
 				}
 			}
-			err := NewManagerWithOptions(store, sp).Attach(context.Background(), b.ID, "claude", runtime.Config{})
+			err := newTestManager(t, store, sp).Attach(context.Background(), b.ID, "claude", runtime.Config{})
 			if gotErr := err != nil; gotErr != tc.wantErr || (err != nil && !errors.Is(err, ErrStateSync)) {
 				t.Fatalf("Attach = %v, want error=%v (ErrStateSync)", err, tc.wantErr)
 			}
@@ -243,7 +243,7 @@ func TestLiveResumeConsumeDefersOnABusyLease(t *testing.T) {
 	defer SetOperatorLeaseWaitForTest(0)()
 	_, sp, store, info := liveHeldSession(t, StateActive)
 	city := t.TempDir()
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
 	held, err := TryRuntimeLease(NewStore(beads.SessionStore{Store: store}), RuntimeLeaseRequest{City: city, Name: info.SessionName, ID: info.ID, TTL: RuntimeLeaseTTL(0)})
 	if err != nil {
 		t.Fatalf("TryRuntimeLease: %v", err)

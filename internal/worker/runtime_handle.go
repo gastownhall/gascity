@@ -478,6 +478,13 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
+		// A provider type can implement the idle wait while the runtime behind
+		// it cannot (an exec pack that does not declare an idle boundary, or a
+		// composite routing to a backend without one): that is the same
+		// permanent "no live delivery" as having no waiter at all.
+		if errors.Is(err, runtime.ErrInteractionUnsupported) {
+			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
+		}
 		if errors.Is(err, context.Canceled) {
 			return NudgeResult{Delivered: false}, err
 		}

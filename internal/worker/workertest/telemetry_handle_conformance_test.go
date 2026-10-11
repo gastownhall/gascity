@@ -93,7 +93,7 @@ func sessionHandleRecordedInputTokens(t *testing.T) int64 {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager:     manager,
@@ -137,6 +137,7 @@ func runtimeHandleInvocationDatapoints(t *testing.T) int {
 
 	sp := runtime.NewFake()
 	factory, err := worker.NewFactory(worker.FactoryConfig{
+		CityPath: t.TempDir(),
 		Provider: sp,
 		Recorder: events.NewFake(),
 	})

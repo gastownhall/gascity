@@ -114,8 +114,8 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		worker = true
 		// Exactly these: isolation is not the repository variable (no
 		// rollback to 0, no canary), the fork CA's worker certificate and the
-		// fork endpoint, nothing more (no CACHE_DIR: no sticky disk shared
-		// across fork workers).
+		// fork endpoint, nothing more (no sticky disk shared across fork
+		// workers: the only warm start is the read-only warm set).
 		want := map[string]string{
 			"RBE_WORKER_TLS_CERT":  "${{ secrets.RBE_FORK_WORKER_TLS_CERT }}",
 			"RBE_WORKER_TLS_KEY":   "${{ secrets.RBE_FORK_WORKER_TLS_KEY }}",
@@ -136,6 +136,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"RBE_WIRE_ZSTD": "${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}",
 			// The dedicated zread host; the worker refuses zstd without it.
 			"RBE_WIRE_ZSTD_READ_URL": "${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}",
+			// The read-only warm set (no writable cache shared with any tier):
+			// off unless the repository variable names it; one run in N.
+			"RBE_WARM_URL":   "${{ vars.RBE_FORK_WARM_URL || '' }}",
+			"RBE_WARM_EVERY": "${{ vars.RBE_FORK_WARM_EVERY || '1' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -153,9 +157,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD and
-	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above): neither can turn isolation
-	// down, and none picks the worker code (always the pin).
+	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
+	// RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY
+	// (pinned above): none can turn isolation down, and none picks the worker
+	// code (always the pin).
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -163,9 +168,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
-		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") {
-		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD and RBE_FORK_WIRE_ZSTD_READ_URL once each, nothing else", rbeForkPoolWorkflow, n)
+	if n := strings.Count(text, "vars."); n != 4 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || !strings.Contains(text, "vars.RBE_FORK_WARM_URL ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WARM_EVERY ") {
+		t.Errorf("%s reads repository variables %d times; want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL, RBE_FORK_WARM_URL and RBE_FORK_WARM_EVERY once each, nothing else", rbeForkPoolWorkflow, n)
 	}
 }
 

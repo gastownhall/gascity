@@ -55,7 +55,7 @@ func (e *killedSeatEnv) readyTicks(t *testing.T, work beads.Bead, name string, n
 func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 	t.Run("API and CLI fallback (Manager.Suspend)", func(t *testing.T) {
 		e, work, name := runningSeatWithWork(t)
-		if err := session.NewManagerWithOptions(e.mem, e.sp, session.WithClock(e.clk)).Suspend(e.seat.ID); err != nil {
+		if err := session.NewManagerWithOptions(e.mem, e.sp, session.WithClock(e.clk), session.WithCityPath(e.city)).Suspend(e.seat.ID); err != nil {
 			t.Fatalf("Suspend: %v", err)
 		}
 		if starts := e.readyTicks(t, work, name, 3); starts != 0 || e.sp.IsRunning(name) {
@@ -161,7 +161,7 @@ func TestHeldPoolSeatKeepsItsSlotAndWork(t *testing.T) {
 // unassigned pool seat as drained, but never one an operator holds.
 func TestDrainAckFinalizeKeepsAHeldSeatOpen(t *testing.T) {
 	for _, held := range []bool{true, false} {
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 		b := env.createSessionBead("worker", "worker")
 		front := sessionFrontDoor(env.store)
@@ -173,7 +173,7 @@ func TestDrainAckFinalizeKeepsAHeldSeatOpen(t *testing.T) {
 		if err := front.ApplyPatch(b.ID, session.DrainAckStopPendingPatch(env.clk.Now())); err != nil {
 			t.Fatal(err)
 		}
-		finalizeDrainAckStoppedSession("", env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", true,
+		finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", true,
 			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr)
 		got, _ := env.store.Get(b.ID)
 		if closed := got.Status == "closed"; closed == held {

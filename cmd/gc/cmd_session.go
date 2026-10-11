@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -2468,7 +2467,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// under the name's flock alone. The lease ends before the controller poke.
 	killCtx := context.Background()
 	releaseLease, leaseOverridden := func() {}, false
-	if infoErr == nil && !info.Closed && filepath.IsAbs(cityPath) {
+	if infoErr == nil && !info.Closed {
 		req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
 		lease, overridden, err := killRuntimeLease(killCtx, sessionFrontDoor(sessStore), req, force, stderr)
 		if err != nil {

@@ -49,7 +49,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -365,6 +365,7 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -535,6 +536,7 @@ func TestFactorySweepSessionModelUsageRecordsMetrics(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -630,6 +632,7 @@ func TestFactorySweepSessionModelUsageRetriesAfterTransientSinkError(t *testing.
 	// Fail the first model-fact write, then recover.
 	flaky := &flakyModelSink{inner: usage.NewLocalSink(sinkPath), failModelWrites: 1}
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -728,7 +731,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -986,6 +989,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1077,6 +1081,7 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1179,6 +1184,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeTranscriptErrorRetries(t *tes
 	store := &listErrStore{Store: beads.NewMemStore()}
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1251,6 +1257,7 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAbsentTranscriptRetries(t *te
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1533,6 +1540,7 @@ func TestFactorySweepRecoversBacklogBeyondFixedTailWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -1641,6 +1649,7 @@ func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},

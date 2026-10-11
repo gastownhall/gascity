@@ -66,9 +66,11 @@ func newGatherFixture(t *testing.T, rows ...beads.Bead) *gatherFixture {
 		Recording:    f.rec.Load,
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(f.cache) },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			f.resolves.Add(1)
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				f.resolves.Add(1)
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			}}
 		},
 		LookPath: func(name string) (string, error) { f.looks.Add(1); return "/bin/" + name, nil },
 	}

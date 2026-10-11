@@ -22,7 +22,7 @@ import (
 // drain the agent acked and whose runtime is gone: the row J27 A attaches to.
 func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps) {
 	t.Helper()
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	b := env.createSessionBead("worker", "worker")
@@ -43,7 +43,7 @@ func heldDrainedSession(t *testing.T) (*reconcilerTestEnv, beads.Bead, drainOps)
 
 func (e *reconcilerTestEnv) userHoldTick(t *testing.T, id string, dops drainOps) {
 	t.Helper()
-	e.userHoldTickAt(t, "", id, dops)
+	e.userHoldTickAt(t, e.city, id, dops)
 }
 
 // userHoldTickAt is userHoldTick for a city at cityPath: the controller's
@@ -89,7 +89,7 @@ func (e *reconcilerTestEnv) assertResumedStaysUp(t *testing.T, id string, dops d
 
 func TestAttachAfterManagedSuspendStaysUp(t *testing.T) {
 	env, b, dops := heldDrainedSession(t)
-	mgr := session.NewManagerWithOptions(env.store, env.sp, session.WithClock(env.clk))
+	mgr := session.NewManagerWithOptions(env.store, env.sp, session.WithClock(env.clk), session.WithCityPath(env.city))
 	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -101,6 +101,7 @@ func TestAttachAfterManagedSuspendStaysUp(t *testing.T) {
 // written over the resumed row. A drain whose row still holds the intent
 // runs as before.
 func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
+	testCity := t.TempDir()
 	for intent, wantStop := range map[string]bool{"": false, "user-hold": true} {
 		now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 		sp := runtime.NewFake()
@@ -116,7 +117,7 @@ func TestUserHoldDrainReleasedOnceTheHoldIsConsumed(t *testing.T) {
 		}
 		dt := newDrainTracker()
 		beginDrainForTest(t, store, dt, b.ID, "user-hold", now.Add(-time.Hour), now.Add(-time.Minute)).ackSet = true
-		advanceSessionDrainsWithSessionsTraced("", dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		advanceSessionDrainsWithSessionsTraced(testCity, dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
 			got, _ := store.Get(id)
 			return &got
 		}), map[string]wakeEvaluation{}, &config.City{}, &clock.Fake{Time: now}, nil)
@@ -155,7 +156,7 @@ func TestAttachAfterManagedSuspendSurvivesAMidResumeTick(t *testing.T) {
 			t.Errorf("mid-resume tick drain = %+v, want a user-hold drain (test premise)", ds)
 		}
 	}
-	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk))
+	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(env.city))
 	if err := mgr.Attach(context.Background(), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestAttachSurvivesATickAndItsFollowUpDuringStart(t *testing.T) {
 			!strings.Contains(env.stderr.String(), "stop-pending worker deferred") {
 			t.Errorf("follow-up tick left reason=%q; stderr=%q; want the marker deferred on the attach's lease", info.StateReason, env.stderr.String())
 		}
-		stops.wait(-1) // any queued stop runs to completion inside the Start window
+		waitAsyncStopsForTest(t, stops) // any queued stop runs to completion inside the Start window
 		if !env.sp.IsRunning("worker") {
 			t.Error("the follow-up tick's stop killed the runtime the attach is starting")
 		}
@@ -250,7 +251,7 @@ func TestAttachSurvivesAStaleSnapshotDrainAck(t *testing.T) {
 			stops := &asyncStartTracker{}
 			env.clk.Time = env.clk.Time.Add(time.Minute)
 			env.userHoldTickOn(t, city, before, dops, withAsyncDrainAckStopTracker(stops))
-			stops.wait(-1)
+			waitAsyncStopsForTest(t, stops)
 			if !env.sp.IsRunning("worker") {
 				t.Fatalf("the stale-snapshot drain-ack stopped the resumed runtime; stdout:\n%s", env.stdout.String())
 			}

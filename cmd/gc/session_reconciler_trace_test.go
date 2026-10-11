@@ -737,7 +737,7 @@ func (s livenessGetErrStore) Get(id string) (beads.Bead, error) {
 func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 	run := func(t *testing.T, injectStoreLivenessErr bool, sp runtime.Provider) (got beads.Bead, before map[string]string, stderr string) {
 		t.Helper()
-		env := newReconcilerTestEnv()
+		env := newReconcilerTestEnv(t)
 		env.cfg = &config.City{}
 		// An active, resumable, undesired session with a dead runtime is the plain
 		// orphan-close case. Its metadata exposes absence-derived healing that
@@ -764,8 +764,9 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 		}
 
 		var stderrBuf bytes.Buffer
-		reconcileSessionBeads(
+		reconcileSessionBeadsAtPath(
 			context.Background(),
+			env.city,
 			[]beads.Bead{session},
 			nil, // desiredState — empty ⇒ orphan
 			nil, // configuredNames
@@ -774,7 +775,8 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 			store, // store
 			nil,   // dops
 			nil,   // assignedWorkBeads
-			nil,   // readyWaitSet
+			nil,
+			nil, // readyWaitSet
 			newDrainTracker(),
 			nil,   // poolDesired
 			false, // storeQueryPartial
@@ -785,6 +787,7 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 			events.Discard,
 			0, 0,
 			io.Discard, &stderrBuf,
+			withAsyncDrainAckStopTracker(env.stops),
 		)
 
 		stored, err := env.store.Get(session.ID)

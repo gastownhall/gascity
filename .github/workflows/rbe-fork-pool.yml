@@ -96,6 +96,12 @@ jobs:
           # again; for an emergency also cancel the running pool runs.
           RBE_WIRE_ZSTD: ${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}
           RBE_WIRE_ZSTD_READ_URL: ${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}
+          # The same read-only warm set as the OSS pool (nothing here can write
+          # it; every blob is re-hashed before NativeLink loads it), fetched
+          # before any fork action exists. Off until RBE_FORK_WARM_URL is set;
+          # RBE_FORK_WARM_EVERY=N warms one run in N. Rollback: unset it.
+          RBE_WARM_URL: ${{ vars.RBE_FORK_WARM_URL || '' }}
+          RBE_WARM_EVERY: ${{ vars.RBE_FORK_WARM_EVERY || '1' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # As in rbe-worker-pool.yml: drift is reported while the worker serves.
