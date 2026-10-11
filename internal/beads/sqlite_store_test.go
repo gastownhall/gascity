@@ -553,7 +553,8 @@ func TestSQLiteStoreCloseStore(t *testing.T) {
 		return n
 	}
 
-	settleBelow(0)
+	runtime.GC()
+	runtime.Gosched()
 	base := runtime.NumGoroutine()
 
 	s, err := OpenSQLiteStore(t.TempDir(),
@@ -768,7 +769,8 @@ func TestSQLiteStoreNoLeakOnDiscard(t *testing.T) {
 		return n
 	}
 
-	settleBelow(0)
+	runtime.GC()
+	runtime.Gosched()
 	base := runtime.NumGoroutine()
 
 	for i := 0; i < n; i++ {
