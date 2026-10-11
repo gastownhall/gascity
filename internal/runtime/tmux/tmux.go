@@ -236,8 +236,9 @@ var (
 	// callers must NOT retry this: retrying would re-inject a message the
 	// session already received, which is the ga-civwyz duplicate-reminder
 	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
-	// days of production logs).
-	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+	// days of production logs). It wraps runtime.ErrNudgeDeliveredUnobserved
+	// so callers that only know the runtime contract treat it as delivered.
+	ErrNudgeSubmitDeliveredUnobserved = fmt.Errorf("%w: submit Enter delivered and composer drained but busy state was never observed", runtime.ErrNudgeDeliveredUnobserved)
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -1952,31 +1953,32 @@ func (t *Tmux) isSessionAttachedForAttach(target string) bool {
 	return attached && err == nil
 }
 
-// WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
-// This wakes up Claude Code's event loop by simulating a terminal resize.
+// WakePane tries to trigger a SIGWINCH in a pane with a resize dance, to wake
+// up Claude Code's event loop by simulating a terminal resize.
 //
 // When Claude runs in a detached tmux session, its TUI library may not process
 // stdin until a terminal event occurs. Attaching triggers SIGWINCH which wakes
-// the event loop. This function simulates that by doing a resize dance.
+// the event loop. The resize dance does not deliver that yet: it sends no
+// SIGWINCH on a single-pane window (ga-vkm6pu) and leaves a split pane one row
+// tall (ga-bwyec7); see the comment inside.
 //
-// Note: This always performs the resize. Use WakePaneIfDetached to skip
+// Note: This always attempts the resize. Use WakePaneIfDetached to skip
 // attached sessions where the wake is unnecessary.
 func (t *Tmux) WakePane(target string) {
-	// Resize pane down by 1 row, then up by 1 row
-	// This triggers SIGWINCH without changing the final pane size
-	if _, err := t.run("resize-pane", "-t", target, "-y", "-1"); err != nil {
-		// Non-fatal (e.g. "height too small" on a single-pane window) -- the
-		// resize-up below and the rest of the wake still proceed -- but make
-		// it observable instead of silently swallowed.
-		fmt.Printf("warning: WakePane resize-pane failed for %s: %v\n", target, err)
-	}
+	// tmux reads -y as an absolute height, not a delta: "-y -1" always fails
+	// with "height too small", and "-y +1" sets the pane to one row. On a
+	// single-pane window neither call resizes anything, so no SIGWINCH is
+	// sent; on a split window the pane is left one row tall. Both errors are
+	// discarded because the wake is best-effort.
+	_, _ = t.run("resize-pane", "-t", target, "-y", "-1")
 	time.Sleep(50 * time.Millisecond)
 	_, _ = t.run("resize-pane", "-t", target, "-y", "+1")
 }
 
-// WakePaneIfDetached triggers a SIGWINCH only if the session is detached.
-// This avoids unnecessary latency on attached sessions where Claude is
-// already processing terminal events.
+// WakePaneIfDetached runs WakePane only if the session is detached, so it
+// carries WakePane's limits (ga-vkm6pu, ga-bwyec7). This avoids unnecessary
+// latency on attached sessions where Claude is already processing terminal
+// events.
 func (t *Tmux) WakePaneIfDetached(target string) {
 	if t.IsSessionAttached(target) {
 		return
@@ -2507,58 +2509,82 @@ const (
 
 // submitEnterAndConfirm sends the provider's submit key sequence (see
 // nudgeSubmitKeySequences — a single Enter for every family this fork has
-// verified so far) and confirms the message submitted by observing the
-// agent transition to its busy/processing state. It re-sends the sequence
-// only while the pane remains idle (submission not yet observed), so a turn
-// that already started can never receive a second submit.
+// verified so far) and confirms the message submitted by observing the pane
+// go from idle to busy (see busyTransition). A pane already busy before the
+// call (a stray earlier turn) confirms nothing until it has read idle. The
+// sequence is never re-sent to a pane that reads busy, so a running turn,
+// this submit's or an earlier one, does not receive a second submit.
 //
-// Returns:
-//   - (true, nil)  — the agent went busy: the message submitted.
-//   - (false, nil) — the submit sequence was delivered to tmux but busy was
-//     never observed within the budget (best-effort; preserves the
-//     historical "nil == handed to tmux" contract so callers do not
-//     re-paste).
-//   - (false, err) — every submit attempt failed at the tmux layer.
+// Returns (confirmed, sawIdle, err):
+//   - confirmed: the pane read idle, then busy, so the message submitted.
+//   - sawIdle: some reading showed the pane idle. False means every reading
+//     was busy or failed: a turn that started before this call outlasted the
+//     window, and its busy proves nothing about this submit.
+//   - err: the last submit attempted failed at the tmux layer. A nil error
+//     with confirmed false means the submit reached tmux but no idle->busy
+//     transition was observed within the budget; the caller judges delivery
+//     from the pane itself (see nudgeSession).
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
-	// Baseline snapshot taken before the first send. Without it, a pane that
-	// was already busy going into this call (e.g. from a stray earlier
-	// submit) would have its pre-existing busy reading wrongly credited to
-	// send 0's poll below -- only a false->true transition relative to this
-	// baseline counts as confirmation of THIS call's submit. If the baseline
-	// read itself fails, treat it as unknown/busy so send 0 cannot confirm
-	// off an unverified idle state either.
-	baselineIdle := false
-	if isBusy, err := busy(); err == nil {
-		baselineIdle = !isBusy
-	}
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
+	// Baseline reading before the first send: an idle baseline lets send 0's
+	// own polls confirm, while a busy or failed one leaves the pane needing
+	// an idle reading first.
+	watch := busyTransition{busy: busy}
+	watch.observe()
 
 	var lastErr error
 	for send := 0; send < submitEnterMaxSends; send++ {
+		resend := true
 		if send > 0 {
-			// Re-confirm the pane is still idle before re-sending. A turn that
-			// already submitted (busy) must never receive a second Enter.
-			if isBusy, err := busy(); err == nil && isBusy {
-				return true, nil
+			isBusy, confirmed := watch.observe()
+			if confirmed {
+				return true, true, nil
 			}
+			// Busy without an idle reading yet: the turn running since before
+			// this call has not finished. Never submit into it; keep watching.
+			resend = !isBusy
 			sleep(submitReEnterBackoff)
 		}
-		if err := sendSubmit(); err != nil {
-			lastErr = err
-			continue
+		if resend {
+			if err := sendSubmit(); err != nil {
+				lastErr = err
+				continue
+			}
+			lastErr = nil // a later send succeeded; don't surface an earlier transient failure
+			wake()
 		}
-		lastErr = nil // a later send succeeded; don't surface an earlier transient failure
-		wake()
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
-			if isBusy, err := busy(); err == nil && isBusy && (send > 0 || baselineIdle) {
-				return true, nil
+			if _, confirmed := watch.observe(); confirmed {
+				return true, true, nil
 			}
 			sleep(submitConfirmPollInterval)
 		}
 	}
-	return false, lastErr
+	return false, watch.seenIdle, lastErr
+}
+
+// busyTransition tracks the idle->busy transition that confirms a submit. A
+// busy reading confirms only after an earlier reading showed the pane idle, so
+// busy carried over from a turn started before the submit is never credited to
+// it. A failed read counts as neither idle nor busy.
+type busyTransition struct {
+	busy     func() (bool, error)
+	seenIdle bool
+}
+
+// observe reads the pane once and reports whether it is busy and whether that
+// busy reading completes the transition.
+func (b *busyTransition) observe() (isBusy, confirmed bool) {
+	isBusy, err := b.busy()
+	if err != nil {
+		return false, false
+	}
+	if !isBusy {
+		b.seenIdle = true
+	}
+	return isBusy, isBusy && b.seenIdle
 }
 
 // Staged-draft recovery bounds. The confirm window above totals ~2.4s, and a
@@ -2588,7 +2614,8 @@ type stagedDraftMarker struct {
 // without an entry never gets recovery submits. Every entry must also be
 // submit-verify eligible: recovery runs only on the verified submit path.
 // paneShowsDrainedComposer reads every entry too: a composer that still shows
-// a placeholder has not drained.
+// a placeholder has not drained. It finds the target's live composer by its
+// family's promptPrefix (composerPromptPrefix).
 var stagedDraftMarkers = map[string]stagedDraftMarker{
 	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
 	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
@@ -2597,6 +2624,15 @@ var stagedDraftMarkers = map[string]stagedDraftMarker{
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
 	m, ok := stagedDraftMarkers[family]
 	return m, ok
+}
+
+// composerPromptPrefix returns the prompt that starts m's family composer, or
+// DefaultReadyPromptPrefix for the zero marker of a family without an entry.
+func (m stagedDraftMarker) composerPromptPrefix() string {
+	if m.promptPrefix == "" {
+		return DefaultReadyPromptPrefix
+	}
+	return m.promptPrefix
 }
 
 // stagedDraftMarkerFor resolves target's staged-draft marker, identifying the
@@ -2662,10 +2698,12 @@ type stagedDraftOutcome int
 
 const (
 	// stagedDraftUnresolved: recovery proved nothing. No draft was visible,
-	// the pane could not be read, a send failed, or the bound ran out. The
-	// caller keeps its unconfirmed-submit handling.
+	// the pane read busy before any idle reading, the pane could not be read,
+	// a send failed, or the bound ran out. The caller keeps its
+	// unconfirmed-submit handling.
 	stagedDraftUnresolved stagedDraftOutcome = iota
-	// stagedDraftSubmittedBusy: the pane went busy, so the submit landed.
+	// stagedDraftSubmittedBusy: the pane went busy after an idle reading, so
+	// the submit landed.
 	stagedDraftSubmittedBusy
 	// stagedDraftCleared: after a re-send the draft left the composer but no
 	// capture saw the busy indicator. The agent took the message, so this is
@@ -2692,11 +2730,17 @@ func (o stagedDraftOutcome) String() string {
 // interrupt. It stops as soon as the pane goes busy or the draft clears, and
 // after submitDraftRecoverySends sends at most. It never sends when no draft
 // was seen, so an idle pane with an empty composer (the ambiguous case where
-// the submit may already have landed) keeps the old contract.
+// the submit may already have landed) keeps the old contract. Like
+// submitEnterAndConfirm, it credits busy as the submit landing only after an
+// idle reading: sawIdle reports whether the confirm window saw one, and any
+// idle capture here counts too. A pane busy before any idle reading is still
+// running a turn that began before the nudge, so recovery sends nothing and
+// returns stagedDraftUnresolved, leaving the verdict to the caller's
+// drained-composer check.
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func recoverStagedDraft(sendSubmit func() error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
+func recoverStagedDraft(sawIdle bool, sendSubmit func() error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
 	sawDraft := false
 	for sends := 0; ; sends++ {
 		obs, err := observe()
@@ -2704,14 +2748,17 @@ func recoverStagedDraft(sendSubmit func() error, wake func(), observe func() (pa
 		case err != nil:
 			return stagedDraftUnresolved
 		case obs.busy:
-			return stagedDraftSubmittedBusy
+			if sawIdle {
+				return stagedDraftSubmittedBusy
+			}
+			return stagedDraftUnresolved
 		case !obs.drafted:
 			if sawDraft {
 				return stagedDraftCleared
 			}
 			return stagedDraftUnresolved
 		}
-		sawDraft = true
+		sawIdle, sawDraft = true, true
 		if sends >= submitDraftRecoverySends {
 			return stagedDraftUnresolved
 		}
@@ -2991,7 +3038,7 @@ func (t *Tmux) nudgeSession(
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		confirmed, sawIdle, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
@@ -3003,11 +3050,14 @@ func (t *Tmux) nudgeSession(
 			// re-send while that draft is visible (recoverStagedDraft). Skip
 			// it when a client is attached or the probe cannot tell, for the
 			// same reason the C-u clear above is skipped: a human may be
-			// composing, and a re-sent submit would send their draft.
-			if marker, ok := t.stagedDraftMarkerFor(target); ok {
+			// composing, and a re-sent submit would send their draft. A pane
+			// that never read idle is still running an earlier turn, so
+			// recovery leaves it to the drained-composer check below.
+			marker, hasMarker := t.stagedDraftMarkerFor(target)
+			if hasMarker {
 				if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
 					observe := func() (paneSubmitObservation, error) { return t.observeSubmit(target, marker) }
-					switch recoverStagedDraft(sendSubmit, wake, observe, time.Sleep) {
+					switch recoverStagedDraft(sawIdle, sendSubmit, wake, observe, time.Sleep) {
 					case stagedDraftSubmittedBusy:
 						return nil
 					case stagedDraftCleared:
@@ -3029,8 +3079,10 @@ func (t *Tmux) nudgeSession(
 			// submit itself is in doubt. A drained composer is positive
 			// evidence the Enter reached the pane and the agent consumed it —
 			// only the busy-state OBSERVATION missed it — so that case must be
-			// reported as proven delivery, not requeued as a failure.
-			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+			// reported as proven delivery, not requeued as a failure. The
+			// composer is found by the target family's own prompt (codex's
+			// "› "), not Claude's.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message, marker.composerPromptPrefix()) {
 				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
@@ -4861,14 +4913,20 @@ func codexTranscriptTailContainsTurnAborted(tail string) bool {
 // "(main)", "⏱️ Jun 4 02:57:04", or the "✻ Worked for 3m 38s" done marker.
 var claudeBusySpinnerRe = regexp.MustCompile(`\([0-9]+[ms][^)]*[·•]`)
 
-// claudeBareGerundSpinnerRe matches Claude Code's spinner glyph plus gerund
-// before it has gained the elapsed-timer suffix claudeBusySpinnerRe matches --
-// e.g. "· Tinkering…" or "✢ Clauding…" -- which is how Claude Code 2.1.x
-// renders for roughly the first second of a turn, before token streaming
-// appends "(Nm/Ns · ...)" . Requires the leading character to be a symbol
-// (not a letter/digit) and the word to end "ing…" so idle chrome with a
-// leading glyph -- "🚀 Opus 4.8 | ..." -- does not match.
-var claudeBareGerundSpinnerRe = regexp.MustCompile(`[^\sA-Za-z0-9] [A-Z][A-Za-z]*ing…`)
+// claudeBareGerundSpinnerRe matches Claude Code's spinner row before it has
+// gained the elapsed-timer suffix claudeBusySpinnerRe matches -- e.g.
+// "· Tinkering…" or "✢ Clauding…" -- which is how Claude Code 2.1.x renders
+// for roughly the first second of a turn, before token streaming appends
+// "(Nm/Ns · ...)". The row must start the line with one of the spinner frames
+// Claude Code ships across platforms (· ✢ ✳ * ✶ ✻ ✽), then one space and a
+// single word ending in "…". Any spelling of the word matches, so hyphenated,
+// apostrophized, and accented verbs ("Dilly-dallying…", "Beboppin'…",
+// "Flambéing…") read busy, while transcript prose ("- Loading…",
+// "Status: Pending…", "1. Fixing…"), codex's "•" bullets, and the
+// "✻ Worked for 1m 49s" done marker do not. A transcript line that itself
+// starts with a frame glyph and a lone word ending in "…" (a "* Loading…"
+// bullet) still reads busy.
+var claudeBareGerundSpinnerRe = regexp.MustCompile(`^\s*[·✢✳✶✻✽*] [^\s…]+…`)
 
 // paneContainsBusyIndicator checks captured pane lines for signs that the agent
 // is actively processing. Agent TUIs surface this differently: older Claude Code
@@ -4891,10 +4949,11 @@ func paneContainsBusyIndicator(lines []string) bool {
 }
 
 // paneShowsDrainedComposer reports whether the pane's live composer -- the
-// LAST captured line matching the ready prompt prefix (DefaultReadyPromptPrefix)
-// -- has drained, meaning the submit Enter actually reached the pane and the
-// agent consumed it. Earlier lines that also start with the prompt prefix are
-// scrollback transcript entries, not the live composer, and are ignored.
+// LAST captured line matching readyPromptPrefix, the target family's composer
+// prompt (stagedDraftMarker.composerPromptPrefix) -- has drained, meaning the
+// submit Enter actually reached the pane and the agent consumed it. Earlier
+// lines that also start with the prompt prefix are scrollback transcript
+// entries, not the live composer, and are ignored.
 //
 // It returns false when the composer still holds sent: the first non-empty
 // line of sent (compared on its first 40 runes, trimmed) is still present in
@@ -4914,8 +4973,8 @@ func paneContainsBusyIndicator(lines []string) bool {
 // prior submit drained it and only the busy-state OBSERVATION failed. When no
 // line matches the prompt prefix at all, the composer cannot be observed, so
 // this conservatively returns false rather than claiming delivery is proven.
-func paneShowsDrainedComposer(lines []string, sent string) bool {
-	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+func paneShowsDrainedComposer(lines []string, sent, readyPromptPrefix string) bool {
+	remainder, observed := lastComposerRemainder(lines, readyPromptPrefix)
 	if !observed {
 		return false
 	}

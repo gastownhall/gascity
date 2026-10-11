@@ -915,6 +915,13 @@ func formatWaitIdleReminder(source, message string) string {
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
 	err := m.nudgeContent(sessName, content, immediate)
+	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+		// The provider proved delivery and only missed the turn start, so
+		// this nudge is delivered: a caller that retried it would deliver
+		// the message twice.
+		log.Printf("session: %q: %v", sessName, err)
+		err = nil
+	}
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()

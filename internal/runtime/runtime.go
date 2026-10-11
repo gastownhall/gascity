@@ -77,6 +77,14 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
+// was consumed, but the provider never observed the session start the turn.
+// Delivery is proven, so callers must treat the nudge as delivered and must
+// not retry it: a retry delivers the message twice. Providers wrap their own
+// unobserved-delivery conditions with this sentinel so callers can dispatch
+// with errors.Is.
+var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".

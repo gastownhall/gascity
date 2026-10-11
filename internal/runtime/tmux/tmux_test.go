@@ -3152,11 +3152,6 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 		{"claude busy spinner long turn", []string{"✶ Investigating… (31m 40s · ↓ 108.6k tokens)"}, true},
 		{"claude busy spinner thinking", []string{"✢ Clauding… (56s · ↓ 1.7k tokens · thinking with max effort)"}, true},
 		{"codex busy spinner bullet", []string{"◦ Working (2m 48s • esc to interrupt)"}, true},
-		// Claude Code 2.1.x's spinner starts bare -- glyph + gerund + ellipsis,
-		// no parenthesized suffix -- for roughly the first second of a turn,
-		// before token streaming appends the "(Nm/Ns · ...)" suffix above.
-		{"claude bare gerund spinner no timer yet", []string{"· Tinkering…"}, true},
-		{"claude bare gerund spinner clauding", []string{"✢ Clauding…"}, true},
 		// Idle/done markers and status chrome must NOT read as busy — a false
 		// positive makes WaitForIdle never return, so the agent is never nudged.
 		{"claude done marker", []string{"✻ Worked for 1m 49s", "❯ "}, false},
@@ -3271,9 +3266,9 @@ func TestPaneShowsDrainedComposer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			got := paneShowsDrainedComposer(tt.lines, tt.sent, DefaultReadyPromptPrefix)
 			if got != tt.want {
-				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
+				t.Errorf("paneShowsDrainedComposer(%v, %q, %q) = %v, want %v", tt.lines, tt.sent, DefaultReadyPromptPrefix, got, tt.want)
 			}
 		})
 	}

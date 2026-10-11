@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"context"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -145,6 +147,85 @@ func TestRespondCancelsCopyModeBeforeDelivery(t *testing.T) {
 		}
 		if literal := callIndexWithTokens(fe.calls, "send-keys", "-l", "1"); literal < 0 {
 			t.Fatalf("happy path must still deliver the approval key; calls=%v", fe.calls)
+		}
+	})
+}
+
+// copyModeNudgeExecutor answers the #{pane_in_mode} probe with inMode and every
+// other tmux call with empty output, so NudgeSession runs its whole delivery
+// path against a pane that is, or is not, parked in copy-mode. It answers by
+// argument rather than by call index, so the probe can sit anywhere in the
+// sequence without shifting the other responses.
+type copyModeNudgeExecutor struct {
+	calls  [][]string
+	inMode string
+}
+
+func (e *copyModeNudgeExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	if slices.Contains(args, "#{pane_in_mode}") {
+		return e.inMode, nil
+	}
+	return "", nil
+}
+
+func (e *copyModeNudgeExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// TestNudgeSessionCancelsCopyModeBeforeDelivery pins the same ga-c4w fix on the
+// nudge path: NudgeSession must exit copy-mode before it pastes the message, or
+// a pane a human scrolled back swallows the nudge. It drives the real
+// NudgeSession and orders the calls at the executor boundary.
+func TestNudgeSessionCancelsCopyModeBeforeDelivery(t *testing.T) {
+	t.Run("parked pane cancels copy-mode before the literal paste", func(t *testing.T) {
+		ex := &copyModeNudgeExecutor{inMode: "1"}
+		tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+
+		if err := tm.NudgeSession("sess", "hello"); err != nil {
+			t.Fatalf("NudgeSession: %v", err)
+		}
+
+		probe := callIndexWithTokens(ex.calls, "display-message", "#{pane_in_mode}")
+		cancel := callIndexWithTokens(ex.calls, "send-keys", "-X", "cancel")
+		literal := callIndexWithTokens(ex.calls, "send-keys", "-l", "hello")
+
+		if probe < 0 {
+			t.Fatalf("expected a #{pane_in_mode} probe before delivery; calls=%v", ex.calls)
+		}
+		if cancel < 0 {
+			t.Fatalf("parked pane: expected a copy-mode `-X cancel` before the paste; calls=%v", ex.calls)
+		}
+		if literal < 0 {
+			t.Fatalf("the message was never pasted; calls=%v", ex.calls)
+		}
+		if probe >= cancel {
+			t.Fatalf("#{pane_in_mode} probe (idx %d) must precede the copy-mode cancel (idx %d); calls=%v", probe, cancel, ex.calls)
+		}
+		if cancel >= literal {
+			t.Fatalf("copy-mode cancel (idx %d) must precede the literal paste (idx %d); calls=%v", cancel, literal, ex.calls)
+		}
+	})
+
+	t.Run("unparked pane issues no cancel and delivers normally", func(t *testing.T) {
+		ex := &copyModeNudgeExecutor{inMode: "0"}
+		tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+
+		if err := tm.NudgeSession("sess", "hello"); err != nil {
+			t.Fatalf("NudgeSession: %v", err)
+		}
+
+		probe := callIndexWithTokens(ex.calls, "display-message", "#{pane_in_mode}")
+		literal := callIndexWithTokens(ex.calls, "send-keys", "-l", "hello")
+
+		if cancel := callIndexWithTokens(ex.calls, "send-keys", "-X", "cancel"); cancel >= 0 {
+			t.Fatalf("unparked pane: spurious copy-mode cancel at idx %d; calls=%v", cancel, ex.calls)
+		}
+		if literal < 0 {
+			t.Fatalf("happy path must still paste the message; calls=%v", ex.calls)
+		}
+		if probe < 0 || probe >= literal {
+			t.Fatalf("#{pane_in_mode} probe (idx %d) must precede the literal paste (idx %d); calls=%v", probe, literal, ex.calls)
 		}
 	})
 }

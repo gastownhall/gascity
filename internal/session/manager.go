@@ -69,7 +69,7 @@ const BeadType = "session"
 const LabelSession = "gc:session"
 
 // MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
-// the wall-clock time of the most recent successful queued-nudge delivery.
+// the wall-clock time of the most recent successful nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
 // Info holds the user-facing details of a chat session.
