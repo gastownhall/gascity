@@ -1555,7 +1555,13 @@ var bdCommandRetrySleep = time.Sleep
 // to classify transport-class failures. The managed retry below and gc
 // hook's store-unavailable signal both read it, so it is hoisted out of
 // bdTransportRetryableError rather than inlined: a marker added for one
-// consumer must classify for the other.
+// consumer must classify for the other. gc hook classifies more than this
+// table lists (classifyWorkQueryStoreUnavailable): the dispatch availability
+// tier, which includes bd's circuit-breaker fail-fast, and bd's own
+// connection-error messages (bdConnectionErrorMarkers). Those are deliberately
+// not listed here, because the managed retry would fire on them too: it re-runs
+// any bd command, writes included, and a retry against a server whose breaker
+// is open lands inside the cooldown and fails fast again.
 //
 // It is an explicit compatibility surface with the bd CLI, and remains the
 // classification mechanism until bd ships a typed machine-readable error

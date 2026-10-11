@@ -146,8 +146,11 @@ work_query = "kill -9 $$"
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("cmdHookWithFormat() = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	if code != 2 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 2 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("stderr = %q, want %s for killed work query", stderr.String(), hookStoreUnavailableToken)
 	}
 	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
 	if err != nil {
@@ -206,8 +209,8 @@ work_query = "kill -9 $$"
 
 	var stdout, stderr bytes.Buffer
 	code := cmdHookWithFormat([]string{"other"}, false, "", &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	if code != 2 {
+		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 2 (store unavailable) for killed work query; stderr=%s", code, stderr.String())
 	}
 	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
 	if err != nil {
@@ -1308,9 +1311,13 @@ func TestHookCommandError(t *testing.T) {
 	}
 }
 
+// TestHookCommandErrorPrintsPartialOutput pins that an ordinary work-query
+// failure still prints whatever output the runner returned with it before
+// exiting 1. TestDoHookStoreUnavailableSuppressesPartialStdout is the companion:
+// a store-unavailable failure, such as a timed-out query, prints none of it.
 func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 	runner := func(string, string) (string, error) {
-		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
+		return "[]\n", fmt.Errorf("running work query %q: exit status 1: invalid value for --limit", "bd ready")
 	}
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
@@ -1320,8 +1327,11 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 	if got := stdout.String(); got != "[]" {
 		t.Errorf("stdout = %q, want partial JSON output", got)
 	}
-	if !strings.Contains(stderr.String(), "partial stdout") {
-		t.Errorf("stderr = %q, want timeout diagnostic", stderr.String())
+	if !strings.Contains(stderr.String(), "invalid value for --limit") {
+		t.Errorf("stderr = %q, want the work-query diagnostic", stderr.String())
+	}
+	if strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Errorf("stderr = %q carries the store-unavailable token for an ordinary failure", stderr.String())
 	}
 }
 
