@@ -127,14 +127,13 @@ title = "Work"
 	}
 }
 
-// TestSlingStandaloneFormulaOnASingleStoreCityRigTargetIsUnchanged pins that
-// the #6054 fix leaves a city that relocates nothing exactly as it was: the
-// API hands the sling GraphBeadStore() (the city store) as its graph store, so
-// a rig-targeted --formula mints its root in the city store while routing goes
-// through the rig store, and the sling fails with 400. That pre-existing
-// non-split defect is tracked separately (ga-i0prlx); this row only guards that the
-// relocated-graph fix did not change it.
-func TestSlingStandaloneFormulaOnASingleStoreCityRigTargetIsUnchanged(t *testing.T) {
+// TestSlingStandaloneFormulaOnASingleStoreCityRigTargetMintsTheRootInTheRigStore
+// pins ga-i0prlx: a city that relocates nothing hands the sling no graph store,
+// so, as gc sling does through resolveGraphStore, a rig-targeted --formula
+// mints its wisp root in the rig store that routes it. Before the fix the root
+// was minted in the city store, routing failed with 400, and the open, unrouted
+// root was left behind in the city store.
+func TestSlingStandaloneFormulaOnASingleStoreCityRigTargetMintsTheRootInTheRigStore(t *testing.T) {
 	h, state := newSlingTestServer(t)
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
@@ -165,10 +164,24 @@ title = "Work"
 	body := `{"target":"myrig/worker","formula":"split-root-only"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (unchanged single-store behavior); body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "bead not found") {
-		t.Fatalf("body = %s, want the unchanged routing failure", rec.Body.String())
+	roots, err := state.stores["myrig"].List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list rig store: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("rig store holds %d beads, want the one wisp root: %+v", len(roots), roots)
+	}
+	if got := roots[0].Metadata[beadmeta.RoutedToMetadataKey]; got != "myrig/worker" {
+		t.Errorf("wisp root %s gc.routed_to = %q, want myrig/worker", roots[0].ID, got)
+	}
+	leaked, err := state.CityBeadStore().List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list city store: %v", err)
+	}
+	if len(leaked) != 0 {
+		t.Fatalf("city store holds %d beads, want none (no root minted outside the routing store): %+v", len(leaked), leaked)
 	}
 }

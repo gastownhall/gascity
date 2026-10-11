@@ -3233,6 +3233,7 @@ func TestRecordQueuedNudgeFailureDeadLettersWhenTerminalBeadMarkFails(t *testing
 func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
@@ -3302,6 +3303,7 @@ func TestCmdNudgePollSurvivesTransientObserveErrors(t *testing.T) {
 func TestCmdNudgePollRecordsDispatchSkipForBusyTarget(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -3389,6 +3391,7 @@ func TestCmdNudgePollRecordsDispatchSkipForBusyTarget(t *testing.T) {
 func TestCmdNudgePollDoesNotRecordSkipWithoutQueuedWork(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 

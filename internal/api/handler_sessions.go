@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -94,10 +95,16 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		provider, displayName = resolveProviderInfo(info.Provider, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
+	state := string(info.State)
+	if info.Closed {
+		// session.Info blanks State on a closed bead and carries closure in
+		// Closed; the wire reports it as the closed lifecycle state.
+		state = string(session.BaseStateClosed)
+	}
 	r := sessionResponse{
 		ID:          info.ID,
 		Template:    info.Template,
-		State:       string(info.State),
+		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
 		Provider:    provider,
@@ -474,7 +481,6 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-
 	res, err := session.NewStore(store).WakeSession(id, time.Now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if errors.Is(err, session.ErrNotSessionBead) {
@@ -501,6 +507,10 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
