@@ -35,6 +35,7 @@ go_library(
         "staging.go",
         "startup_hints.go",
         "turn_events.go",
+        "turn_events_merge.go",
         "worker.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
@@ -85,6 +86,7 @@ go_test(
         "staging_skip_mergeable_test.go",
         "staging_test.go",
         "testenv_import_test.go",
+        "turn_events_merge_test.go",
     ],
     data = glob(
         ["**"],

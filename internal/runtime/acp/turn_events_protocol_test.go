@@ -38,7 +38,7 @@ func TestACPProtocolTurnEventsInterruptCancels(t *testing.T) {
 	s.nudge(t, "long turn")
 	// Interrupt only after the fake has logged the prompt, so the cancel
 	// cannot race the prompt's arrival.
-	waitForMethod(t, s, "session/prompt")
+	waitForPrompt(t, s)
 	if err := s.p.Interrupt(s.name); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}

@@ -2,7 +2,10 @@ package auto
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -21,43 +24,75 @@ func (f *turnEventFake) SubscribeTurnEvents(context.Context) (<-chan runtime.Tur
 	return f.ch, nil
 }
 
+// recvTurn reads one event from ch or fails after a bounded wait.
+func recvTurn(t *testing.T, ch <-chan runtime.TurnEvent) runtime.TurnEvent {
+	t.Helper()
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("turn-event stream closed, want an event")
+		}
+		return ev
+	case <-time.After(10 * time.Second):
+		t.Fatal("no turn event within 10s")
+	}
+	return runtime.TurnEvent{}
+}
+
 func TestSubscribeTurnEventsForwardsTheImplementingBackend(t *testing.T) {
 	cases := []struct {
-		name      string
-		defaultSP runtime.Provider
-		acpSP     runtime.Provider
-		want      func(d, a runtime.Provider) chan runtime.TurnEvent
+		name             string
+		defaultSP, acpSP runtime.Provider
+		senders          func(a, b runtime.Provider) []chan runtime.TurnEvent
 	}{
 		{
 			name:      "acp only",
 			defaultSP: runtime.NewFake(),
 			acpSP:     newTurnEventFake(),
-			want:      func(_, a runtime.Provider) chan runtime.TurnEvent { return a.(*turnEventFake).ch },
+			senders: func(_, b runtime.Provider) []chan runtime.TurnEvent {
+				return []chan runtime.TurnEvent{b.(*turnEventFake).ch}
+			},
 		},
 		{
 			name:      "default only",
 			defaultSP: newTurnEventFake(),
 			acpSP:     runtime.NewFake(),
-			want:      func(d, _ runtime.Provider) chan runtime.TurnEvent { return d.(*turnEventFake).ch },
+			senders: func(a, _ runtime.Provider) []chan runtime.TurnEvent {
+				return []chan runtime.TurnEvent{a.(*turnEventFake).ch}
+			},
 		},
 		{
-			name:      "both: default first, like session events",
+			name:      "both: streams merged, like session events",
 			defaultSP: newTurnEventFake(),
 			acpSP:     newTurnEventFake(),
-			want:      func(d, _ runtime.Provider) chan runtime.TurnEvent { return d.(*turnEventFake).ch },
+			senders: func(a, b runtime.Provider) []chan runtime.TurnEvent {
+				return []chan runtime.TurnEvent{a.(*turnEventFake).ch, b.(*turnEventFake).ch}
+			},
+		},
+		{
+			name:      "acp behind a nested composite without turn events",
+			defaultSP: New(runtime.NewFake(), runtime.NewFake()),
+			acpSP:     newTurnEventFake(),
+			senders: func(_, b runtime.Provider) []chan runtime.TurnEvent {
+				return []chan runtime.TurnEvent{b.(*turnEventFake).ch}
+			},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			var p runtime.TurnEventProvider = New(tc.defaultSP, tc.acpSP)
-			got, err := p.SubscribeTurnEvents(context.Background())
+			got, err := p.SubscribeTurnEvents(ctx)
 			if err != nil {
 				t.Fatalf("SubscribeTurnEvents: %v", err)
 			}
-			want := tc.want(tc.defaultSP, tc.acpSP)
-			want <- runtime.TurnEvent{Kind: runtime.TurnEventStarted, TurnID: "t1"}
-			if ev := <-got; ev.TurnID != "t1" {
-				t.Fatalf("forwarded event = %+v, want turn t1", ev)
+			for i, ch := range tc.senders(tc.defaultSP, tc.acpSP) {
+				id := fmt.Sprintf("t%d", i)
+				ch <- runtime.TurnEvent{Kind: runtime.TurnEventStarted, TurnID: id}
+				if ev := recvTurn(t, got); ev.TurnID != id {
+					t.Fatalf("forwarded event = %+v, want turn %s", ev, id)
+				}
 			}
 		})
 	}
@@ -65,7 +100,8 @@ func TestSubscribeTurnEventsForwardsTheImplementingBackend(t *testing.T) {
 
 func TestSubscribeTurnEventsErrorsWithoutAnImplementingBackend(t *testing.T) {
 	p := New(runtime.NewFake(), runtime.NewFake())
-	if _, err := p.SubscribeTurnEvents(context.Background()); err == nil {
-		t.Fatal("SubscribeTurnEvents succeeded with no turn-event backend, want an error")
+	_, err := p.SubscribeTurnEvents(context.Background())
+	if !errors.Is(err, runtime.ErrNoTurnEventSource) {
+		t.Fatalf("err = %v, want runtime.ErrNoTurnEventSource", err)
 	}
 }

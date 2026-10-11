@@ -51,6 +51,7 @@ go_test(
         "startup_test.go",
         "stop_grace_test.go",
         "testenv_import_test.go",
+        "turn_events_protocol_test.go",
         "turn_events_test.go",
         "turns_test.go",
     ],
@@ -72,8 +73,8 @@ go_test(
         "//internal/bazeltest",
         "//internal/runtime",
         "//internal/runtime/auto",
-        "//internal/runtime/runtimetest",
         "//internal/runtime/hybrid",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",
     ] + select({

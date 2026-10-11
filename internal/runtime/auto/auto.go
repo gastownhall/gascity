@@ -666,19 +666,13 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 		runtime.SessionEventSource{Name: "ACP", Provider: p.acpSP})
 }
 
-// SubscribeTurnEvents forwards the turn-event stream of whichever backend
-// implements runtime.TurnEventProvider, preferring the default backend the
-// same way SubscribeSessionEvents does. Today only ACP does, so this is what
-// lets a city that routes some sessions to ACP record their turns.
+// SubscribeTurnEvents forwards the turn-event streams of the backends that
+// implement runtime.TurnEventProvider, merging them when both do, the same
+// way SubscribeSessionEvents does. A nested composite without a turn-event
+// backend is skipped, so ACP turns behind an inner composite still arrive.
+// See runtime.SubscribeTurnEventSources.
 func (p *Provider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
-	dTEP, dok := p.defaultSP.(runtime.TurnEventProvider)
-	aTEP, aok := p.acpSP.(runtime.TurnEventProvider)
-	switch {
-	case dok:
-		return dTEP.SubscribeTurnEvents(ctx)
-	case aok:
-		return aTEP.SubscribeTurnEvents(ctx)
-	default:
-		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeTurnEvents")
-	}
+	return runtime.SubscribeTurnEventSources(ctx,
+		runtime.TurnEventSource{Name: "default", Provider: p.defaultSP},
+		runtime.TurnEventSource{Name: "ACP", Provider: p.acpSP})
 }

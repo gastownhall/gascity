@@ -63,6 +63,7 @@ type ProfileBackend interface {
 	SessionEventProvider
 	SessionObjectKiller
 	SessionRosterProvider
+	TurnEventProvider
 	UnattendedSessionStopper
 }
 
@@ -75,7 +76,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileTmux:
 		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
 	case ProfileSubprocess:
 		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
 	case ProfileHerdr:
@@ -169,6 +170,7 @@ type (
 		LivenessObserverWithError
 		ProcessTableScanner
 		SessionEventProvider
+		TurnEventProvider
 		freshTrait
 		sidecarTrait
 		sleepTrait
@@ -353,6 +355,17 @@ func (f FullFake) KillZombieObject(name, _, _, _ string) (SessionObjectKillResul
 // sends nothing and closes with ctx.
 func (f FullFake) SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error) {
 	ch := make(chan SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+// SubscribeTurnEvents implements [TurnEventProvider]: a stream that sends
+// nothing and closes with ctx.
+func (f FullFake) SubscribeTurnEvents(ctx context.Context) (<-chan TurnEvent, error) {
+	ch := make(chan TurnEvent)
 	go func() {
 		<-ctx.Done()
 		close(ch)
