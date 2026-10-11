@@ -122,6 +122,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
+	p.closeSoftReload(&w, &a)
 	var unregistered []intent
 	if p.effects != nil {
 		intents, unregistered = splitRegistered(&w, intents, p.creates != nil)

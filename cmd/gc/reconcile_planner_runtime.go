@@ -63,8 +63,7 @@ type plannerRuntime struct {
 	exec    *effectExecutor
 	lane    atomic.Pointer[externalReadsLane] // built at start
 	env     atomic.Pointer[reconcileEnv]
-	// softReload amends a reload's reply; v2SoftReloadUnavailable until C7c
-	// hands the planner a soft-reload request instead (v5 M2).
+	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
 	softReload func(intent reloadIntent, r *reloadControlReply)
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
@@ -83,10 +82,11 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
+	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, ready: make(chan struct{})}
 	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
 	rt.exec.preserve = func() bool { return rt.host.preserveSessions != nil && rt.host.preserveSessions() }
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
+	rt.softReload = rt.acceptSoftReload
 	if v2EffectsEnabled(reconcilerModeLookupEnv) {
 		rt.planner.effects = rt.exec
 	}

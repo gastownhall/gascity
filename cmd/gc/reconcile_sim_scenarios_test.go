@@ -592,3 +592,40 @@ func TestSimCutoverV5HashesRebaselineNotDrain(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// Kills a soft reload under v2 that accepts nothing, accepts a row twice,
+// or never replies (MAINT-025, v5 M2): a request for the env's generation
+// accepts a live seat's drifted config, with no stop and no start, counts it
+// once, and closes when no drifted row is left, so the reply carries it; a
+// newer request closes the older at once.
+func TestSimSoftReloadAcceptsDriftOnce(t *testing.T) {
+	stale := runtime.FingerprintVersion + ":stale"
+	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "last_woke_at", rowAt(-time.Hour), "started_config_hash", stale), gc1Work())
+	q := newSoftReloadRequest(1)
+	s.p.openSoftReload(q)
+	for range 3 {
+		s.settle()
+	}
+	select {
+	case <-q.done:
+	default:
+		t.Fatal("the request is still open with no drifted row left")
+	}
+	var r reloadControlReply
+	q.reply(&r)
+	if m := s.gc1(); r.AcceptedDriftCount == nil || *r.AcceptedDriftCount != 1 || m["started_config_hash"] == stale || !strings.HasPrefix(m["started_config_hash"], runtime.FingerprintVersion+":") {
+		t.Fatalf("reply %+v, row hash %q: want one accepted and the row's hash current", r, m["started_config_hash"])
+	}
+	if len(s.sp.kills) != 0 || len(s.sp.starts) != 0 {
+		t.Fatalf("kills %v starts %v, want the seat left running", s.sp.kills, s.sp.starts)
+	}
+	older, newer := newSoftReloadRequest(1), newSoftReloadRequest(1)
+	s.p.openSoftReload(older)
+	s.p.openSoftReload(newer)
+	select {
+	case <-older.done:
+	default:
+		t.Fatal("a newer request left the older open")
+	}
+	s.noViolations(t)
+}

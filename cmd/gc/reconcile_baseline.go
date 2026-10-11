@@ -27,12 +27,19 @@ const (
 	// baselineLiveBackfill stamps an empty live hash with no session_live
 	// config (SESS-563).
 	baselineLiveBackfill baselineReason = "live-backfill"
+	// baselineSoftReload accepts a drifted row's config under a soft reload
+	// (MAINT-025): the core baseline, not the live pair, as legacy's
+	// softReloadAcceptedHashMetadata.
+	baselineSoftReload baselineReason = "soft-reload"
 )
 
 // baselinePatch is cfg's baseline for reason.
 func baselinePatch(cfg runtime.Config, reason baselineReason) session.MetadataPatch {
-	live := runtime.LiveFingerprint(cfg)
-	patch := session.MetadataPatch{"started_live_hash": live, "live_hash": live}
+	patch := session.MetadataPatch{}
+	if reason != baselineSoftReload {
+		live := runtime.LiveFingerprint(cfg)
+		patch["started_live_hash"], patch["live_hash"] = live, live
+	}
 	if reason == baselineLiveBackfill {
 		return patch
 	}

@@ -150,6 +150,7 @@ type planner struct {
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
 	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	softReload    atomic.Pointer[softReloadRequest] // the open soft reload (M2)
 	stalled       map[string]executionStalledRequest
 	stalledMu     sync.Mutex
 	stalledPosted []executionStalledRequest
@@ -321,6 +322,7 @@ func (p *planner) drainSettlements(now time.Time) {
 		if !s.Late {
 			p.backoffSettled(s)
 			p.observeSettlement(s)
+			p.softReload.Load().settle(s)
 		}
 	}
 	for _, s := range items {

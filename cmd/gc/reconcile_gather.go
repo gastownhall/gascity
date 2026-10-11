@@ -86,7 +86,8 @@ type World struct {
 	InFlight    inflightView
 	Bucket      bucketState
 	Boot        bootState
-	Paused      bool // starts paused for a provider swap (P7)
+	Paused      bool            // starts paused for a provider swap (P7)
+	SoftReload  *softReloadView // an open soft reload, for A8 (M2)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -134,7 +135,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused(), SoftReload: p.softReload.Load().view()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()

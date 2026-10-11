@@ -459,6 +459,7 @@ go_library(
         "reconcile_session_effects.go",
         "reconcile_session_fence.go",
         "reconcile_session_namelock.go",
+        "reconcile_soft_reload.go",
         "reconcile_startup_health.go",
         "reconcile_steps_nudges.go",
         "reconcile_steps_waits.go",
