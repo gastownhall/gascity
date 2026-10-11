@@ -638,7 +638,8 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps
 }
 
 // CheckBeadStateWithOptions checks whether a bead is already routed for the
-// requested route options and returns a structured result.
+// requested route options and returns a structured result, which also
+// carries the status the check read.
 func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if q == nil {
 		return BeadCheckResult{}
@@ -647,17 +648,14 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	if err != nil {
 		return BeadCheckResult{}
 	}
+	result := checkReadBeadState(q, b, beadID, a, deps, opts)
+	result.Status = b.Status
+	return result
+}
 
-	// A fresh read may find the bead already closed/tombstoned even though it
-	// was "open" at the batch's initial listing snapshot (#5927): another
-	// actor can close it during the window between that snapshot and this
-	// child's turn in the dispatch loop. None of the routing/idempotency
-	// checks below are meaningful for a bead that's already terminal, so
-	// short-circuit before them.
-	if convoycore.IsTerminalStatus(b.Status) {
-		return BeadCheckResult{AlreadyTerminal: true}
-	}
-
+// checkReadBeadState returns the routing verdict of CheckBeadStateWithOptions
+// for b, the bead it just read.
+func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if IsCustomSlingQuery(a) {
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}
