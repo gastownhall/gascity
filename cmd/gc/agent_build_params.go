@@ -139,6 +139,9 @@ type agentBuildParams struct {
 	// skillCatalogFromCache reports whether skillCatalog came from the
 	// last-good cache rather than the current LoadCityCatalog result.
 	skillCatalogFromCache bool
+	// skillCatalogFailed reports a city catalog load that failed with no
+	// cached catalog to fall back on: skills contribute nothing this cycle.
+	skillCatalogFailed bool
 	// rigSkillCatalogs caches rig-specific shared catalogs. Each entry
 	// includes city-shared skills plus any rig-import shared catalogs.
 	rigSkillCatalogs map[string]*materialize.CityCatalog
@@ -214,8 +217,11 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 			if stderr != nil {
 				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (using cached catalog to avoid drift)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
 			}
-		} else if stderr != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+		} else {
+			params.skillCatalogFailed = true
+			if stderr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: LoadCityCatalog %v (no cached catalog; skills will not contribute to fingerprints this tick)\n", cityCatalog.Err) //nolint:errcheck // best-effort stderr
+			}
 		}
 	} else {
 		catCopy := cityCatalog.Catalog

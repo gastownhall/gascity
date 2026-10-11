@@ -900,9 +900,9 @@ func TestEscalationRecoversAPanicInTheDetachedTermination(t *testing.T) {
 		t.Fatal("could not claim the termination slot")
 	}
 
-	gen := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
+	d := drainAckStopPendingForTest(t, store, "sess-1", "worker", "")
 	queueDrainAckForcedTermination(
-		t.TempDir(), store, sp, &config.City{}, sessionpkg.Info{ID: "sess-1", Generation: gen}, "worker",
+		t.TempDir(), store, sp, &config.City{}, d.Info(), "worker",
 		"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr,
 	)
 

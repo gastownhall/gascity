@@ -537,6 +537,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		if enriched {
 			applyInventoryAttrs(&obs, a, at)
 		}
+		keepNewerFacts(&obs, old, at)
 		if observationChanged(old, obs, had) {
 			flips++
 		}
@@ -556,6 +557,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		case unrefreshed[obs.Backend] != "":
 			obs.Listed.Reason = unrefreshed[obs.Backend]
 		}
+		keepNewerFacts(&obs, old, at)
 		if observationChanged(old, obs, true) {
 			flips++
 		}
@@ -590,6 +592,17 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	}
 	c.store(next, flips > 0 || primedChanged(prev.Primed, primed), at)
 	return flips
+}
+
+// keepNewerFacts restores onto obs each of old's facts observed after at, a
+// pass's start: a fresh read Note wrote after the pass began wins over the
+// pass, and a pass that started later overrides it (v5 O4).
+func keepNewerFacts(obs *RuntimeObservation, old RuntimeObservation, at time.Time) {
+	for _, kind := range allFactKinds {
+		if f := old.fact(kind); f.ObservedAt.After(at) {
+			*obs.fact(kind) = *f
+		}
+	}
 }
 
 // primedChanged reports whether any backend's primed state differs, which

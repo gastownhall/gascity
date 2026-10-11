@@ -30,6 +30,17 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
+// workLegs is the city a seat's work is read across beside the store a caller
+// holds: assignedWorkSweepPlan adds the registered city work store, the serving
+// rigs and the bindings. The zero value reads that store alone. It carries the
+// city into the close cascade, which reached closeBead with a store and nothing
+// else.
+type workLegs struct {
+	cityPath string
+	cfg      *config.City
+	rigs     map[string]beads.Store
+}
+
 // seatWorkStatuses are the statuses a seat's work can hold: what the index reads.
 var seatWorkStatuses = []string{"open", "in_progress"}
 

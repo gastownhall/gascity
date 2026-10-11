@@ -40,7 +40,7 @@ func TestReconcileSessionBeads_KillFencedRowIsLeftAlone(t *testing.T) {
 		{name: "runtime gone, undesired", desired: false, running: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newReconcilerTestEnv()
+			env := newReconcilerTestEnv(t)
 			env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 			if tc.desired {
 				env.addDesired("worker", "worker", tc.running)
@@ -88,7 +88,7 @@ func TestReconcileSessionBeads_KillFencedRowIsLeftAlone(t *testing.T) {
 // mid-kill) is ordinary asleep state again, so a live runtime heals the row
 // back to awake.
 func TestReconcileSessionBeads_StaleKillFenceHealsNormally(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", true)
 	session := killFencedSessionBead(t, env, env.clk.Now().Add(-sessionpkg.KillPendingGrace-time.Minute))
@@ -109,6 +109,7 @@ func TestReconcileSessionBeads_StaleKillFenceHealsNormally(t *testing.T) {
 }
 
 func TestCleanupDeadRuntimeSessionCorpsesSkipsKillFencedRow(t *testing.T) {
+	testCity := t.TempDir()
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	sp := newDeadRuntimeArtifactProvider()
 	sp.visible["killed-worker"] = true
@@ -124,7 +125,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsKillFencedRow(t *testing.T) {
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "s1", Status: "open", Metadata: meta}})
 
 	var stderr bytes.Buffer
-	if got := cleanupDeadRuntimeSessionCorpses("", nil, nil, nil, snapshot, nil, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+	if got := cleanupDeadRuntimeSessionCorpses(testCity, nil, nil, nil, snapshot, nil, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0: the dead pane is the kill in progress; stderr=%q", got, stderr.String())
 	}
 	if len(sp.stopped) != 0 {
