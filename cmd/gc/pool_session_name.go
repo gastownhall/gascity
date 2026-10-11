@@ -145,6 +145,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	keeps ...*deadAssigneeKeepLog,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -152,7 +153,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps...)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
@@ -218,7 +219,12 @@ func releaseOrphanedPoolAssignments(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	keeps ...*deadAssigneeKeepLog,
 ) []releasedPoolAssignment {
+	var keepLog *deadAssigneeKeepLog
+	if len(keeps) > 0 {
+		keepLog = keeps[0]
+	}
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
 	}
@@ -369,7 +375,7 @@ func releaseOrphanedPoolAssignments(
 		// The verb's route guard is the one this sweep's pre-filter lacks:
 		// an expanded workflow root's run_target is no lane (NEW-5).
 		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
-			logDeadAssigneeKeep(wb.ID, assignee, out.Why[wb.ID])
+			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -384,21 +390,35 @@ func releaseOrphanedPoolAssignments(
 	return released
 }
 
-// deadAssigneeKeeps is the last logged keep reason by bead, so a claim the
+// deadAssigneeKeepLog is the last logged keep reason by bead, so a claim the
 // sweep keeps every tick (a detached probe alive, an unserved route) logs
-// once per reason, not per tick.
-var deadAssigneeKeeps sync.Map
+// once per reason, not per tick. Its owner (the controller, the v2 lane)
+// keeps it across ticks; a nil log logs every keep.
+type deadAssigneeKeepLog struct {
+	mu   sync.Mutex
+	last map[string]string
+}
 
-// logDeadAssigneeKeep logs why the dead-assignee sweep kept id, when the
-// reason changed since the last log.
-func logDeadAssigneeKeep(id, assignee, why string) {
+// log logs why the dead-assignee sweep kept id, when the reason changed
+// since the last log, and reports whether it logged.
+func (l *deadAssigneeKeepLog) log(id, assignee, why string) bool {
 	if why == "" {
-		return
+		return false
 	}
-	if last, ok := deadAssigneeKeeps.Swap(id, why); ok && last == why {
-		return
+	if l != nil {
+		l.mu.Lock()
+		repeat := l.last[id] == why
+		if l.last == nil {
+			l.last = make(map[string]string)
+		}
+		l.last[id] = why
+		l.mu.Unlock()
+		if repeat {
+			return false
+		}
 	}
 	log.Printf("releaseOrphanedPoolAssignments: kept %q of dead assignee %q: %s", id, assignee, why)
+	return true
 }
 
 // releaseConfirmedOrphanSessionWork releases the pool-routed work still held by

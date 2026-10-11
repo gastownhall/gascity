@@ -243,7 +243,7 @@ func TestOrphanReleaseDetectsStrandedClaims(t *testing.T) {
 	if err := store.Close(seat.ID); err != nil {
 		t.Fatal(err)
 	}
-	work, err := store.Create(beads.Bead{Title: "stranded", Assignee: "worker-dead", Metadata: map[string]string{"gc.routed_to": "nowhere", beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID}})
+	work, err := store.Create(beads.Bead{Title: "stranded", Assignee: "worker-dead", Metadata: map[string]string{"gc.routed_to": "nowhere", beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID, beadmeta.StrandedAssigneeMetadataKey: "worker-dead"}})
 	if err != nil {
 		t.Fatal(err)
 	}

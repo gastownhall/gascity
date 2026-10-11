@@ -426,7 +426,7 @@ func TestBeadReconcileTickDetectsStrandedClaims(t *testing.T) {
 	if err := store.Close(seat.ID); err != nil {
 		t.Fatal(err)
 	}
-	work := createWork(t, store, "in_progress", seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane", beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID})
+	work := createWork(t, store, "in_progress", seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane", beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID, beadmeta.StrandedAssigneeMetadataKey: seat.ID})
 	rec := events.NewFake()
 	cr := &CityRuntime{
 		cityPath: t.TempDir(), cityName: "strand-town",
@@ -469,10 +469,6 @@ func TestRetireRemovedNamedSessionAlertsOnKeptClaims(t *testing.T) {
 		t.Fatalf("session.stranded_claims = %+v, want one naming %s, kind retired", evts, kept.ID)
 	}
 }
-
-// closedSessionFor names a closed session by bead ID or session_name, and
-
-// The detector reads the sessions store only when its cadence is due, and
 
 // The killed seat's pre-gate costs no read for a seat whose open claims have
 // no route: laneDirect would keep them all (M26).
@@ -612,7 +608,7 @@ func TestDetectorFollowsTheStamp(t *testing.T) {
 			t.Fatal(err)
 		}
 		stamp := func(meta map[string]string) {
-			meta[beadmeta.StrandedMetadataKey], meta[beadmeta.StrandedSessionMetadataKey] = "true", seat.ID
+			meta[beadmeta.StrandedMetadataKey], meta[beadmeta.StrandedSessionMetadataKey], meta[beadmeta.StrandedAssigneeMetadataKey] = "true", seat.ID, seat.ID
 			createWork(t, store, "in_progress", seat.ID, meta)
 		}
 		stamp(map[string]string{beadmeta.RunTargetMetadataKey: "repo/worker"})
@@ -638,7 +634,7 @@ func TestDetectorScanCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, route := range []string{"nowhere/lane", "repo/worker"} {
-		createWork(t, mem, "in_progress", seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: route, beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID})
+		createWork(t, mem, "in_progress", seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: route, beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.ID, beadmeta.StrandedAssigneeMetadataKey: seat.ID})
 	}
 	work, sessions := &detectorReadCounter{Store: mem}, &detectorReadCounter{Store: mem}
 	legs := testWorkLegs("", &config.City{Agents: []config.Agent{persistentWorker()}}, work, nil)
@@ -680,7 +676,7 @@ func TestReleaseClearsTheStrandedStamp(t *testing.T) {
 	}
 	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs(c.path, c.cfg, c.store, nil), c.store, c.seat, "", io.Discard)
 	got, _ := c.store.Get(served.ID)
-	if got.Assignee != "" || got.Metadata[beadmeta.StrandedMetadataKey] != "" || got.Metadata[beadmeta.StrandedSessionMetadataKey] != "" {
+	if got.Assignee != "" || got.Metadata[beadmeta.StrandedMetadataKey] != "" || got.Metadata[beadmeta.StrandedSessionMetadataKey] != "" || got.Metadata[beadmeta.StrandedAssigneeMetadataKey] != "" {
 		t.Fatalf("released claim: assignee %q, stamp %q/%q; want released and unstamped", got.Assignee, got.Metadata[beadmeta.StrandedMetadataKey], got.Metadata[beadmeta.StrandedSessionMetadataKey])
 	}
 }
@@ -693,5 +689,151 @@ func TestDetectorKeepsEpisodesOverADarkLeg(t *testing.T) {
 	detectStrandedClaims(testWorkLegs("", servingCity("worker"), failingListStore{Store: beads.NewMemStore()}, nil), beads.NewMemStore(), nil, alerts, now.Add(strandedRealertEvery))
 	if _, ok := alerts.episodes["gc-1"]; !ok {
 		t.Fatal("an unreadable leg ended the seat's episode")
+	}
+}
+
+// A stamp names the closed seat and the assignee the claim was kept under;
+// a claim taken by hand since (S1) or whose seat is open again (S2) is no
+// longer stranded: the detector neither alerts nor keeps the stamp. A claim
+// held by another open seat (a reused alias) alerts nothing (N06b).
+func TestDetectorDropsStaleStamps(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	stamped := func(t *testing.T, seatState string, closed bool) (*beads.MemStore, beads.Bead, beads.Bead) {
+		store := beads.NewMemStore()
+		seat, err := store.Create(beads.Bead{Title: "seat", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "s-1", "template": "repo/worker", "state": seatState, "alias": "repo/ada"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closed {
+			if err := store.Close(seat.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		claim := createWork(t, store, "in_progress", "repo/ada", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+		if err := stampStranded(store, claim.ID, seat.ID, "repo/ada"); err != nil {
+			t.Fatal(err)
+		}
+		return store, seat, claim
+	}
+	scan := func(store *beads.MemStore, open []session.Info) int {
+		rec := events.NewFake()
+		alerts := &strandedClaimAlerts{rec: rec, scanned: now.Add(-strandedRealertEvery)}
+		detectStrandedClaims(testWorkLegs("", &config.City{Agents: []config.Agent{persistentWorker()}}, store, nil), store, open, alerts, now)
+		evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims})
+		return len(evts)
+	}
+	t.Run("the control alerts", func(t *testing.T) {
+		store, _, _ := stamped(t, "drained", true)
+		if n := scan(store, nil); n != 1 {
+			t.Fatalf("alerts = %d, want 1", n)
+		}
+	})
+	t.Run("taken by hand", func(t *testing.T) {
+		store, _, claim := stamped(t, "drained", true)
+		julian := "julian"
+		if err := store.Update(claim.ID, beads.UpdateOpts{Assignee: &julian}); err != nil {
+			t.Fatal(err)
+		}
+		if n := scan(store, nil); n != 0 {
+			t.Fatalf("alerts = %d, want none for a claim julian holds", n)
+		}
+		if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
+			t.Fatal("the stale stamp stayed")
+		}
+	})
+	t.Run("the seat is open again", func(t *testing.T) {
+		store, seat, claim := stamped(t, "asleep", false)
+		if n := scan(store, []session.Info{seedSessionInfo(seat)}); n != 0 {
+			t.Fatalf("alerts = %d, want none for an open seat's own claim", n)
+		}
+		if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
+			t.Fatal("the stale stamp stayed")
+		}
+	})
+	t.Run("an archived seat still alerts", func(t *testing.T) {
+		store, seat, _ := stamped(t, "archived", false)
+		if n := scan(store, []session.Info{seedSessionInfo(seat)}); n != 1 {
+			t.Fatalf("alerts = %d, want 1 for a retired seat's claim", n)
+		}
+	})
+	t.Run("another open seat reuses the alias", func(t *testing.T) {
+		store, _, _ := stamped(t, "drained", true)
+		other := session.Info{ID: "gc-new", SessionNameMetadata: "s-2", Alias: "repo/ada"}
+		if n := scan(store, []session.Info{other}); n != 0 {
+			t.Fatalf("alerts = %d, want none: the claim is the new seat's", n)
+		}
+	})
+}
+
+// The stamp is decided on the live claim: one taken since the close kept it
+// is not stamped.
+func TestStampStrandedSkipsAMovedClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	claim := createWork(t, store, "in_progress", "julian", nil)
+	if err := stampStranded(store, claim.ID, "gc-1", "repo/ada"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
+		t.Fatal("stamped a claim the closed seat no longer holds")
+	}
+}
+
+// onlyStrandedWork: a seat holding nothing, a failed read, or any claim the
+// cascade's rule serves (a plain run_target among them) answers false; a
+// served claim in the tick's rows answers with no live read.
+func TestOnlyStrandedWork(t *testing.T) {
+	cfg := servingCity("repo/worker")
+	info := session.Info{ID: "gc-1", SessionNameMetadata: "s-1", Template: "repo/worker"}
+	if onlyStrandedWork(testSeatWork("", cfg, beads.NewMemStore(), nil), info) {
+		t.Fatal("a seat holding nothing reads stranded-only (N19)")
+	}
+	if onlyStrandedWork(testSeatWork("", cfg, failingListStore{Store: beads.NewMemStore()}, nil), info) {
+		t.Fatal("a failed read reads stranded-only (N15)")
+	}
+	store := beads.NewMemStore()
+	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+	if !onlyStrandedWork(testSeatWork("", cfg, store, nil), info) {
+		t.Fatal("an unserved claim alone does not read stranded-only")
+	}
+	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RunTargetMetadataKey: "repo/worker"})
+	counted := &liveListCounter{Store: store}
+	if onlyStrandedWork(testSeatWork("", cfg, counted, nil), info) {
+		t.Fatal("a plain run_target claim the cascade serves reads stranded (N01)")
+	}
+	if counted.live != 0 {
+		t.Fatalf("live per-assignee lists = %d, want none: the tick's rows answered", counted.live)
+	}
+}
+
+// liveListCounter counts the live per-assignee lists a store answers.
+type liveListCounter struct {
+	beads.Store
+	live int
+}
+
+func (s *liveListCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live && q.Assignee != "" {
+		s.live++
+	}
+	return s.Store.List(q)
+}
+
+// The dead-assignee keep log logs a keep once per reason; a nil log logs
+// every keep.
+func TestDeadAssigneeKeepLogDedupes(t *testing.T) {
+	var l deadAssigneeKeepLog
+	for i, c := range []struct {
+		why  string
+		want bool
+	}{{"detached-alive", true}, {"detached-alive", false}, {"unserved-route", true}, {"", false}} {
+		if got := l.log("w-1", "gc-dead", c.why); got != c.want {
+			t.Fatalf("step %d (%q): logged %t, want %t", i, c.why, got, c.want)
+		}
+	}
+	var none *deadAssigneeKeepLog
+	for range 2 {
+		if !none.log("w-1", "gc-dead", "moved") {
+			t.Fatal("a nil log deduped")
+		}
 	}
 }

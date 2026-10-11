@@ -14,7 +14,8 @@ import (
 // revised). A close that keeps a claim no lane serves stamps it with the
 // closed seat (strand); on D6's cadence the detector lists the stamped claims
 // on every work leg (beadmeta.StrandedMetadataKey, one cached query per
-// leg), keeps those still assigned, held by no other open session and released by
+// leg), keeps those still assigned as they were kept, to a seat not open
+// again, held by no other open session and released by
 // no sweep (the dead-assignee sweep's rule, laneDirect), and raises
 // session.stranded_claims for each seat; a seat it no longer finds (its
 // claims rerouted, released or closed: a release clears the stamp) ends its
@@ -27,9 +28,13 @@ func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.In
 		return
 	}
 	owners := make(map[string][]string) // assignee → the open sessions answering to it
+	live := make(map[string]bool)       // open seats not archived
 	for _, info := range open {
 		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
 			owners[id] = append(owners[id], info.ID)
+		}
+		if session.State(strings.TrimSpace(info.MetadataState)) != session.StateArchived {
+			live[info.ID] = true
 		}
 	}
 	// heldElsewhere reports an open session other than seat answering to
@@ -49,7 +54,14 @@ func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.In
 		for _, b := range rows {
 			assignee := strings.TrimSpace(b.Assignee)
 			seat := strings.TrimSpace(b.Metadata[beadmeta.StrandedSessionMetadataKey])
-			if seat == "" || assignee == "" || heldElsewhere(assignee, seat) || (b.Status != "open" && b.Status != "in_progress") {
+			switch {
+			case b.Status != "open" && b.Status != "in_progress":
+				continue
+			case seat == "" || assignee == "" || assignee != strings.TrimSpace(b.Metadata[beadmeta.StrandedAssigneeMetadataKey]) || live[seat]:
+				// Taken by hand, or the seat is open again: the stamp is stale.
+				clearStrandedStamp(store, b.ID)
+				continue
+			case heldElsewhere(assignee, seat):
 				continue
 			}
 			if route, served := releaseRoute(legs.cfg, b, "", laneDirect); !served {
@@ -65,4 +77,48 @@ func detectStrandedClaims(legs WorkLegs, sessions beads.Store, open []session.In
 	if complete {
 		alerts.sweep(held)
 	}
+}
+
+// stampStranded marks claim id on store stranded on seat as assigned to
+// assignee, while the live row is still assigned so.
+func stampStranded(store beads.Store, id, seat, assignee string) error {
+	return fencedClaimMeta(store, id, func(b beads.Bead) map[string]string {
+		if strings.TrimSpace(b.Assignee) != assignee || b.Status == "closed" {
+			return nil
+		}
+		return map[string]string{beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat, beadmeta.StrandedAssigneeMetadataKey: assignee}
+	})
+}
+
+// clearStrandedStamp clears claim id's stale stamp, best-effort: one the
+// detector finds again next scan, and clears then.
+func clearStrandedStamp(store beads.Store, id string) {
+	_ = fencedClaimMeta(store, id, func(b beads.Bead) map[string]string {
+		if strings.TrimSpace(b.Metadata[beadmeta.StrandedMetadataKey]) == "" {
+			return nil
+		}
+		return map[string]string{beadmeta.StrandedMetadataKey: "", beadmeta.StrandedSessionMetadataKey: "", beadmeta.StrandedAssigneeMetadataKey: ""}
+	})
+}
+
+// fencedClaimMeta writes decide's metadata on claim id, decided on the live
+// row, by one write fenced on that row's revision; a store with no
+// conditional writer writes after the read. A nil patch writes nothing.
+func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[string]string) error {
+	b, err := liveBeadRead(store, id)
+	if err != nil {
+		return err
+	}
+	patch := decide(b)
+	if len(patch) == 0 {
+		return nil
+	}
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	switch {
+	case err != nil:
+		return err
+	case writer == nil:
+		return store.SetMetadataBatch(id, patch)
+	}
+	return writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: patch})
 }

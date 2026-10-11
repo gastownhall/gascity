@@ -1832,15 +1832,9 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
+	var cfgErr error
 	if cityErr == nil {
-		var cfgErr error
 		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
-		if cfg == nil {
-			// Without the config no claim's route can be judged, so the close
-			// could release none of them: refuse rather than strand them all.
-			fmt.Fprintf(stderr, "gc session close: city config did not load (%v); refusing to close: its claims could not be released\n", cfgErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
@@ -1872,6 +1866,17 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	closedSessionBead, sessionBeadErr := sessStore.Get(sessionID)
 	if sessionBeadErr != nil {
 		closedSessionBead = beads.Bead{ID: sessionID}
+	}
+	// Without the config no claim's route can be judged, so the close could
+	// release none of the session's claims: refuse while it holds any, rather
+	// than strand them all. A session holding none closes.
+	if cityErr == nil && cfg == nil {
+		scope := releaseScopeOwn(closedSessionBead)
+		legs := workLegsFromCensus(cityPath, nil, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
+		if holds, err := seatWorkFor(legs, scope).has(seatWorkQuery{scope: scope, statuses: seatWorkStatuses}); holds || err != nil {
+			fmt.Fprintf(stderr, "gc session close: city config did not load (%v); refusing to close %s while it holds claims: they could not be released\n", cfgErr, sessionID) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))

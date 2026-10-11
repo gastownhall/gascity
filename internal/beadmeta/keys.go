@@ -249,13 +249,15 @@ const (
 	ScopeRoleMetadataKey                = "gc.scope_role"
 	SessionAffinityMetadataKey          = "gc.session_affinity"
 	SessionIDMetadataKey                = "gc.session_id"
-	// StrandedMetadataKey ("true") and StrandedSessionMetadataKey (the closed
-	// session's bead ID) mark a claim a close kept because no lane serves it
+	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
+	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
+	// when it was kept) mark a claim a close kept because no lane serves it
 	// (owner ruling O5, revised): stranded work, which session.stranded_claims
-	// reports until the claim is rerouted or released. A release clears both
-	// (SessionAffinityMetadataKeys).
-	StrandedMetadataKey        = "gc.stranded"
-	StrandedSessionMetadataKey = "gc.stranded_session"
+	// reports while the claim is still assigned as it was kept. A release
+	// clears all three (SessionAffinityMetadataKeys).
+	StrandedMetadataKey         = "gc.stranded"
+	StrandedSessionMetadataKey  = "gc.stranded_session"
+	StrandedAssigneeMetadataKey = "gc.stranded_assignee"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -634,6 +636,7 @@ var KnownMetadataKeys = []string{
 	SessionIDMetadataKey,
 	StrandedMetadataKey,
 	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
@@ -702,4 +705,5 @@ var SessionAffinityMetadataKeys = []string{
 	ContinuationGroupMetadataKey,
 	StrandedMetadataKey,
 	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 }

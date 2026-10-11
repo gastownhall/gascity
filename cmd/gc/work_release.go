@@ -276,38 +276,42 @@ func namedSessionBacks(cfg *config.City, agent *config.Agent) bool {
 	return false
 }
 
-// onlyStrandedWork reports that every claim info holds, read live on sw's
-// legs, would stay on its closed row under the cascade's rule (no lane
-// serves it), and that keep accepts each: a close may land over it, keep the
-// claims and alert (O5, revised). A failed read reports false.
-func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info, keep func(beads.Bead) bool) bool {
+// onlyStrandedWork reports that info holds claims, and that every one would
+// stay on its closed row under the cascade's rule (no lane serves it): a
+// close may land over them, keep them and alert (O5, revised). sw's rows are
+// read first, so a served claim among them answers false with no live read;
+// only then is the seat read live, which must agree. A failed read, or no
+// claim at all, reports false.
+func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
 	scope := releaseScope(info, sw.Legs().cfg)
-	hits, err := sw.fresh(scope).match(seatWorkQuery{scope: scope, statuses: seatWorkStatuses}, false)
-	if err != nil {
-		return false
-	}
+	q := seatWorkQuery{scope: scope, statuses: seatWorkStatuses}
 	seat := releaseSeatOfInfo(info)
-	for _, h := range hits {
-		if _, served := releaseRoute(sw.Legs().cfg, h.bead, seat.fallback, laneCarried); served || !keep(h.bead) {
+	stranded := func(hits []seatWorkHit, err error) bool {
+		if err != nil || len(hits) == 0 {
 			return false
 		}
+		return !slices.ContainsFunc(hits, func(h seatWorkHit) bool {
+			_, served := releaseRoute(sw.Legs().cfg, h.bead, seat.fallback, laneCarried)
+			return served
+		})
 	}
-	return true
+	return stranded(sw.snapshot(q, false)) && stranded(sw.fresh(scope).match(q, false))
 }
 
 // strand marks each claim out kept because no lane serves it as stranded
-// on seat's closed row (beadmeta.StrandedSessionMetadataKey), which the
-// detector reads, and alerts on them for the close kind; a close that kept
-// none ends the seat's episode. A stamp that fails
-// is logged: the claim still stays, and the close's own alert names it.
+// on seat's closed row, as assigned when it was kept (stampStranded), which
+// the detector reads, and alerts on them for the close kind; a close that
+// kept none ends the seat's episode. A stamp that fails is logged: the claim
+// still stays, and the close's own alert names it.
 func strand(alerts *strandedClaimAlerts, seat releaseSeat, kind string, out ReleaseOutcome, now time.Time, stderr io.Writer) {
 	claims := out.Unserved() // none ends the seat's episode
-	stores := make(map[string]beads.Store, len(out.Kept))
+	kept := make(map[string]seatWorkHit, len(out.Kept))
 	for _, k := range out.Kept {
-		stores[k.bead.ID] = k.store
+		kept[k.bead.ID] = k
 	}
 	for _, c := range claims {
-		if err := stores[c.id].SetMetadataBatch(c.id, map[string]string{beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: seat.id}); err != nil {
+		k := kept[c.id]
+		if err := stampStranded(k.store, c.id, seat.id, strings.TrimSpace(k.bead.Assignee)); err != nil {
 			fmt.Fprintf(stderr, "session beads: marking claim %s stranded on closed session %s: %v\n", c.id, seat.id, err) //nolint:errcheck
 		}
 	}

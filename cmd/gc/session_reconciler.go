@@ -2734,7 +2734,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// seat (O5, revised): its agent is gone, the claims stay on the
 						// closed row, and the cascade alerts. A claim a lane serves (one
 						// moved, or detached and alive) still blocks.
-						if !closed && onlyStrandedWork(sw, infoByID[id], func(beads.Bead) bool { return true }) {
+						if !closed && onlyStrandedWork(sw, infoByID[id]) {
 							closed = closeBead(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr)
 						}
 					}

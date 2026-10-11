@@ -269,18 +269,37 @@ func appendCityTOML(t *testing.T, cityPath, body string) {
 	}
 }
 
-// A city whose config does not load refuses the close loudly: no claim's
-// route could be judged, so the close would strand them all.
-func TestCmdSessionCloseRefusesWithoutConfig(t *testing.T) {
-	cityPath, _ := migratedOneShotCLICity(t)
-	captureCLIStorageStderr(t)
-	t.Setenv("GC_SESSION", "fake")
-	appendCityTOML(t, cityPath, "\n[[[not toml\n")
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionClose([]string{"gc-anything"}, &stdout, &stderr); code == 0 {
-		t.Fatalf("cmdSessionClose = 0 with an unloadable config; stderr=%s", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "refusing to close") {
-		t.Fatalf("stderr = %q, want the config refusal", stderr.String())
+// A city whose config does not load refuses the close of a session holding
+// claims, whose routes could not be judged, and closes one holding none.
+func TestCmdSessionCloseWithoutConfigRefusesOnlyOverClaims(t *testing.T) {
+	for _, holds := range []bool{true, false} {
+		t.Run(map[bool]string{true: "holding a claim", false: "holding nothing"}[holds], func(t *testing.T) {
+			cityDir := t.TempDir()
+			writePhase0InterfaceCity(t, cityDir, "[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n")
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_DIR", t.TempDir())
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+			store, err := openCityStoreAt(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seat, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "asleep"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if holds {
+				if _, err := store.Create(beads.Bead{Title: "claim", Type: "task", Assignee: seat.ID, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			appendCityTOML(t, cityDir, "\n[[[not toml\n")
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionClose([]string{seat.ID}, &stdout, &stderr)
+			refused := strings.Contains(stderr.String(), "refusing to close")
+			if holds && (code == 0 || !refused) || !holds && (code != 0 || refused) {
+				t.Fatalf("cmdSessionClose = %d, stderr %q; want refused %t", code, stderr.String(), holds)
+			}
+		})
 	}
 }

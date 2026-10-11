@@ -342,6 +342,8 @@ type externalReadsLane struct {
 	// stranded is the controller's stranded-claim alerter, which the
 	// orphan-release step's detector feeds; nil detects nothing.
 	stranded *strandedClaimAlerts
+	// deadAssigneeKeeps dedupes the orphan-release step's keep log.
+	deadAssigneeKeeps deadAssigneeKeepLog
 }
 
 // sourceRead is one read in flight.

@@ -259,6 +259,9 @@ type CityRuntime struct {
 	// (work_release.go); built on first use (strandedClaimAlerter).
 	strandedAlerts     *strandedClaimAlerts
 	strandedAlertsOnce sync.Once
+	// deadAssigneeKeeps dedupes the dead-assignee sweep's keep log across
+	// ticks.
+	deadAssigneeKeeps deadAssigneeKeepLog
 
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
@@ -3168,7 +3171,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// arm of this very tick is about to act on (the release-first ordering plus
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase, &cr.deadAssigneeKeeps)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
