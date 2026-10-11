@@ -433,9 +433,18 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// running past the stop, with no controller left to reap them. Also stop the
 	// city's own recorded sessions that a per-name probe reports running or
 	// cannot rule out (doStopWithoutSuccess withholds success for an unknown).
-	for _, sn := range storeRecordedRunningOutside(desired, sessionFrontDoor(sessStore), sp, stderr) {
-		sessionNames = append(sessionNames, sn)
-		desired[sn] = true
+	// Only when the runtime's listing answers: one whose listing fails is
+	// unreachable, its per-name probes would each wait out the provider's
+	// timeout, and the stop already reports the incomplete inventory
+	// (recordedSweepAllowed). That costs an attested runtime nothing and an
+	// unattested one a listing call.
+	if !runtime.ListRunningAttested(sp) {
+		if _, listErr := sp.ListRunning(""); recordedSweepAllowed(sp, listErr) {
+			for _, sn := range storeRecordedRunningOutside(desired, sessionFrontDoor(sessStore), sp, "gc stop", stderr, nil) {
+				sessionNames = append(sessionNames, sn)
+				desired[sn] = true
+			}
+		}
 	}
 	recorder := openCityRecorderAt(cityPath, stderr)
 
@@ -533,7 +542,15 @@ func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp 
 		// of a start), and the check is local, so it also spares the probe.
 		_, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc stop: session %s is starting; leaving it to its start: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			// Only a busy flock is a start in flight. Any other lease error
+			// (the runtime dir on a filesystem flock cannot serve) leaves the
+			// row unverified: neither stopped nor known to be starting. Both
+			// stay out of the sweep, whose stop could kill a live start.
+			if errors.Is(err, session.ErrRuntimeLeaseBusy) {
+				fmt.Fprintf(stderr, "gc stop: session %s is starting; leaving it to its start: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc stop: session %s is recorded creating and its start could not be checked: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			}
 			if inFlight == nil {
 				inFlight = make(map[string]bool)
 			}
@@ -600,7 +617,8 @@ func newStopProbeSessionProvider(cfg *config.City, cityPath string) (runtime.Pro
 // It answers false whenever it cannot prove the city is stopped, so the full
 // flow still handles a partially stopped city: a live session, a live or
 // SIGKILLed proxy, a stray Dolt child, a gc-managed Dolt, a scope that is not
-// provider-owned proxied, or a runtime it could not list completely.
+// provider-owned proxied, a runtime that does not attest its listing
+// (runtime.ListRunningAttested), or a runtime it could not list completely.
 //
 // The city's nudge pollers are stopped only once the store is found retired
 // and the runtime is found empty, and the store is checked again after they
@@ -620,6 +638,13 @@ func cityAlreadyStoppedForStop(cfg *config.City, cityPath string) (bool, runtime
 	}
 	sp, err := sessionProviderForStopProbe(cfg, cityPath)
 	if err != nil {
+		return false, nil
+	}
+	// A runtime that does not attest its listing (an exec pack whose
+	// list-running is unsupported answers an empty inventory) cannot prove
+	// the city has no sessions left: run the full flow, which reads the
+	// city's recorded sessions per name.
+	if !runtime.ListRunningAttested(sp) {
 		return false, nil
 	}
 	running, complete := listRunningForStop(sp, io.Discard)

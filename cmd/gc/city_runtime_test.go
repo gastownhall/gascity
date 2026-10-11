@@ -10,8 +10,10 @@ import (
 	"go/token"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -884,9 +886,12 @@ func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
 
 // blindListProvider is a runtime whose ListRunning cannot see its fleet (an
 // exec pack answering list-running with exit 2 reads as an empty inventory).
+// Like an exec pack, it does not attest its listing complete.
 type blindListProvider struct{ *runtime.Fake }
 
 func (blindListProvider) ListRunning(string) ([]string, error) { return nil, nil }
+
+func (blindListProvider) ListRunningComplete() bool { return false }
 
 // blindProbeProvider is a blindListProvider that can fail chosen names' stop
 // and liveness probe, and stop chosen names when interrupted (an agent that
@@ -979,6 +984,7 @@ func TestCityRuntimeShutdownStopsRecordedSessionsTheRuntimeCannotList(t *testing
 				stdout:              &stdout,
 				stderr:              &stderr,
 			}
+			markOwnedForTest(cr)
 
 			cr.shutdown()
 
@@ -8051,4 +8057,445 @@ func TestCityRuntimeReapStaleSessionBeads_HonorsEndpointHold(t *testing.T) {
 	if n := cr.reapStaleSessionBeads(newSeatWork(cr.workLegs())); n != 0 {
 		t.Fatalf("reaped %d rows, want the row held while its endpoint refuses", n)
 	}
+}
+
+// wedgedListingProvider models the default tmux runtime with a wedged server:
+// its listing is attested complete, but ListRunning fails, and every
+// per-name probe (slow, on a real wedged server) cannot tell running from
+// gone. It counts the per-name reads it is asked for.
+//
+// With Fake.ListingUnattested set it models the t3bridge runtime with its
+// bridge down instead: unattested, every call retried for its connect window
+// and then failed with ErrRuntimeUnavailable.
+type wedgedListingProvider struct {
+	*runtime.Fake
+	probes atomic.Int64
+}
+
+func (p *wedgedListingProvider) ListRunning(string) ([]string, error) {
+	return nil, errors.New("tmux list-sessions: server not responding")
+}
+
+func (p *wedgedListingProvider) IsRunning(string) bool {
+	p.probes.Add(1)
+	return false
+}
+
+func (p *wedgedListingProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	p.probes.Add(1)
+	// What the state cache last saw, which it cannot vouch for.
+	stale := p.Fake.IsRunning(name)
+	return runtime.Liveness{Running: stale, Alive: stale}, fmt.Errorf("observing tmux session %q: %w", name, runtime.ErrRuntimeUnavailable)
+}
+
+// A runtime that attests its listing complete already lists the city's
+// fleet, so a shutdown whose listing failed (a wedged tmux server) must not
+// fall back to probing every session row the store records: each probe would
+// time out, every row would read unknown and be stopped one by one, and a
+// bounded stop would run for minutes.
+func TestCityRuntimeShutdownDoesNotProbeRecordedSessionsOnAnAttestedRuntimeWhoseListFails(t *testing.T) {
+	for _, timeout := range []string{"0s", "1s"} {
+		t.Run("shutdown_timeout="+timeout, func(t *testing.T) {
+			store := beads.NewMemStore()
+			for _, md := range []map[string]string{
+				{"session_name": "worker-1", "template": "worker", "state": "awake"},
+				{"session_name": "worker-2", "template": "worker", "state": "awake"},
+				{"session_name": "worker-asleep", "template": "worker", "state": "asleep"},
+				{"session_name": "worker-draining", "template": "worker", "state": "draining"},
+			} {
+				if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+			}
+			sp := &wedgedListingProvider{Fake: runtime.NewFake()}
+			if !runtime.ListRunningAttested(sp) {
+				t.Fatal("the test provider must attest its listing, as tmux does")
+			}
+			var stdout, stderr lockedBuffer
+			cr := &CityRuntime{
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Daemon:    config.DaemonConfig{ShutdownTimeout: timeout},
+				},
+				sp:                  sp,
+				rec:                 events.Discard,
+				standaloneCityStore: store,
+				stdout:              &stdout,
+				stderr:              &stderr,
+			}
+			markOwnedForTest(cr)
+
+			cr.shutdown()
+
+			if got := sp.probes.Load(); got != 0 {
+				t.Errorf("shutdown made %d per-name probe(s) on an attested runtime whose list failed, want 0; stdout = %q", got, stdout.String())
+			}
+			if strings.Contains(stdout.String(), "state unknown") {
+				t.Errorf("shutdown stopped recorded sessions as unknown on an attested runtime; stdout = %q", stdout.String())
+			}
+		})
+	}
+}
+
+// A runtime discarded before run() took ownership of the city (a supervisor
+// init failure) leaves the sessions the store records for the runtime that
+// will adopt them: its shutdown does not sweep them on a blind runtime.
+func TestCityRuntimeShutdownOfAnUnownedRuntimeLeavesRecordedSessions(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{Title: "worker-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "awake"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "worker-1", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var stdout, stderr lockedBuffer
+	cr := &CityRuntime{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		},
+		sp:                  blindListProvider{fake},
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		stdout:              &stdout,
+		stderr:              &stderr,
+	}
+
+	cr.shutdown()
+
+	if !fake.IsRunning("worker-1") {
+		t.Fatalf("an unowned runtime's shutdown stopped a recorded session; stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+}
+
+// countingExecProvider models an exec runtime pack: it embeds only the
+// runtime.Provider interface, so it has none of the optional capabilities
+// (no error-bearing liveness, no attestation), its listing is blind, and it
+// counts the per-name reads each of which is a round trip on a remote pack.
+type countingExecProvider struct {
+	runtime.Provider
+	fake            *runtime.Fake
+	exitOnInterrupt bool
+	mu              sync.Mutex
+	calls           map[string]map[string]int // method -> name -> count
+	log             map[string][]string       // name -> methods, in call order
+}
+
+func newCountingExecProvider(fake *runtime.Fake) *countingExecProvider {
+	return &countingExecProvider{Provider: fake, fake: fake, calls: make(map[string]map[string]int)}
+}
+
+func (p *countingExecProvider) count(method, name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.calls[method] == nil {
+		p.calls[method] = make(map[string]int)
+	}
+	p.calls[method][name]++
+	if p.log == nil {
+		p.log = make(map[string][]string)
+	}
+	p.log[name] = append(p.log[name], method)
+}
+
+// callsAfter returns the methods called on name after its last Interrupt.
+func (p *countingExecProvider) callsAfter(name string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	calls := p.log[name]
+	if i := slices.Index(calls, "Interrupt"); i >= 0 {
+		return slices.Clone(calls[i+1:])
+	}
+	return nil
+}
+
+func (p *countingExecProvider) counts(method string) map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.calls[method])
+}
+
+func (p *countingExecProvider) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = make(map[string]map[string]int)
+	p.log = nil
+}
+
+func (p *countingExecProvider) ListRunning(string) ([]string, error) { return nil, nil }
+
+func (p *countingExecProvider) IsRunning(name string) bool {
+	p.count("IsRunning", name)
+	return p.fake.IsRunning(name)
+}
+
+func (p *countingExecProvider) GetMeta(name, key string) (string, error) {
+	p.count("GetMeta", name)
+	return p.fake.GetMeta(name, key)
+}
+
+func (p *countingExecProvider) IsAttached(name string) bool {
+	p.count("IsAttached", name)
+	return p.fake.IsAttached(name)
+}
+
+func (p *countingExecProvider) GetLastActivity(name string) (time.Time, error) {
+	p.count("GetLastActivity", name)
+	return p.fake.GetLastActivity(name)
+}
+
+func (p *countingExecProvider) Interrupt(name string) error {
+	p.count("Interrupt", name)
+	if err := p.fake.Interrupt(name); err != nil {
+		return err
+	}
+	if p.exitOnInterrupt {
+		return p.fake.Stop(name)
+	}
+	return nil
+}
+
+// Each per-name read of a name the runtime cannot list is one provider op
+// (stopProbeRunning): on an exec pack the full worker observation also reads
+// metadata, attachment and activity, several round trips per name, which
+// outlasts the caller's wait on a city of any size. The store sweep,
+// unlistedSessionSet, the grace-window poll and pass 2 each read a name at
+// most once.
+func TestStopReadsUnlistedSessionsWithOneProbeEach(t *testing.T) {
+	assertOneIsRunningEach := func(t *testing.T, sp *countingExecProvider, phase string, want map[string]int) {
+		t.Helper()
+		if got := sp.counts("IsRunning"); !maps.Equal(got, want) {
+			t.Errorf("%s: IsRunning calls = %v, want %v", phase, got, want)
+		}
+		for _, method := range []string{"GetMeta", "IsAttached", "GetLastActivity"} {
+			if got := sp.counts(method); len(got) > 0 {
+				t.Errorf("%s: %s calls = %v, want none (the per-name read is the bare liveness probe)", phase, method, got)
+			}
+		}
+		sp.reset()
+	}
+
+	t.Run("phases", func(t *testing.T) {
+		fake := runtime.NewFake()
+		startStopTestSessions(t, fake, "up-1", "up-2")
+		sp := newCountingExecProvider(fake)
+		store := beads.NewMemStore()
+		for _, md := range []map[string]string{
+			{"session_name": "up-1", "template": "worker", "state": "awake"},
+			{"session_name": "up-2", "template": "worker", "state": "awake"},
+			{"session_name": "down", "template": "worker", "state": "asleep"},
+		} {
+			if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+		}
+		all := map[string]int{"up-1": 1, "up-2": 1, "down": 1}
+
+		got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "test", io.Discard, nil)
+		slices.Sort(got)
+		if !slices.Equal(got, []string{"up-1", "up-2"}) {
+			t.Errorf("storeRecordedRunningOutside = %v, want [up-1 up-2]", got)
+		}
+		assertOneIsRunningEach(t, sp, "store sweep", all)
+
+		unlisted := unlistedSessionSet(sp, []string{"up-1", "up-2", "down"}, nil)
+		if !maps.Equal(unlisted, map[string]bool{"up-1": true, "up-2": true}) {
+			t.Errorf("unlistedSessionSet = %v, want up-1 and up-2", unlisted)
+		}
+		assertOneIsRunningEach(t, sp, "unlistedSessionSet", all)
+
+		// The poll stops at the first name still up.
+		if namesObservedExited(sp, []string{"down", "up-1", "up-2"}) {
+			t.Error("namesObservedExited = true with up-1 and up-2 running")
+		}
+		assertOneIsRunningEach(t, sp, "poll", map[string]int{"down": 1, "up-1": 1})
+
+		// Names the caller's own sweep already probed are not probed again.
+		if got := unlistedSessionSet(sp, []string{"up-1", "up-2"}, map[string]bool{"up-1": true, "up-2": true}); len(got) != 2 {
+			t.Errorf("unlistedSessionSet with known names = %v, want both", got)
+		}
+		assertOneIsRunningEach(t, sp, "unlistedSessionSet over known names", nil)
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		// up-1 and up-2 exit on their interrupt. The sweep probes all three
+		// rows once and hands up-1 and up-2 to gracefulStopAll as known, so
+		// unlistedSessionSet does not probe them again; the first poll sees
+		// both exited (one probe each) and pass 2 reads them once more.
+		fake := runtime.NewFake()
+		startStopTestSessions(t, fake, "up-1", "up-2")
+		sp := newCountingExecProvider(fake)
+		sp.exitOnInterrupt = true
+		store := beads.NewMemStore()
+		for _, md := range []map[string]string{
+			{"session_name": "up-1", "template": "worker", "state": "awake"},
+			{"session_name": "up-2", "template": "worker", "state": "awake"},
+			{"session_name": "down", "template": "worker", "state": "asleep"},
+		} {
+			if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+		}
+		var stdout, stderr lockedBuffer
+		cr := &CityRuntime{
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Daemon:    config.DaemonConfig{ShutdownTimeout: "5s"},
+			},
+			sp:                  sp,
+			rec:                 events.Discard,
+			standaloneCityStore: store,
+			stdout:              &stdout,
+			stderr:              &stderr,
+		}
+		markOwnedForTest(cr)
+
+		cr.shutdown()
+
+		if fake.IsRunning("up-1") || fake.IsRunning("up-2") {
+			t.Fatalf("a recorded running session survived shutdown; stdout = %q, stderr = %q", stdout.String(), stderr.String())
+		}
+		// The interrupt itself goes through the worker boundary, which reads
+		// the session as it always has; what this change adds is the sweep's
+		// probe before it and the poll's and pass 2's after it.
+		if got := sp.counts("IsRunning")["down"]; got != 1 {
+			t.Errorf("the asleep row was probed %d time(s), want once (the sweep)", got)
+		}
+		for _, name := range []string{"up-1", "up-2"} {
+			if got := sp.callsAfter(name); !slices.Equal(got, []string{"IsRunning", "IsRunning"}) {
+				t.Errorf("%s: reads after its interrupt = %v, want [IsRunning IsRunning] (the poll and pass 2)", name, got)
+			}
+		}
+	})
+}
+
+// recordedStopTestStore returns a store recording the given sessions.
+func recordedStopTestStore(t *testing.T, sessions ...map[string]string) beads.Store {
+	t.Helper()
+	store := beads.NewMemStore()
+	for _, md := range sessions {
+		if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	return store
+}
+
+// A runtime that does not attest its listing but whose listing failed (the
+// t3bridge runtime with its bridge not running: every call is retried for
+// seconds, then fails) is unreachable, not blind. The store sweep is for a
+// listing that answers but cannot see the fleet; here every per-row probe
+// would wait out the retry window and read unknown, and each unknown row
+// would be interrupted, waited for and stopped one by one, so a shutdown of
+// seconds ran for minutes. Shutdown must make no per-row probe.
+func TestCityRuntimeShutdownDoesNotProbeRecordedSessionsWhenAnUnattestedListingFails(t *testing.T) {
+	for _, timeout := range []string{"0s", "1s"} {
+		t.Run("shutdown_timeout="+timeout, func(t *testing.T) {
+			store := recordedStopTestStore(t,
+				map[string]string{"session_name": "worker-1", "template": "worker", "state": "awake"},
+				map[string]string{"session_name": "worker-asleep", "template": "worker", "state": "asleep"},
+				map[string]string{"session_name": "worker-draining", "template": "worker", "state": "draining"},
+			)
+			fake := runtime.NewFake()
+			fake.ListingUnattested = true
+			sp := &wedgedListingProvider{Fake: fake}
+			if runtime.ListRunningAttested(sp) {
+				t.Fatal("the test provider must not attest its listing, as t3bridge does not")
+			}
+			var stdout, stderr lockedBuffer
+			cr := &CityRuntime{
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Daemon:    config.DaemonConfig{ShutdownTimeout: timeout},
+				},
+				sp:                  sp,
+				rec:                 events.Discard,
+				standaloneCityStore: store,
+				stdout:              &stdout,
+				stderr:              &stderr,
+			}
+			markOwnedForTest(cr)
+
+			cr.shutdown()
+
+			if got := sp.probes.Load(); got != 0 {
+				t.Errorf("shutdown made %d per-name probe(s) on an unattested runtime whose list failed, want 0; stdout = %q", got, stdout.String())
+			}
+			if strings.Contains(stdout.String(), "state unknown") {
+				t.Errorf("shutdown stopped recorded sessions as unknown on an unreachable runtime; stdout = %q", stdout.String())
+			}
+		})
+	}
+}
+
+// A forced shutdown stops the store sweep's probing between waves: on a
+// blind runtime whose backend is unreachable every probe can take the
+// provider's whole op timeout (30 s on an exec pack), and the sweep would
+// otherwise add a timeout per wave of rows to a stop the operator forced.
+// The rows it did not reach are reported, not stopped blind.
+func TestStoreRecordedSweepStopsProbingOnceForceIsRequested(t *testing.T) {
+	var rows []map[string]string
+	for i := range 3 * defaultMaxParallelInterrupts {
+		rows = append(rows, map[string]string{"session_name": fmt.Sprintf("worker-%d", i), "template": "worker", "state": "asleep"})
+	}
+	store := recordedStopTestStore(t, rows...)
+	sp := newCountingExecProvider(runtime.NewFake())
+	var force atomic.Bool
+	probedBeforeForce := 0
+	abort := func() bool {
+		if force.Load() {
+			return true
+		}
+		probedBeforeForce++
+		if probedBeforeForce == defaultMaxParallelInterrupts {
+			force.Store(true)
+		}
+		return false
+	}
+	var stderr lockedBuffer
+	got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "shutdown", &stderr, abort)
+	if len(got) != 0 {
+		t.Errorf("storeRecordedRunningOutside = %v, want none (no row is running)", got)
+	}
+	probed := 0
+	for _, n := range sp.counts("IsRunning") {
+		probed += n
+	}
+	if probed != defaultMaxParallelInterrupts {
+		t.Errorf("probed %d row(s), want %d (the probes started before force)", probed, defaultMaxParallelInterrupts)
+	}
+	want := fmt.Sprintf("%d recorded session(s) the runtime cannot list were not checked", 2*defaultMaxParallelInterrupts)
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to report %q", stderr.String(), want)
+	}
+}
+
+// A name an attested runtime's successful listing does not show is gone:
+// unlistedSessionSet probes nothing and returns nothing for it.
+func TestUnlistedSessionSetTrustsAnAttestedListing(t *testing.T) {
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "listed")
+	sp := &probeCountingFake{Fake: fake}
+	if !runtime.ListRunningAttested(sp) {
+		t.Fatal("the test provider must attest its listing")
+	}
+	if got := unlistedSessionSet(sp, []string{"listed", "omitted"}, nil); got != nil {
+		t.Errorf("unlistedSessionSet = %v, want nil on an attested runtime", got)
+	}
+	if got := sp.probes.Load(); got != 0 {
+		t.Errorf("unlistedSessionSet made %d per-name probe(s) on an attested runtime, want 0", got)
+	}
+}
+
+// probeCountingFake is an attested Fake that counts per-name liveness reads
+// (it has no error-bearing observation, so every probe is IsRunning).
+type probeCountingFake struct {
+	*runtime.Fake
+	probes atomic.Int64
+}
+
+func (p *probeCountingFake) IsRunning(name string) bool {
+	p.probes.Add(1)
+	return p.Fake.IsRunning(name)
 }

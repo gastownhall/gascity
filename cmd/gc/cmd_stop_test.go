@@ -2799,3 +2799,57 @@ func TestCmdStopBodyWithholdsSuccessWhenARecordedSessionProbeFails(t *testing.T)
 		})
 	}
 }
+
+// A runtime that does not attest its listing (an exec pack whose
+// list-running is unsupported answers an empty inventory) cannot prove a
+// retired-store city has nothing running: the stop takes the full flow,
+// which reads the city's recorded sessions per name and stops one still up.
+func TestCmdStopBodyRetiredStoreOnAnUnattestedRuntimeTakesFullFlow(t *testing.T) {
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "idler-adhoc-1")
+	sp := blindListProvider{fake}
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp,
+		map[string]string{"session_name": "idler-adhoc-1", "template": "idler", "state": "awake"},
+	)
+	oldRetired, oldProbe := stopCityStoreRetired, sessionProviderForStopProbe
+	stopCityStoreRetired = func(string) bool { return true }
+	sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+	t.Cleanup(func() { stopCityStoreRetired, sessionProviderForStopProbe = oldRetired, oldProbe })
+
+	if stopped, _ := cityAlreadyStoppedForStop(cfg, cityDir); stopped {
+		t.Fatal("cityAlreadyStoppedForStop = true over a runtime that does not attest its listing")
+	}
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody = %d, stderr = %q", code, stderr.String())
+	}
+	if fake.IsRunning("idler-adhoc-1") {
+		t.Fatalf("idler-adhoc-1 survived the stop of a retired-store city on an unattested runtime; stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+}
+
+// The standalone stop on a runtime that does not attest its listing and
+// whose listing fails (the t3bridge runtime with its bridge not running)
+// makes no per-row probe of the recorded sessions: the runtime is
+// unreachable, each probe would wait out its retry window, and every row
+// would be stopped as unknown one by one. The stop reports the incomplete
+// inventory instead, as it did before the sweep.
+func TestCmdStopBodyDoesNotProbeRecordedSessionsWhenAnUnattestedListingFails(t *testing.T) {
+	fake := runtime.NewFake()
+	fake.ListingUnattested = true
+	sp := &wedgedListingProvider{Fake: fake}
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp,
+		map[string]string{"session_name": "idler-1", "template": "idler", "state": "awake"},
+		map[string]string{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+	)
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code == 0 {
+		t.Errorf("cmdStopBody = 0 over a runtime whose listing failed; stderr = %q", stderr.String())
+	}
+	if got := sp.probes.Load(); got != 0 {
+		t.Errorf("gc stop made %d per-name probe(s) on an unattested runtime whose list failed, want 0; stdout = %q, stderr = %q", got, stdout.String(), stderr.String())
+	}
+	if out := stdout.String() + stderr.String(); strings.Contains(out, "state unknown") {
+		t.Errorf("gc stop stopped recorded sessions as unknown on an unreachable runtime; output = %q", out)
+	}
+}

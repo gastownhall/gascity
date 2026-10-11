@@ -4995,9 +4995,18 @@ func (cr *CityRuntime) shutdown() {
 		// is unsupported answers an empty inventory) would otherwise leave every
 		// session this city started running past the stop. Also stop the city's
 		// open sessions that a per-name probe reports running or cannot rule out
-		// (gracefulStopAll reads those per name, not from the blind list).
-		recorded := storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, cr.stderr)
-		running = append(running, recorded...)
+		// (gracefulStopAll reads those per name, not from the blind list), but
+		// only when the listing answered: a runtime whose listing failed is
+		// unreachable, and probing every row would only time out per row
+		// (recordedSweepAllowed). Only a runtime that reached run() owns the
+		// city's sessions: one discarded on an init failure leaves them for the
+		// runtime that will adopt them. A forced shutdown stops probing between
+		// waves.
+		var recorded []string
+		if cr.ownedCity.Load() && recordedSweepAllowed(cr.sp, listErr) {
+			recorded = storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, "shutdown", cr.stderr, cr.forceStopRequested)
+			running = append(running, recorded...)
+		}
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
 		gracefulStopAllWithForceSignal(running, setOf(recorded), cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {
@@ -5037,39 +5046,80 @@ func (cr *CityRuntime) shutdown() {
 
 // storeRecordedRunningOutside returns the names of the city's open (not
 // closed) sessions that skip does not hold and that the provider reports
-// running or cannot rule out. Shutdown stops only what it lists; for a
-// provider whose ListRunning cannot see the fleet this is the city's own
-// record of what it started. The recorded state is not trusted to say what is
-// up: a session caught draining, or one recorded asleep whose sandbox
-// survived, is as running as an awake one, so a per-name probe
-// (stopProbeRunning, one provider op) decides, and a probe that fails keeps
-// the name (unknown is not absent; the stop reports it as unknown). A session
-// recorded creating is skipped: it is its start's to finish (shutdown waits
-// for async starts first, and a standalone stop reaps one whose start died
-// with its controller in stopInterruptedStartsForStop). A store read error
-// returns nothing.
-func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
-	if !sessFront.Backed() || sp == nil {
+// running or cannot rule out. Stop paths stop only what the runtime lists;
+// for a provider whose ListRunning cannot see the fleet this is the city's
+// own record of what it started. A provider that attests its listing
+// complete (runtime.ListRunningAttested: tmux, k8s, subprocess, acp, a fully
+// attested composite) returns nothing: its list already is the fleet, and
+// probing every row of an attested runtime whose list just failed (a wedged
+// tmux server) would add a timeout per row to a stop that must stay bounded.
+// Callers also skip the sweep when an unattested runtime's listing failed
+// (see recordedSweepAllowed).
+//
+// The recorded state is not trusted to say what is up: a session caught
+// draining, or one recorded asleep whose sandbox survived, is as running as
+// an awake one, so a per-name probe (stopProbeRunning, one provider op, in
+// bounded parallel) decides, and a probe that fails keeps the name (unknown
+// is not absent; the stop reports it as unknown). A session recorded
+// creating is skipped: it is its start's to finish (shutdown waits for async
+// starts first, and a standalone stop reaps one whose start died with its
+// controller in stopInterruptedStartsForStop). A store read error is
+// reported under prefix and returns nothing.
+//
+// abort (may be nil) is asked before each probe: a forced shutdown stops
+// probing there, and the rows it did not reach are reported and left out.
+func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer, abort func() bool) []string {
+	if !sessFront.Backed() || sp == nil || runtime.ListRunningAttested(sp) {
 		return nil
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "shutdown: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: listing the city's sessions: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
 		return nil
 	}
 	seen := make(map[string]bool)
-	var found []string
+	var candidates []string
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionName)
 		if name == "" || skip[name] || seen[name] || sessionMetadataStateInfo(info) == "creating" {
 			continue
 		}
 		seen[name] = true
-		if alive, err := stopProbeRunning(sp, name); err != nil || alive {
+		candidates = append(candidates, name)
+	}
+	probed := probeNamesRunning(sp, candidates, abort)
+	var found []string
+	unchecked := 0
+	for _, name := range candidates {
+		p, ok := probed[name]
+		switch {
+		case !ok:
+			unchecked++
+		case p.err != nil || p.running:
 			found = append(found, name)
 		}
 	}
+	if unchecked > 0 {
+		fmt.Fprintf(stderr, "%s: force stop: %d recorded session(s) the runtime cannot list were not checked and may still be running\n", prefix, unchecked) //nolint:errcheck // best-effort stderr
+	}
 	return found
+}
+
+// recordedSweepAllowed reports whether a stop should sweep the city's
+// recorded sessions (storeRecordedRunningOutside), given the error of the
+// runtime listing the stop just made. The sweep is for a runtime whose
+// listing answers but cannot see its fleet (an exec pack answering
+// list-running with exit 2 reads as an empty, error-free inventory). A
+// runtime whose listing failed is unreachable: its per-name probes fail the
+// same way, after the provider's own timeout or retry window (a T3 bridge
+// that is not running retries every call for seconds), every recorded row
+// would read unknown and be stopped one at a time, and a bounded stop would
+// run for minutes. Such a stop stops what it listed and reports the
+// incomplete inventory, as it did before the sweep existed. A server that is
+// absent counts as a failed listing here too: sessions do not outlive their
+// server, so there is nothing for the sweep to find.
+func recordedSweepAllowed(sp runtime.Provider, listErr error) bool {
+	return sp != nil && !runtime.ListRunningAttested(sp) && listErr == nil
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {
