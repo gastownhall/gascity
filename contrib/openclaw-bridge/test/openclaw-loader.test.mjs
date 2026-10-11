@@ -40,13 +40,18 @@ test('@openclaw/imessage is pinned to the same release as openclaw', async () =>
   assert.equal(pkg.dependencies['@openclaw/imessage'], pkg.dependencies.openclaw)
 })
 
-test('resolveChunkExport finds a mangled-alias export in an .mjs chunk', async (t) => {
+test('resolveChunkExport finds a mangled-alias export in an .mjs chunk, past chunks that only import it', async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'openclaw-chunks-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   await mkdir(path.join(dir, 'nested'))
-  await writeFile(path.join(dir, 'other-AbC123.mjs'), 'const x = 1\nexport { x as t }\n')
+  // The 2026.8.35 shape: no chunk matches the hint, and chunks that sort
+  // before the defining one import the symbol without exporting it.
   await writeFile(
-    path.join(dir, 'client-XyZ789.mjs'),
+    path.join(dir, 'actions-AbC123.mjs'),
+    'import { n as createWidgetClient } from "./sanitize-XyZ789.mjs"\nconst use = () => createWidgetClient()\nexport { use as t }\n',
+  )
+  await writeFile(
+    path.join(dir, 'sanitize-XyZ789.mjs'),
     'function createWidgetClient() { return "ok" }\nexport { createWidgetClient as n }\n',
   )
   const fn = await resolveChunkExport(dir, 'createWidgetClient', 'client-')
