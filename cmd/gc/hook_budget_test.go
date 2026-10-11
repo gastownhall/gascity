@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -212,8 +214,15 @@ func recordHookCommand(t *testing.T, fn func(stdout, stderr io.Writer) int) hook
 		mu.Unlock()
 		return rec
 	}
+	// run() opens the invocation store memo for every hook verb measured here
+	// (TestInvocationStoreMemoCoversTheHookVerbs); the in-process call does the
+	// same, and ends it the way run() does at exit.
+	endStoreMemo := beginInvocationStoreMemo()
 	var stdout, stderr bytes.Buffer
 	code := fn(&stdout, &stderr)
+	if err := endStoreMemo(); err != nil {
+		t.Errorf("releasing the invocation's stores: %v", err)
+	}
 	observeOpenedStore = prev
 	resetHookBudgetProcessState(t)
 
@@ -269,19 +278,19 @@ func hookBudgetScenarios() []hookBudgetScenario {
 	oneMail := func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "human", hookBudgetIdentity, "status please") }
 	handoff := func(t *testing.T, f hookBudgetFixture) { f.autoHandoff(t) }
 	return []hookBudgetScenario{
-		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 21, Opens: 2}},
-		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 23, Opens: 2}, wantStdout: "status please"},
-		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 2}, wantStdout: "context cycle"},
+		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 18, Opens: 1}},
+		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 20, Opens: 1}, wantStdout: "status please"},
+		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 24, Opens: 1}, wantStdout: "context cycle"},
 		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1}},
-		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 20, Opens: 2}},
-		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 2}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 33, Opens: 5}, wantStdout: "review queued work"},
-		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 47, Opens: 3}},
-		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 53, Opens: 3}, wantStdout: "context cycle"},
+		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 17, Opens: 1}},
+		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 10, Opens: 1}, wantStdout: "inspect"},
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 21, Opens: 1}, wantStdout: "review queued work"},
+		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 41, Opens: 1}},
+		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 47, Opens: 1}, wantStdout: "context cycle"},
 		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, stdout, stderr)
 		}},
-		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdMailSend([]string{"human"}, false, false, "", "", "done", "work finished", stdout, stderr)
 		}},
 	}
@@ -290,6 +299,11 @@ func hookBudgetScenarios() []hookBudgetScenario {
 func TestHookRequestBudget(t *testing.T) {
 	model := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: hookBudgetLedgerRows}
 	biggerLedger := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: 10 * hookBudgetLedgerRows}
+	hookBudgetUpdateGolden = os.Getenv(hookBudgetGoldenUpdateEnv) != ""
+	goldenDir, err := filepath.Abs(filepath.Join("testdata", "hook_budget"))
+	if err != nil {
+		t.Fatalf("golden dir: %v", err)
+	}
 	for _, sc := range hookBudgetScenarios() {
 		t.Run(sc.name, func(t *testing.T) {
 			f := newHookBudgetFixture(t)
@@ -306,6 +320,7 @@ func TestHookRequestBudget(t *testing.T) {
 			if slices.ContainsFunc(run.ops, func(op beadstest.RecordedOp) bool { return op.Kind == beadstest.OpReady }) {
 				t.Errorf("recorded a Ready, which beadstest.WireModel prices at a 1-request floor; price Ready there before budgeting it")
 			}
+			assertHookBudgetGolden(t, goldenDir, sc.name, run.stdout)
 			if cost.Unkeyed != 0 {
 				t.Errorf("%d listing requests walk the whole ledger, want none", cost.Unkeyed)
 			}
@@ -319,7 +334,7 @@ func TestHookRequestBudget(t *testing.T) {
 			if cost.Requests > sc.ceiling.Requests {
 				t.Errorf("modeled %d requests at %d ledger rows, ceiling %d", cost.Requests, hookBudgetLedgerRows, sc.ceiling.Requests)
 			}
-			if t.Failed() {
+			if t.Failed() || testing.Verbose() {
 				t.Logf("recorded operations:\n%s", describeHookBudgetOps(run.ops))
 			}
 		})
@@ -338,12 +353,117 @@ func describeHookBudgetOps(ops []beadstest.RecordedOp) string {
 			b.WriteString(" " + op.ID)
 		}
 		if op.Kind == beadstest.OpList {
-			fmt.Fprintf(&b, " %+v", op.Query)
+			b.WriteString(" {" + beadstest.DescribeListQuery(op.Query) + "}")
 		}
 		if op.Err != nil {
 			b.WriteString(" err=" + op.Err.Error())
 		}
 		b.WriteString("\n")
+		if len(op.Caller) > 0 {
+			b.WriteString("      from " + strings.Join(op.Caller, " < ") + "\n")
+		}
 	}
 	return b.String()
+}
+
+// TestHookVerbsOpenOneStoreThroughRun runs hook verbs through run(), the real
+// entry point, so the store memo is the one run() opens for them rather than
+// the one recordHookCommand opens.
+func TestHookVerbsOpenOneStoreThroughRun(t *testing.T) {
+	for _, args := range [][]string{
+		{"mail", "check", "--inject"},
+		{"nudge", "drain", "--inject"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			newHookBudgetFixture(t)
+			resetHookBudgetProcessState(t)
+			var opens int
+			prev := observeOpenedStore
+			observeOpenedStore = func(_ string, store beads.Store) beads.Store {
+				opens++
+				return store
+			}
+			t.Cleanup(func() { observeOpenedStore = prev })
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("gc %s = %d; stderr=%s", strings.Join(args, " "), code, stderr.String())
+			}
+			if opens != 1 {
+				t.Fatalf("gc %s opened %d stores, want 1", strings.Join(args, " "), opens)
+			}
+			if activeInvocationStoreMemo() != nil {
+				t.Fatal("run() left the invocation store memo active")
+			}
+		})
+	}
+}
+
+// hookBudgetGoldenUpdateEnv names the variable that rewrites the hook output
+// goldens from the current output instead of comparing against them.
+const hookBudgetGoldenUpdateEnv = "HOOK_BUDGET_UPDATE_GOLDEN"
+
+var (
+	hookBudgetClockLine = regexp.MustCompile(`(?m)^Current time: .*$`)
+	hookBudgetPrimeHead = regexp.MustCompile(`^\[([^\]]+)\] (\S+) • \S+`)
+	hookBudgetReminder  = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+)
+
+// normalizeHookBudgetOutput makes one hook's output comparable across runs:
+// the clock line is masked, and a prime hook's additionalContext keeps only its
+// header and the system reminders the hook appends to the prompt. The rendered
+// prompt body is the pack's, not this hook's, and is not pinned here.
+func normalizeHookBudgetOutput(t *testing.T, stdout string) string {
+	t.Helper()
+	trimmed := strings.TrimSpace(stdout)
+	if strings.HasPrefix(trimmed, "{") {
+		var payload struct {
+			HookSpecificOutput struct {
+				AdditionalContext string `json:"additionalContext"`
+				HookEventName     string `json:"hookEventName"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+			t.Fatalf("decoding hook JSON output: %v\n%s", err, stdout)
+		}
+		ctx := payload.HookSpecificOutput.AdditionalContext
+		var b strings.Builder
+		fmt.Fprintf(&b, "hookEventName: %s\n", payload.HookSpecificOutput.HookEventName)
+		fmt.Fprintf(&b, "header: %s\n", hookBudgetPrimeHead.ReplaceAllString(strings.SplitN(ctx, "\n", 2)[0], "[$1] $2 • <now>"))
+		for _, reminder := range hookBudgetReminder.FindAllString(ctx, -1) {
+			b.WriteString(reminder)
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	return hookBudgetClockLine.ReplaceAllString(stdout, "Current time: <now>")
+}
+
+// hookBudgetUpdateGolden is read once, before any fixture clears the
+// environment.
+var hookBudgetUpdateGolden bool
+
+// assertHookBudgetGolden compares a scenario's normalized output with its
+// golden, so a change that lowers a hook's request count is shown to leave
+// what the hook says byte-identical.
+func assertHookBudgetGolden(t *testing.T, goldenDir, scenario, stdout string) {
+	t.Helper()
+	name := strings.NewReplacer(" ", "_", "/", "__", "-", "").Replace(scenario)
+	path := filepath.Join(goldenDir, name+".golden")
+	got := normalizeHookBudgetOutput(t, stdout)
+	if hookBudgetUpdateGolden {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatalf("writing golden %s: %v", path, err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading golden %s (set %s=1 to write it): %v", path, hookBudgetGoldenUpdateEnv, err)
+	}
+	if got != string(want) {
+		t.Errorf("hook output differs from %s:\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
+	}
 }

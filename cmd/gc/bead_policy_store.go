@@ -28,6 +28,10 @@ const (
 type beadPolicyStore struct {
 	beads.Store
 	cfg *config.City
+	// borrowed marks a handle over a store the invocation memo owns
+	// (invocation_store_memo.go). closeBeadStoreHandle leaves its store open;
+	// the memo closes it when the invocation ends.
+	borrowed bool
 }
 
 type beadPolicyGraphStore struct {
@@ -58,12 +62,23 @@ var (
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, false)
+}
+
+// borrowedStoreWithBeadPolicies is wrapStoreWithBeadPolicies for a store the
+// invocation memo owns: the handle's close leaves the store open.
+func borrowedStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
+	return wrapStoreWithBeadPoliciesOwnership(store, cfg, true)
+}
+
+func wrapStoreWithBeadPoliciesOwnership(store beads.Store, cfg *config.City, borrowed bool) beads.Store {
 	if store == nil {
 		return nil
 	}
 	policyStore := &beadPolicyStore{
-		Store: store,
-		cfg:   cfg,
+		Store:    store,
+		cfg:      cfg,
+		borrowed: borrowed,
 	}
 	if applier, ok := beads.GraphApplyFor(store); ok {
 		return &beadPolicyGraphStore{
