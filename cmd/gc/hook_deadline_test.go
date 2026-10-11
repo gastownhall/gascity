@@ -385,3 +385,55 @@ func TestNudgeDrainInjectAcksOnlyWhenTheHookCanFinish(t *testing.T) {
 		})
 	}
 }
+
+// deadlineAfterCloseProvider is a beadmail provider whose archive runs out of
+// hook time between its close and label phases: before the first label it
+// moves the hook deadline inside the margin, as a slow close would.
+type deadlineAfterCloseProvider struct {
+	*beadmail.Provider
+	t            *testing.T
+	gateAnswered []bool
+}
+
+func (p *deadlineAfterCloseProvider) ArchiveInjectedAutoHandoffsFromInbox(inbox *beadmail.Inbox, ids []string, mayLabel func() bool) error {
+	return p.Provider.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids, func() bool {
+		p.t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(time.Second)))
+		ok := mayLabel()
+		p.gateAnswered = append(p.gateAnswered, ok)
+		return ok
+	})
+}
+
+// TestArchiveSkipsTheLabelWhenTheDeadlineNearsAfterTheClose pins that the
+// injecting hook checks its deadline again before the archive's label write:
+// once the close has used up the margin, the handoff stays closed and read
+// through mail.read, and the label — which adds nothing to a closed handoff —
+// is not written past the deadline.
+func TestArchiveSkipsTheLabelWhenTheDeadlineNearsAfterTheClose(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := &deadlineAfterCloseProvider{Provider: beadmail.New(store), t: t}
+	handoff, err := store.Create(beads.Bead{
+		Title: "context cycle", Type: "message", Assignee: "mayor", From: "mayor",
+		Labels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	setHookProcessStart(t, time.Now().Add(-time.Minute))
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(time.Hour)))
+	target := resolvedMailTarget{display: "mayor", recipients: []string{"mayor"}, session: &session.Info{ID: "mayor"}}
+	var stdout, stderr bytes.Buffer
+	if code := doMailCheckTargetWithFormat(mp, target, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailCheckTargetWithFormat = %d; stderr=%s", code, stderr.String())
+	}
+	if len(mp.gateAnswered) != 1 || mp.gateAnswered[0] {
+		t.Fatalf("label gate answered %v, want one refusal", mp.gateAnswered)
+	}
+	b, err := store.Get(handoff.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" || hasBeadLabel(b.Labels, "read") {
+		t.Fatalf("handoff = status %q labels %v metadata %v; want closed, read through mail.read, no label", b.Status, b.Labels, b.Metadata)
+	}
+}

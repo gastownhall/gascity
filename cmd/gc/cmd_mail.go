@@ -816,7 +816,7 @@ type injectedAutoHandoffArchiver interface {
 // auto-handoff mail from the rows an inbox read already holds
 // (beadmail.Provider.ArchiveInjectedAutoHandoffsFromInbox).
 type inboxAutoHandoffArchiver interface {
-	ArchiveInjectedAutoHandoffsFromInbox(*beadmail.Inbox, []string) error
+	ArchiveInjectedAutoHandoffsFromInbox(inbox *beadmail.Inbox, ids []string, mayLabel func() bool) error
 }
 
 // archiveInjectedAutoHandoffMessagesFrom archives the injected auto-handoff
@@ -837,7 +837,11 @@ func archiveInjectedAutoHandoffMessagesFrom(cmdName string, mp mail.Provider, in
 	if archiver, ok := mp.(inboxAutoHandoffArchiver); ok && inbox != nil {
 		ids = inbox.InjectedAutoHandoffIDs(ids)
 		what = fmt.Sprintf("%d injected auto-handoff message(s)", len(ids))
-		archive = func() error { return archiver.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids) }
+		// The deadline is asked again before each label write, which follows
+		// the destructive close and adds nothing to a closed handoff.
+		archive = func() error {
+			return archiver.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids, hookDeadlineStillLeavesTime)
+		}
 	} else if archiver, ok := mp.(injectedAutoHandoffArchiver); ok {
 		archive = func() error { return archiver.ArchiveInjectedAutoHandoffs(ids) }
 	}

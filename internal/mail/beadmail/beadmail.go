@@ -565,7 +565,10 @@ func (p *Provider) ArchiveMatching(filter ArchiveFilter) ([]mail.Message, []mail
 // read-gated TTL sweep (PurgeReadMessageWisps) reclaims it later — one unified
 // retention path, no special-case delete, no permanent data loss.
 func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
-	var errs []error
+	var (
+		errs     []error
+		handoffs []string
+	)
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -582,10 +585,9 @@ func (p *Provider) ArchiveInjectedAutoHandoffs(ids []string) error {
 		if !isInjectedAutoHandoff(b) {
 			continue
 		}
-		if err := p.archiveInjectedAutoHandoff(id); err != nil {
-			errs = append(errs, err)
-		}
+		handoffs = append(handoffs, id)
 	}
+	errs = append(errs, p.archiveInjectedAutoHandoffs(handoffs, nil))
 	return errors.Join(errs...)
 }
 
@@ -597,7 +599,7 @@ func isInjectedAutoHandoff(b beads.Bead) bool {
 		hasLabel(b.Labels, mail.ArchiveAfterInjectLabel)
 }
 
-// archiveInjectedAutoHandoff marks one injected handoff read and closes it,
+// archiveInjectedAutoHandoffs marks each injected handoff read and closes it,
 // retain-addressable, mirroring SweepReadMessagesBefore: mail.read (so a later
 // SessionStart does not re-inject it, a read-back reports it read, and the
 // read-gated purge can reclaim it), the retention close_reason (so
@@ -605,31 +607,46 @@ func isInjectedAutoHandoff(b beads.Bead) bool {
 // until PurgeReadMessageWisps reclaims it) and the "read" label. Never a hard
 // delete.
 //
-// The order of the two writes is what makes an archive that a hook deadline
-// cuts short safe. The close comes first, as one close-with-metadata write
-// ([beads.Store.CloseAll] of the one id) carrying mail.read and the
-// close_reason; the "read" label, which is what hides OPEN mail from every
-// inbox read, is added only once the handoff is closed. So no step leaves it
-// read but still open — neither archived nor delivered again. Stopped before
-// or inside the close (a store that applies the metadata and the close as two
-// operations underneath can stop between them), the handoff is open with no
-// "read" label: unread, so the next hook delivers it again. Stopped after the
-// close, it is closed and read through mail.read, missing only the label, and
-// a later archive of the same id adds it idempotently.
-func (p *Provider) archiveInjectedAutoHandoff(id string) error {
-	if _, err := p.store.CloseAll([]string{id}, map[string]string{
-		mail.ReadMetadataKey: "true",
-		"close_reason":       RetentionSweepCloseReason,
-	}); err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return nil
+// It writes in two phases. First every handoff is closed, each by one
+// close-with-metadata write ([beads.Store.CloseAll] of its id) carrying
+// mail.read and the close_reason. Then each is given the "read" label, which
+// is what hides OPEN mail from a label-based inbox read, while mayLabel (nil:
+// always) allows it. Stopped before a handoff's close, it is open and unread:
+// the next hook delivers it again. A store that applies the metadata and the
+// close as two operations underneath can stop between them, leaving the
+// handoff open with mail.read=true but no label: a label-based inbox read
+// delivers it again, a read-back reports it read, and once past retention
+// PurgeReadMessageWisps may delete it. Stopped after the close — or with
+// mayLabel refusing — it is closed and read through mail.read, missing the
+// label for good: a closed handoff never returns to an inbox, so nothing
+// archives it again. That costs nothing a reader sees, which is why a hook
+// near its deadline skips the label rather than risk its output.
+func (p *Provider) archiveInjectedAutoHandoffs(ids []string, mayLabel func() bool) error {
+	var (
+		errs   []error
+		closed []string
+	)
+	for _, id := range ids {
+		if _, err := p.store.CloseAll([]string{id}, map[string]string{
+			mail.ReadMetadataKey: "true",
+			"close_reason":       RetentionSweepCloseReason,
+		}); err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
+				errs = append(errs, fmt.Errorf("archiving %s: %w", id, err))
+			}
+			continue
 		}
-		return fmt.Errorf("archiving %s: %w", id, err)
+		closed = append(closed, id)
 	}
-	if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return fmt.Errorf("labeling archived %s read: %w", id, err)
+	for _, id := range closed {
+		if mayLabel != nil && !mayLabel() {
+			break
+		}
+		if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("labeling archived %s read: %w", id, err))
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func archiveExactMatches(value, exact string, insensitive bool) bool {

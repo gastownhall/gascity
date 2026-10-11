@@ -93,6 +93,16 @@ func hookDeadlineLeavesArchiveTime(now, start time.Time) (bool, error) {
 	return deadline.Sub(now) >= hookArchiveMargin(deadline, start), nil
 }
 
+// hookDeadlineStillLeavesTime reports, now, whether the archive margin still
+// remains before the deadline gc hook run handed this process. It gates the
+// optional writes that follow a destructive step already taken — the archive's
+// label, the nudge delivery stamp — so they are skipped silently, never run
+// into the deadline. A deadline that does not parse leaves no time.
+func hookDeadlineStillLeavesTime() bool {
+	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
+	return err == nil && ok
+}
+
 // hookDeadlineAllowsArchive reports whether an injecting hook has time to
 // archive the injected auto-handoff mail it is about to archive, described by
 // what. When it does not, it says so on stderr under cmdName, so a skipped

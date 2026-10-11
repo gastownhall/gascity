@@ -231,14 +231,13 @@ func (in *Inbox) InjectedAutoHandoffIDs(ids []string) []string {
 // that opted into archive-after-inject ([Inbox.InjectedAutoHandoffIDs]) is
 // marked read and closed without being read again. An id the inbox did not
 // read is left alone — it was not injected from this inbox.
-func (p *Provider) ArchiveInjectedAutoHandoffsFromInbox(inbox *Inbox, ids []string) error {
-	var errs []error
-	for _, id := range inbox.InjectedAutoHandoffIDs(ids) {
-		if err := p.archiveInjectedAutoHandoff(id); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
+//
+// mayLabel gates each "read" label write, which follows every close
+// (archiveInjectedAutoHandoffs): a hook passes whether time remains before its
+// deadline, so it never runs past the deadline on a write that adds nothing to
+// a closed handoff. Nil always labels.
+func (p *Provider) ArchiveInjectedAutoHandoffsFromInbox(inbox *Inbox, ids []string, mayLabel func() bool) error {
+	return p.archiveInjectedAutoHandoffs(inbox.InjectedAutoHandoffIDs(ids), mayLabel)
 }
 
 // sortMessagesByArrival orders messages oldest first, ties by id.

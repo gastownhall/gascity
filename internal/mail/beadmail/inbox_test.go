@@ -277,7 +277,7 @@ func TestArchiveFromInboxRetiresWithoutRereading(t *testing.T) {
 	store.reset()
 	store.updates, store.setMetadata, store.closes, store.closeAlls = 0, 0, 0, 0
 
-	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID, ordinary.ID, elsewhere.ID}); err != nil {
+	if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID, ordinary.ID, elsewhere.ID}, nil); err != nil {
 		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
 	}
 	if store.gets != 0 || store.updates != 1 || store.setMetadata != 0 || store.closes != 0 || store.closeAlls != 1 {
@@ -329,7 +329,7 @@ func TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff(t *testing.T) {
 	}
 	store.updateErr = errors.New("label write refused")
 
-	err = p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID})
+	err = p.ArchiveInjectedAutoHandoffsFromInbox(inbox, []string{handoff.ID}, nil)
 	if err == nil || !strings.Contains(err.Error(), "label write refused") {
 		t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox = %v, want the label failure reported", err)
 	}
@@ -349,6 +349,66 @@ func TestArchiveWhoseLabelWriteFailsStillRetiresTheHandoff(t *testing.T) {
 	}
 	if len(again) != 0 {
 		t.Fatalf("CheckAutoHandoffs = %v, want the closed handoff never delivered again", again)
+	}
+}
+
+// TestArchiveFromInboxClosesEveryHandoffBeforeAnyLabel pins the archive's two
+// phases and the gate between them: every injected handoff is closed first,
+// and each "read" label is written only while mayLabel still allows it — so a
+// hook whose deadline runs out after the closes writes no label, rather than
+// running into the deadline with a handoff already closed.
+func TestArchiveFromInboxClosesEveryHandoffBeforeAnyLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		labelsLeft int
+		wantOps    []string
+	}{
+		{name: "time for every label", labelsLeft: 2, wantOps: []string{"closeAll", "closeAll", "update", "update"}},
+		{name: "deadline passes after the first label", labelsLeft: 1, wantOps: []string{"closeAll", "closeAll", "update"}},
+		{name: "deadline passes between close and label", labelsLeft: 0, wantOps: []string{"closeAll", "closeAll"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
+			p := New(store)
+			var ids []string
+			for _, thread := range []string{"t1", "t2"} {
+				handoff, err := p.SendHandoff(mail.HandoffIntent{
+					From: "human", To: "sky", Subject: "context cycle " + thread, ThreadID: thread,
+					ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+				})
+				if err != nil {
+					t.Fatalf("SendHandoff: %v", err)
+				}
+				ids = append(ids, handoff.ID)
+			}
+			inbox, err := p.InboxForRoutes([]string{"sky"})
+			if err != nil {
+				t.Fatalf("InboxForRoutes: %v", err)
+			}
+			left := tc.labelsLeft
+			mayLabel := func() bool {
+				if left == 0 {
+					return false
+				}
+				left--
+				return true
+			}
+			if err := p.ArchiveInjectedAutoHandoffsFromInbox(inbox, ids, mayLabel); err != nil {
+				t.Fatalf("ArchiveInjectedAutoHandoffsFromInbox: %v", err)
+			}
+			if !slices.Equal(store.ops, tc.wantOps) {
+				t.Fatalf("archive wrote %v, want %v", store.ops, tc.wantOps)
+			}
+			for _, id := range ids {
+				b, err := store.MemStore.Get(id)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+				if b.Status != "closed" || b.Metadata[mail.ReadMetadataKey] != "true" {
+					t.Fatalf("handoff %s = status %q metadata %v, want closed and read", id, b.Status, b.Metadata)
+				}
+			}
+		})
 	}
 }
 
