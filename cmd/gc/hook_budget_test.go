@@ -236,10 +236,14 @@ func recordHookCommand(t *testing.T, fn func(stdout, stderr io.Writer) int) hook
 }
 
 // hookBudgetCeiling bounds one scenario. Requests is the modeled wire total,
-// which no longer depends on the ledger size; Opens bounds store opens.
+// which no longer depends on the ledger size; Opens bounds store opens;
+// SessionGets bounds the Gets of the hook's own session bead; GetMisses bounds
+// Gets that find nothing — an address probed as if it were a bead id.
 type hookBudgetCeiling struct {
-	Requests int
-	Opens    int
+	Requests    int
+	Opens       int
+	SessionGets int
+	GetMisses   int
 }
 
 type hookBudgetScenario struct {
@@ -278,19 +282,19 @@ func hookBudgetScenarios() []hookBudgetScenario {
 	oneMail := func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "human", hookBudgetIdentity, "status please") }
 	handoff := func(t *testing.T, f hookBudgetFixture) { f.autoHandoff(t) }
 	return []hookBudgetScenario{
-		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 18, Opens: 1}},
-		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 20, Opens: 1}, wantStdout: "status please"},
-		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 24, Opens: 1}, wantStdout: "context cycle"},
-		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1}},
-		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 17, Opens: 1}},
-		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 10, Opens: 1}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 21, Opens: 1}, wantStdout: "review queued work"},
-		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 41, Opens: 1}},
-		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 47, Opens: 1}, wantStdout: "context cycle"},
-		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}},
+		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
+		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
+		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 0, GetMisses: 0}},
+		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 15, Opens: 1, SessionGets: 1, GetMisses: 0}},
+		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 19, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
+		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 39, Opens: 1, SessionGets: 4, GetMisses: 2}},
+		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 45, Opens: 1, SessionGets: 4, GetMisses: 2}, wantStdout: "context cycle"},
+		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, stdout, stderr)
 		}},
-		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdMailSend([]string{"human"}, false, false, "", "", "done", "work finished", stdout, stderr)
 		}},
 	}
@@ -334,11 +338,28 @@ func TestHookRequestBudget(t *testing.T) {
 			if cost.Requests > sc.ceiling.Requests {
 				t.Errorf("modeled %d requests at %d ledger rows, ceiling %d", cost.Requests, hookBudgetLedgerRows, sc.ceiling.Requests)
 			}
+			if cost.GetMisses > sc.ceiling.GetMisses {
+				t.Errorf("%d Gets missed (an address probed as a bead id), ceiling %d", cost.GetMisses, sc.ceiling.GetMisses)
+			}
+			if got := countGetsOf(run.ops, f.sessionID); got > sc.ceiling.SessionGets {
+				t.Errorf("read the session bead %s %d times, ceiling %d", f.sessionID, got, sc.ceiling.SessionGets)
+			}
 			if t.Failed() || testing.Verbose() {
 				t.Logf("recorded operations:\n%s", describeHookBudgetOps(run.ops))
 			}
 		})
 	}
+}
+
+// countGetsOf counts the recorded Gets of one bead.
+func countGetsOf(ops []beadstest.RecordedOp, id string) int {
+	n := 0
+	for _, op := range ops {
+		if op.Kind == beadstest.OpGet && op.ID == id {
+			n++
+		}
+	}
+	return n
 }
 
 func describeHookBudgetOps(ops []beadstest.RecordedOp) string {

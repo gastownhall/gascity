@@ -47,6 +47,9 @@ type Provider struct {
 	store        beads.Store
 	sessions     session.AddressDirectory
 	sessionCache *sessionInfoCache
+	// sender is the calling session, already resolved by the command; see
+	// PinSender.
+	sender *session.Info
 }
 
 type sessionInfoCache struct {
@@ -280,10 +283,42 @@ func (p *Provider) createMessageBead(title, body, from, to string, labels []stri
 	})
 }
 
+// PinSender records the calling session, which the command has already
+// resolved from its own bead. A send whose sender names that session takes its
+// sender route from it rather than resolving the address again: by bead id
+// always, and by current alias or session name while the session is open —
+// exactly the addresses [session.AddressDirectory.ResolveAddress] would
+// resolve to it.
+func (p *Provider) PinSender(info session.Info) {
+	pinned := info
+	p.sender = &pinned
+}
+
+// pinnedSenderFor returns the pinned sender when from names it.
+func (p *Provider) pinnedSenderFor(from string) (session.Info, bool) {
+	if p.sender == nil || from == "" {
+		return session.Info{}, false
+	}
+	info := *p.sender
+	if from == strings.TrimSpace(info.ID) {
+		return info, true
+	}
+	if info.Closed {
+		return session.Info{}, false
+	}
+	if from == strings.TrimSpace(info.Alias) || from == strings.TrimSpace(info.SessionNameMetadata) {
+		return info, true
+	}
+	return session.Info{}, false
+}
+
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
 	from = strings.TrimSpace(from)
 	if from == "" || from == "human" || p.sessions == nil {
 		return from, nil, nil
+	}
+	if info, ok := p.pinnedSenderFor(from); ok {
+		return senderRouteFromInfo(info, from)
 	}
 	info, err := p.sessions.ResolveAddress(from, false)
 	if err != nil {
@@ -292,6 +327,11 @@ func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, e
 		}
 		return "", nil, fmt.Errorf("resolving sender %q: %w", from, err)
 	}
+	return senderRouteFromInfo(info, from)
+}
+
+// senderRouteFromInfo is the sender route of a resolved sending session.
+func senderRouteFromInfo(info session.Info, from string) (string, map[string]string, error) {
 	display := senderDisplayAddress(info, from)
 	metadata := map[string]string{fromSessionIDMetadataKey: info.ID}
 	if display != "" {

@@ -739,7 +739,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 	}
 
-	target, err := resolveNudgeTarget(targetID, stderr)
+	// With no explicit target, the drain is the hook's own: GC_SESSION_ID
+	// names its session bead exactly, so it is preferred over GC_ALIAS.
+	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
 			wispExtra = ""
@@ -1641,6 +1643,16 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 }
 
 func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTarget, error) {
+	return resolveNudgeTargetPreferringHookIdentity(identifier, false, warningWriter...)
+}
+
+// resolveNudgeTargetPreferringHookIdentity is resolveNudgeTarget for a caller
+// that may target the hook's own session. With preferHookIdentity, an open
+// session bead named by GC_SESSION_ID is the target, resolved with one Get and
+// without entering the named-session materialize path; when GC_SESSION_ID is
+// unset, stale or closed, identifier resolves exactly as resolveNudgeTarget
+// resolves it.
+func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nudgeTarget{}, err
@@ -1655,6 +1667,15 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 		// reads the session bead; both route through the session-class store
 		// (identity today) while the raw store remains the nudge-queue currency.
 		sessStore := cliSessionStore(store.Store, cfg, cityPath)
+		if preferHookIdentity {
+			identity, ok, err := resolveHookIdentity(sessStore)
+			if err != nil {
+				return nudgeTarget{}, err
+			}
+			if ok && !identity.info.Closed {
+				return resolveNudgeTargetFromSessionInfo(cityPath, cfg, identity.info), nil
+			}
+		}
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)

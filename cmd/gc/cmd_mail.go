@@ -731,8 +731,29 @@ func doMailCheckTarget(mp mail.Provider, target resolvedMailTarget, inject bool,
 	return doMailCheckTargetWithFormat(mp, target, inject, "", stdout, stderr)
 }
 
+// mailRouteInboxReader is the optional mail-provider capability of reading a
+// mailbox for a route set taken as given (beadmail.Provider.InboxForRoutes).
+type mailRouteInboxReader interface {
+	InboxForRoutes(routes []string) (*beadmail.Inbox, error)
+}
+
+// unreadMailForTarget returns the target's unread mail, oldest first. A target
+// resolved from its own session bead carries its whole route set, and a
+// provider that reads a route set as given answers it with one read; any other
+// target or provider is asked recipient by recipient.
+func unreadMailForTarget(mp mail.Provider, target resolvedMailTarget) ([]mail.Message, error) {
+	if reader, ok := mp.(mailRouteInboxReader); ok && len(target.routes) > 0 {
+		inbox, err := reader.InboxForRoutes(target.routes)
+		if err != nil {
+			return nil, err
+		}
+		return inbox.Unread(), nil
+	}
+	return collectMailMessages(mp.Check, target.recipients)
+}
+
 func doMailCheckTargetWithFormat(mp mail.Provider, target resolvedMailTarget, inject bool, hookFormat string, stdout, stderr io.Writer) int {
-	messages, err := collectMailMessages(mp.Check, target.recipients)
+	messages, err := unreadMailForTarget(mp, target)
 	if err != nil {
 		if inject {
 			fmt.Fprintf(stderr, "gc mail check: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1045,7 +1066,18 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, sess
 		return sender, nil
 	}
 	if sessStore != nil && cfg != nil {
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
+		// A session bead id resolves with one Get, and the address is read off
+		// the bead it returns.
+		if info, ok, err := resolveExactSessionInfo(sessStore, identifier); err != nil {
+			return "", err
+		} else if ok {
+			address := session.MailboxAddressFromInfo(info)
+			if address == "" {
+				return "", errNoMailboxIdentity(identifier)
+			}
+			return address, nil
+		}
+		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
 		if err == nil {
 			address, err := session.NewStore(beads.SessionStore{Store: sessStore}).MailboxAddress(sessionID)
 			if err != nil {
@@ -1152,6 +1184,11 @@ func listLiveSessionMailboxesCached(sessStore beads.Store, cache *mailIdentitySe
 type resolvedMailTarget struct {
 	display    string
 	recipients []string
+	// routes is the mailbox's whole route set when the target was resolved
+	// from its own session bead (mailTargetFromSessionInfo). An inbox read can
+	// take it as given instead of expanding each recipient again; it is empty
+	// when the target was resolved by name.
+	routes []string
 }
 
 // mailIdentitySessionCache memoizes a single gc:session enumeration so that
@@ -1261,7 +1298,14 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, sessS
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
 	}
 	if sessStore != nil && cfg != nil {
-		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
+		// A session bead id resolves with one Get, and the mailbox is read off
+		// the bead it returns.
+		if info, ok, err := resolveExactSessionInfo(sessStore, identifier); err != nil {
+			return resolvedMailTarget{}, err
+		} else if ok {
+			return mailTargetFromSessionInfo(info, identifier)
+		}
+		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
 		if err == nil {
 			b, err := sessStore.Get(sessionID)
 			if err != nil {
@@ -1269,7 +1313,7 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, sessS
 			}
 			addresses := sessionMailboxAddresses(b)
 			if len(addresses) == 0 {
-				return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
+				return resolvedMailTarget{}, errNoMailboxIdentity(identifier)
 			}
 			return resolvedMailTarget{
 				display:    addresses[0],
@@ -1873,10 +1917,23 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	sender := from
 	if sender == "" {
 		if store != nil {
-			var ok bool
-			sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, sessStore, stderr, "gc mail send", idCache)
-			if !ok {
+			// The calling session resolves from its own bead id with one Get,
+			// and the provider sends from it without resolving the address
+			// again. Without that id, the default candidates resolve as before.
+			identity, resolved, err := resolveHookIdentity(sessStore)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", os.Getenv("GC_SESSION_ID"), err) //nolint:errcheck // best-effort stderr
 				return 1
+			}
+			if resolved && identity.mailboxAddress() != "" {
+				sender = identity.mailboxAddress()
+				identity.pinSender(mp)
+			} else {
+				var ok bool
+				sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, sessStore, stderr, "gc mail send", idCache)
+				if !ok {
+					return 1
+				}
 			}
 		} else {
 			sender = defaultMailIdentity()
