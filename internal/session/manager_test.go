@@ -2276,7 +2276,7 @@ func TestAttachWaitsForInFlightResetInsteadOfRacingIt(t *testing.T) {
 
 	store := beads.NewMemStore()
 	sp := &startCountingProvider{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2303,7 +2303,7 @@ func TestAttachWaitsForInFlightResetInsteadOfRacingIt(t *testing.T) {
 		_ = store.SetMetadata(info.ID, "continuation_reset_pending", "")
 	}()
 
-	if err := mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -2327,7 +2327,7 @@ func TestAttachFallsBackToOwnStartWhenInFlightResetNeverClears(t *testing.T) {
 
 	store := beads.NewMemStore()
 	sp := &startCountingProvider{Fake: runtime.NewFake()}
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2342,7 +2342,7 @@ func TestAttachFallsBackToOwnStartWhenInFlightResetNeverClears(t *testing.T) {
 	}
 	// Nothing ever clears continuation_reset_pending.
 
-	if err := mgr.Attach(context.Background(), info.ID, "claude --resume", runtime.Config{}); err != nil {
+	if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
