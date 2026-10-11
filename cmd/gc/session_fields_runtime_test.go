@@ -465,6 +465,31 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return c.meta(t)
 			},
 		},
+		"cmd/gc/reconcile_arms_heals.go:deadRuntimePatch": { // SESS-532
+			[]string{"state", "active", "sleep_intent", "idle-stop-pending"},
+			func(t *testing.T, meta []string) map[string]string {
+				c := newHealCase(t, livenessGone, desireSleep, meta...)
+				patch, class, _ := deadRuntimePatch(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}, true)
+				if err := c.store.SetMetadataBatch(c.k.ID, class.Into(c.k.ID, maps.Clone(patch))); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
+		"cmd/gc/reconcile_arms_drain.go:armDrainBegin": { // SESS-616
+			[]string{"state", "awake", "sleep_intent", "idle-stop-pending"},
+			func(t *testing.T, meta []string) map[string]string {
+				c := newHealCase(t, livenessAlive, desireWake, meta...)
+				it, ok := armDrainBegin(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
+				if !ok || it.Reason != decideIdleStopClear {
+					t.Fatalf("the SESS-616 clear did not fire: %+v", it)
+				}
+				if err := c.store.SetMetadataBatch(c.k.ID, it.Class.Into(c.k.ID, maps.Clone(it.Patch))); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
 		"cmd/gc/reconcile_arms_heals.go:armStrandedClear": {
 			[]string{"state", "active", strandedEventEmittedKey, ago(time.Hour)},
 			armSite(armStrandedClear),

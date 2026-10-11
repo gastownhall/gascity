@@ -159,10 +159,14 @@ var (
 	v2SatisfiedWake = Site{Mode: ModeV2, File: srcHeals}.pending("mc-fmhlc", "A6's satisfied-wake clear (D7)")
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
 		"S2's adopt commit clears the wake request (D7)")
-	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538);
-	// v2StartAccrual is C5a2's of a failed start.
-	v2Accrual      = v2(srcHeals, "deadRuntimePatch")
-	v2StartAccrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
+	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538), which
+	// also finishes a pending idle stop's sleep (SESS-532: sleep_reason=idle,
+	// sleep_intent cleared); v2StartAccrual is C5a2's of a failed start.
+	v2Accrual = v2(srcHeals, "deadRuntimePatch")
+	// v2SleepIntentClear is A20's clear of a woken row's leftover
+	// idle-stop-pending mark (SESS-616).
+	v2SleepIntentClear = v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")
+	v2StartAccrual     = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
 		"S3/S5 accrue a failed start (SESS-537)")
 	opCreate = op(srcManager, "Manager.createBeadOnly")
 	// opConsumeHold is an operator's resume consuming a user hold (#7424's
@@ -273,7 +277,7 @@ var registry = slices.Concat([]Field{
 	// Lifecycle.
 	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "asleepHealPatch"))},
 	{Key: "state_reason", Class: ClassLifecycle, Writers: sites(legacyCommit, op("internal/session/kill_fence.go", "KillPendingPatch"))},
-	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch")), Clears: sites(waitHold)},
+	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual), Clears: sites(waitHold)},
 	{Key: "slept_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"),
 		op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake)},
@@ -289,7 +293,7 @@ var registry = slices.Concat([]Field{
 	// Operator intent.
 	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), op("cmd/gc/cmd_session_kill_fence.go", "killSleepPatch"))},
 	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual, v2StartAccrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), v2SleepIntentClear, v2Accrual)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
 	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},

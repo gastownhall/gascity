@@ -125,8 +125,8 @@ func TestOperatorSuspendSkipsINC003Grace(t *testing.T) {
 // still suspended; the void clears the controller half alone.
 func TestResumeVoidsSuspendedDrain(t *testing.T) {
 	meta := intentAt(drainSuspended, "3")
-	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != "" || it.Reason != decideStopActive {
-		t.Fatalf("still suspended: %+v, want the request held", it)
+	if it, _ := decideDrain(t, meta, undesired(drainSuspended)); it.Kind != intentSignal {
+		t.Fatalf("still suspended: %+v, want the request kept and signaled", it)
 	}
 	store, _ := stampedMem(t, gate.Require)
 	b, err := store.Create(drainRow(meta...))
@@ -192,7 +192,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			meta := slices.Concat(intentAt(drainConfigDrift, "3"), []string{"started_config_hash", c.hash, "started_live_hash", live}, c.extra)
 			it, _ := decideDrain(t, meta, c.entry, c.world...)
-			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Reason != decideStopActive) {
+			if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignal) {
 				t.Fatalf("%+v, want cancel=%v", it, c.cancel)
 			}
 		})
@@ -224,7 +224,7 @@ func TestDrainCancelLensesMatchLegacy(t *testing.T) {
 				case lens:
 					want = intentDrainCancel
 				case reason == drainConfigDrift || reason == executionStalledDrainReason:
-					want = "" // still authorized
+					want = intentSignal // still authorized, past its grace
 				}
 				if it, _ := decideDrain(t, intentAt(reason, "3"), entry); it.Kind != want {
 					t.Errorf("%s, %s lens, keep=%v: %+v, want kind %q", reason, name, keep, it, want)
@@ -500,7 +500,8 @@ func TestNoWakeRequestCancelsOnAssignedWork(t *testing.T) {
 		{"blocked in-progress work", sleep, []func(*World){blockedClaim}, true},
 	} {
 		it, _ := decideDrain(t, quarantined, c.entry, c.world...)
-		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != "") {
+		// A request no work cancels stands, and is signaled past its grace.
+		if got := it.Kind == intentDrainCancel; got != c.cancel || (!c.cancel && it.Kind != intentSignalFresh) {
 			t.Errorf("%s: %+v, want cancel=%v", c.name, it, c.cancel)
 		}
 	}
@@ -527,15 +528,15 @@ func TestIdleBeginWritesTheIdleLatch(t *testing.T) {
 }
 
 // TestSignaledStopIsNotA20s. Kills A20 holding a signaled stop: a requested
-// or acked drain holds for its signal there, but a signaled one (legacy's
+// or acked drain is signaled there, but a signaled one (legacy's
 // stop-pending projection) falls through to A4's stop verb (C6b2).
 func TestSignaledStopIsNotA20s(t *testing.T) {
 	stopPending := []string{"state", "draining", "state_reason", session.DrainAckStopPendingReason, "drain_at", rowAt(-time.Minute)}
 	if it, _ := decideDrain(t, stopPending, undesired(drainOrphaned)); it.Reason == decideStopActive {
 		t.Fatalf("signaled stop: %+v, want A20 to yield to A4", it)
 	}
-	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != "" || it.Reason != decideStopActive {
-		t.Fatalf("requested stop: %+v, want A20 holding it for the signal", it)
+	if it, _ := decideDrain(t, intentAt(drainOrphaned, "3"), undesired(drainOrphaned)); it.Kind != intentSignal {
+		t.Fatalf("requested stop: %+v, want A20 signaling it", it)
 	}
 }
 

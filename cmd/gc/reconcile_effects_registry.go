@@ -103,10 +103,10 @@ var effectSpecs = map[string]effectSpec{
 	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentDrainBegin:      {class: capRowWrites, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections}, // A20 (C6a2)
 	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},   // A20 (C6a2)
-	intentSignal:          {class: capRowWrites, bootGated: true},
-	intentSignalFresh:     {class: capProbing, bootGated: true},
-	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
-	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
+	intentSignal:          {class: capRowWrites, bootGated: true, sections: signalSections},                                // A20's signal (C6b1)
+	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, sections: signalSections},         // A20's signal (C6b1)
+	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections},                                             // A19 (C6a)
+	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections},                                             // A19 (C6a)
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Lease: true}},
 	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround}, // A21 (C5c1)
 	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},          // A10 (C3)

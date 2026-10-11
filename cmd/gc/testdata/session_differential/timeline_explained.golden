@@ -371,16 +371,22 @@ event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","templa
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 provider:Stop s-gc-1 resolved
+row:gc-1:drain_at legacy="T+20s" v2="T+30s" [A4 drain-stop]
+row:gc-1:state legacy="asleep" v2="draining" [A4 drain-stop]
+row:gc-1:state_reason legacy="" v2="drain-ack-stop-pending" [A4 drain-stop]
+@ +40s
+row:gc-1:detached_at resolved
 ## 2 the wait turns ready (+1m30s)
 @ +50s
-row:gc-1:drain_at legacy="T+20s" v2="" [A4 wait-sleep]
+row:gc-1:drain_at legacy="T+20s" v2="T+30s" [A4 wait-sleep]
 row:gc-1:drain_intent_at legacy="" v2="T+20s" [A4 wait-sleep]
 row:gc-1:drain_intent_incarnation legacy="" v2="1" [A4 wait-sleep]
 row:gc-1:drain_intent_reason legacy="" v2="wait-hold" [A4 wait-sleep]
 row:gc-1:last_woke_at legacy="" v2="T-1h0m0s" [A4 wait-sleep]
 row:gc-1:sleep_reason legacy="idle" v2="" [A4 wait-sleep]
 row:gc-1:slept_at legacy="T+20s" v2="" [A4 wait-sleep]
-row:gc-1:state legacy="asleep" v2="awake" [A4 wait-sleep]
+row:gc-1:state legacy="asleep" v2="draining" [A4 wait-sleep]
+row:gc-1:state_reason legacy="" v2="drain-ack-stop-pending" [A4 wait-sleep]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 wait-sleep]
 @ +1m10s
 event:session.woke worker-1 null legacy="1" v2="" [A4 wait-sleep]
@@ -402,9 +408,6 @@ row:gc-1:core_hash_breakdown.SessionSetup legacy="e3b0c44298fc1c14" v2="" [A4 wa
 row:gc-1:core_hash_breakdown.SessionSetupScript legacy="e3b0c44298fc1c14" v2="" [A4 wait-sleep]
 row:gc-1:core_hash_breakdown.version legacy="v6" v2="" [A4 wait-sleep]
 row:gc-1:creation_complete_at legacy="T+1m10s" v2="" [A4 wait-sleep]
-row:gc-1:drain_intent_at resolved
-row:gc-1:drain_intent_incarnation resolved
-row:gc-1:drain_intent_reason resolved
 row:gc-1:generation legacy="2" v2="1" [A4 wait-sleep]
 row:gc-1:last_woke_at legacy="T+1m10s" v2="T-1h0m0s" [A4 wait-sleep]
 row:gc-1:live_hash legacy="<changed>" v2="" [A4 wait-sleep]
@@ -416,30 +419,15 @@ row:gc-1:started_config_hash legacy="<changed>" v2="" [A4 wait-sleep]
 row:gc-1:started_launch_hash legacy="<changed>" v2="" [A4 wait-sleep]
 row:gc-1:started_live_hash legacy="<changed>" v2="" [A4 wait-sleep]
 row:gc-1:started_provision_hash legacy="<changed>" v2="" [A4 wait-sleep]
-row:gc-1:state legacy="active" v2="awake" [A4 wait-sleep]
-row:gc-1:state_reason legacy="creation_complete" v2="" [A4 wait-sleep]
+row:gc-1:state legacy="active" v2="draining" [A4 wait-sleep]
+row:gc-1:state_reason legacy="creation_complete" v2="drain-ack-stop-pending" [A4 wait-sleep]
 runtime:s-gc-1 legacy="id=gc-1 epoch=2 token=<set> alive attached=false" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [A4 wait-sleep]
-work:gc-2:nudge_id legacy="" v2="wait-gc-2-0-1" [A4 wait-sleep]
-work:gc-3 legacy="" v2="present" [A4 wait-sleep]
-work:gc-3:agent legacy="" v2="worker-1" [A4 wait-sleep]
-work:gc-3:deliver_after legacy="" v2="T+1m10s" [A4 wait-sleep]
-work:gc-3:expires_at legacy="" v2="<wall>" [A4 wait-sleep]
-work:gc-3:labels legacy="" v2="agent:worker-1,gc:nudge,nudge:wait-gc-2-0-1,source:wait" [A4 wait-sleep]
-work:gc-3:message legacy="" v2="Wait satisfied (gc-2): Wait satisfied." [A4 wait-sleep]
-work:gc-3:nudge_id legacy="" v2="wait-gc-2-0-1" [A4 wait-sleep]
-work:gc-3:reference_json legacy="" v2="{\"kind\":\"bead\",\"id\":\"gc-2\"}" [A4 wait-sleep]
-work:gc-3:session_id legacy="" v2="gc-1" [A4 wait-sleep]
-work:gc-3:source legacy="" v2="wait" [A4 wait-sleep]
-work:gc-3:state legacy="" v2="queued" [A4 wait-sleep]
-work:gc-3:status legacy="" v2="open" [A4 wait-sleep]
-work:gc-3:title legacy="" v2="nudge:wait-gc-2-0-1" [A4 wait-sleep]
-work:gc-3:type legacy="" v2="chore" [A4 wait-sleep]
 @ +1m20s
 event:session.woke worker-1 null resolved
 provider:RemoveMeta s-gc-1 resolved
 provider:Start s-gc-1 resolved
-row:gc-1:detached_at legacy="T+1m20s" v2="T+0s" [A4 wait-sleep]
-row:gc-1:state resolved
+row:gc-1:detached_at legacy="T+1m20s" v2="" [A4 wait-sleep]
+row:gc-1:state legacy="awake" v2="draining" [A4 wait-sleep]
 row:gc-1:stranded_event_emitted_at resolved
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
@@ -464,17 +452,18 @@ provider:SetMeta test-city--chat legacy="4" v2="" [A4 idle-sleep]
 provider:Stop test-city--chat legacy="1" v2="" [A4 idle-sleep]
 row:gc-c:config_wake_suppressed resolved
 row:gc-c:detached_at legacy="" v2="T+0s" [A4 idle-sleep]
-row:gc-c:drain_at legacy="T+5m10s" v2="" [A4 idle-sleep]
 row:gc-c:last_woke_at legacy="" v2="T-1m0s" [A4 idle-sleep]
 row:gc-c:sleep_reason legacy="idle" v2="" [A4 idle-sleep]
 row:gc-c:slept_at legacy="T+5m10s" v2="" [A4 idle-sleep]
-row:gc-c:state legacy="asleep" v2="awake" [A4 idle-sleep]
+row:gc-c:state legacy="asleep" v2="draining" [A4 idle-sleep]
+row:gc-c:state_reason legacy="" v2="drain-ack-stop-pending" [A4 idle-sleep]
 runtime:test-city--chat legacy="" v2="id=gc-c epoch=1 token=tok-gc-c alive attached=false" [A4 idle-sleep]
 @ +5m20s
 event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"} resolved
 provider:RemoveMeta test-city--chat resolved
 provider:SetMeta test-city--chat resolved
 provider:Stop test-city--chat resolved
+row:gc-c:detached_at resolved
 === an unwanted row inside, then past, the wake grace
 ## 0 seed (+20s)
 ## 1 inside the grace (+2m30s)
@@ -500,6 +489,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 provider:Stop s-gc-1 resolved
+row:gc-1:drain_at legacy="T+4m0s" v2="T+4m10s" [A4 drain-stop]
+row:gc-1:state legacy="drained" v2="draining" [A4 drain-stop]
+row:gc-1:state_reason resolved
 ## 3 past the drain timeout (+12m0s)
 === an unwanted row of a suspended agent
 ## 0 seed (+20s)
@@ -524,6 +516,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 provider:Stop s-gc-1 resolved
+row:gc-1:drain_at legacy="T+0s" v2="T+10s" [A4 drain-stop]
+row:gc-1:state legacy="drained" v2="draining" [A4 drain-stop]
+row:gc-1:state_reason resolved
 ## 1 a minute on (+1m50s)
 === an unwanted row woken by a clock ten minutes ahead
 ## 0 seed (+20s)
@@ -548,6 +543,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 provider:Stop s-gc-1 resolved
+row:gc-1:drain_at legacy="T+0s" v2="T+10s" [A4 drain-stop]
+row:gc-1:state legacy="drained" v2="draining" [A4 drain-stop]
+row:gc-1:state_reason resolved
 ## 1 past the skewed wake's grace (+16m30s)
 === an unwanted row woken by a clock two minutes ahead
 ## 0 seed (+20s)
@@ -573,6 +571,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:RemoveMeta s-gc-1 resolved
 provider:SetMeta s-gc-1 resolved
 provider:Stop s-gc-1 resolved
+row:gc-1:drain_at legacy="T+7m0s" v2="T+7m10s" [A4 drain-stop]
+row:gc-1:state legacy="drained" v2="draining" [A4 drain-stop]
+row:gc-1:state_reason resolved
 === attach, then detach, then idle
 ## 0 seed (+20s)
 @ +0s

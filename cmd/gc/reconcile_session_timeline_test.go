@@ -1353,17 +1353,13 @@ func operatorTimeline() []timelineFixture {
 		cfg.Agents[0].SleepAfterIdle = "5m"
 		return cfg
 	}
-	// nudgeQueued is the wait's nudge v2's waits step queues to the live
-	// waiter, gc-3.
-	nudgeQueued := map[string]string{}
-	for _, k := range []string{"agent", "deliver_after", "expires_at", "labels", "message", "nudge_id", "reference_json", "session_id", "source", "state", "status", "title", "type"} {
-		nudgeQueued["work:gc-3:"+k] = "A4 wait-sleep"
-	}
 	waiter := tlFixture("a waiter sleeps", napping, []parityRow{tlRow("gc-1", 1, time.Hour)},
 		append(tlClaim("in_progress", "s-gc-1"), parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}}), []simRuntime{tlLive("gc-1")},
 		[]parityStep{
 			tlRestlessSeed,
-			{Name: "wait", Op: func(tw twin) {
+			// v2 signals the wait's drain a patrol after its begin (C6b1),
+			// one tick past this step's last; the next step's ticks settle it.
+			{Name: "wait", Restless: true, Op: func(tw twin) {
 				st, _ := tw.row("gc-1")
 				if _, err := st.Create(beads.Bead{Title: "wait:worker", Type: waitBeadType, Labels: []string{waitBeadLabel, "session:gc-1"}, Metadata: map[string]string{
 					"session_id": "gc-1", "session_name": "s-gc-1", "kind": "deps", "state": waitStatePending, "dep_ids": "gw-2", "dep_mode": "all",
@@ -1390,8 +1386,8 @@ func operatorTimeline() []timelineFixture {
 			}),
 			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
 				"row:gc-1:*waitsleep": "A4 wait-sleep", "runtime:s-gc-1": "A4 wait-sleep", "provider:Start s-gc-1": "A4 wait-sleep", "provider:RemoveMeta s-gc-1": "A4 wait-sleep",
-				"event:session.woke worker-1 null": "A4 wait-sleep", "work:gc-2:nudge_id": "A4 wait-sleep", "work:gc-3": "A4 wait-sleep",
-			}, nudgeQueued),
+				"event:session.woke worker-1 null": "A4 wait-sleep",
+			}),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}
 }

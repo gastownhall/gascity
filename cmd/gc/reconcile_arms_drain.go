@@ -1,8 +1,10 @@
 package main
 
 import (
+	"cmp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -21,6 +23,7 @@ const (
 	decideDrainVoid      = "drain-void:"
 	decideStopResidue    = "drain-void:residue"
 	decideStopActive     = "stop-requested"
+	decideDrainSignal    = "drain-signal:"
 	decideWakeGrace      = "undesired-wake-grace" // INC-003
 	decideDrainWorkKept  = "drain-kept:assigned-work"
 	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
@@ -196,6 +199,63 @@ func workKeepsNoWakeRow(r *rowFacts) bool {
 	return false
 }
 
+// armSignal is A20's signal (v5 D1, D2; C6b1): requested or acked →
+// signaled, by one CAS of legacy's stop-pending projection
+// (DrainAckStopPendingPatch), which A4's stop verb then takes. An ack is
+// due at once. A requested drain is due once its policy row's grace has
+// passed since the drain began; A19, before this arm, has canceled or
+// voided one no longer authorized, and a row it holds under Keep, or one
+// whose reason's row a later PR completes, holds here too.
+// An idle or no-wake-reason signal reads L3 and L4 fresh (C8.9), so it is
+// the fresh kind, and rests on the row's own live runtime. The effect
+// decides again on the fresh row, so a drain A19 voids or cancels since
+// the pass is never signaled (R16).
+func armSignal(r *rowFacts, req stopRequest) (intent, bool) {
+	hold := intent{Reason: decideStopActive}
+	if req.Phase == stopRequested {
+		p := drainPolicyOf(req.Reason)
+		if p.authorized == nil || (p.keepHolds && r.entry.Desired == desireKeep) {
+			return hold, true
+		}
+		if wait := signalWait(r.w, req); wait > 0 {
+			r.after(wait)
+			return hold, true
+		}
+	}
+	kind := intentSignal
+	if req.Phase == stopRequested {
+		kind = drainKind(req.Reason, true)
+	}
+	if kind == intentSignalFresh && !r.freshOwnAlive() {
+		return hold, true
+	}
+	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
+	return intent{Kind: kind, Reason: decideDrainSignal + req.Reason, Basis: basis, Patch: session.DrainAckStopPendingPatch(r.w.Now)}, true
+}
+
+// signalWait is how long a requested drain waits for its signal: its grace
+// less the time since the drain began. A begin stamp that is unparseable
+// or ahead of now (a skewed clock wrote it) is due at once, as INC-003 gives
+// such a wake no grace: skew must never pin a row, and the decide keeps no
+// memory to count a grace from. So the wait is never more than one grace.
+func signalWait(w *World, req stopRequest) time.Duration {
+	if req.At.IsZero() || req.At.After(w.Now) {
+		return 0
+	}
+	return req.At.Add(drainSignalGrace(w, req.Reason)).Sub(w.Now)
+}
+
+// drainSignalGrace is the policy table's signal grace for reason: the
+// patrol interval (World.Patrol, gather's), capped by drift_drain_timeout
+// for a config drift.
+func drainSignalGrace(w *World, reason string) time.Duration {
+	grace := cmp.Or(w.Patrol, v2DefaultPatrol)
+	if reason == drainConfigDrift && w.Env != nil && w.Env.Cfg != nil {
+		grace = min(grace, w.Env.Cfg.Daemon.DriftDrainTimeoutDuration())
+	}
+	return grace
+}
+
 // idleProof is SESS-621's gate on an idle begin: a non-interactive session
 // begins at once; an interactive one only with Full sleep capability, and
 // then probe asks its effect to prove the agent idle (WaitForIdle, with no
@@ -222,15 +282,22 @@ func idleProof(w *World, info session.Info, reason string) (allowed, probe bool)
 // not operator-dormant (D1 rule 2), so a begin proceeds where legacy
 // drains; a user-hold row is, and C6b2's direct stop owns it. An idle begin
 // passes SESS-621's gate and writes the idle latch, the row's sleep policy
-// fingerprint (D2). A requested or acked row holds for the signal (C6b1,
-// C6c2). A woken row's leftover idle-stop-pending mark is cleared
-// (SESS-616).
+// fingerprint (D2). A requested or acked row is signaled (armSignal). A
+// woken row's leftover idle-stop-pending mark is cleared (SESS-616).
 func armDrainBegin(r *rowFacts) (intent, bool) {
 	if req, ok := activeStop(r.row); ok {
-		return intent{Reason: decideStopActive}, req.Phase != stopSignaled // a signaled one is A4's
+		if req.Phase == stopSignaled {
+			return intent{Reason: decideStopActive}, false // A4's
+		}
+		// TODO(C7, A12-A16): the ack's fast path sits at A20's position, not
+		// the contract's A11; when A12-A16 register, check none pre-empts an
+		// acked stop (C6c2 moves it to A11).
+		return armSignal(r, req)
 	}
 	e, info := r.entry, r.row.Info
-	// TODO(R7): Disposition's operator-dormant cell replaces the HoldSet read.
+	// TODO(R7): key on an operator's suspend or kill, not on
+	// Disposition.OperatorDormant, which also counts heartbeat, quarantine,
+	// wait and timer holds as dormant, under which legacy drains (D1 rule 2).
 	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) || session.HoldsInfo(info, r.w.Now).In&session.HoldUser != 0 {
 		return intent{}, false
 	}

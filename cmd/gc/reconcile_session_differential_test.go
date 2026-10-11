@@ -197,6 +197,7 @@ var parityFindings = map[string]parityEntry{
 	},
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
 	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
+	"idle-respawn-drain":   {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
@@ -220,11 +221,10 @@ var parityUnported = map[string]parityEntry{
 	// Owner: the C5b follow-up PR, with episode-mirror.
 	"A4 idle-sleep": {"C6b1, C6b2 (A4 + D4)", "legacy signals an idle drain in the tick it begins it and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2's begin (A20) writes the stop request and the fingerprint, and registers no signal or finalize yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
 	"A4 managed-suspend": {
-		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2's A20 writes the stop request and registers no signal or stop verb yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
+		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2 writes no stop request on an operator-dormant row (D1 rule 2), and the direct stop verb of the operator-dormant path (D3, C6b2) is not registered yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
 		append([]string{"state", "wake_request", "wake_requested_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
-	"A4 drain-stop":             {"C6b1, C6b2 (A4 + D3, D4)", "legacy signals and stops a drain in the tick it begins it (its drain-ack mark, the provider's meta and Stop); v2's begin (A20) writes only the stop request (D1), which legacy never writes, and registers no signal or stop verb yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
-	"signal-fresh idle-respawn": {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
+	"A4 drain-stop": {"C6b1, C6b2 (A4 + D3, D4)", "legacy signals and stops a drain in the tick it begins it (its drain-ack mark, the provider's meta and Stop); v2's begin (A20) writes only the stop request (D1), which legacy never writes, and registers no signal or stop verb yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"A4 wait-sleep": {
 		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch (a wait's own intent is no explicit sleep intent) and delivers the wait's nudge with the start; v2's begin (A20) writes the stop request and registers no signal or stop verb yet, so the waiter's runtime stays up and its waits step queues the nudge to it live",
 		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
@@ -253,6 +253,10 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// and the D2 policy table it shares with A19.
 	intentDrainBegin:      regexp.MustCompile(`\bA20\b`),
 	intentDrainBeginFresh: regexp.MustCompile(`\bA20\b`),
+	// A20's signal half (C6b1) owns the same rows: the D2 table's
+	// authorization and grace columns.
+	intentSignal:      regexp.MustCompile(`\bA20\b`),
+	intentSignalFresh: regexp.MustCompile(`\bA20\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
 	intentRekey: regexp.MustCompile(`\bS4\b`),
@@ -1295,10 +1299,10 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))}, Work: []parityRow{routedDemandBead("gw-1")}, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
 			// Legacy also creates and starts the replacement seat gc-2.
 			Explain: explain(map[string]string{
-				"row:gc-1:*respawn": "signal-fresh idle-respawn", "provider:SetMeta s-gc-1": "signal-fresh idle-respawn", "provider:RemoveMeta s-gc-1": "signal-fresh idle-respawn",
-				"provider:Stop s-gc-1": "signal-fresh idle-respawn", "event:session.stopped worker [reason session_id template]": "signal-fresh idle-respawn",
-				"row:gc-2": "signal-fresh idle-respawn", "provider:Start worker-gc-2": "signal-fresh idle-respawn", "provider:RemoveMeta worker-gc-2": "signal-fresh idle-respawn",
-				"event:session.woke worker-1 []": "signal-fresh idle-respawn",
+				"row:gc-1:*respawn": "idle-respawn-drain", "provider:SetMeta s-gc-1": "idle-respawn-drain", "provider:RemoveMeta s-gc-1": "idle-respawn-drain",
+				"provider:Stop s-gc-1": "idle-respawn-drain", "event:session.stopped worker [reason session_id template]": "idle-respawn-drain",
+				"row:gc-2": "idle-respawn-drain", "provider:Start worker-gc-2": "idle-respawn-drain", "provider:RemoveMeta worker-gc-2": "idle-respawn-drain",
+				"event:session.woke worker-1 []": "idle-respawn-drain",
 			}),
 		},
 		{
@@ -1348,7 +1352,9 @@ func parityFixtures() []parityFixture {
 			// (legacy's SleepPatch(idle), keeping the latch): A6's
 			// dead-runtime heal writes it (C6a2 review 1c).
 			Name: "an idle stop pending with its runtime gone finishes the sleep", Behaviors: []string{"SESS-532"}, City: chatOnDemand,
-			Rows:    []parityRow{onDemand("last_woke_at", at(-time.Hour), "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
+			// A keyed conversation woken 10s ago: a continuation reset or a
+			// rapid-crash accrual would show.
+			Rows:    []parityRow{onDemand("last_woke_at", at(-10*time.Second), "session_key", "k-1", "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
 			Explain: latchCompared(chatStanding),
 		},
 		{

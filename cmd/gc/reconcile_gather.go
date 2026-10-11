@@ -82,15 +82,18 @@ type World struct {
 	ScaleCheck  *scaleCheckResult
 	Obs         *ObservationSnapshot
 	ObsMaxAge   time.Duration
-	Observed    map[rowKey]rowObservation // observeCensus's per-row facts
-	Gates       map[endpointKey]endpointView
-	Backoff     map[string]backoffRecord
-	InFlight    inflightView
-	Bucket      bucketState
-	Boot        bootState
-	Paused      bool            // starts paused for a provider swap (P7)
-	SoftReload  *softReloadView // the open soft reload this pass read, for A8 (M2)
-	AliasOwed   map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
+	// Patrol is the patrol interval, read once by gather, so the decide
+	// never reaches the config's environment-backed reader.
+	Patrol     time.Duration
+	Observed   map[rowKey]rowObservation // observeCensus's per-row facts
+	Gates      map[endpointKey]endpointView
+	Backoff    map[string]backoffRecord
+	InFlight   inflightView
+	Bucket     bucketState
+	Boot       bootState
+	Paused     bool            // starts paused for a provider swap (P7)
+	SoftReload *softReloadView // the open soft reload this pass read, for A8 (M2)
+	AliasOwed  map[rowKey]bool // rows whose runtime is owed their written alias, for A7 (M1)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
@@ -206,7 +209,8 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.ScaleCheck = rec.scaleCheck(now)
 
-	w.ObsMaxAge = 2 * env.patrol()
+	w.Patrol = env.patrol()
+	w.ObsMaxAge = 2 * w.Patrol
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
 	var guard *endpointCapacityGuard
 	if e.Capacity != nil {
