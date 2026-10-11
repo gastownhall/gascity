@@ -31,7 +31,7 @@ func reproSession(t *testing.T) (*Manager, beads.Store, string) {
 func TestSuspendThenWakeIsSingleVoiced(t *testing.T) {
 	mgr, store, id := reproSession(t)
 
-	if err := mgr.Suspend(id); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), id, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	suspended, err := store.Get(id)
@@ -115,7 +115,7 @@ func TestSuspendClearsSleepVocabulary(t *testing.T) {
 		t.Fatal("precondition: sleep did not stamp slept_at")
 	}
 
-	if err := mgr.Suspend(id); err != nil {
+	if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), id, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	md, err := store.Get(id)

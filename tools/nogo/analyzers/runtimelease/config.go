@@ -19,7 +19,7 @@ var Analyzer = New(Config{
 	CityHelpers: map[string]int{
 		"workerKillSessionTargetWithConfig":                 0,
 		"controllerKillSessionRow":                          0,
-		"workerKillSessionTargetCtx":                        1,
+		"workerKillSessionTargetCtx":                        2,
 		"workerHandleForSessionWithConfig":                  0,
 		"workerHandleForSessionWithStaleKeyDetectionWaiter": 0,
 		"workerHandleForSessionTargetWithConfig":            0,
@@ -32,15 +32,27 @@ var Analyzer = New(Config{
 		"resetConfiguredNamedSessionForConfigDriftInfo":     0,
 		"queueDrainAckAsyncStop":                            0,
 		"queueDrainAckForcedTermination":                    0,
-		"confirmDrainAckRuntimeDead":                        1,
+		"confirmDrainAckRuntimeDead":                        2,
 		"controllerStopLease":                               1,
 		"cleanupDeadRuntimeSessionCorpses":                  0,
 		"releaseBeadScopedPoolRuntimeLeased":                0,
 		"reapStaleSessionBeads":                             0,
 		"autoSuspendChatSessions":                           0,
 	},
-	SweepCtx: "CitySweepContext",
-	Allowed:  allowed,
+	Sweep: session + ".ActorSweep",
+	// The three stop sweeps that build the sweep's actor, and the session
+	// functions that interpret it: its lease mode, its refusal to start, and
+	// the shutdown suspend.
+	SweepSites: []string{
+		cmdGC + ":stopTargetThroughWorkerBoundary",
+		worker + ":SessionHandle.StopForShutdown",
+		worker + ":RuntimeHandle.StopForShutdown",
+		session + ":Actor.leaseMode",
+		session + ":Actor.CheckStarts",
+		session + ":Manager.Suspend",
+	},
+	Actor:   session + ".Actor",
+	Allowed: allowed,
 })
 
 // allowed are the functions that may call a runtime verb directly, with the
@@ -86,10 +98,10 @@ var allowed = map[string]Allowance{
 		Callers: []string{"Manager.createStarted", "Manager.ensureRunning", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},
 	},
 	session + ":Manager.createStarted":             {Reason: "CreateSession's first start of a new row (a residual, CONTRACT §12.5)", Callers: []string{"Manager.CreateSession"}},
-	session + ":Manager.suspend":                   {Reason: "an operator's suspend takes the lease (leaseForStop); the city stop's sweep takes none"},
-	session + ":Manager.tearDownRuntimeForSuspend": {Reason: "a suspend's stop, under its lease", Callers: []string{"Manager.suspend"}},
+	session + ":Manager.Suspend":                   {Reason: "a suspend takes the lease (leaseForStop); the city stop's sweep (ActorSweep) takes none"},
+	session + ":Manager.tearDownRuntimeForSuspend": {Reason: "a suspend's stop, under its lease", Callers: []string{"Manager.Suspend"}},
 	session + ":Manager.CloseDetailed":             {Reason: "takes the lease (leaseForStop)"},
-	session + ":Manager.KillContext":               {Reason: "takes the lease (leaseForStop), or runs under its caller's"},
+	session + ":Manager.Kill":                      {Reason: "takes the lease (leaseForStop), or runs under its caller's (Actor.Lease)"},
 	session + ":Manager.interruptAndSubmitLocked":  {Reason: "takes the lease before it interrupts (leaseForRestartLocked)"},
 	// internal/worker: runtime-only handles.
 	worker + ":RuntimeHandle.StartResolved":  {Reason: "takes the name's flock (session.LeaseRuntimeName)"},

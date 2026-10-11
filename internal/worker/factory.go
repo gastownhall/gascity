@@ -52,7 +52,6 @@ type FactoryConfig struct {
 // Factory centralizes worker-boundary object construction for callers such as
 // the API server and gc CLI.
 type Factory struct {
-	cityPath              string
 	manager               *sessionpkg.Manager
 	store                 beads.Store
 	provider              runtime.Provider
@@ -107,7 +106,6 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 		memo = NewDerivedActivityMemo()
 	}
 	return &Factory{
-		cityPath:              cfg.CityPath,
 		manager:               manager,
 		store:                 cfg.Store,
 		provider:              cfg.Provider,
@@ -280,7 +278,6 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 		return nil, sessionpkg.ErrSessionNotFound
 	}
 	return NewRuntimeHandle(RuntimeHandleConfig{
-		CityPath:     f.cityPath,
 		Provider:     f.provider,
 		SessionName:  sessionName,
 		ProviderName: providerName,

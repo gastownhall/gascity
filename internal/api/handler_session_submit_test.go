@@ -38,7 +38,7 @@ func TestHandleSessionSubmitResumesOnlyWithResumeTrue(t *testing.T) {
 
 			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Me")
 			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
-			if err := mgr.Suspend(info.ID); err != nil {
+			if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 				t.Fatalf("Suspend: %v", err)
 			}
 
@@ -83,7 +83,7 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestHandleSessionMessageReportsQueued(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(info.ID); err != nil {
+	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	rec := httptest.NewRecorder()
@@ -306,7 +306,7 @@ func TestHandleSessionSubmitWithoutResumeLeavesStartToController(t *testing.T) {
 			state := &willStartState{fakeState: fs, refusal: tc.refusal, uncertain: tc.uncertain}
 			h := newTestCityHandlerWith(t, state, New(state))
 			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Dormant")
-			if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(info.ID); err != nil {
+			if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 				t.Fatalf("Suspend: %v", err)
 			}
 			if !tc.held {
@@ -406,7 +406,7 @@ func TestDeferralFor(t *testing.T) {
 }
 
 // TestBackgroundMessageNeverStartsInProcess is review finding C-4: extmsg's
-// background send routes like ResumeViaController. A message to an asleep
+// background send routes as ActorBackground. A message to an asleep
 // session is queued, the wake recorded and the session handed to the
 // controller; nothing starts in the controller's process. Kills a background
 // send that starts the runtime itself.
@@ -414,7 +414,7 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Asleep")
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(info.ID); err != nil {
+	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{"state": "asleep", "suspended_at": "", "held_until": "", "sleep_intent": ""}); err != nil {

@@ -959,7 +959,7 @@ func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1002,7 +1002,7 @@ func TestWorkerFactorySessionByIDPreservesStoredResolvedCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1037,7 +1037,7 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
@@ -1050,7 +1050,7 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), srv.actor(session.ActorOperator)); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -1082,7 +1082,7 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Suspend(info.ID); err != nil {
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 	if err := fs.cityBeadStore.SetMetadata(info.ID, "template_overrides", `{"permission_mode":"plan"}`); err != nil {
@@ -1098,7 +1098,7 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
 	// Resuming a suspended session is an operator's own act (D8): Attach.
-	if err := handle.Attach(context.Background()); err != nil {
+	if err := handle.Attach(context.Background(), srv.actor(session.ActorOperator)); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 
@@ -1143,7 +1143,7 @@ func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t
 	if err != nil {
 		t.Fatalf("HandleForTarget: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1276,7 +1276,7 @@ func TestWorkerFactoryRoutesWorkerOperationEventsToStateProvider(t *testing.T) {
 		t.Fatalf("newResolvedWorkerSessionHandle: %v", err)
 	}
 
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1315,7 +1315,7 @@ func TestWorkerFactorySharesDerivedActivityMemoAcrossRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("factory.Session: %v", err)
 	}
-	if err := seat.Start(context.Background()); err != nil {
+	if err := seat.Start(context.Background(), srv.actor(session.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	started, err := seat.State(context.Background())

@@ -58,6 +58,7 @@ go_test(
     srcs = [
         "acp_capture_test.go",
         "activity_memo_test.go",
+        "actor_helpers_test.go",
         "factory_resolved_test.go",
         "factory_test.go",
         "handle_clone_test.go",

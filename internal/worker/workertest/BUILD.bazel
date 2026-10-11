@@ -29,6 +29,7 @@ go_library(
 go_test(
     name = "workertest_test",
     srcs = [
+        "actor_helpers_test.go",
         "catalog_phase2_data_test.go",
         "hangbudget_test.go",
         "nocity_guard_test.go",

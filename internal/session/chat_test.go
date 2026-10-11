@@ -510,10 +510,10 @@ func TestPendingConversationRestartDefersDelivery(t *testing.T) {
 func TestResumeInjectsSSHKeepalive(t *testing.T) {
 	for name, start := range map[string]func(*Manager, Info) error{
 		"Start": func(m *Manager, info Info) error {
-			return m.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator)
+			return m.Start(context.Background(), testActor(m, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 		},
 		"StartRuntimeOnly": func(m *Manager, info Info) error {
-			return m.StartRuntimeOnly(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+			return m.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, m, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

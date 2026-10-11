@@ -66,10 +66,10 @@ func TestManagerRefusesKillFencedSession(t *testing.T) {
 		call func(*Manager, string) error
 	}{
 		{name: "attach", call: func(m *Manager, id string) error {
-			return m.Attach(context.Background(), id, "claude --resume", runtime.Config{})
+			return m.Attach(context.Background(), testActor(m, ActorOperator), id, "claude --resume", runtime.Config{})
 		}},
 		{name: "send", call: func(m *Manager, id string) error {
-			_, err := m.Send(context.Background(), id, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)
+			_, err := m.Send(context.Background(), testActor(m, ActorOperator), id, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
 			return err
 		}},
 	} {

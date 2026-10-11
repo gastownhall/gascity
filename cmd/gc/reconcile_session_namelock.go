@@ -21,6 +21,12 @@ import (
 // not absolute, the empty one included, has no runtime dir to lock in, and
 // refuses (session.RefuseWithoutCity). release is idempotent.
 func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Duration) (lease *session.RuntimeLease, release func(), err error) {
+	return waitRuntimeLease(context.Background(), store, cityPath, name, id, ttl, 0)
+}
+
+// waitRuntimeLease is tryRuntimeLease waiting up to bound, and while ctx
+// lasts, for a busy name.
+func waitRuntimeLease(ctx context.Context, store beads.Store, cityPath, name, id string, ttl, bound time.Duration) (lease *session.RuntimeLease, release func(), err error) {
 	if !filepath.IsAbs(cityPath) {
 		return nil, nil, session.RefuseWithoutCity(cityPath, fmt.Sprintf("runtime %q", name))
 	}
@@ -30,34 +36,63 @@ func tryRuntimeLease(store beads.Store, cityPath, name, id string, ttl time.Dura
 	} else {
 		id = ""
 	}
-	if lease, err = session.TryRuntimeLease(front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}); err != nil {
+	if lease, err = session.WaitRuntimeLease(ctx, front, session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: id, TTL: ttl}, bound); err != nil {
 		return nil, nil, err
 	}
 	return lease, lease.Release, nil
 }
 
+// startHolderLive reports whether a live holder has the runtime lease of
+// info's row (session.RuntimeLeaseHeld): the reaper spares a row a live
+// holder is starting. What cannot be probed (no store, a city path that is
+// not absolute, a failed read) reads as held.
+func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
+	name := strings.TrimSpace(info.SessionName)
+	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
+		return true
+	}
+	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
+	return err != nil || held
+}
+
+// startAbandoned reports whether the start whose in-flight marker (state
+// creating, a fresh last_woke_at) the pass read on info was abandoned by its
+// holder (session.RuntimeStartAbandoned): no live holder has the lease every
+// PreWake is written under, and the row read under the name's flock still
+// carries the marker. The reconciler relaunches such a start under its own
+// lease (CONTRACT S7, §12.5; mc-5a1ma). A start that committed or failed
+// since the pass's read is not abandoned, and neither is what cannot be
+// probed: the marker keeps its time-based meaning.
+func startAbandoned(store beads.Store, cityPath string, info session.Info) bool {
+	name := strings.TrimSpace(info.SessionName)
+	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
+		return false
+	}
+	abandoned, err := session.RuntimeStartAbandoned(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID}, info)
+	return err == nil && abandoned
+}
+
 // controllerStopLease takes, without waiting, the runtime lease a controller
 // stop sequence holds across all its kills (a kill, its confirm-dead
-// re-kills, an escalation's process-table kill), and returns ctx carrying it
-// to each. A lease failure other than busy (the store unreachable, the row
-// closed) is logged, and the sequence runs under the name's flock alone: a
-// store never holds a stop hostage. Busy is session.ErrRuntimeLeaseBusy, which
-// the caller defers to a later tick. A city path that is not absolute has no
-// runtime dir to lock in: the stop refuses with session.ErrRuntimeLeaseNoCity
-// and kills nothing.
-func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (context.Context, func(), error) {
-	if !filepath.IsAbs(cityPath) {
-		return nil, func() {}, session.RefuseWithoutCity(cityPath, fmt.Sprintf("the controller's stop of runtime %q", name))
-	}
+// re-kills, an escalation's process-table kill), and returns the controller's
+// Actor carrying it to each. A lease failure other than busy (the store
+// unreachable, the row closed) is logged, and the sequence runs under the
+// name's flock alone: a store never holds a stop hostage. Busy is
+// session.ErrRuntimeLeaseBusy, which the caller defers to a later tick. A city
+// path that is not absolute has no runtime dir to lock in: tryRuntimeLease
+// refuses with session.ErrRuntimeLeaseNoCity, and nothing is killed.
+func controllerStopLease(store beads.Store, cityPath, name, sessionID string, stderr io.Writer) (session.Actor, func(), error) {
+	by := sessionActor(session.ActorController, cityPath)
 	lease, release, err := tryRuntimeLease(store, cityPath, name, sessionID, session.RuntimeLeaseTTL(0))
-	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) && !errors.Is(err, session.ErrRuntimeLeaseNoCity) {
 		fmt.Fprintf(stderr, "session reconciler: stopping %s under the name's flock alone: %v\n", name, err) //nolint:errcheck
 		lease, release, err = tryRuntimeLease(nil, cityPath, name, "", 0)
 	}
 	if err != nil {
-		return nil, func() {}, err
+		return by, func() {}, err
 	}
-	return session.ContextWithRuntimeLease(session.WithoutLeaseWait(context.Background()), lease), release, nil
+	by.Lease = lease
+	return by, release, nil
 }
 
 // The v2 effects' shared refusal causes for a row's runtime. A refusal backs

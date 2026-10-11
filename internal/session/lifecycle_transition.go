@@ -177,23 +177,6 @@ func ClearWakeRequestPatch() MetadataPatch {
 // 100 years is effectively forever without risking time arithmetic overflow.
 const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
 
-// OperatorSuspendPatch is the one shape of an operator's suspend (`gc session
-// suspend`, managed or not, and POST /v0/session/{id}/suspend): an indefinite
-// held_until explained by sleep_intent=user-hold, state=suspended stamped now,
-// and the pending wake cleared as newer intent (D7). The intent is what tells
-// the hold from a `gc runtime heartbeat` keep-alive, which writes held_until
-// alone.
-func OperatorSuspendPatch(now time.Time) MetadataPatch {
-	patch := ClearWakeRequestPatch()
-	patch["held_until"] = now.Add(IndefiniteHoldDuration).UTC().Format(time.RFC3339)
-	patch["sleep_intent"] = string(SleepReasonUserHold)
-	patch["state"] = string(StateSuspended)
-	patch["suspended_at"] = now.UTC().Format(time.RFC3339)
-	patch["slept_at"] = ""
-	patch["sleep_reason"] = ""
-	return patch
-}
-
 // KeepUserHold is patch as written over fresh: when fresh carries an
 // operator's sleep_intent=user-hold, the intent stays, so a sleep decided from
 // an older read (a drain completion, a timer stop, a city stop) never turns

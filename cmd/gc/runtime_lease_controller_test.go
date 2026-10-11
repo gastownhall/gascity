@@ -350,7 +350,7 @@ func TestOperatorResumeOfAStopPendingRowIsRefused(t *testing.T) {
 	}
 	d := drainAckStopPendingForTest(t, store, "gc-worker", "worker", "tok-1")
 	mgr := newSessionManagerWithConfig(city, store, sp, nil)
-	err := mgr.Start(context.Background(), "gc-worker", "resume-cmd", runtime.Config{}, sessionpkg.ResumeOperator)
+	err := mgr.Start(context.Background(), testOperatorIn(t, city), "gc-worker", "resume-cmd", runtime.Config{})
 	if !errors.Is(err, sessionpkg.ErrSessionStopping) {
 		t.Fatalf("operator resume of a stop-pending row = %v, want ErrSessionStopping", err)
 	}
@@ -593,7 +593,7 @@ func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	b := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&b)
 	decided := sessionInfoFromBead(mustGetBead(t, env.store, b.ID))
-	if err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+	if _, err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifiedStop(t.TempDir(), sessionpkg.Decide(decided, sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); !errors.Is(err, sessionpkg.ErrKillPremiseMoved) || !env.sp.IsRunning("worker") {

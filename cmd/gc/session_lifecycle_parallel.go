@@ -194,6 +194,17 @@ func (c startCandidate) name() string {
 	return c.info.SessionNameMetadata
 }
 
+// startLeaseName is the runtime name a candidate's start runs under, which
+// its lease must name: its own name, or the row's resolved one (the name a
+// bead-backed start's Manager resolves). A borrow on another name is refused
+// at the start (session's checkBorrowed).
+func startLeaseName(c startCandidate) string {
+	if name := strings.TrimSpace(c.name()); name != "" {
+		return name
+	}
+	return strings.TrimSpace(c.info.SessionName)
+}
+
 // wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
 // session was last woken (last_woke_at), falling back to when it last slept
 // (slept_at), and finally to its creation time so a brand-new session does not
@@ -2515,6 +2526,10 @@ func startPreparedStartCandidate(
 			return false, fmt.Errorf("rig %q is suspended", rigName)
 		}
 	}
+	// The start runs under the candidate's lease (the controller's), which
+	// the runtime-only handle borrows instead of taking the name's flock.
+	by := sessionActor(sessionpkg.ActorController, cityPath)
+	by.Lease = item.candidate.lease
 	if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
@@ -2529,13 +2544,13 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, err
 		}
-		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+		return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
 	}
 	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
-	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+	return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {
@@ -2996,9 +3011,9 @@ func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, writte
 	return undo
 }
 
-// restorePreWakeState undoes a refused start's PreWake, so the reconciler does
-// not later heal a never-launched "creating" row into a conversation reset,
-// reap it as stale, or lose an explicit wake. Under the session mutation lock
+// restorePreWakeState undoes a refused or failed start's PreWake, so the
+// reconciler does not later heal a never-launched "creating" row into a
+// conversation reset, reap it as stale, or lose an explicit wake. Under the session mutation lock
 // it re-reads the row and restores each key only while it still holds the
 // value PreWake wrote: anything written since (a suspend, a wait hold, a new
 // wake request, a newer attempt's lease) wins. Nothing is written to a closed
@@ -3180,8 +3195,26 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}
-	if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+	// The failed attempt is over: undo its PreWake (restorePreWakeState), as a
+	// capacity refusal does, so a claimless row is not left creating with its
+	// in-flight marker cleared, which the stuck-creating reaper ages from
+	// CreatedAt and closes as stale-session (mc-ydyvj). The wake failure below
+	// still accrues and bounds a crash loop. A PreWake that found the row
+	// already creating was a relaunch of a start a crashed holder abandoned
+	// (mc-5a1ma): restoring would put back that creating row with no marker,
+	// the same reaped shape, so this attempt's marker stays. Its holder is
+	// gone once this start releases the lease, so the next pass reads it
+	// abandoned and relaunches it, and the reaper's claimless exemption
+	// spares it meanwhile.
+	undo := result.prepared.preWakeUndo
+	relaunched := sessionpkg.State(strings.TrimSpace(undo.restore["state"])) == sessionpkg.StateCreating
+	switch {
+	case undo.written != nil && !relaunched:
+		restorePreWakeState(result.prepared, sessFront, stderr)
+	case undo.written == nil:
+		if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+		}
 	}
 	// tp.DisplayName() is the exact identity the start counter records, so a
 	// quarantine triggered by repeated start failures joins the start series
@@ -4057,7 +4090,7 @@ func executePlannedStartsTraced(
 				// defers, writing nothing; the next pass reconsiders it, as does a
 				// city path that is not absolute (ErrRuntimeLeaseNoCity).
 				leased := false
-				if name := strings.TrimSpace(candidate.info.SessionName); name != "" {
+				if name := startLeaseName(candidate); name != "" {
 					lease, dropLease, err := tryRuntimeLease(store, cityPath, name, "", 0)
 					if err != nil {
 						if release != nil {
@@ -4677,7 +4710,7 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 	// A stop sweep (`gc stop`, a rig restart) stops every session, and takes
 	// no runtime lease by design (the allowlist).
 	if cityStopSessionMarked(store, target.sessionID) {
-		if err := workerKillSessionTargetCtx(sessionpkg.CitySweepContext(context.Background()), "", store, sp, cfg, targetID); err != nil {
+		if err := workerKillSessionTargetCtx(context.Background(), sessionpkg.Actor{Kind: sessionpkg.ActorSweep}, "", store, sp, cfg, targetID); err != nil {
 			return err
 		}
 		markCityStopSessionAsAsleep(sessionFrontDoor(store), target.sessionID, nil)

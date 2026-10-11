@@ -607,3 +607,90 @@ func TestCmdSessionKill_ClearsAUserHoldsTimer(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionKillFenceRollbackKeepsWritesSince: a failed kill's rollback
+// restores only the keys the fence changed that still read as it wrote them:
+// a wait and a quarantine written after the fence stand, and the operator's
+// suspend the kill cleared comes back.
+func TestSessionKillFenceRollbackKeepsWritesSince(t *testing.T) {
+	store := openConditionalKillFenceStore(t)
+	b := createKillFenceSessionBead(t, store)
+	held := time.Now().Add(sessionpkg.IndefiniteHoldDuration).UTC().Format(time.RFC3339)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"sleep_intent": "user-hold", "held_until": held}); err != nil {
+		t.Fatal(err)
+	}
+	fence, err := writeSessionKillFence(store, b.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("writeSessionKillFence: %v", err)
+	}
+	if fenced := mustGetBead(t, store, b.ID); fenced.Metadata["sleep_intent"] != "" || fenced.Metadata["held_until"] != "" {
+		t.Fatalf("the kill left the suspend: %v", fenced.Metadata)
+	}
+	q := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"quarantined_until": q, "wait_hold": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fence.rollback(store); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	got := mustGetBead(t, store, b.ID)
+	if got.Metadata["quarantined_until"] != q || got.Metadata["wait_hold"] != "true" {
+		t.Fatalf("the rollback reverted writes made after the fence: %v", got.Metadata)
+	}
+	if got.Metadata["sleep_intent"] != "user-hold" || got.Metadata["held_until"] != held || got.Metadata["state"] != string(sessionpkg.StateAwake) {
+		t.Fatalf("the rollback did not restore what the kill changed: %v", got.Metadata)
+	}
+}
+
+// TestSessionKillFenceRollbackLeavesAKeyRewrittenSince: a key the fence wrote
+// that another writer changed after it keeps that writer's value.
+func TestSessionKillFenceRollbackLeavesAKeyRewrittenSince(t *testing.T) {
+	store := openConditionalKillFenceStore(t)
+	b := createKillFenceSessionBead(t, store)
+	fence, err := writeSessionKillFence(store, b.ID, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("writeSessionKillFence: %v", err)
+	}
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"last_woke_at": "2026-10-11T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fence.rollback(store); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if got := mustGetBead(t, store, b.ID).Metadata["last_woke_at"]; got != "2026-10-11T00:00:00Z" {
+		t.Fatalf("last_woke_at = %q after the rollback, want the write made since the fence", got)
+	}
+}
+
+// batchHookStore runs hook before the first SetMetadataBatch: a write that
+// lands between a blind writer's read and its write.
+type batchHookStore struct {
+	beads.Store
+	hook func()
+}
+
+func (s *batchHookStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if h := s.hook; h != nil {
+		s.hook = nil
+		h()
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged: on a store
+// without conditional writes, the fence's blind write carries only the class
+// keys the kill changed, so a class key written between its read and its
+// write (here a suspend's stamp) stands.
+func TestSessionKillFenceWithoutCASWritesOnlyWhatTheKillChanged(t *testing.T) {
+	mem := beads.NewMemStore()
+	b := createKillFenceSessionBead(t, mem)
+	store := &batchHookStore{Store: mem, hook: func() {
+		_ = mem.SetMetadataBatch(b.ID, map[string]string{"suspended_at": "2026-10-11T00:00:00Z"})
+	}}
+	if _, err := writeSessionKillFence(store, b.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("writeSessionKillFence: %v", err)
+	}
+	if got := mustGetBead(t, mem, b.ID).Metadata["suspended_at"]; got != "2026-10-11T00:00:00Z" {
+		t.Fatalf("suspended_at = %q, want the stamp written during the fence's write", got)
+	}
+}

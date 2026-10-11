@@ -1265,7 +1265,7 @@ func TestHandleSessionStreamStructuredClosedWithoutHistoryMatchesTranscriptSnaps
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -1633,7 +1633,7 @@ func TestHandleSessionStreamStructuredInvalidCursorEmitsResetSnapshot(t *testing
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"m1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-	if err := mgr.Close(info.ID); err != nil {
+	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func TestExitAccrualDecidesOnAFreshRead(t *testing.T) {
 					t.Fatal(err)
 				}
 				mgr := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithCityPath(env.city))
-				if err := mgr.Kill(row.ID); err != nil {
+				if err := mgr.Kill(context.Background(), testActorIn(t, sessionpkg.ActorOperator, env.city), row.ID); err != nil {
 					t.Fatal(err)
 				}
 				if err := fence.clear(env.store); err != nil {
@@ -69,6 +70,13 @@ func TestExitAccrualDecidesOnAFreshRead(t *testing.T) {
 			}
 			if meta["wake_attempts"] != "" || meta["churn_count"] != "" || meta["session_key"] != "conv-1" || meta["continuation_reset_pending"] != "" {
 				t.Fatalf("row after an operator kill = %v, want no wake failure or churn accrued and the conversation kept", meta)
+			}
+			// A refused accrual skips the row for the tick (#7567 review,
+			// mutant C6): the tick that read the kill stale does not restart
+			// the session the operator just killed; the next tick decides on
+			// a fresh snapshot.
+			if env.sp.IsRunning("worker") {
+				t.Fatal("the tick that read the kill stale restarted the killed session")
 			}
 		})
 	}
