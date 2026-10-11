@@ -8,12 +8,13 @@ import (
 )
 
 // TestEffectiveWorkQueryNoWorkBdInvocationBudget is the `gc hook --claim` row
-// of the hook request budget (engdocs/design/worker-hook-request-budget.md).
-// `gc hook --claim` issues no store operation of its own before the work query;
-// the default work query is a generated script whose every `bd` invocation is a
-// process start and a connection handshake against the ledger. With no work
-// available the script walks every tier, so this pins how many `bd` processes
-// that costs a configured named session (GC_SESSION_NAME == GC_ALIAS).
+// of the hook request budget, whose other rows are TestHookRequestBudget in
+// cmd/gc. `gc hook --claim` issues no store operation of its own before the
+// work query; the default work query is a generated script whose every `bd`
+// invocation is a process start and a connection handshake against the ledger.
+// With no work available the script walks every tier, so this pins how many
+// `bd` processes that costs a configured named session
+// (GC_SESSION_NAME == GC_ALIAS).
 //
 // The ceiling is today's count; it ratchets down as the script stops visiting
 // duplicate identities and re-reading the cached ephemeral set.

@@ -154,10 +154,12 @@ func nativeReadListPushableTypes(ctx context.Context, storage beadslib.Storage) 
 }
 
 // loadListPushableTypes sets the store's pushable type set from its scope's
-// types.infra setting. It runs once, at open. A setting that cannot be read
-// leaves the set nil, and the store then pushes no type at all: a type the
-// server classifies as infra would lose durable rows, and only the server's
-// own setting says which types those are.
+// types.infra setting. It runs once, at open, so a type an operator adds to
+// the setting later stays pushable on a store already open — losing that
+// type's durable rows — until the process holding the store restarts. A
+// setting that cannot be read leaves the set nil, and the store then pushes no
+// type at all: a type the server classifies as infra would lose durable rows,
+// and only the server's own setting says which types those are.
 func (s *NativeDoltStore) loadListPushableTypes(ctx context.Context) {
 	pushable, err := nativeReadListPushableTypes(ctx, s.storage)
 	if err != nil {
@@ -273,7 +275,10 @@ func (s *NativeDoltStore) listRequestStats() ListRequestStats {
 	return s.listCounters.snapshot()
 }
 
-// ListOpenQuery is the ListQuery a List-composed store answers ListOpen with.
+// ListOpenQuery is the ListQuery the native store answers ListOpen with, and
+// the one OpRecordingStore records for every delegate's ListOpen. MemStore and
+// FileStore leave IncludeClosed unset for a closed status; they select the
+// same beads, because a set Status alone decides ListQuery.Matches.
 func ListOpenQuery(status ...string) ListQuery {
 	query := ListQuery{AllowScan: true}
 	if len(status) > 0 {

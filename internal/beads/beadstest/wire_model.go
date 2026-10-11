@@ -32,6 +32,11 @@ const nativeGetMissRequests = 1
 // ceil(LedgerRows / ModelListPageRows). Close costs 2 (a re-read plus the
 // close). Every other operation that reaches the backend costs 1; the
 // clone-local string reads and writes cost nothing.
+//
+// That 1 is a floor, not the native shape, for an operation that fans out
+// behind one call. Ready is the one that matters: the native store sends the
+// ready listing and then reads its candidates' blocking edges, in chunks, so
+// a budget that records a Ready is understated until Ready is priced here.
 type WireModel struct {
 	// Handshake is the number of requests one store open costs.
 	Handshake int
@@ -57,7 +62,8 @@ type WireCost struct {
 	// Writes is the number of operations that write.
 	Writes int
 	// Other is the number of operations that are neither reads nor writes
-	// above (Ready, DepList, DepMetadata, Ping and similar), each priced at 1.
+	// above (Ready, DepList, DepMetadata, Ping and similar), each priced at 1:
+	// a floor for Ready (see WireModel).
 	Other int
 	// Requests is the modeled total of backend requests.
 	Requests int

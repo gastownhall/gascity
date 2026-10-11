@@ -251,10 +251,11 @@ func TestNativeDoltStoreListRetriesWithoutARefusedType(t *testing.T) {
 }
 
 // A refused type whose type-less retry fails too is not evidence the scope
-// lacks gc's types: the refusal is returned, nothing latches, and the next
-// listing pushes the type again.
+// lacks gc's types: the refusal is returned with the retry's failure, nothing
+// latches, and the next listing pushes the type again.
 func TestNativeDoltStoreListDoesNotLatchWhenTheRetryFails(t *testing.T) {
 	refusal := fmt.Errorf("listIssues: %w: issue_type", issueops.ErrValidation)
+	retryFailure := errors.New("statement refused for an unrelated reason")
 	var sent []string
 	storage := &nativeDoltReaderSpy{
 		list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
@@ -262,15 +263,16 @@ func TestNativeDoltStoreListDoesNotLatchWhenTheRetryFails(t *testing.T) {
 			if req.IssueType != "" {
 				return issueops.IssuePage{}, refusal
 			}
-			return issueops.IssuePage{}, errors.New("statement refused for an unrelated reason")
+			return issueops.IssuePage{}, retryFailure
 		},
 	}
 	var logs bytes.Buffer
 	store := newNativeDoltStoreForTest(storage)
 	store.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	for i := 0; i < 2; i++ {
-		if _, err := store.List(ListQuery{Type: "session", Status: "open"}); !errors.Is(err, issueops.ErrValidation) {
-			t.Fatalf("List #%d = %v, want the original refusal", i, err)
+		_, err := store.List(ListQuery{Type: "session", Status: "open"})
+		if !errors.Is(err, issueops.ErrValidation) || !errors.Is(err, retryFailure) {
+			t.Fatalf("List #%d = %v, want the original refusal and the retry's failure", i, err)
 		}
 	}
 	if store.typePushdownOff.Load() {
@@ -281,6 +283,46 @@ func TestNativeDoltStoreListDoesNotLatchWhenTheRetryFails(t *testing.T) {
 	}
 	if !slices.Equal(sent, []string{"session", "", "session", ""}) {
 		t.Fatalf("sent types %q, want the push retried on each list", sent)
+	}
+}
+
+// A type-less retry that loses its connection reports that loss, not just the
+// refusal: withReadRetry reconnects, and the fresh connection answers the
+// retry and latches type pushdown off.
+func TestNativeDoltStoreListReconnectsWhenTheRetryLosesItsConnection(t *testing.T) {
+	refusal := fmt.Errorf("listIssues: %w: issue_type", issueops.ErrValidation)
+	refusingReader := func(retry func() (issueops.IssuePage, error)) closableReaderSpy {
+		return closableReaderSpy{&nativeDoltReaderSpy{
+			list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+				if req.IssueType != "" {
+					return issueops.IssuePage{}, refusal
+				}
+				return retry()
+			},
+		}}
+	}
+	dead := refusingReader(func() (issueops.IssuePage, error) {
+		return issueops.IssuePage{}, errors.New("[mysql] invalid connection")
+	})
+	healthy := refusingReader(func() (issueops.IssuePage, error) {
+		return issueops.IssuePage{Items: []*issueops.IssueWithCounts{{Issue: &beadslib.Issue{
+			ID: "gc-1", Title: "s", Status: beadslib.StatusOpen, IssueType: "session",
+		}}}}, nil
+	})
+	var reopens int32
+	store := storeWithReopen(dead, healthy, &reopens)
+	got, err := store.List(ListQuery{Type: "session", Status: "open"})
+	if err != nil {
+		t.Fatalf("List = %v, want the listing answered after a reconnect", err)
+	}
+	if reopens != 1 {
+		t.Fatalf("reopens = %d, want 1: the retry's lost connection must reconnect", reopens)
+	}
+	if len(got) != 1 || got[0].ID != "gc-1" {
+		t.Fatalf("List = %+v, want the session row", got)
+	}
+	if !store.typePushdownOff.Load() {
+		t.Fatal("the retry answered on the fresh connection did not latch type pushdown off")
 	}
 }
 
@@ -411,6 +453,50 @@ func TestNativeDoltStoreWithoutASettingPushesNoType(t *testing.T) {
 	}
 	if !slices.Equal(sent, []string{""}) {
 		t.Fatalf("sent types %q, want none pushed", sent)
+	}
+}
+
+// closableInfraSettingStorage is an infraSettingStorage a reconnect may retire.
+type closableInfraSettingStorage struct {
+	infraSettingStorage
+}
+
+func (closableInfraSettingStorage) Close() error { return nil }
+
+// A store reads its scope's types.infra once, at open. A setting changed
+// afterwards does not reach it, not even through a reconnect, so it keeps
+// pushing a type the scope has since made infra until its process restarts.
+// A store opened after the change honors it
+// (TestNativeDoltStoreListPushesOnlyTypesTheScopeKeepsDurable).
+func TestNativeDoltStoreListKeepsTheTypesInfraItOpenedWith(t *testing.T) {
+	var sent []string
+	readerFor := func(fail bool) *nativeDoltReaderSpy {
+		return &nativeDoltReaderSpy{
+			list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+				if fail {
+					return issueops.IssuePage{}, errors.New("[mysql] invalid connection")
+				}
+				sent = append(sent, req.IssueType)
+				return issueops.IssuePage{}, nil
+			},
+		}
+	}
+	atOpen := closableInfraSettingStorage{infraSettingStorage{nativeDoltReaderSpy: readerFor(true)}}
+	changed := closableInfraSettingStorage{infraSettingStorage{nativeDoltReaderSpy: readerFor(false), value: "agent,role,message,session"}}
+	var reopens int32
+	store := storeWithReopen(atOpen, changed, &reopens)
+	store.loadListPushableTypes(context.Background())
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.List(ListQuery{Type: "session", Status: "in_progress"}); err != nil {
+			t.Fatalf("List #%d: %v", i, err)
+		}
+	}
+	if reopens != 1 {
+		t.Fatalf("reopens = %d, want 1: the test exercises a reconnect onto the changed setting", reopens)
+	}
+	if !slices.Equal(sent, []string{"session", "session"}) {
+		t.Fatalf("sent types %q, want the type read at open pushed on both lists", sent)
 	}
 }
 

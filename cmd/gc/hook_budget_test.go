@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +17,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
-// The hook request budget (engdocs/design/worker-hook-request-budget.md).
+// The hook request budget: how many beads requests each session-side hook
+// command sends a remote ledger. Agent hooks run these commands as often as
+// every prompt, so one whose cost grows with the ledger slows every agent as
+// the ledger grows.
 //
 // Every session-side hook command runs here in process against a FILE-BACKED
 // city, with observeOpenedStore wrapping each store it opens in a recorder.
@@ -29,8 +33,8 @@ import (
 // where a listing whose plan carries no narrowing predicate pages through the
 // whole ledger. Each scenario asserts that no listing walks the whole ledger,
 // so its cost does not grow with the ledger, and a ceiling on that total and
-// on the store opens. The ceilings are ratchets: each slice of the design
-// lowers them.
+// on the store opens. The ceilings are ratchets: they started at the counts
+// measured when this harness landed, and come down as a hook sheds requests.
 //
 // `gc hook --claim` issues no store operation before its work query, which is a
 // generated script of `bd` invocations; its budget is
@@ -197,7 +201,10 @@ func recordHookCommand(t *testing.T, fn func(stdout, stderr io.Writer) int) hook
 		mu        sync.Mutex
 		recorders []*beadstest.OpRecordingStore
 	)
+	// The cleanup restores the seam when fn fails the test; the restore after
+	// fn ends the recording as soon as it returns.
 	prev := observeOpenedStore
+	t.Cleanup(func() { observeOpenedStore = prev })
 	observeOpenedStore = func(_ string, store beads.Store) beads.Store {
 		rec := beadstest.NewOpRecordingStore(store)
 		mu.Lock()
@@ -296,6 +303,9 @@ func TestHookRequestBudget(t *testing.T) {
 			}
 			cost := model.Price(run.opens, run.ops)
 			t.Logf("%s", cost)
+			if slices.ContainsFunc(run.ops, func(op beadstest.RecordedOp) bool { return op.Kind == beadstest.OpReady }) {
+				t.Errorf("recorded a Ready, which beadstest.WireModel prices at a 1-request floor; price Ready there before budgeting it")
+			}
 			if cost.Unkeyed != 0 {
 				t.Errorf("%d listing requests walk the whole ledger, want none", cost.Unkeyed)
 			}

@@ -376,8 +376,10 @@ type NativeDoltStore struct {
 
 	// listPushableTypes is the issue types a listing of this scope may push,
 	// read from the scope's types.infra setting at open (loadListPushableTypes)
-	// and never written again. Nil pushes no type: a store whose setting could
-	// not be read, or one built directly over a storage value.
+	// and never written again, not even by a reconnect: a setting changed after
+	// open reaches a long-lived store only when its process restarts. Nil
+	// pushes no type: a store whose setting could not be read, or one built
+	// directly over a storage value.
 	listPushableTypes map[string]bool
 
 	// typePushdownOff latches when the backend refused a pushed issue type:

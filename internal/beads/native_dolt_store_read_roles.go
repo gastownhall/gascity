@@ -218,8 +218,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 
 // listPlanRequest sends one plan request. A pushed type the backend refuses is
 // sent again without it; type pushdown latches off only when that retry is
-// answered, and a retry that fails too returns the refusal. Both sends are
-// counted.
+// answered. A retry that fails too returns both errors joined: errors.Is still
+// finds the refusal, and withReadRetry classifies the retry's own failure, so
+// a connection lost on the retry reconnects. Both sends are counted.
 func (s *NativeDoltStore) listPlanRequest(ctx context.Context, reader issueops.Reader, req issueops.ListRequest, tally *nativeListTally) (issueops.IssuePage, error) {
 	page, err := reader.List(ctx, req)
 	tally.noteRequest(req, len(page.Items))
@@ -231,7 +232,7 @@ func (s *NativeDoltStore) listPlanRequest(ctx context.Context, reader issueops.R
 	retried, retryErr := reader.List(ctx, req)
 	tally.noteRequest(req, len(retried.Items))
 	if retryErr != nil {
-		return issueops.IssuePage{}, err
+		return issueops.IssuePage{}, errors.Join(err, retryErr)
 	}
 	s.disableTypePushdown(refusedType, err)
 	return retried, nil
