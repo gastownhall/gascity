@@ -128,7 +128,7 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#39 commit-writes-awake": {"CONTRACT v5 §12.2 #39 (C5b)", "v2's start and adopt commits write awake, the state legacy's next tick heals its committed active row to; for that one tick legacy reads active", []string{"state"}},
 	"§12.2#38 start-meta-clears":   {"CONTRACT v5 §12.2 #38 (A18, C5a1)", "legacy's start clears stale runtime metadata (RemoveMeta) on the runtime it starts; v2's FreshOnly start creates a runtime without any and removes nothing", nil},
 	"§12.2#27 held-slot-kept": {
-		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep closes it held or not",
+		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep keeps an operator's suspend (closeAllowed's KeepsSlot, R9-C) and closes it under any other hold",
 		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
 	},
 	"§12.2#43 close-after-hold-heal": {
@@ -1180,8 +1180,8 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			Name: "an undesired pool row under a live user hold keeps its slot", Behaviors: []string{"MAINT-051"},
-			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(time.Hour), "slept_at", at(-time.Hour))},
-			Explain: map[string]string{"row:gc-1:*kept": "§12.2#27 held-slot-kept"},
+			// Legacy keeps it too since closeAllowed (R9-C): its KeepsSlot.
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(time.Hour), "slept_at", at(-time.Hour))},
 		},
 		{
 			Name: "an undesired pool row in quarantine keeps its slot", Behaviors: []string{"MAINT-051"},

@@ -39,10 +39,12 @@ import (
 //     no release failed; with no marker, the effect stamps one and records
 //     session.stranded (SESS-624), unless every claim's detached probe still
 //     reports alive.
-//  3. The premise close: L5 must read Free, except for a SESS-080 phantom,
-//     whose work is the configured identity's; a repair, whose release
-//     decided; and an orphaned orphan whose remaining claims no lane serves
-//     (O5, revised). The terminal patch is the re-decided intent's.
+//  3. The premise close, through the shared precondition (closePermitted):
+//     no operator suspend keeps the slot, no pending wake or restart request,
+//     and L5 must read Free, except for a SESS-080 phantom, whose work is the
+//     configured identity's; a repair, whose release decided; and an
+//     orphaned orphan whose remaining claims no lane serves (O5, revised).
+//     The terminal patch is the re-decided intent's.
 //  4. After a landed close only, outside every lock (around): legacy's
 //     post-close cascade, best-effort (closeReleases.cascade). A claim no
 //     lane serves stays on the closed row (O5, revised) and raises
@@ -273,13 +275,18 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 		step.Refuse, step.Err = causeReleaseFailed, relErr
 	case c.Repair && rel.why == releaseStrandedRepair:
 		step.Terminal = session.ClosePatch(v.World.Now, strandedRepairCloseReason)
-	case work && !c.Phantom && (!c.Orphaned || !strandedOnly):
-		step.Refuse = causeHasWork
-		if v.Fence.Work != nil {
-			step.Err = v.Fence.Work.Err
-		}
 	default:
-		step.Terminal, step.Class = fresh.Patch, fresh.Class
+		// The shared precondition (closePermitted), its work L5's: a phantom's
+		// work is its configured identity's, and an orphaned orphan's unserved
+		// claims do not keep it (O5, revised). A repair needs none: A21 never
+		// decides one on a row KeepsSlot holds, and redecideClose refuses a
+		// suspend that lands after the pass.
+		switch step.Refuse = closePermitted(v.Row, closeGated, work && !c.Phantom && (!c.Orphaned || !strandedOnly)); {
+		case step.Refuse == causeHasWork && v.Fence.Work != nil:
+			step.Err = v.Fence.Work.Err
+		case step.Refuse == "":
+			step.Terminal, step.Class = fresh.Patch, fresh.Class
+		}
 	}
 	return step
 }

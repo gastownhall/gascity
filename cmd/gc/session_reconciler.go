@@ -804,7 +804,7 @@ func drainAckClaimableAnomalyBead(
 // so applyTo returns the snapshot Info unchanged.
 type drainAckFinalizeResult struct {
 	// batch is the metadata patch for the Path-A close (ClosePatch), whose persist
-	// happens inside closeSessionBeadIfReachableStoreUnassigned (a helper); the
+	// happens inside closeSeat (a helper); the
 	// caller folds it onto the snapshot via ApplyPatch. nil when the call took no
 	// close/metadata path.
 	batch sessionpkg.MetadataPatch
@@ -869,7 +869,7 @@ func finalizeDrainAckStoppedSession(
 	}
 	// Every decision read comes off the typed Info; the whole-bead raw-by-design
 	// helpers (sessionHasOpenAssignedWorkForReachableStore,
-	// closeSessionBeadIfReachableStoreUnassigned, recordDrainAckAssignedWorkEvent)
+	// closeSeat, recordDrainAckAssignedWorkEvent)
 	// take Info too, and the one genuine post-mutation re-read is the front-door
 	// Get NDI witness below. Callers pass the coherent infoByID[id].
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -916,7 +916,7 @@ func finalizeDrainAckStoppedSession(
 	}
 	choice := finalizePatch(facts)
 	if choice.CloseSeat {
-		if closeSessionBeadIfReachableStoreUnassigned(store, sw, info, "drained", clk.Now().UTC(), stderr, true) {
+		if closeSeat(store, sw, info, closeWhy{reason: "drained", gate: closeGated, keep: notOwnDrainStep}, clk.Now().UTC(), stderr) {
 			closePatch := sessionpkg.ClosePatch(clk.Now().UTC(), "drained")
 			if dops != nil {
 				_ = dops.clearDrain(name)
@@ -2269,7 +2269,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					closedFailedCreate := releaseBeadScopedPoolRuntimeLeased(cityPath, infoByID[id], sp, stderr) &&
-						closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
+						closeSeat(store, sw, infoByID[id], closeWhy{reason: string(sessionpkg.StateFailedCreate), gate: closeGated}, clk.Now().UTC(), stderr)
 					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session
 						// min-floor scan (below) reads Info.Closed off infoByID, so a
@@ -2702,7 +2702,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
 							preserve = append(preserve, rn)
 						}
-						if closeBeadPreservingAssignees(store, sw, infoByID[id], reason, preserve, clk.Now().UTC(), stderr) {
+						if closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, preserve: preserve}, clk.Now().UTC(), stderr) {
 							tick.markClosed(id)
 							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
 							if trace != nil {
@@ -2713,7 +2713,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closed := closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+					closed := closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeGated}, clk.Now().UTC(), stderr)
 					if !closed && reason == "orphaned" {
 						// The guard refused because the seat still holds work. Nothing
 						// else can resolve that: the wake path is blocked on the orphaned
@@ -2728,13 +2728,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if released := releaseConfirmedOrphanSessionWork(cfg, sw.Legs().workStore(), sw.Legs().rigs, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 						}
-						closed = closeSessionBeadIfReachableStoreUnassigned(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+						closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeGated}, clk.Now().UTC(), stderr)
 						// What the release kept for want of a lane does not keep the
 						// seat (O5, revised): its agent is gone, the claims stay on the
 						// closed row, and the cascade alerts. A claim a lane serves (one
 						// moved, or detached and alive) still blocks.
 						if !closed && onlyStrandedWork(sw, infoByID[id]) {
-							closed = closeBead(store, sw, infoByID[id], reason, clk.Now().UTC(), stderr)
+							closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing}, clk.Now().UTC(), stderr)
 						}
 					}
 					if closed {
@@ -4779,11 +4779,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
-			// Close directly rather than via closeSessionBeadIfUnassigned.
-			// That helper also runs a live sessionHasOpenAssignedWork query
-			// and would redundantly re-query a store we just hit — skip the
-			// duplicate I/O and pass through the preserved sleep_reason as
-			// the close_reason below.
+			// Close through closeSeat, work-gated: its gate reads the tick's
+			// SeatWork (no I/O) and the close-time re-read, and the preserved
+			// sleep_reason passes through as the close_reason below.
 			//
 			// Preserve the original sleep_reason (idle / idle-timeout / drained)
 			// on the closed bead for forensic fidelity; fall back to "drained"
@@ -4793,7 +4791,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBeadUnlessLateWork(store, sw, infoByID[target.info.ID], closeReason, clk.Now().UTC(), stderr, nil) {
+			if closeSeat(store, sw, infoByID[target.info.ID], closeWhy{reason: closeReason, gate: closeGated}, clk.Now().UTC(), stderr) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
@@ -4971,7 +4969,7 @@ func resolveConfiguredNamedSessionTemplate(bp *agentBuildParams, spec namedSessi
 	return tp, nil
 }
 
-// sessionHasOpenAssignedWorkForConfig uses the same configured-named-session
+// sessionHasOpenAssignedWorkForConfigInfo uses the same configured-named-session
 // fallback identity strategy as sessionAssigneeMatches, but queries every store
 // the city serves instead of a single configured reachable store. Use this
 // cross-store query for cleanup-of-record paths that must not orphan work in any
@@ -4985,14 +4983,6 @@ func resolveConfiguredNamedSessionTemplate(bp *agentBuildParams, spec namedSessi
 // live worker. On a work-led plane the relocated binding was exactly such a leg
 // (ga-j4ob9), and this gate was invisible to the boundary census too, because it
 // ranged a map rather than calling a named enumerator.
-func sessionHasOpenAssignedWorkForConfig(sw *SeatWork, session beads.Bead) (bool, error) {
-	return sessionHasOpenAssignedWorkInStores(sw, releaseScopeOfBead(session, sw.Legs().cfg))
-}
-
-// sessionHasOpenAssignedWorkForConfigInfo is the session.Info form of
-// sessionHasOpenAssignedWorkForConfig for the reconciler forward pass (the raw
-// form stays for the repair/cleanup lanes that hold a raw bead). The work-store
-// probe stays bead-shaped; only the assignment-identifier derivation reads Info.
 func sessionHasOpenAssignedWorkForConfigInfo(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	return sessionHasOpenAssignedWorkInStores(sw, releaseScope(info, sw.Legs().cfg))
 }
@@ -5065,7 +5055,7 @@ func sessionHasOpenAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.I
 // unrelated decisions (config-drift drain deferral, the max-session-age timer,
 // the pool-slot-freeable check, wake-on-assigned-work), and none of those
 // should start ignoring a session's own drain step. Use this function
-// (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
+// (and closeSeat's notOwnDrainStep keep)
 // ONLY from the drain-ack finalize path.
 // The identifier set here stays NARROW deliberately: {ID, session_name,
 // configured_named_identity} plus the session's stable alias
