@@ -4991,6 +4991,11 @@ func (cr *CityRuntime) shutdown() {
 		// not kill-server on the strength of a subset.
 		sweepEnumerated := listErr == nil
 		store := cr.sessionsBeadStore()
+		// A runtime that cannot enumerate its fleet (an exec pack whose list-running
+		// is unsupported answers an empty inventory) would otherwise leave every
+		// session this city started running past the stop. Also stop the sessions
+		// the store records as awake and the runtime confirms are running.
+		running = appendStoreAwakeRunning(running, sessionFrontDoor(store.Store), cr.sp, cr.stderr)
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
 		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {
@@ -5026,6 +5031,37 @@ func (cr *CityRuntime) shutdown() {
 			teardownServerForStop(cr.sp, cr.stderr, fmt.Sprintf("%s: city '%s'", cr.logPrefix, cr.cityName))
 		}
 	})
+}
+
+// appendStoreAwakeRunning returns running plus the session names the store records
+// as awake ("active") that the provider reports running and running does not
+// already hold. Shutdown stops only what it lists; for a provider whose
+// ListRunning cannot see the fleet this is the city's own record of what it
+// started. A store read error leaves running unchanged.
+func appendStoreAwakeRunning(running []string, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
+	if !sessFront.Backed() || sp == nil {
+		return running
+	}
+	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
+	if err != nil {
+		fmt.Fprintf(stderr, "shutdown: listing awake sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		return running
+	}
+	seen := make(map[string]bool, len(running))
+	for _, name := range running {
+		seen[name] = true
+	}
+	for _, info := range infos {
+		name := strings.TrimSpace(info.SessionName)
+		if name == "" || seen[name] || sessionMetadataStateInfo(info) != "active" {
+			continue
+		}
+		seen[name] = true
+		if sp.IsRunning(name) {
+			running = append(running, name)
+		}
+	}
+	return running
 }
 
 func (cr *CityRuntime) preserveSessionsOnShutdown() {
