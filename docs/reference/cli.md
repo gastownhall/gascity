@@ -4076,14 +4076,22 @@ filesystem (a remote sandbox, a container image).
 Orchestrator-local state named by the work_dir_exclude start-config field
 (secrets, the event log, the nudge queue, ledger stores, sockets, other
 sessions' worktrees) is left out; an excluded directory is pruned with
-everything below it. Paths are relative to &lt;work_dir&gt;, slash-separated, in
-lexical order, one per line (NUL-terminated with --null).
+everything below it. Paths are relative to &lt;work_dir&gt; and slash-separated,
+in depth-first walk order with each directory's entries sorted by name.
 
-Directories are listed as well as their contents so empty directories
-survive, and symlinks are listed, never followed. Feed the list to a tool
-without recursion, for example:
+Every surviving file and symlink is listed, plus every surviving directory
+that is empty on disk. A non-empty directory is never listed, so a consumer
+that recurses into listed entries still copies nothing excluded. Symlinks
+are listed, never followed; copy them as links.
 
-  gc runtime workdir-export --null "$WORK_DIR" |
+Scripts must use --null, which terminates entries with NUL. The default
+newline-terminated output is for reading: it fails, printing nothing, when an
+entry contains a newline or carriage return or starts with "-", because a
+line-based consumer would misread it. Run the gc that produced the start
+config (its env.GC_BIN) and check its exit status, for example:
+
+  set -o pipefail
+  "$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
     tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
 
 The protocol contract is docs/reference/exec-session-provider.md.
@@ -4094,7 +4102,7 @@ gc runtime workdir-export <work_dir> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `-0`, `--null` | bool |  | terminate entries with NUL instead of newline |
+| `-0`, `--null` | bool |  | terminate entries with NUL instead of newline (required for scripts) |
 
 ## gc service
 

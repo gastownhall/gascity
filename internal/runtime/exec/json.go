@@ -68,7 +68,9 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 		PackOverlayDirs:    cfg.PackOverlayDirs,
 		OverlayDir:         cfg.OverlayDir,
 		CopyFiles:          cfs,
-		WorkDirExclude:     citylayout.WorkDirExportExcludes(cfg.WorkDir),
+	}
+	if cfg.WorkDir != "" {
+		sc.WorkDirExclude = citylayout.WorkDirExportExcludes()
 	}
 	return json.Marshal(sc)
 }

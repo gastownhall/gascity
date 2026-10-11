@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -84,6 +85,10 @@ func TestDefaultWorkDirExportExcludesDenyControllerState(t *testing.T) {
 		".gc/session-name-locks/a.lock",
 		".gc/supervisor/publications.json",
 		".gc/worktrees/rig/agent/main.go",
+		".gc/agents/dog/src/main.go",
+		".gc/scope-ownership.json",
+		".gc/mcp-locks/abc.lock",
+		".gc/dispatch-wake",
 		".gc/storage-served-binding.json",
 		".gc/storage-infra-cleared.json",
 		".gc/cache/packs/x/child.pid",
@@ -118,6 +123,8 @@ func TestDefaultWorkDirExportExcludesDenyControllerState(t *testing.T) {
 		".beads/dolt-backups/success/1/x",
 		".gc/beads.json",
 		"rigs/app/.gc/beads.json",
+		".gc/beads.json.bak",
+		".gc/credentials.json",
 		".gc/jsonl-archive/2026-01.jsonl",
 		".gc/jsonl-export-state.json",
 		".gc/mcp-adopted/claude/settings.json",
@@ -158,6 +165,9 @@ func TestDefaultWorkDirExportExcludesKeepDeploymentArtifacts(t *testing.T) {
 		".gc/tmp/agent-prompt.md",
 		".gc/mcp-managed/claude.json",
 		".gc/molecules/root/artifacts/b-1/out.txt",
+		".gc/artifacts/b-1/iter-1/out.txt",
+		".gc/synth/role.meta.md",
+		".gc/file-beads-layout",
 		".beads/metadata.json",
 		".beads/config.yaml",
 		".beads/http_target.json",
@@ -174,50 +184,14 @@ func TestDefaultWorkDirExportExcludesKeepDeploymentArtifacts(t *testing.T) {
 	}
 }
 
-func TestWorkDirExportExcludes(t *testing.T) {
-	t.Run("empty work dir", func(t *testing.T) {
-		if got := WorkDirExportExcludes(""); got != nil {
-			t.Fatalf("WorkDirExportExcludes(\"\") = %v, want nil", got)
-		}
-	})
-	t.Run("unrelated work dir", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if got := WorkDirExportExcludes(dir); got != nil {
-			t.Fatalf("WorkDirExportExcludes(unrelated) = %v, want nil", got)
-		}
-	})
-	t.Run(".gc file is not a runtime root", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, RuntimeRoot), nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if got := WorkDirExportExcludes(dir); got != nil {
-			t.Fatalf("WorkDirExportExcludes(.gc file) = %v, want nil", got)
-		}
-	})
-	for _, marker := range []string{RuntimeRoot, BeadsRoot} {
-		t.Run("work dir with "+marker, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.Mkdir(filepath.Join(dir, marker), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			got := WorkDirExportExcludes(dir)
-			if len(got) != len(defaultWorkDirExportExcludes) {
-				t.Fatalf("WorkDirExportExcludes = %v, want the default list", got)
-			}
-			for i := range got {
-				if got[i] != defaultWorkDirExportExcludes[i] {
-					t.Fatalf("WorkDirExportExcludes[%d] = %q, want %q", i, got[i], defaultWorkDirExportExcludes[i])
-				}
-			}
-			got[0] = "mutated"
-			if defaultWorkDirExportExcludes[0] == "mutated" {
-				t.Fatal("WorkDirExportExcludes returned the shared default slice")
-			}
-		})
+func TestWorkDirExportExcludesIsAFreshCopyOfTheDefaults(t *testing.T) {
+	got := WorkDirExportExcludes()
+	if strings.Join(got, "\n") != strings.Join(defaultWorkDirExportExcludes, "\n") {
+		t.Fatalf("WorkDirExportExcludes = %v, want the default list", got)
+	}
+	got[0] = "mutated"
+	if defaultWorkDirExportExcludes[0] == "mutated" {
+		t.Fatal("WorkDirExportExcludes returned the shared default slice")
 	}
 }
 
@@ -258,6 +232,7 @@ var soleMatchProbes = map[string]string{
 	".gc/secrets/**":                   ".gc/secrets/s-1.key",
 	".gc/controller.token":             ".gc/controller.token",
 	".gc/credentials.toml":             ".gc/credentials.toml",
+	".gc/credentials.json":             ".gc/credentials.json",
 	".gc/**/*.sock":                    ".gc/controller.sock",
 	".gc/**/*.pid":                     ".gc/controller.pid",
 	".gc/*.lock":                       ".gc/controller.lock",
@@ -271,6 +246,10 @@ var soleMatchProbes = map[string]string{
 	".gc/session-mcp/**":               ".gc/session-mcp/s-1.json",
 	".gc/supervisor/**":                ".gc/supervisor/publications.json",
 	".gc/worktrees/**":                 ".gc/worktrees/rig/agent/main.go",
+	".gc/agents/**":                    ".gc/agents/dog/src/main.go",
+	".gc/scope-ownership.json":         ".gc/scope-ownership.json",
+	".gc/mcp-locks/**":                 ".gc/mcp-locks/abc",
+	".gc/dispatch-wake":                ".gc/dispatch-wake",
 	".gc/storage-served-binding.json":  ".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json":   ".gc/storage-infra-cleared.json",
 	".gc/mcp-adopted/**":               ".gc/mcp-adopted/claude/settings.json",
@@ -278,6 +257,7 @@ var soleMatchProbes = map[string]string{
 	".gc/jsonl-archive/**":             ".gc/jsonl-archive/2026-01.jsonl",
 	".gc/jsonl-export-state.json":      ".gc/jsonl-export-state.json",
 	"**/.gc/beads.json":                "rigs/app/.gc/beads.json",
+	"**/.gc/beads.json.bak":            "rigs/app/.gc/beads.json.bak",
 	"**/.beads/dolt/**":                "rigs/app/.beads/dolt/app/.dolt/noms/x",
 	"**/.beads/doltlite/**":            "rigs/app/.beads/doltlite/app.db",
 	"**/.beads/embeddeddolt/**":        "rigs/app/.beads/embeddeddolt/app/.dolt/noms/x",
@@ -462,18 +442,19 @@ func TestWorkDirExportExcludedRejectsBadPattern(t *testing.T) {
 	if _, err := WorkDirExportExcluded([]string{"[unclosed"}, "x"); err == nil {
 		t.Fatal("WorkDirExportExcluded accepted a malformed pattern")
 	}
+	if _, err := WorkDirExportExcluded([]string{".gc/**", "a/[bad"}, ".gc/x"); err == nil {
+		t.Fatal("WorkDirExportExcluded hid a malformed pattern behind an earlier match")
+	}
+	for _, rel := range []string{"a", "b", "a/x", "a/x/y"} {
+		if _, err := MatchWorkDirExclude("a/[bad", rel); err == nil {
+			t.Errorf("MatchWorkDirExclude(%q, %q) accepted a malformed segment", "a/[bad", rel)
+		}
+	}
 }
 
-func TestWorkDirExportEntries(t *testing.T) {
-	dir := t.TempDir()
-	for _, rel := range []string{
-		".gc/controller.token",
-		".gc/settings.json",
-		".gc/sessions/s-1/start-stderr.log",
-		".beads/doltlite/hq.db",
-		".beads/metadata.json",
-		"src/main.go",
-	} {
+func writeExportTree(t *testing.T, dir string, rels ...string) {
+	t.Helper()
+	for _, rel := range rels {
 		full := filepath.Join(dir, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)
@@ -482,43 +463,122 @@ func TestWorkDirExportEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(dir, ".gc"), filepath.Join(dir, "gc-link")); err != nil {
-		t.Fatal(err)
-	}
+}
+
+func exportEntries(t *testing.T, dir string) []string {
+	t.Helper()
 	got, err := WorkDirExportEntries(dir)
 	if err != nil {
 		t.Fatalf("WorkDirExportEntries: %v", err)
 	}
-	want := []string{
-		".beads",
-		".beads/metadata.json",
-		".gc",
-		".gc/settings.json",
-		"empty",
-		"gc-link",
-		"src",
-		"src/main.go",
-	}
+	return got
+}
+
+func assertExportEntries(t *testing.T, got []string, want ...string) {
+	t.Helper()
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("WorkDirExportEntries =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
-func TestWorkDirExportEntriesWithoutRuntimeStateListsEverything(t *testing.T) {
+func TestWorkDirExportEntries(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte("x"), 0o600); err != nil {
+	writeExportTree(t, dir,
+		".gc/controller.token",
+		".gc/settings.json",
+		".gc/sessions/s-1/start-stderr.log",
+		".beads/doltlite/hq.db",
+		".beads/metadata.json",
+		"a/b",
+		"a-c",
+		"src/main.go",
+	)
+	if err := os.MkdirAll(filepath.Join(dir, "empty", "nested-empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := WorkDirExportEntries(dir)
-	if err != nil {
-		t.Fatalf("WorkDirExportEntries: %v", err)
+	if err := os.Symlink(filepath.Join(dir, ".gc"), filepath.Join(dir, "gc-link")); err != nil {
+		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != "events.jsonl" {
-		t.Fatalf("WorkDirExportEntries = %v, want [events.jsonl]", got)
+	assertExportEntries(t, exportEntries(t, dir),
+		".beads/metadata.json",
+		".gc/settings.json",
+		"a/b",
+		"a-c",
+		"empty/nested-empty",
+		"gc-link",
+		"src/main.go",
+	)
+}
+
+// TestWorkDirExportEntriesSurviveARecursiveConsumer expands every listed
+// entry the way tar, rsync -r, or cp -r would, and requires the expansion to
+// add nothing excluded.
+func TestWorkDirExportEntriesSurviveARecursiveConsumer(t *testing.T) {
+	dir := t.TempDir()
+	writeExportTree(t, dir,
+		".gc/controller.token",
+		".gc/secrets/s-1.key",
+		".gc/settings.json",
+		".beads/.env",
+		".beads/metadata.json",
+		"rigs/app/.beads/doltlite/app.db",
+		"rigs/app/main.go",
+	)
+	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	for _, entry := range exportEntries(t, dir) {
+		err := filepath.WalkDir(filepath.Join(dir, filepath.FromSlash(entry)), func(p string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(dir, p)
+			if err != nil {
+				return err
+			}
+			if excludedByDefault(t, filepath.ToSlash(rel)) {
+				t.Errorf("recursing into listed entry %q ships excluded %q", entry, rel)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestWorkDirExportEntriesExcludeNestedScopesWithoutTopLevelMarker(t *testing.T) {
+	dir := t.TempDir()
+	writeExportTree(t, dir,
+		"appA/.beads/.env",
+		"appA/.beads/config.yaml",
+		"appA/main.go",
+		"appB/.beads/doltlite/b.db",
+		"appB/.gc/beads.json",
+		"appB/main.go",
+	)
+	assertExportEntries(t, exportEntries(t, dir),
+		"appA/.beads/config.yaml",
+		"appA/main.go",
+		"appB/main.go",
+	)
+}
+
+func TestWorkDirExportEntriesResolveASymlinkedWorkDir(t *testing.T) {
+	parent := t.TempDir()
+	cityDir := filepath.Join(parent, "city")
+	writeExportTree(t, cityDir, ".gc/controller.token", ".gc/settings.json", "src/a")
+	link := filepath.Join(parent, "linkcity")
+	if err := os.Symlink(cityDir, link); err != nil {
+		t.Fatal(err)
+	}
+	assertExportEntries(t, exportEntries(t, link), ".gc/settings.json", "src/a")
+}
+
+func TestWorkDirExportEntriesWithoutRuntimeStateListsEverything(t *testing.T) {
+	dir := t.TempDir()
+	writeExportTree(t, dir, "events.jsonl")
+	assertExportEntries(t, exportEntries(t, dir), "events.jsonl")
 }
 
 func TestWorkDirExportEntriesErrors(t *testing.T) {

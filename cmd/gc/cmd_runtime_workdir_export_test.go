@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -37,7 +39,7 @@ func TestRuntimeWorkdirExportListsSurvivingEntries(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("workdir-export: %v; stderr: %s", err, stderr.String())
 	}
-	want := ".beads\n.beads/metadata.json\n.gc\n.gc/settings.json\nsrc\nsrc/main.go\n"
+	want := ".beads/metadata.json\n.gc/settings.json\nsrc/main.go\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout =\n%s\nwant\n%s", stdout.String(), want)
 	}
@@ -51,7 +53,7 @@ func TestRuntimeWorkdirExportNullSeparated(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("workdir-export --null: %v; stderr: %s", err, stderr.String())
 	}
-	if got, want := stdout.String(), ".gc\x00a\x00"; got != want {
+	if got, want := stdout.String(), "a\x00"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
@@ -68,5 +70,55 @@ func TestRuntimeWorkdirExportMissingDirFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gc runtime workdir-export") {
 		t.Fatalf("stderr = %q, want a gc runtime workdir-export error", stderr.String())
+	}
+}
+
+func runWorkdirExport(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := newRuntimeCmd(&out, &errOut)
+	cmd.SetArgs(append([]string{"workdir-export"}, args...))
+	err = cmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+// TestRuntimeWorkdirExportNewlineModeFailsClosed covers names a line-based
+// consumer would misread: an embedded newline that forges the line
+// ".gc/controller.token", a carriage return, and a leading dash tar's
+// default file-list mode parses as an option.
+func TestRuntimeWorkdirExportNewlineModeFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, rel string
+	}{
+		{"newline", "src\n.gc/controller.token"},
+		{"nested newline", "rigs/app/x\n.gc/controller.token"},
+		{"carriage return", "src\r.gc/controller.token"},
+		{"leading dash", "-Cx/f"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeWorkDirExportFixture(t, ".gc/controller.token", "src/main.go", tc.rel)
+			stdout, stderr, err := runWorkdirExport(t, dir)
+			if err == nil {
+				t.Fatalf("workdir-export listed %q one per line; stdout %q", tc.rel, stdout)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want nothing when newline output would be ambiguous", stdout)
+			}
+			if !strings.Contains(stderr, "--null") {
+				t.Fatalf("stderr = %q, want it to point at --null", stderr)
+			}
+
+			stdout, stderr, err = runWorkdirExport(t, "--null", dir)
+			if err != nil {
+				t.Fatalf("workdir-export --null: %v; stderr: %s", err, stderr)
+			}
+			got := strings.Split(strings.TrimSuffix(stdout, "\x00"), "\x00")
+			sort.Strings(got)
+			want := []string{tc.rel, "src/main.go"}
+			sort.Strings(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("--null entries = %q, want %q", got, want)
+			}
+		})
 	}
 }

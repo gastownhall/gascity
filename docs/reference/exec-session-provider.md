@@ -337,13 +337,12 @@ filesystem, not the orchestrator.
 
 - **`work_dir_exclude`** — array of patterns, relative to `work_dir`,
   naming orchestrator-local state that must not leave the orchestrator
-  host. gc sends it whenever `work_dir` holds a `.gc/` runtime root or a
-  `.beads/` directory: a city-scoped agent with no `dir` or `work_dir`
-  (whose work dir is the city root), a rig root, or a worktree carrying a
-  `.gc/` directory. A script that copies, archives, or syncs `work_dir`
-  into another filesystem (a remote sandbox, a container image) must skip
-  every matching path. A script that runs the agent in place on the
-  orchestrator's filesystem ignores it.
+  host. gc sends it with every start config that has a `work_dir`, whatever
+  the directory holds: a work dir with no top-level `.gc/` or `.beads/` can
+  still hold rig scopes below it. A script that copies, archives, or syncs
+  `work_dir` into another filesystem (a remote sandbox, a container image)
+  must skip every matching path. A script that runs the agent in place on
+  the orchestrator's filesystem ignores it.
 
 The list is a floor, not the complete set. A script must skip every
 matching path and may skip more. A script that carries its own built-in
@@ -351,10 +350,35 @@ denylist applies the union of that list and `work_dir_exclude`; it never
 replaces its list with gc's, so a gap on either side cannot widen what
 leaves the host.
 
-Rather than implement the grammar below, a script can ask the `gc` binary
-for the entries that survive it: `gc runtime workdir-export --null
-"$WORK_DIR"` prints them NUL-terminated, directories included, for a
-non-recursive consumer such as `tar --null --no-recursion -T -`.
+Rather than implement the grammar below, a script can ask gc for the
+entries that survive it:
+
+```sh
+set -o pipefail
+"$GC_BIN" runtime workdir-export --null "$WORK_DIR" |
+  tar -C "$WORK_DIR" --null --no-recursion -T - -czf -
+```
+
+- Call the gc named by the start config's `env.GC_BIN`, the binary that
+  produced the list. An older `gc` on `PATH` may lack the subcommand.
+- Check its exit status (`set -o pipefail` in a pipeline). On failure it
+  prints nothing to stdout, and an unchecked pipeline archives an empty work
+  dir.
+- Use `--null`. The default newline-terminated output is for reading: it
+  refuses, printing nothing, any entry that contains a newline or carriage
+  return or starts with `-`, because a line-based consumer would misread it.
+- The output lists every surviving file and symlink, plus every surviving
+  directory that is empty on disk. A non-empty directory is never listed, so
+  a consumer that recurses into listed entries still copies nothing
+  excluded; a consumer that does not recurse recreates parent directories
+  from the paths below them. A directory whose every entry is excluded is
+  absent.
+- Entries come in depth-first walk order, each directory's entries sorted by
+  name. This is not `sort` order: `a/b` comes before `a-c`.
+
+A script that applies `work_dir_exclude` itself copies symlinks as links and
+never dereferences them: an in-tree link such as `x -> .gc/controller.token`
+would otherwise ship its target.
 
 Pattern grammar:
 
@@ -372,15 +396,17 @@ Pattern grammar:
 
 The list covers secrets and credentials (`.gc/services/**`,
 `.gc/secrets/**`, `.gc/controller.token`, `.gc/credentials.toml`,
-`.gc/mcp-adopted/**`, `.beads/.env`, `.beads/.beads-credential-key`,
+`.gc/credentials.json`, `.gc/mcp-adopted/**`, `.beads/.env`, `.beads/.beads-credential-key`,
 `.beads/proxy.secret`), the event and usage logs, the nudge queue,
 per-session diagnostics under `.gc/sessions/` and ACP transcripts under
 `.gc/transcripts/`, sockets, locks and pid files, relocated class stores,
 every ledger store and copy of one in any scope (`.beads/dolt/`,
 `.beads/doltlite/`, `.beads/embeddeddolt/`, SQLite files, bd backups and
-corrupt-store backups, the file provider's `.gc/beads.json`, the legacy
-JSONL archive), bd server, proxy and sync state, orchestrator runtime
-state, and other sessions' worktrees. Copying any of it gives the session a
+corrupt-store backups, the file provider's `.gc/beads.json` and its
+`.bak`, the legacy JSONL archive), bd server, proxy and sync state, the
+provider-lifecycle journal `.gc/scope-ownership.json`, orchestrator runtime
+state, and other agents' work dirs under `.gc/worktrees/` and
+`.gc/agents/`. Copying any of it gives the session a
 stale, private fork of state the orchestrator owns, or hands it secrets it
 must not hold. Deployment artifacts the session reads at start are never
 listed: `.gc/settings.json`, `.gc/site.toml`, `.gc/cache/` and

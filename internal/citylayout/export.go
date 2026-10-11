@@ -2,7 +2,6 @@ package citylayout
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,9 +17,11 @@ const BeadsRoot = ".beads"
 // .gc/scripts, .gc/tmp snapshots, .beads/metadata.json, .beads/config.yaml,
 // .beads/http_target.json, .beads/redirect) are deliberately absent.
 //
-// Roots this package names are built from its own constants, and
+// Roots this package names are built from its own constants.
 // TestEveryCitylayoutRuntimeRootIsClassified fails when a new .gc/ root here
-// is neither excluded nor deliberately kept.
+// is neither excluded nor deliberately kept, and
+// TestEveryRepoRuntimeEntryIsClassified does the same for every top-level
+// .gc/ entry the module's Go source names.
 var defaultWorkDirExportExcludes = []string{
 	// Orchestrator runtime roots named by this package.
 	RuntimeDataRoot + "/**",
@@ -34,6 +35,7 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/secrets/**",
 	".gc/controller.token",
 	".gc/credentials.toml",
+	".gc/credentials.json",
 	".gc/mcp-adopted/**",
 
 	// Sockets, pid files, and locks.
@@ -52,13 +54,18 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/session-mcp/**",
 	".gc/supervisor/**",
 	".gc/worktrees/**",
+	".gc/agents/**",
 	".gc/emergency/**",
 	".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json",
+	".gc/scope-ownership.json",
+	".gc/mcp-locks/**",
+	".gc/dispatch-wake",
 
 	// Ledger copies: the file provider's store in every scope and the
 	// legacy JSONL archive.
 	"**/.gc/beads.json",
+	"**/.gc/beads.json.bak",
 	".gc/jsonl-archive/**",
 	".gc/jsonl-export-state.json",
 
@@ -96,22 +103,50 @@ var defaultWorkDirExportExcludes = []string{
 	"**/.beads/dolt-handoff-*",
 }
 
-// WorkDirExportExcludes returns the paths, relative to workDir, that a
-// runtime which copies the work dir somewhere else (a remote sandbox, a
-// container image) must leave behind. It returns nil unless workDir holds a
-// .gc/ runtime root or a .beads/ directory, so an ordinary checkout gets no
-// list.
+// WorkDirExportExcludes returns the paths, relative to a session's work dir,
+// that a runtime which copies the work dir somewhere else (a remote sandbox, a
+// container image) must leave behind. The list does not depend on the work
+// dir: patterns that match nothing cost nothing, and patterns starting with
+// "**/" reach nested rig scopes under any work dir.
 //
 // The list is a floor, not the complete set: a consumer must skip every
 // matching path and may skip more. [MatchWorkDirExclude] documents the
 // pattern grammar.
 //
 // The returned slice is a fresh copy the caller may modify.
-func WorkDirExportExcludes(workDir string) []string {
-	if !HasRuntimeRoot(workDir) && !hasDir(workDir, BeadsRoot) {
-		return nil
-	}
+func WorkDirExportExcludes() []string {
 	return append([]string(nil), defaultWorkDirExportExcludes...)
+}
+
+// excludePattern is a work-dir exclude pattern split into its segments, each
+// validated once at compile time.
+type excludePattern struct {
+	raw  string
+	segs []string
+}
+
+func compileWorkDirExcludes(patterns []string) ([]excludePattern, error) {
+	compiled := make([]excludePattern, 0, len(patterns))
+	for _, p := range patterns {
+		segs := strings.Split(p, "/")
+		for _, seg := range segs {
+			if _, err := path.Match(seg, ""); err != nil {
+				return nil, fmt.Errorf("work-dir exclude pattern %q: %w", p, err)
+			}
+		}
+		compiled = append(compiled, excludePattern{raw: p, segs: segs})
+	}
+	return compiled, nil
+}
+
+// matchesExactly reports whether the pattern matches the path segments
+// themselves, ignoring the directories above them.
+func (p excludePattern) matchesExactly(segs []string) (bool, error) {
+	ok, err := matchExcludeSegments(p.segs, segs)
+	if err != nil {
+		return false, fmt.Errorf("work-dir exclude pattern %q: %w", p.raw, err)
+	}
+	return ok, nil
 }
 
 // MatchWorkDirExclude reports whether the work-dir-relative path rel is
@@ -125,17 +160,34 @@ func WorkDirExportExcludes(workDir string) []string {
 // spells out that a whole subtree stays behind. This is not gitignore, rsync,
 // or tar syntax: a pattern with no "/" matches only at the work-dir root.
 //
-// It returns an error for a malformed pattern segment.
+// It returns an error for a malformed pattern segment, whatever rel is.
 func MatchWorkDirExclude(pattern, rel string) (bool, error) {
-	pat := strings.Split(pattern, "/")
+	return WorkDirExportExcluded([]string{pattern}, rel)
+}
+
+// WorkDirExportExcluded reports whether rel, or any directory above it, is
+// excluded by any of patterns. It returns an error when any pattern is
+// malformed, whatever rel is.
+func WorkDirExportExcluded(patterns []string, rel string) (bool, error) {
+	compiled, err := compileWorkDirExcludes(patterns)
+	if err != nil {
+		return false, err
+	}
 	segs := strings.Split(rel, "/")
 	for n := 1; n <= len(segs); n++ {
-		ok, err := matchExcludeSegments(pat, segs[:n])
-		if err != nil {
-			return false, fmt.Errorf("work-dir exclude pattern %q: %w", pattern, err)
+		excluded, err := matchesAny(compiled, segs[:n])
+		if err != nil || excluded {
+			return excluded, err
 		}
-		if ok {
-			return true, nil
+	}
+	return false, nil
+}
+
+func matchesAny(compiled []excludePattern, segs []string) (bool, error) {
+	for _, p := range compiled {
+		ok, err := p.matchesExactly(segs)
+		if err != nil || ok {
+			return ok, err
 		}
 	}
 	return false, nil
@@ -155,13 +207,6 @@ func matchExcludeSegments(pat, segs []string) (bool, error) {
 		return false, nil
 	}
 	if len(segs) == 0 {
-		// Still validate the remaining segments so a malformed pattern is
-		// reported regardless of which path it is first tried against.
-		for _, p := range pat {
-			if _, err := path.Match(p, ""); err != nil {
-				return false, err
-			}
-		}
 		return false, nil
 	}
 	ok, err := path.Match(pat[0], segs[0])
@@ -171,73 +216,82 @@ func matchExcludeSegments(pat, segs []string) (bool, error) {
 	return matchExcludeSegments(pat[1:], segs[1:])
 }
 
-// WorkDirExportExcluded reports whether rel is excluded by any of patterns.
-func WorkDirExportExcluded(patterns []string, rel string) (bool, error) {
-	for _, p := range patterns {
-		ok, err := MatchWorkDirExclude(p, rel)
-		if err != nil || ok {
-			return ok, err
-		}
-	}
-	return false, nil
-}
-
-// WorkDirExportEntries walks workDir and returns, in lexical order, the
-// slash-separated work-dir-relative path of every file, directory, and
-// symlink that survives [WorkDirExportExcludes]. An excluded directory is
-// pruned with everything below it. Symlinks are listed, never followed.
+// WorkDirExportEntries walks workDir and returns the slash-separated
+// work-dir-relative paths a runtime may copy elsewhere: every file, symlink,
+// and other non-directory that survives [WorkDirExportExcludes], plus every
+// surviving directory that is empty on disk. An excluded directory is pruned
+// with everything below it. Symlinks are listed, never followed; a workDir
+// that is itself a symlink is resolved first.
 //
-// Directories are listed as well as their contents so empty directories
-// survive; a consumer must therefore not recurse into listed directories
-// (tar --no-recursion, or rsync --files-from without -r).
+// A non-empty directory is never listed, so a consumer that recurses into
+// listed directories still adds nothing excluded; one that does not recurse
+// recreates parents from the paths below them. A directory whose every entry
+// is excluded is therefore absent from the list.
+//
+// Entries come in depth-first walk order, the entries of each directory
+// sorted by name.
 func WorkDirExportEntries(workDir string) ([]string, error) {
 	if workDir == "" {
 		return nil, fmt.Errorf("work-dir export: empty work dir")
 	}
-	fi, err := os.Stat(workDir)
+	root, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("work-dir export: %w", err)
+	}
+	fi, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("work-dir export: %w", err)
 	}
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("work-dir export: %s is not a directory", workDir)
 	}
-	excludes := WorkDirExportExcludes(workDir)
-	var entries []string
-	err = filepath.WalkDir(workDir, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if p == workDir {
-			return nil
-		}
-		rel, err := filepath.Rel(workDir, p)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		excluded, err := WorkDirExportExcluded(excludes, rel)
+	excludes, err := compileWorkDirExcludes(defaultWorkDirExportExcludes)
+	if err != nil {
+		return nil, err
+	}
+	w := exportWalker{excludes: excludes}
+	if err := w.walk(root, nil); err != nil {
+		return nil, fmt.Errorf("work-dir export %s: %w", workDir, err)
+	}
+	return w.entries, nil
+}
+
+type exportWalker struct {
+	excludes []excludePattern
+	entries  []string
+}
+
+// walk lists the surviving entries below the directory abs, whose
+// work-dir-relative segments are segs. Its caller has already checked abs
+// and every directory above it, so each entry is matched by its own path
+// only.
+func (w *exportWalker) walk(abs string, segs []string) error {
+	children, err := os.ReadDir(abs)
+	if err != nil {
+		return err
+	}
+	if len(children) == 0 && len(segs) > 0 {
+		w.entries = append(w.entries, strings.Join(segs, "/"))
+		return nil
+	}
+	for _, child := range children {
+		childSegs := make([]string, len(segs)+1)
+		copy(childSegs, segs)
+		childSegs[len(segs)] = child.Name()
+		excluded, err := matchesAny(w.excludes, childSegs)
 		if err != nil {
 			return err
 		}
 		if excluded {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+			continue
 		}
-		entries = append(entries, rel)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("work-dir export %s: %w", workDir, err)
+		if child.IsDir() {
+			if err := w.walk(filepath.Join(abs, child.Name()), childSegs); err != nil {
+				return err
+			}
+			continue
+		}
+		w.entries = append(w.entries, strings.Join(childSegs, "/"))
 	}
-	return entries, nil
-}
-
-func hasDir(dir, name string) bool {
-	if dir == "" {
-		return false
-	}
-	fi, err := os.Stat(filepath.Join(dir, name))
-	return err == nil && fi.IsDir()
+	return nil
 }
