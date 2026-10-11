@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 const (
@@ -89,7 +90,7 @@ func TestSessionHandleStateBusyFromACPCapture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	path, err := citylayout.ACPTranscriptPath(city, handle.sessionID, "1")
@@ -151,7 +152,7 @@ func newACPTestHandle(t *testing.T, sessionKey string) (*SessionHandle, string) 
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
+	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if sessionKey != "" {
