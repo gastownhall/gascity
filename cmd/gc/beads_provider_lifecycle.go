@@ -1227,11 +1227,12 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 // any wait for it and before the provider script runs. A non-nil error from it
 // is returned as-is and nothing is run.
 //
-// It exists for a verb aimed at a particular state that another holder of the
-// slot may change while this one queues: the proxied admission recover, whose
-// target generation the health loop's own recover of the same zombie may have
-// replaced with a healthy proxy by the time the slot is granted (round4
-// review F3).
+// It exists for a verb aimed at a particular state that may change while this
+// one queues: the proxied admission recover, whose target generation the
+// health loop's own recover of the same zombie may have replaced with a
+// healthy proxy by the time the slot is granted (round4 review F3), and the
+// controller's stop of a suspended scope, which a resume may have reached by
+// then (stopStillSuspendedScope).
 func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, scopeRoot, op string, precondition func() error) error {
 	provider := beadsProvider(cityPath)
 	if !strings.HasPrefix(provider, "exec:") {

@@ -75,8 +75,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPatch(sm, "/agent/{base}", (*Server).humaHandleAgentUpdate, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 	cityDelete(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentDeleteQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 	cityDelete(sm, "/agent/{base}", (*Server).humaHandleAgentDelete, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
-	cityPost(sm, "/agent/{dir}/{base}/{action}", (*Server).humaHandleAgentActionQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
-	cityPost(sm, "/agent/{base}/{action}", (*Server).humaHandleAgentAction, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusNotImplemented))
+	cityPost(sm, "/agent/{dir}/{base}/{action}", (*Server).humaHandleAgentActionQualified, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
+	cityPost(sm, "/agent/{base}/{action}", (*Server).humaHandleAgentAction, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented))
 
 	// Agent output SSE streams.
 	agentOutputEventMap := map[string]any{

@@ -142,6 +142,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// the seam reads it only through trackCloseTransitionLocked's queueing
 		// (excluded above with the queue it feeds).
 		"closeIntents": true,
+		// ownEmits records what onChange emitted, to recognize its echoes in
+		// applyEvent; the merge neither reads nor writes it.
+		"ownEmitMu": true, "ownEmits": true, "ownEmitsSweptAt": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 

@@ -120,8 +120,9 @@ The controller already has optional runtime extension points:
 
 These signals are uneven across providers. The design must tolerate:
 
-- full support (`tmux`)
-- activity-only support (`k8s`, some `exec`)
+- full support (`tmux`, `exec` packs that declare `report-activity`,
+  `report-attachment` and `proc.exec`)
+- activity-only support (`k8s`, other `exec` packs)
 - no meaningful idle-boundary support (`subprocess`)
 - routed mixed capability (`auto`, `hybrid`)
 
@@ -502,12 +503,21 @@ probe, abort the idle-sleep attempt for that tick.
 
 `WaitForIdle` probes must never stall the patrol loop unboundedly:
 
-- each probe has a hard per-session timeout of `1s`
-- probes run synchronously inside the single-threaded reconciler
-- at most `3` new probes may run in one patrol tick
-- the reconciler reserves `2s` of the `5s` `defaultTickBudget` for
-  non-probe work, so no new idle probe is started once that reserve
-  would be consumed
+- each probe has a hard per-session timeout of `1s`, unless the routed
+  leaf implements `runtime.IdleProbeBudgetProvider`: then the timeout is
+  its budget clamped to [`1s`, `fenceProbeTimeout` (`5s`)]
+  (`idleSleepProbeTimeoutFor`). Remote tmux-in-box `exec` packs report
+  `5s`, because each pane capture is a full round trip to the box and two
+  of them cannot reliably fit in `1s`; a timed-out probe fails closed on
+  every tick. The v2 effect pass's `provedIdle` uses the same timeout.
+  The cap means no single idle wait exceeds the bound every other
+  effect-fence probe already has; it is not a per-pass bound, because
+  `provedIdle` runs after the other fence legs, one after another.
+- the reconciler's idle probes (`launchIdleProbes`) run asynchronously,
+  one goroutine per probe, so a probe never blocks the patrol tick; only
+  the v2 effect pass's `provedIdle` waits synchronously
+- at most `maxIdleSleepProbesPerTick` (`3`) probes are in flight at once;
+  a tick starts only as many new probes as that leaves room for
 - remaining candidates are skipped until the next tick
 - `advanceSessionDrainsWithSessionsTraced` always runs even when the tick
   admits zero new probes
@@ -523,8 +533,9 @@ Interactive safety is stricter than worker safety:
   signal or structured pending detection
 - if those conditions are not met, effective policy becomes `"off"` for
   that session, even when an agent-level override asked for sleep
-- interactive auto-sleep therefore fails closed on k8s/exec/ACP-style
-  backends today
+- interactive auto-sleep therefore fails closed on k8s/ACP-style
+  backends today, and on `exec` packs unless they declare
+  `report-activity`, `report-attachment` and `proc.exec`
 
 For tmux-like providers, `WaitForIdle` must treat a foreground process
 blocked on stdin or a visible approval prompt as not idle. A provider
@@ -603,7 +614,7 @@ Provider classes in current code:
 |---|---|---|---|---|
 | `tmux` | yes | no structured pending today | yes | strongest support |
 | `k8s` | yes | no | no | timed-only sleep |
-| `exec` | script-dependent | no | no | timed-only when activity exists, otherwise disabled |
+| `exec` | script-dependent | no | pane scan over `exec` when declared | `full` with report-activity + report-attachment + proc.exec (5s idle-proof budget), otherwise `timed_only` |
 | `subprocess` | no useful activity | no | no | disabled |
 | `acp` | yes (`session/update`, durably stamped) | currently unsupported | no | timed-only sleep |
 | `auto` / `hybrid` | routed | routed | routed | decide per session, not globally |

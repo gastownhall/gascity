@@ -23,7 +23,7 @@ import (
 // orphan or lose its lease. It is not and does not: the two APIs write to
 // disjoint storage, so the collision is a no-op for production behavior.
 func TestReconcileSessionBeads_SetLocalStringDoesNotAffectPendingCreateLease(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	session := env.createSessionBead("s-gc-local", "worker")
 	env.setSessionMetadata(&session, map[string]string{
@@ -76,7 +76,7 @@ func TestReconcileSessionBeads_SetLocalStringDoesNotAffectPendingCreateLease(t *
 // write surfaces through Get/Bead.Metadata, the local write does not, and is only
 // visible through GetLocalString.
 func TestReconcileSessionBeads_SetMarkerAndSetLocalStringCoexistOnSameSessionBead(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	session := env.createSessionBead("s-gc-coexist", "worker")
 
 	infoStore := sessionpkg.NewStore(beads.SessionStore{Store: env.store})

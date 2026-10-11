@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -91,7 +92,7 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := handle.Kill(r.Context()); err != nil {
+	if err := handle.Kill(r.Context(), s.actor(session.ActorOperator)); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
