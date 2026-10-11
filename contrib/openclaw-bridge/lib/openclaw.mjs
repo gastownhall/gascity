@@ -1,30 +1,38 @@
-// Loader for the openclaw iMessage connector from the published `openclaw`
-// npm package (dist/extensions/imessage + dist chunks). No build step: the
-// tarball ships compiled ESM.
+// Loader for the openclaw channel connectors from their published npm
+// packages. No build step: the tarballs ship compiled ESM.
 //
-// Most of what the bridge needs is on the extension's public entry modules
-// (runtime-api.js, api.js). One seam — the persistent JSON-RPC client used
-// for watch-mode inbound — is NOT re-exported there, only bundled into a
-// hash-named chunk with mangled export aliases. resolveChunkExport() finds
-// it by scanning dist export statements at startup, so this keeps working
-// across openclaw releases as long as the symbol itself survives.
-// (Upstream ask: export createIMessageRpcClient from the extension API.)
+// iMessage ships as its own package, `@openclaw/imessage` (split out of
+// `openclaw` in 2026.8.x); Telegram is still bundled in `openclaw`
+// (dist/extensions/telegram). @openclaw/imessage imports `openclaw/plugin-sdk/*`
+// at runtime, so both packages are direct dependencies pinned to the same
+// release.
+//
+// Most of what the bridge needs is on the iMessage plugin's public entry
+// modules (runtime-api.js, api.js). One seam — the persistent JSON-RPC client
+// used for watch-mode inbound — is NOT re-exported there, only bundled into a
+// hash-named chunk under dist/.setup with mangled export aliases.
+// resolveChunkExport() finds it by scanning chunk export statements at
+// startup, so this keeps working across openclaw releases as long as the
+// symbol itself survives.
+// (Upstream ask: export createIMessageRpcClient from the plugin API.)
 
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const distRoot = path.join(here, '..', 'node_modules', 'openclaw', 'dist')
+const nodeModules = path.join(here, '..', 'node_modules')
+const openclawDist = path.join(nodeModules, 'openclaw', 'dist')
+const imessageDist = path.join(nodeModules, '@openclaw', 'imessage', 'dist')
 
 // Loads the connector surface the bridge uses. Everything returned here is
 // openclaw's shipped code, imported as-is.
 export async function loadIMessageConnector() {
-  const extUrl = (f) => pathToFileURL(path.join(distRoot, 'extensions', 'imessage', f)).href
+  const entryUrl = (f) => pathToFileURL(path.join(imessageDist, f)).href
   const [runtimeApi, api, createIMessageRpcClient] = await Promise.all([
-    import(extUrl('runtime-api.js')),
-    import(extUrl('api.js')),
-    resolveChunkExport(distRoot, 'createIMessageRpcClient', 'client-'),
+    import(entryUrl('runtime-api.js')),
+    import(entryUrl('api.js')),
+    resolveChunkExport(path.join(imessageDist, '.setup'), 'createIMessageRpcClient', 'client-'),
   ])
   return {
     // outbound pipeline: target parsing, markdown handling, chunking, receipts
@@ -47,7 +55,7 @@ export async function loadIMessageConnector() {
 // host. The bridge drives Telegram's getUpdates long-poll itself.)
 export async function loadTelegramConnector() {
   const runtimeApi = await import(
-    pathToFileURL(path.join(distRoot, 'extensions', 'telegram', 'runtime-api.js')).href
+    pathToFileURL(path.join(openclawDist, 'extensions', 'telegram', 'runtime-api.js')).href
   )
   return {
     // outbound pipeline: markdown -> Telegram HTML, chunking, retries, receipts

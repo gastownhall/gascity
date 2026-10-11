@@ -11,16 +11,27 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { loadIMessageConnector, loadTelegramConnector, resolveChunkExport } from '../lib/openclaw.mjs'
+
+const root = fileURLToPath(new URL('..', import.meta.url))
 
 const assertFns = (surface, names) => {
   for (const name of names) {
     assert.equal(typeof surface[name], 'function', `expected openclaw connector to export ${name}() as a function`)
   }
 }
+
+test('@openclaw/imessage is pinned to the same release as openclaw', async () => {
+  // @openclaw/imessage peers on openclaw >= its own version and imports
+  // openclaw/plugin-sdk/* at runtime, so the two must move together.
+  const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
+  assert.ok(pkg.dependencies?.openclaw, 'openclaw must be a direct dependency')
+  assert.equal(pkg.dependencies['@openclaw/imessage'], pkg.dependencies.openclaw)
+})
 
 test('resolveChunkExport finds a mangled-alias export in an .mjs chunk', async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'openclaw-chunks-'))

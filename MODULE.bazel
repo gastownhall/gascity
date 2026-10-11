@@ -481,7 +481,7 @@ openapi_base_spec(
 # lockfiles fetched here.
 #
 # Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
-# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.19.0).
+# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.22.3).
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "22.23.2")
 
