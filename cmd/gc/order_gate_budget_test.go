@@ -263,7 +263,7 @@ func TestConditionChecksRunConcurrentlyWithinTheirCap(t *testing.T) {
 			// the first-to-notice check's own cleanup.
 			check := fmt.Sprintf(
 				`mkdir -p %[1]s; echo . >> %[3]s; f=$(mktemp %[1]s/w.XXXXXX); ok=0; trap '[ "$ok" = 1 ] || rm -f "$f"' EXIT; `+
-					`i=0; while [ $i -lt 50 ]; do if [ "$(ls %[1]s | wc -l)" -ge %[2]d ]; then ok=1; exit 0; fi; sleep 0.02; i=$((i+1)); done; exit 1`,
+					`i=0; while [ $i -lt 15 ]; do if [ "$(ls %[1]s | wc -l)" -ge %[2]d ]; then ok=1; exit 0; fi; sleep 0.01; i=$((i+1)); done; exit 1`,
 				liveDir, wave, ranMarker)
 
 			aa := make([]orders.Order, 0, wave)
