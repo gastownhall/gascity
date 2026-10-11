@@ -33,6 +33,7 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
 	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseNotificationTests(t, func(t *testing.T) beads.Store { return newSQLiteForConformance(t) })
 	beadstest.RunCloseReasonAfterReopenTests(t, factory)
 }
 

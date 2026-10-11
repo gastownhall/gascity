@@ -157,6 +157,7 @@ func TestTopoOrderRowsMatchesTopoOrder(t *testing.T) {
 // reads session_name off Info.SessionNameMetadata. The full kill path is
 // exercised end-to-end by TestRetireDuplicateRowsMatchesBeads.
 func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
+	testCity := t.TempDir()
 	sp := runtime.NewFake()
 	cases := []struct {
 		name string
@@ -171,8 +172,8 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := wtickSessionBead("s-stop", tc.meta)
 			var rawErr, infoErr bytes.Buffer
-			raw := stopRuntimeBeforeSessionBeadMutation("", nil, tc.sp, nil, b, "duplicate", &rawErr)
-			info := stopRuntimeBeforeSessionBeadMutationInfo("", nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
+			raw := stopRuntimeBeforeSessionBeadMutation(testCity, nil, tc.sp, nil, b, "duplicate", &rawErr)
+			info := stopRuntimeBeforeSessionBeadMutationInfo(testCity, nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
 			if raw != info {
 				t.Fatalf("stop-runtime diverged: raw=%v info=%v", raw, info)
 			}
@@ -189,6 +190,7 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 // bead metadata + work assignee across the two stores. It fails loudly if the row
 // form skips the runtime stop, the front-door retire, or the work reassignment.
 func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
+	city := t.TempDir()
 	cfg := &config.City{
 		Agents:        []config.Agent{{Name: "mayor"}},
 		NamedSessions: []config.NamedSession{{Template: "mayor"}},
@@ -279,7 +281,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 				indexBySessionName[sn] = i
 			}
 		}
-		retireDuplicateConfiguredNamedSessionBeads("", store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
+		retireDuplicateConfiguredNamedSessionBeads(city, store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
 	}
 	runRows := func(store beads.Store, sp *runtime.Fake) {
 		rowBeads := loadOpen(t, store)
@@ -287,7 +289,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		for i, b := range rowBeads {
 			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
-		retireDuplicateConfiguredNamedSessionRows("", store, nil, sp, cfg, cityName, rows, now, nil)
+		retireDuplicateConfiguredNamedSessionRows(city, store, nil, sp, cfg, cityName, rows, now, nil)
 	}
 
 	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {

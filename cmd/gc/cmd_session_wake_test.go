@@ -587,8 +587,8 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				cityPath = t.TempDir()
 				st := suspensionstate.State{}
 				suspensionstate.SetRig(&st, "frontend", tt.runtimeOverride)
-				if err := saveSuspensionState(fsys.OSFS{}, cityPath, st); err != nil {
-					t.Fatalf("saveSuspensionState: %v", err)
+				if err := suspensionstate.Save(fsys.OSFS{}, cityPath, st); err != nil {
+					t.Fatalf("suspensionstate.Save: %v", err)
 				}
 			}
 			deps := sessionWakeDeps{

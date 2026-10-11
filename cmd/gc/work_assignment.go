@@ -121,26 +121,6 @@ func (w workAssignment) HasNonSessionWork(items []beads.Bead) bool {
 	return false
 }
 
-// OpenAssignedToBasic returns the WORK beads assigned to the given identity with
-// the given status, using the no-flags List{Assignee,Status} query (no Live, no
-// TierMode). It is the typed form of the raw probe in
-// releaseWorkFromClosedSessionBead, kept distinct from OpenAssignedTo because the
-// close-release path deliberately runs the unflagged query — making it byte-
-// identical to OpenAssignedTo's flagged query would change the emitted bead op.
-// Like OpenAssignedTo, mail message beads are excluded (ra-59207): they are not
-// WORK and have no claim/routing semantics for the release path to act on.
-func (w workAssignment) OpenAssignedToBasic(assignee, status string) ([]beads.Bead, error) {
-	store := w.unwrapped()
-	if store == nil {
-		return nil, nil
-	}
-	items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status})
-	if err != nil {
-		return nil, err
-	}
-	return excludeMailMessageBeads(items), nil
-}
-
 // excludeMailMessageBeads filters mail message beads (beadmail.IsMessageBead)
 // out of a WORK query result. A mail wisp is a delivery route, not a claimable
 // unit of work — it can be neither released nor reassigned — so every WORK

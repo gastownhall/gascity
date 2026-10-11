@@ -93,7 +93,7 @@ if [ -e "$DEMO" ] && [ ! -e "$DEMO/.gc-openclaw-telegram-demo" ]; then
 fi
 if [ ! -d "$ROOT/node_modules/openclaw/dist" ]; then
   bold "installing openclaw from npm (pinned via package-lock.json)..."
-  (cd "$ROOT" && npm install --no-audit --no-fund)
+  (cd "$ROOT" && npm ci --no-audit --no-fund)
 fi
 GC="${GC_BIN:-$ROOT/.cache/gc}"
 if [ ! -x "$GC" ]; then

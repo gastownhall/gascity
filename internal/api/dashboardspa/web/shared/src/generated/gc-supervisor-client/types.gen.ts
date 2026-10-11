@@ -63,11 +63,11 @@ export type AgentPatch = {
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     AutoReclaimStaleClaims: boolean | null;
-    ContextAdvisory: ContextAdvisory;
+    ContextAdvisory?: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -88,11 +88,11 @@ export type AgentPatch = {
     MouseMode: string | null;
     Name: string;
     Nudge: string | null;
-    OptionDefaults: {
+    OptionDefaults?: {
         [key: string]: string;
     };
     OverlayDir: string | null;
-    Pool: PoolOverride;
+    Pool?: PoolOverride;
     PreStart: Array<string> | null;
     PreStartAppend: Array<string> | null;
     PromptTemplate: string | null;
@@ -757,7 +757,7 @@ export type ConversationTranscriptRecord = {
     ExplicitTarget: string;
     ID: string;
     Kind: TranscriptMessageKind;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     Provenance: TranscriptProvenance;
@@ -854,7 +854,7 @@ export type DeliveryContextRecord = {
     ID: string;
     LastMessageID: string;
     LastPublishedAt: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     SchemaVersion: number;
@@ -1481,12 +1481,12 @@ export type InboundEventPayload = {
 };
 
 export type InboundResult = {
-    Binding: SessionBindingRecord;
-    GroupRoute: GroupRouteDecision;
+    Binding?: SessionBindingRecord;
+    GroupRoute?: GroupRouteDecision;
     Message: ExternalInboundMessage;
     TargetAgentName: string;
     TargetSessionID: string;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type ListBodyAgentPatch = {
@@ -2232,9 +2232,9 @@ export type OutboundEventPayload = {
 };
 
 export type OutboundResult = {
-    DeliveryContext: DeliveryContextRecord;
+    DeliveryContext?: DeliveryContextRecord;
     Receipt: PublishReceipt;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type OutputTurn = {
@@ -2472,7 +2472,7 @@ export type ProviderPatch = {
     ArgsAppend: Array<string> | null;
     Base: string | null;
     Command: string | null;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -2678,7 +2678,7 @@ export type PublishReceipt = {
     Delivered: boolean;
     FailureKind: string;
     MessageID: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     RetryAfter: number;
@@ -2832,7 +2832,7 @@ export type RigPatch = {
     BeadsProxiedIdleTimeout: string | null;
     DefaultBranch: string | null;
     DefaultMergeStrategy: string | null;
-    FormulaVars: {
+    FormulaVars?: {
         [key: string]: string;
     };
     Name: string;
@@ -4767,6 +4767,56 @@ export type SlingBatchSummary = {
     total: number;
 };
 
+export type SlingChildConflict = {
+    /**
+     * Live workflow roots that refused the launch.
+     */
+    blocking_workflow_ids: Array<string> | null;
+    /**
+     * Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+     */
+    hint: string;
+    /**
+     * Source bead whose live workflow refused the launch.
+     */
+    source_bead_id: string;
+};
+
+export type SlingChildOutcome = {
+    /**
+     * Child bead ID.
+     */
+    bead_id: string;
+    /**
+     * Set when the child failed because its source bead already has a live workflow.
+     */
+    conflict?: SlingChildConflict;
+    /**
+     * Formula attached to the child, when one was.
+     */
+    formula?: string;
+    /**
+     * Root of the formula wisp attached to the child, when a non-graph formula was attached.
+     */
+    molecule_id?: string;
+    /**
+     * routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+     */
+    outcome: 'routed' | 'failed' | 'skipped';
+    /**
+     * Why routing the child failed. Present only for outcome failed.
+     */
+    reason?: string;
+    /**
+     * The child's bead status when it was skipped because it was not open.
+     */
+    status?: string;
+    /**
+     * Graph workflow launched for the child, when one was.
+     */
+    workflow_id?: string;
+};
+
 export type SlingInputBody = {
     /**
      * Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -4840,6 +4890,10 @@ export type SlingResponse = {
     batch?: SlingBatchSummary;
     bead?: string;
     /**
+     * One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+     */
+    children?: Array<SlingChildOutcome> | null;
+    /**
      * Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
      */
     convoy_id?: string;
@@ -4858,7 +4912,10 @@ export type SlingResponse = {
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
      */
     run?: RunRef;
-    status: string;
+    /**
+     * slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+     */
+    status: 'slung' | 'partial';
     target: string;
     warnings?: Array<string> | null;
     workflow_id?: string;
@@ -10799,6 +10856,10 @@ export type PostV0CityByCityNameAgentByBaseByActionErrors = {
      */
     404: ErrorModel;
     /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
      * Unprocessable Entity
      */
     422: ErrorModel;
@@ -11183,6 +11244,10 @@ export type PostV0CityByCityNameAgentByDirByBaseByActionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */

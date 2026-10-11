@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"time"
+
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -127,15 +130,12 @@ func (t *reconcileTick) applyStore(id string, front *sessionpkg.Store, patch ses
 // user-hold intent. The fold follows the fresh intent; a failed write still
 // folds the clear (origin/main parity: the clear's fold survives it).
 func (t *reconcileTick) clearIdleStopPending(id string, front *sessionpkg.Store) {
-	intent := ""
-	_, err := front.UpdateMetadataFenced(id, 3, func(info sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
-		if intent = info.SleepIntent; intent != "idle-stop-pending" {
-			return nil
-		}
-		intent = ""
-		return sessionpkg.MetadataPatch{"sleep_intent": ""}
-	})
-	if err != nil {
+	// The disposition's IdleStopEnd cell: refused over an operator's hold,
+	// whose intent the fold then follows.
+	w, err := front.ApplyDispositionFresh(id, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopEnd}, nil, time.Time{})
+	var refused *sessionpkg.ErrDispositionRefused
+	intent := w.To.Encode()["sleep_intent"]
+	if err != nil && !errors.As(err, &refused) {
 		intent = ""
 	}
 	t.infoByID[id] = t.infoByID[id].ApplyPatch(sessionpkg.MetadataPatch{"sleep_intent": intent})
@@ -146,10 +146,10 @@ func (t *reconcileTick) clearIdleStopPending(id string, front *sessionpkg.Store)
 // record the sleep even if its persistence failed, or the killed session would
 // look awake to the same-tick awake scan and be respawned in the same tick.
 // The write keeps an operator's user hold that a fresh read shows
-// (ApplyKeepingUserHold), and the fold follows what was written, or patch
-// when the write failed.
+// (ApplySleep: the disposition's Sleep cell), and the fold follows what was
+// written, or patch when the write failed.
 func (t *reconcileTick) applySleepOptimistic(id string, front *sessionpkg.Store, patch sessionpkg.MetadataPatch) {
-	if written, err := front.ApplyKeepingUserHold(id, patch); err == nil && written != nil {
+	if written, err := front.ApplySleep(id, patch); err == nil && written != nil {
 		patch = written
 	}
 	t.infoByID[id] = t.infoByID[id].ApplyPatch(patch)

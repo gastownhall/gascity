@@ -537,7 +537,13 @@ func drainAckStopPendingMetadata(meta map[string]string) bool {
 	return State(strings.TrimSpace(meta["state"])) == StateDraining && strings.TrimSpace(meta["state_reason"]) == DrainAckStopPendingReason
 }
 
-func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
+// ensureRunning starts or resumes session id's runtime for by, as by.Kind may
+// (queueFor). replacing is an interrupt's restart of the runtime it just
+// stopped: the hold was decided before that stop, so it is not re-read.
+func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+	if err := by.CheckStarts(); err != nil {
+		return err
+	}
 	// A kill-fenced row reads asleep while its runtime is still being torn
 	// down. Treating that runtime as live would flip the row back to active
 	// (confirmLiveSessionState) and erase the fence, so once the Stop landed the
@@ -548,13 +554,13 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	// Likewise a row whose drain-ack stop is pending: the controller's stop
 	// owns its runtime, and a resume that flipped it back to active would
-	// race that stop (CONTRACT v5.9a, as the kill fence). Every policy.
+	// race that stop (CONTRACT v5.9a, as the kill fence). Every actor.
 	if drainAckStopPendingMetadata(b.Metadata) {
 		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
 	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
-	if m.queueByPolicy(b.Metadata, sessName, policy) {
+	if !replacing && m.queueFor(b.Metadata, sessName, by) {
 		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
@@ -567,13 +573,13 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		// whose drain has not stopped it yet) consumes the hold too, under the
 		// runtime lease (tried, not waited for: a busy lease is the
 		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
-		if premise := liveUserHoldPremise(b.Metadata, policy, m.now()); premise != nil {
-			_, release, err := m.leaseRuntime(ctx, id, sessName, 0)
+		if consume, ok := liveUserHoldDecision(b, by); ok {
+			_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
 			if err != nil {
 				return err
 			}
 			defer release()
-			return m.consumeUserHold(id, premise, m.now())
+			return m.consumeUserHold(consume, m.now())
 		}
 		if err := m.confirmLiveSessionState(id, &b); err != nil {
 			return err
@@ -586,7 +592,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// The start runs under the runtime lease, taken before its first write
 	// (withSessionStartLock reruns this on busy), or under its caller's, and
 	// its calls stop once the lease lapses or moves.
-	lease, release, err := m.leaseRuntime(ctx, id, sessName, 0)
+	lease, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
 	if err != nil {
 		if unroute != nil {
 			unroute()
@@ -640,9 +646,10 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	started := false
 	// An operator's resume of a row the operator holds consumes the hold, but
 	// only once the runtime is up (resume_user_hold.go).
-	var holdPremise map[string]string
-	if policy == ResumeOperator {
-		holdPremise = userHoldPremise(b.Metadata, m.now())
+	var consume Decided
+	consumes := false
+	if by.consumesHold() {
+		consume, consumes = userHoldDecision(b)
 	}
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
@@ -718,8 +725,8 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
-	if holdPremise != nil {
-		return m.consumeUserHold(id, holdPremise, m.now())
+	if consumes {
+		return m.consumeUserHold(consume, m.now())
 	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
@@ -730,7 +737,15 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	return nil
 }
 
-func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	// It runs under its caller's lease (by.Lease) and takes none: without
+	// one it refuses rather than start outside the lease.
+	if by.Lease == nil {
+		return fmt.Errorf("%w: session %q", ErrNoCallerLease, id)
+	}
+	if err := checkBorrowed(by.Lease, id, sessName); err != nil {
+		return err
+	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {
@@ -928,9 +943,9 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
-func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
+func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	if transportFromMetadata(b) == "acp" {
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
+		if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
 			return false, err
 		}
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
@@ -938,7 +953,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		}
 		return true, nil
 	}
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
 		return false, err
 	}
 	if providerKind(b) != "claude" {
@@ -1021,10 +1036,10 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 	b.Metadata[startupDialogVerifiedKey] = "true"
 }
 
-// sendLocked delivers message, starting or resuming the runtime as policy
+// sendLocked delivers message, starting or resuming the runtime as by
 // allows; a row it may not resume gets the message queued (reports true).
-func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool, policy ResumePolicy) (bool, error) {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
+func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false); err != nil {
 		if !errors.Is(err, ErrResumeHeld) {
 			return false, err
 		}
@@ -1046,14 +1061,17 @@ func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessN
 	return false, nil
 }
 
-func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool, policy ResumePolicy) (SubmitOutcome, error) {
+func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
+	if err := m.checkStarter(by); err != nil {
+		return SubmitOutcome{}, err
+	}
 	var outcome SubmitOutcome
 	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate, policy)
+		outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, immediate)
 		outcome.Deferred = outcome.Queued
 		return err
 	})
@@ -1083,42 +1101,48 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // Start ensures the session runtime is live without sending a message.
 // It is the canonical manager-level bring-up path for worker handles and
 // other callers that need bounded startup without attaching a terminal. A
-// dormant row it may not resume under policy returns ErrResumeHeld.
-func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
+// dormant row it may not resume as its actor returns ErrResumeHeld.
+func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
+	if err := m.checkStarter(by); err != nil {
+		return err
+	}
 	return withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy)
+		return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
 	})
 }
 
 // StartRuntimeOnly brings the runtime live for a bead-backed session without
 // mutating persisted lifecycle metadata. Legacy reconciler callers use this
 // bridge while they still own commit/rollback bookkeeping above the worker
-// boundary.
-func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+// boundary. It runs under by.Lease, the caller's.
+func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
+	if err := m.checkStarter(by); err != nil {
+		return err
+	}
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.ensureRunningRuntimeOnly(ctx, id, b, sessName, resumeCommand, hints)
+		return m.ensureRunningRuntimeOnly(ctx, by, id, b, sessName, resumeCommand, hints)
 	})
 }
 
-// Send starts or resumes the session as policy allows, then nudges the
+// Send starts or resumes the session as its actor may, then nudges the
 // runtime with a new user message, or queues it (SubmitOutcome.Queued).
-func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (SubmitOutcome, error) {
-	return m.send(ctx, id, message, resumeCommand, hints, false, policy)
+func (m *Manager) Send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config) (SubmitOutcome, error) {
+	return m.send(ctx, by, id, message, resumeCommand, hints, false)
 }
 
 // SendImmediate is Send, injecting the new user message without waiting for
 // an idle boundary when the runtime supports immediate nudges. Falls back to
 // Send semantics on runtimes without the optional immediate nudge capability.
-func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (SubmitOutcome, error) {
-	return m.send(ctx, id, message, resumeCommand, hints, true, policy)
+func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config) (SubmitOutcome, error) {
+	return m.send(ctx, by, id, message, resumeCommand, hints, true)
 }
 
 // SendLiveOnly nudges the runtime only when the current session is already
@@ -1137,16 +1161,19 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // safe boundary. It resumes supported runtimes if needed, then reports whether
 // live delivery actually happened. Unsupported providers return (false, nil)
 // so higher layers can fall back to queue semantics without treating that as
-// an operational error. A held row the policy may not resume returns
+// an operational error. A held row the actor may not resume returns
 // ErrResumeHeld, queueing nothing, so the caller queues it and says why.
-func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
+func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	if err := m.checkStarter(by); err != nil {
+		return false, err
+	}
 	var delivered bool
 	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints, policy)
+		delivered, err = m.tryWaitIdleNudgeLocked(ctx, by, id, b, source, sessName, message, resumeCommand, hints)
 		return err
 	})
 	return delivered, err
@@ -1314,6 +1341,9 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	}
 	workDir := b.Metadata["work_dir"]
 	if workDir == "" {
+		if path := m.acpCaptureTranscriptPath(b); path != "" {
+			return path, TranscriptFound, nil
+		}
 		return "", TranscriptNoWorkDir, nil
 	}
 	provider := strings.TrimSpace(b.Metadata["provider_kind"])
@@ -1324,6 +1354,12 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, TranscriptFound, nil
+	}
+	// An ACP session's transcript is the capture gc wrote itself. A keyed
+	// native transcript (above) still wins; the workdir fallbacks below could
+	// return an unrelated provider's file.
+	if path := m.acpCaptureTranscriptPath(b); path != "" {
 		return path, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so

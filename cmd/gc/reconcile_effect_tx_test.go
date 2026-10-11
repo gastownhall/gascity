@@ -75,13 +75,6 @@ func (o *lockObserver) holds(id string) bool {
 	return o.held[id] > 0
 }
 
-// nameLocked reports whether city's runtime name lock on name is held.
-func nameLocked(city, name string) bool {
-	runtimeNames.mu.Lock()
-	defer runtimeNames.mu.Unlock()
-	return runtimeNames.held[runtimeNameKey{city, name}]
-}
-
 // txKit is the kit: row gc-1, runtime name s-gc-1, the pass, its runtime
 // (the simulator's cache-aware provider behind a recording leaf), and the
 // outside operations queued per seam, each run once, in order.
@@ -205,7 +198,7 @@ func TestTxLockScope(t *testing.T) {
 	k := newTxKit(t)
 	var problems []string
 	expect := func(where string, row bool) {
-		if k.locks.holds(k.it.Key.ID) != row || !nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if k.locks.holds(k.it.Key.ID) != row || !nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			problems = append(problems, where)
 		}
 	}
@@ -242,7 +235,7 @@ func TestTxLockScope(t *testing.T) {
 	if len(problems) > 0 || !slices.Equal(k.seen, want) || k.meta(txKeyA) != "1" || k.meta(txKeyB) != "1" {
 		t.Fatalf("problems %v, seams %v, a=%q b=%q; want both locks in each section, the name lock alone over the call, both writes", problems, k.seen, k.meta(txKeyA), k.meta(txKeyB))
 	}
-	if nameLocked(k.p.World.CityPath, "s-gc-1") || k.locks.holds(k.it.Key.ID) {
+	if nameHeld(k.t, k.p.World.CityPath, "s-gc-1") || k.locks.holds(k.it.Key.ID) {
 		t.Fatal("a lock outlived the transaction")
 	}
 	k = newTxKit(t) // the first run moved the row to creating
@@ -250,8 +243,7 @@ func TestTxLockScope(t *testing.T) {
 	if s := k.run(context.Background(), spec); s.Outcome != settledFailed || s.Cause != causeCallError || !errors.Is(s.Err, callErr) {
 		t.Fatalf("last call failed: settlement %+v, want failed with cause %q", s, causeCallError)
 	}
-	unlock := runtimeNames.tryLock(k.p.World.CityPath, "s-gc-1")
-	defer unlock()
+	holdName(t, k.p.World.CityPath, "s-gc-1")
 	if s := k.run(context.Background(), spec); s.Outcome != settledRefused || s.Cause != causeNameBusy {
 		t.Fatalf("busy name: settlement %+v, want refused with cause %q", s, causeNameBusy)
 	}
@@ -481,7 +473,7 @@ func TestTxProbe(t *testing.T) {
 	var got string
 	var gotErr error
 	sec := probed(func(_ context.Context, _ effectReads, v txView) (string, error) {
-		if !k.locks.holds(k.it.Key.ID) || !nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if !k.locks.holds(k.it.Key.ID) || !nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			t.Error("the probe ran outside a lock")
 		}
 		return v.Row.SessionName, nil
@@ -746,7 +738,7 @@ func TestTxAroundRunsTheEffectAtMostOnce(t *testing.T) {
 	spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: mark(txKeyA)}}}
 	var second settlement
 	spec.around = func(_ context.Context, _ aroundCaps, run func() settlement) settlement {
-		if k.locks.holds(k.it.Key.ID) || nameLocked(k.p.World.CityPath, "s-gc-1") {
+		if k.locks.holds(k.it.Key.ID) || nameHeld(k.t, k.p.World.CityPath, "s-gc-1") {
 			t.Error("around ran inside a lock")
 		}
 		first := run()
@@ -812,8 +804,9 @@ func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
 // Kills a spec table that loses a kind's admission facts or runs an effect
 // that has not merged, a body anywhere but the create, and a capability
 // reached without its grant: every kind has a cap class, only the merged
-// kinds run, the create's body declares no needs and alone holds a
-// capability, and caps without capCreate hold no create handle.
+// kinds run, the create's body declares no needs, each kind holds exactly
+// the capabilities effectCapGrants lists, and caps without capCreate hold no
+// create handle.
 func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	var running []string
 	for kind, spec := range effectSpecs {
@@ -823,8 +816,8 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 		if spec.runs() {
 			running = append(running, kind)
 		}
-		if spec.caps != 0 && kind != intentCreate {
-			t.Errorf("%s holds capabilities %b", kind, spec.caps)
+		if granted := effectCapGrants[kind]; spec.caps != granted {
+			t.Errorf("%s holds capabilities %b, want %b", kind, spec.caps, granted)
 		}
 	}
 	slices.Sort(running)
@@ -833,7 +826,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
-	if want := []string{intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh}; !slices.Equal(running, want) {
+	if want := []string{intentAdopt, intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh, intentStart}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
 	}
 	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
@@ -845,6 +838,12 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	}
 }
 
+// effectCapGrants are the capabilities each kind holds: the create its
+// runner, the adopt the read-only stores its prepare reads.
+var effectCapGrants = map[string]caps{
+	intentCreate: capCreate, intentAdopt: capReadStores, intentStart: capReadStores | capProviderStart | capEpisode,
+}
+
 // Kills a fact the planner drops: every effectFacts field, set, is consumed
 // by applyFacts. A new field fails here until applyFacts and this table
 // consume it.
@@ -852,22 +851,32 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 	rec := &memRecorder{}
 	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	p.rec = rec
+	cache := newObserveCache()
+	p.observations = func() *ObservationCache { return cache.ObservationCache }
 	var transitions []string
 	saved := recordDrainTransition
 	recordDrainTransition = func(_ context.Context, name, reason, transition string) {
 		transitions = append(transitions, name+"/"+reason+"/"+transition)
 	}
 	t.Cleanup(func() { recordDrainTransition = saved })
+	var quarantined []string
+	savedQ := recordAgentQuarantine
+	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
+	t.Cleanup(func() { recordAgentQuarantine = savedQ })
 	f := effectFacts{
-		Events:     []events.Event{{Type: "session.test"}},
-		Transition: &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
-		Work:       &workVerdict{BeadID: "gc-w1", Refused: true},
+		Events:      []events.Event{{Type: "session.test"}},
+		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
+		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
+		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
+		Quarantined: "worker-1",
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
-		"Events":     len(rec.events) == 1,
-		"Transition": slices.Equal(transitions, []string{"s/idle/cancel"}),
-		"Work":       p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Events":      len(rec.events) == 1,
+		"Transition":  slices.Equal(transitions, []string{"s/idle/cancel"}),
+		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
+		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {
@@ -1446,5 +1455,23 @@ func TestTxCloseLandedSignal(t *testing.T) {
 	k.fail = map[txSeam]error{seamAfterWrite: errors.New("staging fault")}
 	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Cause != causeInjected || s.Outcome != settledAmbiguous || !s.Closed || k.status() != "closed" {
 		t.Fatalf("settlement %+v, row %s; want ambiguous and closed, the fault injected", s, k.status())
+	}
+}
+
+// Kills a cause attached to a landing its last step did not write (the C5b-3
+// review): a section that writes, then one that ends with a cause and no
+// write (C5c1's already-closed), settles landed with no cause; a step whose
+// own write ends the effect with a cause keeps it (healInstead).
+func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
+	ends := section{Decide: func(txView) txStep { return txStep{Done: true, Cause: "already-closed"} }}
+	k := newTxKit(t)
+	if s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}, ends}}); s.Outcome != settledLanded || s.Cause != "" {
+		t.Fatalf("settlement %+v, want landed with no cause", s)
+	}
+	writes := section{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Done: true, Cause: causeHeld}
+	}}
+	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
+		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
 	}
 }

@@ -187,39 +187,52 @@ func (s *Store) ApplyPatchIfLifecycleUnchangedUnder(expected Info, patch Metadat
 }
 
 func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch, lease *RuntimeLease, attempts int) (bool, error) {
+	res, err := s.commitIf(expected.ID, patch, lease, attempts, s.validatedBead, func(b beads.Bead) bool {
+		return sameLifecycleFacts(expected, infoFromPersistedBead(b))
+	})
+	return res == CommitLanded, err
+}
+
+// commitIf writes patch to row id while holds accepts read's read of it
+// (and, with lease, the read still records the lease), fenced at that read's
+// revision; a fence lost to another writer re-reads, up to attempts times.
+// Without conditional writes the write is unfenced: its window runs from the
+// read to the write, plus the cache's lag when read goes through the cache
+// (ApplyPatchIfLifecycleUnchanged; Commit reads live).
+func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
-		return false, nil
+		return 0, nil // nothing to write
 	}
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
-		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+		return 0, fmt.Errorf("updating session %q: %w", id, err)
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		bead, err := s.validatedBead(expected.ID)
+		bead, err := read(id)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 		if bead.Status == "closed" {
-			return false, nil
+			return CommitClosed, nil
 		}
-		if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) || (lease != nil && !lease.HoldsMeta(bead.Metadata)) {
-			return false, nil
+		if !holds(bead) || (lease != nil && !lease.HoldsMeta(bead.Metadata)) {
+			return CommitMoved, nil
 		}
 		if writer == nil {
-			if err := s.ApplyPatch(expected.ID, patch); err != nil {
-				return false, err
+			if err := s.ApplyPatch(id, patch); err != nil {
+				return 0, err
 			}
-			return true, nil
+			return CommitLanded, nil
 		}
-		err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
 		switch {
 		case err == nil:
-			return true, nil
+			return CommitLanded, nil
 		case !beads.IsPreconditionFailed(err):
-			return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+			return 0, fmt.Errorf("updating session %q: %w", id, err)
 		}
 	}
-	return false, nil
+	return CommitContended, nil
 }
 
 // UpdateMetadataFenced writes a patch decided from a fresh read of the row. It
@@ -404,81 +417,70 @@ func (s *Store) SetState(id string, state State, reason string) error {
 	})
 }
 
-// Sleep records a non-terminal sleep/drain result via SleepPatch, keeping an
-// operator's user hold (ApplyKeepingUserHold). The city stop writes it.
+// Sleep records a non-terminal sleep/drain result: SleepPatch's lifecycle
+// with the disposition's Sleep cell (ApplySleep), which keeps an operator's
+// user hold. The city stop writes it.
 func (s *Store) Sleep(id, reason string, now time.Time) error {
-	_, err := s.ApplyKeepingUserHold(id, SleepPatch(now, reason))
+	_, err := s.ApplySleep(id, SleepPatch(now, reason))
 	return err
 }
 
-// operatorSuspendAttempts bounds the suspend's CAS retries: an operator's
+// operatorSuspendAttempts bounds an operator's or agent's own disposition
+// write (ApplyDispositionFresh), and the failed-stop rollback: an operator's
 // write competes with every controller write to the row.
 const operatorSuspendAttempts = 8
 
-// OperatorSuspend writes an operator's suspend, OperatorSuspendPatch(now),
-// decided from a fresh read of the row and fenced on its revision where the
-// store can (UpdateMetadataFenced). A row closed since the caller read it is
-// refused with an illegal-transition error and written nothing; a CAS lost on
-// every attempt writes nothing and returns an error to retry.
-func (s *Store) OperatorSuspend(id string, now time.Time) error {
-	closed := false
-	ok, err := s.UpdateMetadataFenced(id, operatorSuspendAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
-		if closed = info.Closed; closed {
-			return nil
-		}
-		return OperatorSuspendPatch(now)
-	})
+// OperatorSuspend writes an operator's suspend: the disposition table's
+// Suspend cell, decided on each fresh read of the row, with its lifecycle
+// (operatorSuspendLife). Every suspend writes, a suspend already in force
+// included: it is stamped again, so an operator's resume that read the old
+// stamp refuses its consume. A row closed since the caller read it is refused
+// with an illegal-transition error and written nothing; a CAS lost on every
+// attempt writes nothing and returns an error to retry. It returns what it
+// wrote, for a failed stop's rollback.
+func (s *Store) OperatorSuspend(id string, now time.Time) (DispositionWrite, error) {
+	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
+	switch {
+	case err != nil:
+		return DispositionWrite{}, err
+	case w.Result == CommitClosed:
+		return DispositionWrite{}, &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+	case w.Result != CommitLanded:
+		return DispositionWrite{}, fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
+	}
+	return w, nil
+}
+
+// operatorSuspendLife is the lifecycle of an operator's suspend:
+// state=suspended, and the pending wake cleared as newer intent (D7.3).
+func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
+	patch := ClearWakeRequestPatch()
+	patch["state"] = string(StateSuspended)
+	patch["slept_at"] = ""
+	patch["sleep_reason"] = ""
+	return patch
+}
+
+// SetWaitHold begins (on) or ends an agent's wait on the row: the
+// disposition's WaitBegin or WaitEnd cell, decided on a fresh read. A wait
+// never replaces an operator's user-hold intent. reason is the wait's, which
+// the wait hold no longer records. A closed row takes no write and no error,
+// as main's blind write succeeded there (`gc session wait --sleep` exits 0).
+func (s *Store) SetWaitHold(id string, on bool, _ string) error {
+	ev := DispEvent{Kind: EvWaitEnd}
+	if on {
+		ev.Kind = EvWaitBegin
+	}
+	w, err := s.ApplyDispositionFresh(id, ActorAgent, ev, nil, time.Now())
 	switch {
 	case err != nil:
 		return err
-	case closed:
-		return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
-	case !ok:
-		return fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
+	case w.Result == CommitClosed:
+		return nil
+	case w.Result != CommitLanded:
+		return fmt.Errorf("session %s: wait hold lost to concurrent writes; retry", id)
 	}
 	return nil
-}
-
-// ApplyKeepingUserHold writes a sleep patch decided from an older read,
-// fenced on a fresh one (UpdateMetadataFenced) and passed through
-// KeepUserHold, so an operator's suspend that landed since keeps its intent.
-// It returns the patch it wrote, for the caller's fold: nil with no error
-// when the row is closed, and an error when every CAS attempt lost.
-func (s *Store) ApplyKeepingUserHold(id string, patch MetadataPatch) (MetadataPatch, error) {
-	var written MetadataPatch
-	closed := false
-	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, _ PersistedResponse) MetadataPatch {
-		if closed = info.Closed; closed {
-			return nil
-		}
-		written = KeepUserHold(info, patch)
-		return written
-	})
-	switch {
-	case err != nil:
-		return nil, err
-	case closed:
-		return nil, nil
-	case !ok:
-		return nil, fmt.Errorf("writing session %q: lost to concurrent writes; retry", id)
-	}
-	return written, nil
-}
-
-// SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
-// SetMetadataBatch(sessionID, {wait_hold, sleep_intent}) writes in cmd_wait.go.
-// When on is false both keys are cleared (empty-string write).
-func (s *Store) SetWaitHold(id string, on bool, reason string) error {
-	if on {
-		return s.ApplyPatch(id, MetadataPatch{
-			"wait_hold":    reason,
-			"sleep_intent": reason,
-		})
-	}
-	return s.ApplyPatch(id, MetadataPatch{
-		"wait_hold":    "",
-		"sleep_intent": "",
-	})
 }
 
 // setMetadataValue is the single-key write chokepoint. It is the byte-identical
@@ -753,7 +755,8 @@ func closePremiseHolds(decided, open Info) bool {
 // (false, nil). decide returning false, or a row already closed, writes
 // nothing. Without an atomic conditional closer it returns
 // beads.ErrConditionalWriteUnsupported and writes nothing: there is no
-// two-write fallback.
+// two-write fallback. The close clears the runtime lease record, which a
+// closed row holds no more.
 func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedResponse) (MetadataPatch, bool)) (bool, error) {
 	closer, ok := beads.AtomicConditionalCloserFor(s.store)
 	if !ok {
@@ -767,7 +770,7 @@ func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedR
 	if !ok {
 		return false, nil
 	}
-	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch)); {
+	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(withRuntimeLeaseCleared(patch))); {
 	case err == nil:
 		return true, nil
 	case beads.IsPreconditionFailed(err):

@@ -92,7 +92,7 @@ func newHealCase(t *testing.T, liveness rowLiveness, desired desire, meta ...str
 		t.Fatal(err)
 	}
 	c := &healCase{store: store, k: rowKeyOf(b.ID)}
-	c.w = &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.Name()}
+	c.w = &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.TempDir()}
 	c.w.LegStores = map[string]beads.Store{rowLeg: store}
 	c.a = &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{
 		c.k: {Key: c.k, Liveness: liveness, Desired: desired},
@@ -230,7 +230,7 @@ func TestCreatingHealSkipsPendingCreateAndWakeRows(t *testing.T) {
 		want     string
 	}{
 		{"pending create", livenessGone, desireNone, []string{"pending_create_claim", "true"}, decideNoAction},
-		{"wake", livenessGone, desireWake, nil, decideNoAction},
+		{"wake: A18 launches it on its bead (S7)", livenessGone, desireWake, nil, decideStart},
 		{"alive", livenessAlive, desireNone, nil, decideNoAction},
 		{"occupied", livenessOccupied, desireNone, nil, decideNoAction},
 		{"unknown", livenessUnknown, desireNone, nil, decideLivenessUnknown},
@@ -253,8 +253,9 @@ func TestCreatingHealSkipsPendingCreateAndWakeRows(t *testing.T) {
 // wants of it; a pool row AL1 wants asleep so reads runtime-missing, which
 // A21's pool-slot close frees. A Drain row, named or not (A21's orphan
 // close), a census-only rig-leg row (another city's, on a shared rig store), a
-// heartbeat-held row (A17's), a dead runtime A12 has not classified, a
-// creating row (the creating heal's) and an asleep row are not healed by it.
+// dead runtime A12 has not classified, a creating row (the creating heal's)
+// and an asleep row are not healed by it. A Wake row is restarted in the same
+// pass instead: A18's start carries legacy's heal patch into its PreWake.
 func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}
 	held := []string{"held_until", rowAt(time.Hour)}
@@ -268,7 +269,7 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	}{
 		{"named active", livenessGone, desireNone, append([]string{"state", "active"}, named...), "", true},
 		{"named awake", livenessGone, desireSleep, append([]string{"state", "awake"}, named...), "", true},
-		{"wake", livenessGone, desireWake, []string{"state", "active"}, "", true},
+		{"wake: restarted, the heal in its start", livenessGone, desireWake, []string{"state", "active"}, "", false},
 		{"pool sleep", livenessGone, desireSleep, []string{"state", "active"}, "", true},
 		{"pool keep", livenessGone, desireKeep, []string{"state", "awake"}, "", true},
 		{"pool quarantined", livenessGone, desireSleep, []string{"state", "awake", "quarantined_until", rowAt(time.Hour)}, "", true},
@@ -276,8 +277,7 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 		{"drain", livenessGone, desireDrain, []string{"state", "active"}, "", false},
 		{"named drain", livenessGone, desireDrain, append([]string{"state", "active"}, named...), "", false},
 		{"census-only rig leg", livenessGone, desireNone, []string{"state", "active"}, "rig:other", false},
-		{"heartbeat-held", livenessGone, desireSleep, append([]string{"state", "active"}, held...), "", false},
-		{"heartbeat-held, padded", livenessGone, desireSleep, []string{"state", "active", "held_until", " " + rowAt(time.Hour) + " "}, "", false},
+		{"heartbeat-held with no work", livenessGone, desireSleep, append([]string{"state", "active"}, held...), "", true},
 		{"dead, before A12 classifies it", livenessDead, desireWake, []string{"state", "active"}, "", false},
 		{"alive", livenessAlive, desireNone, []string{"state", "active"}, "", false},
 		{"creating", livenessGone, desireNone, []string{"state", "creating"}, "", false},
@@ -291,6 +291,11 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 			it := c.decide()
 			if got := it.Reason == decideDeadRuntimeHeal; got != tc.heal {
 				t.Fatalf("decideRow = (%q, %q), want the dead-runtime heal %v", it.Kind, it.Reason, tc.heal)
+			}
+			if tc.desired == desireWake && tc.liveness == livenessGone {
+				if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentStart || !maps.Equal(it.Patch, want) {
+					t.Fatalf("intent (%q, %v), want a start carrying legacy's heal %v", it.Kind, it.Patch, want)
+				}
 			}
 			if !tc.heal {
 				return
@@ -703,11 +708,11 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 		}
 	}
 
-	gone := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
+	gone := newHealCase(t, livenessGone, desireSleep, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
 	if it := gone.decide(); it.Kind != intentRowHealFresh || it.Patch["state"] != "asleep" || it.Patch["detached_at"] != "" || len(it.Patch) != len(legacyHeal(gone.w.Census.Rows[gone.k].Info))+1 {
 		t.Fatalf("decideRow = (%q, %v), want the dead-runtime heal carrying the detached_at clear", it.Kind, it.Patch)
 	}
-	held := newHealCase(t, livenessGone, desireWake, "state", "active", "held_until", rowAt(-time.Minute), "sleep_reason", "user-hold")
+	held := newHealCase(t, livenessGone, desireSleep, "state", "active", "held_until", rowAt(-time.Minute), "sleep_reason", "user-hold")
 	if it := held.decide(); it.Reason != decideTimerHeal || it.Patch["state"] != "" {
 		t.Fatalf("decideRow = (%q, %v), want the timer heal without the fresh heal's state", it.Reason, it.Patch)
 	}
@@ -716,6 +721,25 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 	if it := quarantine.decide(); it.Reason != decideTimerHeal || it.Patch["sleep_reason"] != "" || it.Patch["wake_attempts"] != "0" || it.Patch[strandedEventEmittedKey] != "" || len(it.Patch) != 5 {
 		t.Fatalf("decideRow = (%q, %v), want the timer heal's own patch carrying the stranded clear", it.Reason, it.Patch)
 	}
+}
+
+// onlyEpochMoved reports whether after is before but for the runtime lease
+// record a leased effect takes and releases: its epoch may move, and the
+// rest of the record ends cleared. An absent key reads as "".
+func onlyEpochMoved(before, after map[string]string) bool {
+	keys := map[string]bool{}
+	for k := range before {
+		keys[k] = true
+	}
+	for k := range after {
+		keys[k] = true
+	}
+	for k := range keys {
+		if k != session.RuntimeLeaseEpochKey && before[k] != after[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // Kills a census-only rig-leg row acted on (CONTRACT v5 AL1; §4 A6 item 4,
@@ -803,7 +827,7 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 				w.Env = &reconcileEnv{SP: sp}
 				w.LegStores = map[string]beads.Store{leg: c.store}
 				s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil)
-				if s.Outcome != settledRefused || s.Cause != cause || !maps.Equal(c.meta(t), before) {
+				if s.Outcome != settledRefused || s.Cause != cause || !onlyEpochMoved(before, c.meta(t)) {
 					t.Fatalf("admitted %q on a census-only row, writer on %s: settlement %+v, row %v, want refused %q and the row %v", it.Kind, leg, s, c.meta(t), cause, before)
 				}
 			}

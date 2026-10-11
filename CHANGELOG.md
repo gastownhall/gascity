@@ -89,6 +89,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controller warned and ran with that gate off. Correct the value before
   upgrading (#7036).
 
+- **An exec runtime that declares `report-activity`, `report-attachment` and
+  `proc.exec` now reports `sleep_capability = full`, and its sleep is
+  `stop`.** Before, every exec runtime reported `timed_only`. With all three
+  declared, an interactive `[session_sleep]` policy applies: an idle
+  interactive session is stopped and started again on wake, so anything kept
+  only inside the box, such as the agent's conversation, is lost unless
+  `stop` preserves it. Interrupts, nudges and restarts on such a runtime wait
+  for the agent's ready prompt in the in-box tmux session `main`. For any
+  runtime that declares `report-attachment`, an `is-attached` op that fails
+  (any non-zero exit, 2 included) used to read as "not attached"; it now
+  keeps the session awake and holds destructive actions. No runtime shipped
+  with gc declares these capabilities (#7533).
+
+- **A convoy sling through the API that routes some children and fails others
+  answers 200 with `status: "partial"`.** The routed children have already
+  changed state, so `POST /sling` returns the per-child outcomes instead of an
+  error; a child refused because its source bead already has a live workflow
+  also names the blocking workflows and the cleanup command. `gc sling`
+  against a remote city prints the same per-child lines as a local sling and
+  exits 1, or 3 when a child was refused that way. A gc built before this
+  release, slinging a convoy through an upgraded supervisor, prints
+  `"success": true` and exits 0 for such a result, though its `status` reads
+  `partial`: upgrade gc with the supervisor, or have scripts check `status`
+  (#7083).
+
+- **`session.pending` and `session.pending_cleared` now carry actor
+  `controller` instead of `api`.** The controller records them whether or not
+  a client watches the event stream; a consumer that matches these events on
+  actor `api` must match `controller` (#7083).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's

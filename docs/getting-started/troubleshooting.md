@@ -375,6 +375,28 @@ gc restart
 Do not bypass or disable the `dolt_mode_safe` check — it guards the store-mode
 contract that keeps `bd` and gc in agreement.
 
+## Listings Miss Durable Beads After Changing `types.infra`
+
+**Symptom:** after a type is added to a store's `types.infra` setting, a
+running city's listings of that type return only its ephemeral beads.
+
+The native store asks the server to filter a listing by type only for types
+the server keeps durable, and it reads which types those are from the store's
+stored `types.infra` setting when it opens. A running city keeps what it read
+for the stores it holds open. `gc` commands, and the stores the city opens for
+a single tick, read the current setting every time.
+
+**Remedy:** change the stored setting, then restart the city:
+
+```bash
+gc bd config set types.infra "<types>"   # add --rig <name> for a rig's store
+gc restart
+```
+
+Gas City reads only the stored setting. If the server of a remote beads
+workspace names `types.infra` in its own `.beads/config.yaml`, put the same
+types in the stored setting too.
+
 ## flock Not Found (macOS)
 
 macOS does not ship `flock`. Install it via Homebrew:

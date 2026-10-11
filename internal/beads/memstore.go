@@ -364,6 +364,7 @@ func (m *MemStore) Reopen(id string) error {
 			}
 			wasClosed := m.beads[i].Status == "closed"
 			setBeadStatus(&m.beads[i], "open")
+			dropCloseReasonMetadata(&m.beads[i])
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {

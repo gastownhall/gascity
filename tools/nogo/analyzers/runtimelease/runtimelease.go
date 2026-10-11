@@ -34,7 +34,9 @@ type Config struct {
 	RuntimePkg  string               // declares the verbs' interfaces (verbs) and StopForCleanup
 	SkipFiles   []string             // file-name prefixes another lint covers
 	CityHelpers map[string]int       // a function handed a city path, by its argument index
-	SweepCtx    string               // the ctx constructor that marks a stop sweep
+	Sweep       string               // the stop sweep's actor kind constant, "importpath.Name"
+	SweepSites  []string             // the functions that may name Sweep: "pkg:Name" or "pkg:Recv.Name"
+	Actor       string               // the lifecycle verbs' actor type, "importpath.Name", whose literals name a City
 	Allowed     map[string]Allowance // by function: "Name" or "Recv.Name", per package path prefix "pkg:"
 }
 
@@ -61,18 +63,30 @@ func run(pass *analysis.Pass, cfg Config) error {
 	for _, file := range pass.Files {
 		name := pass.Fset.Position(file.Pos()).Filename
 		base := name[strings.LastIndex(name, "/")+1:]
-		if strings.HasSuffix(base, "_test.go") || slices.ContainsFunc(cfg.SkipFiles, func(p string) bool { return strings.HasPrefix(base, p) }) {
+		if strings.HasSuffix(base, "_test.go") {
 			continue
 		}
-		if source == nil {
+		// Another lint covers the skipped files' runtime verbs; the actor
+		// rules hold in every file.
+		skipped := slices.ContainsFunc(cfg.SkipFiles, func(p string) bool { return strings.HasPrefix(base, p) })
+		if source == nil && !skipped {
 			source = file
 		}
 		for _, decl := range file.Decls {
+			if gd, ok := decl.(*ast.GenDecl); ok {
+				actorRules(pass, cfg, gd, "package scope")
+				continue
+			}
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok || fd.Body == nil {
 				continue
 			}
 			fn := funcName(fd)
+			actorRules(pass, cfg, fd.Body, fn)
+			actorVarsWithoutCity(pass, cfg, fd.Body, fn)
+			if skipped {
+				continue
+			}
 			_, ok = allowed(fn)
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				if id, isIdent := n.(*ast.Ident); isIdent {
@@ -92,7 +106,7 @@ func run(pass *analysis.Pass, cfg Config) error {
 				if a, listed := allowed(callee); listed && len(a.Callers) > 0 && !slices.Contains(a.Callers, fn) {
 					pass.Reportf(call.Pos(), "runtime lease: %s runs under its caller's lease (%s), and %s is not one of its callers %v", callee, a.Reason, fn, a.Callers)
 				}
-				if i, helper := cfg.CityHelpers[callee]; helper && i < len(call.Args) && emptyString(pass, fd, call.Args[i]) && !sweep(call, cfg.SweepCtx) {
+				if i, helper := cfg.CityHelpers[callee]; helper && i < len(call.Args) && emptyString(pass, fd, call.Args[i]) && !sweep(pass, call, cfg.Sweep) {
 					pass.Reportf(call.Args[i].Pos(), "runtime lease: %s is handed no city path, so its Manager cannot take the runtime lease", callee)
 				}
 				return true
@@ -276,23 +290,129 @@ func emptyString(pass *analysis.Pass, fd *ast.FuncDecl, e ast.Expr) bool {
 	return empty
 }
 
-// sweep reports whether one of call's arguments is a stop sweep's ctx.
-func sweep(call *ast.CallExpr, ctor string) bool {
+// sweep reports whether one of call's arguments names the stop sweep's actor
+// kind, the constant kind ("importpath.Name").
+func sweep(pass *analysis.Pass, call *ast.CallExpr, kind string) bool {
+	found := false
 	for _, a := range call.Args {
-		c, ok := a.(*ast.CallExpr)
-		if !ok {
-			continue
+		ast.Inspect(a, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && isConst(pass, id, kind) {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
+}
+
+// isConst reports whether id uses the constant name ("importpath.Name").
+func isConst(pass *analysis.Pass, id *ast.Ident, name string) bool {
+	c, ok := pass.TypesInfo.Uses[id].(*types.Const)
+	return ok && name != "" && c.Pkg() != nil && c.Pkg().Path()+"."+c.Name() == name
+}
+
+// actorRules reports, under n (fn's body, or a package-level declaration),
+// an Actor literal with no City and a use of the stop sweep's kind outside
+// the sweep sites.
+func actorRules(pass *analysis.Pass, cfg Config, n ast.Node, fn string) {
+	ast.Inspect(n, func(n ast.Node) bool {
+		if lit, isLit := n.(*ast.CompositeLit); isLit && actorWithoutCity(pass, lit, cfg) {
+			pass.Reportf(lit.Pos(), "runtime lease: %s builds an actor with no City, whose lease every verb refuses; give it the city (or build it with the package's actor helper)", fn)
 		}
-		switch f := c.Fun.(type) {
-		case *ast.SelectorExpr:
-			if f.Sel.Name == ctor {
-				return true
+		if id, isIdent := n.(*ast.Ident); isIdent && isConst(pass, id, cfg.Sweep) && !slices.Contains(cfg.SweepSites, pass.Pkg.Path()+":"+fn) {
+			pass.Reportf(id.Pos(), "runtime lease: %s names the stop sweep's actor kind, which takes no lease and tolerates a draining seat; only the sweep sites %v may", fn, cfg.SweepSites)
+		}
+		return true
+	})
+}
+
+// actorVarsWithoutCity reports a variable of cfg.Actor that body declares
+// with no value (var x Actor) and never gives a City, never assigns whole,
+// and never makes the stop sweep's.
+func actorVarsWithoutCity(pass *analysis.Pass, cfg Config, body *ast.BlockStmt, fn string) {
+	declared := map[*types.Var]*ast.Ident{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		if vs, ok := n.(*ast.ValueSpec); ok && len(vs.Values) == 0 {
+			for _, id := range vs.Names {
+				if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && isActorType(v.Type(), cfg) {
+					declared[v] = id
+				}
 			}
-		case *ast.Ident:
-			if f.Name == ctor {
-				return true
+		}
+		return true
+	})
+	if len(declared) == 0 {
+		return
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			var target *ast.Ident
+			field := ""
+			switch l := lhs.(type) {
+			case *ast.Ident:
+				target = l
+			case *ast.SelectorExpr:
+				target, _ = l.X.(*ast.Ident)
+				field = l.Sel.Name
 			}
+			if target == nil {
+				continue
+			}
+			v, _ := pass.TypesInfo.Uses[target].(*types.Var)
+			if _, tracked := declared[v]; !tracked {
+				continue
+			}
+			sweepKind := false
+			if field == "Kind" && i < len(as.Rhs) {
+				ast.Inspect(as.Rhs[i], func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok && isConst(pass, id, cfg.Sweep) {
+						sweepKind = true
+					}
+					return true
+				})
+			}
+			if field == "" || field == "City" || sweepKind {
+				delete(declared, v)
+			}
+		}
+		return true
+	})
+	for _, id := range declared {
+		pass.Reportf(id.Pos(), "runtime lease: %s declares an actor it never gives a City, whose lease every verb refuses", fn)
+	}
+}
+
+// isActorType reports whether t is cfg.Actor.
+func isActorType(t types.Type, cfg Config) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	return ok && cfg.Actor != "" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path()+"."+named.Obj().Name() == cfg.Actor
+}
+
+// actorWithoutCity reports a literal of cfg.Actor that sets no City and is
+// not the stop sweep's.
+func actorWithoutCity(pass *analysis.Pass, lit *ast.CompositeLit, cfg Config) bool {
+	if !isActorType(pass.TypesInfo.TypeOf(lit), cfg) {
+		return false
+	}
+	for _, e := range lit.Elts {
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			return false // positional: every field set
+		}
+		key, _ := kv.Key.(*ast.Ident)
+		if key != nil && key.Name == "City" {
+			return false
+		}
+		if v, ok := kv.Value.(*ast.SelectorExpr); ok && key != nil && key.Name == "Kind" && isConst(pass, v.Sel, cfg.Sweep) {
+			return false
+		}
+		if v, ok := kv.Value.(*ast.Ident); ok && key != nil && key.Name == "Kind" && isConst(pass, v, cfg.Sweep) {
+			return false
 		}
 	}
-	return false
+	return true
 }

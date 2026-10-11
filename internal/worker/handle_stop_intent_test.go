@@ -18,7 +18,7 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp)
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
@@ -70,7 +70,7 @@ func newDrainingStopHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string,
 func TestSessionHandleStopKeepsOperatorIntentOnDrainingSeat(t *testing.T) {
 	handle, sp, sessName, store, id := newDrainingStopHandle(t)
 
-	err := handle.Stop(context.Background())
+	err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator))
 	if !errors.Is(err, sessionpkg.ErrIllegalTransition) {
 		t.Fatalf("Stop(draining) = %v, want ErrIllegalTransition — the operator seam must not carry shutdown latitude", err)
 	}

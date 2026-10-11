@@ -213,6 +213,20 @@ func newSessionNewRequest(workDir string, mcpServers []runtime.MCPServerConfig) 
 	})
 }
 
+// redactedSessionNewParams renders session/new params for the capture
+// transcript: the same shape the agent receives, with MCP server credentials
+// replaced by runtime.RedactMCPServerConfigs.
+func redactedSessionNewParams(workDir string, mcpServers []runtime.MCPServerConfig) (json.RawMessage, error) {
+	data, err := json.Marshal(SessionNewParams{
+		Cwd:        workDir,
+		McpServers: sessionNewMCPServers(runtime.RedactMCPServerConfigs(mcpServers)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal redacted session/new params: %w", err)
+	}
+	return data, nil
+}
+
 func sessionNewMCPServers(servers []runtime.MCPServerConfig) []SessionNewMCPServer {
 	if len(servers) == 0 {
 		return []SessionNewMCPServer{}

@@ -128,6 +128,12 @@ type planner struct {
 	metrics     *passMetrics
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
 
+	// observations is the cache a fresh read's Noted fact is written to; nil
+	// notes none. capacity is the endpoint breaker a start admits its ticket
+	// on; nil admits without one.
+	observations func() *ObservationCache
+	capacity     func() *endpointCapacityGuard
+
 	inflight plannerInflight
 	backoff  *backoffTable
 	bucket   bucketState
@@ -320,9 +326,9 @@ func (p *planner) drainSettlements(now time.Time) {
 }
 
 // applyFacts applies an effect's facts, on time or late alike: its events to
-// the recorder, each recovered alone; its drain transition to legacy's
-// telemetry; its worktree verdict to the work item's backoff record
-// (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+// the recorder, each recovered alone; its drain transition and its
+// quarantine to legacy's telemetry; its worktree verdict to the work item's
+// backoff record (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
 func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	for _, ev := range f.Events {
 		if p.rec != nil {
@@ -332,6 +338,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	if t := f.Transition; t != nil {
 		recordDrainTransition(context.Background(), t.Name, t.Reason, t.Transition)
 	}
+	if f.Quarantined != "" {
+		recordAgentQuarantine(context.Background(), f.Quarantined)
+	}
 	switch {
 	case f.Work == nil:
 	case f.Work.Refused:
@@ -339,10 +348,23 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	default:
 		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
 	}
+	if n := f.Noted; n != nil && p.observations != nil {
+		if cache := p.observations(); cache != nil {
+			// Listed, running and the agent alive, at the read's issue time,
+			// so a later inventory pass overrides it either way (v5 O4).
+			for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
+				cache.Note(n.Name, kind, ObsYes, n.At, SourceProbe, "")
+			}
+		}
+	}
 }
 
-// recordDrainTransition is legacy's drain telemetry; a test reads it.
-var recordDrainTransition = telemetry.RecordDrainTransition
+// recordDrainTransition and recordAgentQuarantine are legacy's drain and
+// quarantine telemetry; a test reads them.
+var (
+	recordDrainTransition = telemetry.RecordDrainTransition
+	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+)
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
 // pass record; a panicking recorder is logged and skips this event only.
@@ -359,8 +381,10 @@ func (p *planner) record(ev events.Event) {
 }
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
-// resets its record; a refusal, failure or ambiguous outcome (an abandoned
-// write) backs it off with its cause, except a swap pause.
+// resets its record; a refusal (a landing with a cause, a heal written in a
+// refusal's stead, included), failure or ambiguous outcome (an abandoned
+// write) backs it off with its cause, except a swap pause and an endpoint-gate
+// refusal, deferrals the gate itself paces.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
@@ -368,9 +392,9 @@ func (p *planner) backoffSettled(s settlement) {
 	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause:
+	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

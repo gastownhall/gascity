@@ -327,6 +327,13 @@ func (s *Store) Close(id string) error {
 
 // Reopen sets a bead's status to "open": script reopen <id>
 func (s *Store) Reopen(id string) error {
+	// metadata.close_reason is a closer's input; a reopened bead must not hand
+	// it to its next close, so it is cleared before the reopen, as BdStore does.
+	if b, err := s.Get(id); err == nil && b.Status != "open" && strings.TrimSpace(b.Metadata["close_reason"]) != "" {
+		if err := s.SetMetadata(id, "close_reason", ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	_, err := s.run(nil, "reopen", id)
 	if err != nil {
 		if isNotFoundError(err) {

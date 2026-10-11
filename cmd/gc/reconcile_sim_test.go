@@ -401,8 +401,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return s.lane.cache },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Episodes: func() (map[string]session.StartupHealthEpisode, error) {
+			return readStartupHealthEpisodes(s.legs[0].cache)
+		},
+		// The production resolver over the sessions leg, so a v2 start
+		// launches the template legacy's start launches.
+		Templates: func(env *reconcileEnv, now time.Time) templateResolver {
+			return newTemplateResolver(newAgentBuildParams("test-city", s.env.CityPath, env.Cfg, env.SP, now, s.legs[0].cache, io.Discard))
 		},
 		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
 	}
@@ -531,10 +536,10 @@ func (s *sim) atSeam(_ context.Context, at txSeam, it intent, _, _ int) error {
 	if k := it.Key; k.ID != "" {
 		needs := effectSpecs[it.Kind].needs // a kind's per-intent needs only add to these
 		row := s.prev[s.legOf(k.Leg).name+"/"+k.ID]
-		switch named := nameLocked(s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
+		switch named := nameHeld(s.t, s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
 		case s.locks.holds(k.ID) != (at != seamBeforeCall && at != seamAfterCall):
 			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: row mutation lock held %t", it.Kind, k.ID, at, s.locks.holds(k.ID))
-		case (needs.NameLock || needs.Runtime || needs.Legs != 0 || needs.Idle || at == seamBeforeCall || at == seamAfterCall) && !named:
+		case (needs.locksName(effectSpecs[it.Kind]) || at == seamBeforeCall || at == seamAfterCall) && !named:
 			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: runtime name not locked", it.Kind, k.ID, at)
 		}
 	}
@@ -728,14 +733,21 @@ var externalOps = []struct {
 	name string
 	fn   func(s *sim, l *simLeg, b beads.Bead)
 }{
-	{"hold", func(s *sim, l *simLeg, b beads.Bead) {
-		s.setMeta(l, b.ID, "held_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "user-hold")
+	{"operator-hold", func(s *sim, l *simLeg, b beads.Bead) { // gc session suspend under a controller: the hold, on a live runtime
+		_, _ = session.NewStore(beads.SessionStore{Store: l.backing}).OperatorSuspend(b.ID, s.clk.Now())
+	}},
+	{"operator-resume", func(s *sim, l *simLeg, b beads.Bead) { // gc session resume: the operator's hold consumed
+		_, _ = session.NewStore(beads.SessionStore{Store: l.backing}).ApplyDispositionFresh(b.ID, session.ActorOperator, session.DispEvent{Kind: session.EvResume}, nil, s.clk.Now())
+	}},
+	{"heartbeat", func(s *sim, l *simLeg, b beads.Bead) { // gc runtime heartbeat: held_until alone, an operator's suspend left as it is
+		until := s.clk.Now().Add(time.Duration(1+s.rng.IntN(120)) * time.Second)
+		_, _ = session.NewStore(beads.SessionStore{Store: l.backing}).ApplyDispositionFresh(b.ID, session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: until}, nil, s.clk.Now())
 	}},
 	{"quarantine", func(s *sim, l *simLeg, b beads.Bead) {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if err := l.backing.SetMetadataBatch(b.ID, session.KillPendingPatch(s.clk.Now())); err != nil {
+		if _, err := writeSessionKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, errSessionKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])
@@ -1125,6 +1137,9 @@ func (s *sim) lastTimer() time.Time {
 	}
 	for _, b := range s.snapshot() {
 		for k, grace := range map[string]time.Duration{"held_until": 0, "quarantined_until": 0, "slept_at": session.KillPendingGrace} {
+			if k == "held_until" && b.Metadata["sleep_intent"] == string(session.SleepReasonUserHold) {
+				continue // an operator's hold, which no timer ends
+			}
 			if at, err := time.Parse(time.RFC3339, b.Metadata[k]); err == nil {
 				later(at.Add(grace))
 			}
@@ -1188,6 +1203,21 @@ var simMutants = []struct {
 		specs[intentRowHeal] = heal
 	}}},
 	{"an effect section runs outside the row's mutation lock", "LOCK ", simOpts{rowLock: func(_ string, fn func() error) error { return fn() }}},
+	// The PreWake keeps the row's token rather than minting one, so a row's
+	// second start creates a runtime under its first one's token. (A launch
+	// over a live runtime never reaches I2: S1's verb section refuses it.)
+	{"a PreWake reuses the row's token", "I2 ", simOpts{
+		specs: func(specs map[string]effectSpec) {
+			reuse := func(ctx context.Context, r effectReads, v txView) (preWakeFold, error) {
+				f, err := foldPreWake(ctx, r, v)
+				f.token = v.Row.InstanceToken
+				return f, err
+			}
+			s := specs[intentStart]
+			s.sections = []section{startSections[0], called(callStart, probed(reuse, preWakeStep), startLaunch), startSections[2]}
+			specs[intentStart] = s
+		},
+	}},
 }
 
 // Kills invariant checks that check nothing: the corpus catches each mutant

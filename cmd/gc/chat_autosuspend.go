@@ -62,7 +62,7 @@ func autoSuspendChatSessions(cityPath string, cfg *config.City, store beads.Stor
 			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		if err := handle.StopIdle(session.WithoutLeaseWait(context.Background())); err != nil {
+		if err := handle.StopIdle(context.Background(), sessionActor(session.ActorController, cityPath)); err != nil {
 			fmt.Fprintf(stderr, "gc start: auto-suspend session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stderr
 		} else {
 			fmt.Fprintf(stdout, "Session %s auto-suspended (idle %s).\n", s.ID, formatDuration(now.Sub(s.LastActive))) //nolint:errcheck // best-effort stdout
