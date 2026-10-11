@@ -328,6 +328,9 @@ func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info, Persi
 			Labels:       patch.AddLabels,
 			RemoveLabels: patch.RemoveLabels,
 		})
+		if err != nil {
+			UnmintDisposition(id, patch.Metadata) // the write did not land
+		}
 		switch {
 		case err == nil:
 			return true, nil
@@ -774,7 +777,11 @@ func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedR
 	if !ok {
 		return false, nil
 	}
-	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(withRuntimeLeaseCleared(patch))); {
+	_, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(withRuntimeLeaseCleared(patch)))
+	if err != nil {
+		UnmintDisposition(id, patch) // the close did not land
+	}
+	switch {
 	case err == nil:
 		return true, nil
 	case beads.IsPreconditionFailed(err):

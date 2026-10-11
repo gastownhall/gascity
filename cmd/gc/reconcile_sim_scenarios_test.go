@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -394,7 +395,13 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 				if r.row.Info.QuarantinedUntil == tc.patch["quarantined_until"] {
 					return intent{}, false
 				}
-				return r.heal(intentRowHeal, decideStabilityClear, tc.patch)
+				// The quarantine's write is the Quarantine cell's, to the
+				// scenario's deadline (none: cleared); the rest is the patch.
+				until, _ := time.Parse(time.RFC3339, tc.patch["quarantined_until"])
+				class := session.CellInfo(r.row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: until}, r.w.Now)
+				patch := maps.Clone(tc.patch)
+				delete(patch, "quarantined_until")
+				return r.healClass(intentRowHeal, decideStabilityClear, patch, class)
 			}
 			s := scriptedWith(t, simOpts{arms: mutateHeal(write)}, []string{"gc-1"}, tc.row)
 			if tc.zombie {

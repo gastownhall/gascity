@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -99,6 +100,20 @@ const (
 )
 
 // intent is one effect the pass proposes for admission.
+// folded is it's write as a plain patch, for a read of what it writes (a fold
+// onto a row); the write itself carries Class typed.
+func (it intent) folded() session.MetadataPatch { return foldClass(it.Patch, it.Class) }
+
+// foldClass is patch with class's keys, as a plain patch for a read.
+func foldClass(patch session.MetadataPatch, class session.DispositionPatch) session.MetadataPatch {
+	out := maps.Clone(patch)
+	if out == nil {
+		out = session.MetadataPatch{}
+	}
+	maps.Copy(out, class.Fold())
+	return out
+}
+
 type intent struct {
 	Kind     string
 	Key      rowKey      // the row; zero for a create
@@ -117,6 +132,10 @@ type intent struct {
 	// The row-write effect re-decides on the fresh row and writes the
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
+	// Class is the disposition cells' keys the write carries beside Patch,
+	// decided without a mint (session.Cell); the effect's write mints them
+	// (DispositionPatch.Into).
+	Class session.DispositionPatch
 	Event *events.Event
 	// AliasLock is the city alias lock A7's row-metadata verb takes around
 	// its effect (v5 M1), when its alias work needs one.

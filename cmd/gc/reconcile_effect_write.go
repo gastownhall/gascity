@@ -36,10 +36,10 @@ func redecideRow(v txView) txStep {
 	if fresh.Heal != nil {
 		fresh = *fresh.Heal
 	}
-	if fresh.Kind != v.It.Kind || len(fresh.Patch) == 0 {
+	if fresh.Kind != v.It.Kind || len(fresh.Patch) == 0 && fresh.Class.Len() == 0 {
 		return txStep{Refuse: causeRedecided}
 	}
-	step := txStep{Write: fresh.Patch}
+	step := txStep{Write: fresh.Patch, Class: fresh.Class}
 	if fresh.Event != nil {
 		step.Facts.Events = []events.Event{*fresh.Event}
 	}

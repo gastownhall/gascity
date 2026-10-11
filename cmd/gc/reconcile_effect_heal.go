@@ -42,7 +42,7 @@ var healSections = []section{{Decide: func(v txView) txStep {
 	if step.Refuse == causeRedecided {
 		step.Refuse = healCause(v)
 	}
-	if v.It.Reason == decideDeadRuntimeHeal && step.Write["quarantined_until"] != "" { // the death's accrual quarantines
+	if v.It.Reason == decideDeadRuntimeHeal && step.Class.Get("quarantined_until") != "" { // the death's accrual quarantines
 		step.Facts.Quarantined = sessionAgentMetricIdentityInfo(v.Row, v.World.Env.Cfg)
 	}
 	return step

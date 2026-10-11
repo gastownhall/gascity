@@ -23,10 +23,10 @@ const (
 // timerHealPatch clears an expired hold, then an expired quarantine judged
 // against the post-hold sleep_reason (SESS-009/010: the order is
 // load-bearing), and clears unknown-state markers on a known-state row
-// (SESS-047). The timers are the disposition's TimerTick cell, the lifecycle
-// the expired-timer builders'. requeue is the time until the earliest timer
-// still running.
-func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, time.Duration) {
+// (SESS-047). The timers are the disposition's TimerTick cell (class), the
+// lifecycle the expired-timer builders'. requeue is the time until the
+// earliest timer still running.
+func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, session.DispositionPatch, time.Duration) {
 	patch := session.MetadataPatch{}
 	var requeue time.Duration
 	expired := false
@@ -54,8 +54,9 @@ func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, tim
 			requeue = earlierRequeue(requeue, t.Sub(now)+time.Second)
 		}
 	}
+	var class session.DispositionPatch
 	if expired {
-		maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvTimerTick}, now).Fold())
+		class = session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvTimerTick}, now)
 	}
 	for key, value := range map[string]string{
 		unknownStateFirstSeenKey: row.UnknownStateFirstSeen,
@@ -66,7 +67,7 @@ func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, tim
 			patch[key] = ""
 		}
 	}
-	return patch, requeue
+	return patch, class, requeue
 }
 
 // requeueUntil is the requeue delay to t: at least a nanosecond, so a deadline that
@@ -104,7 +105,7 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 			}
 			it.Key = k
 			if arm.name == "A6" && it.Kind != "" {
-				it.Patch = r.fold(it.Patch, rowArms[i+1:])
+				it.Patch, it.Class = r.fold(it.Patch, it.Class, rowArms[i+1:])
 				if it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal {
 					it = r.startHealed(it)
 				}
@@ -119,7 +120,7 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 // propose for the row in the same pass, so the row's heals and markers land in
 // one CAS and none waits a pass behind another (CONTRACT v5.8 §12.3, R5). A
 // key an earlier item writes keeps its value; a later fresh heal waits.
-func (r *rowFacts) fold(patch session.MetadataPatch, rest []rowArm) session.MetadataPatch {
+func (r *rowFacts) fold(patch session.MetadataPatch, class session.DispositionPatch, rest []rowArm) (session.MetadataPatch, session.DispositionPatch) {
 	patch = maps.Clone(patch)
 	for _, arm := range rest {
 		if arm.name != "A6" {
@@ -131,9 +132,10 @@ func (r *rowFacts) fold(patch session.MetadataPatch, rest []rowArm) session.Meta
 					patch[key] = value
 				}
 			}
+			class = it.Class.With(class) // the earlier item's keys win
 		}
 	}
-	return patch
+	return patch, class
 }
 
 // rowFacts is what decideRow's arms read of one row, and the earliest
@@ -277,13 +279,13 @@ func armUnknownState(r *rowFacts) (intent, bool) {
 // clear): a row write when a timer expired. A timer still running is the
 // row's deadline, and the row falls through.
 func armTimerHeals(r *rowFacts) (intent, bool) {
-	patch, requeue := timerHealPatch(r.row.Info, r.w.Now)
+	patch, class, requeue := timerHealPatch(r.row.Info, r.w.Now)
 	r.after(requeue)
-	if len(patch) == 0 {
+	if len(patch) == 0 && class.Len() == 0 {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis, Patch: patch}, true
+	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis, Patch: patch, Class: class}, true
 }
 
 // armLivenessUnknown is A9: every arm below reads liveness and desire, so

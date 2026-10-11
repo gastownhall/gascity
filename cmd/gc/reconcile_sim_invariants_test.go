@@ -39,11 +39,11 @@ func init() {
 			return it, ok
 		})}},
 		{"a heal misreads its timer and clears an operator hold", "I15 ", simOpts{arms: mutateHeal(func(r *rowFacts) (intent, bool) {
-			patch, _ := timerHealPatch(r.row.Info, r.w.Now.Add(time.Hour))
-			if len(patch) == 0 {
+			patch, class, _ := timerHealPatch(r.row.Info, r.w.Now.Add(time.Hour))
+			if len(patch) == 0 && class.Len() == 0 {
 				return intent{}, false
 			}
-			return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}, Patch: patch}, true
+			return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}, Patch: patch, Class: class}, true
 		})}},
 		// The I15 carve-out for A6's stability clear (v5.8) holds only for a
 		// committed row whose own runtime the deciding pass read alive 30s
@@ -67,7 +67,7 @@ func quarantineClear(when func(r *rowFacts, stable bool) bool) func(r *rowFacts)
 		if r.row.Info.QuarantinedUntil == "" || err != nil || !when(r, r.w.Now.Sub(woke) >= stabilityThreshold) {
 			return intent{}, false
 		}
-		return r.heal(intentRowHeal, decideStabilityClear, session.MetadataPatch{"quarantined_until": ""})
+		return r.healClass(intentRowHeal, decideStabilityClear, session.MetadataPatch{}, session.CellInfo(r.row.Info, session.ActorController, session.DispEvent{Kind: session.EvQuarantine}, r.w.Now))
 	}
 }
 

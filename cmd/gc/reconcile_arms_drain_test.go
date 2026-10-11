@@ -330,7 +330,7 @@ func TestINC003IsDrainOnly(t *testing.T) {
 func TestWokenRowClearsIdleStopPending(t *testing.T) {
 	wake := func(e *selectionEntry) { e.Desired = desireWake }
 	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, wake)
-	if it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(it.Patch) != 1 || it.Patch["sleep_intent"] != "" {
+	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
 		t.Fatalf("%+v, want the sleep_intent clear alone", it)
 	}
 }

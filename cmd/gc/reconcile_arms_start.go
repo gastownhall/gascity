@@ -114,14 +114,16 @@ func (r *rowFacts) restart() (intent, bool) {
 func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	e, info := r.entry, r.row.Info
 	var patch, kept session.MetadataPatch
+	var class session.DispositionPatch
 	if committed(info) && r.gone() {
 		var accrued bool
-		if patch, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
+		if patch, class, accrued = deadRuntimePatch(r, true); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
-		info, kept = foldInfo(info, patch), patch
+		info, kept = foldInfo(foldInfo(info, patch), class.Fold()), foldClass(patch, class)
 		if r.asleepStranded() {
-			kept, _ = deadRuntimePatch(r, false)
+			strandedPatch, strandedClass, _ := deadRuntimePatch(r, false)
+			kept = foldClass(strandedPatch, strandedClass)
 		}
 	}
 	now := r.w.Now
@@ -145,7 +147,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Kept: kept}, true
+	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Class: class, Kept: kept}, true
 }
 
 // startHealed is heal, an A6 row write, or the start the start arms (A17,
@@ -158,7 +160,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 func (r *rowFacts) startHealed(heal intent) intent {
 	healed := *r
 	if heal.Reason != decideDeadRuntimeHeal {
-		healed.row.Info = foldInfo(r.row.Info, heal.Patch)
+		healed.row.Info = foldInfo(r.row.Info, heal.folded())
 	}
 	it, ok := healed.restart()
 	if !ok || it.Kind != intentStart {
@@ -166,12 +168,12 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	}
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
-	it.Patch, it.Key = patch, heal.Key
+	it.Patch, it.Class, it.Key = patch, heal.Class.With(it.Class), heal.Key
 	if heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded() {
 		// The whole heal stays, the items A6 folded beside a dead runtime's
 		// (detached_at) included; a stranded seat keeps its death's accrual
 		// alone (startIntent's Kept).
-		kept := maps.Clone(heal.Patch)
+		kept := heal.folded()
 		maps.Copy(kept, it.Kept)
 		it.Kept = kept
 	}
@@ -179,9 +181,9 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	case heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded():
 		it.Heal = &heal
 	default: // a stranded seat records its death alone and stays committed, so it is recorded once
-		if accrual, accrued := deadRuntimePatch(r, false); accrued {
+		if accrual, class, accrued := deadRuntimePatch(r, false); accrued {
 			recorded := heal
-			recorded.Patch = accrual
+			recorded.Patch, recorded.Class = accrual, class
 			it.Heal = &recorded
 		}
 	}
