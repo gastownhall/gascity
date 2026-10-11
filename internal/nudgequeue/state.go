@@ -107,7 +107,7 @@ func SortState(state *State) {
 // lazy bead-store open in nudgeMaintenanceStore.frontForState runs inside
 // the locked callback, before the first per-item deadline check, with no
 // budget of its own. A waiter can legitimately time out behind either.
-const defaultLockWaitTimeout = 8 * time.Second
+var defaultLockWaitTimeout = 8 * time.Second
 
 // WithState locks, loads, mutates, and atomically rewrites the queue state.
 // The wait to acquire the lock is bounded to defaultLockWaitTimeout

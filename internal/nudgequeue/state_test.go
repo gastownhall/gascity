@@ -18,6 +18,12 @@ import (
 // specified to live inside WithState, since every production caller goes
 // through it directly, not sit beside it as dead code only a test exercises.
 func TestWithState_TimesOutInsteadOfBlockingForever(t *testing.T) {
+	oldTimeout := defaultLockWaitTimeout
+	defaultLockWaitTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		defaultLockWaitTimeout = oldTimeout
+	})
+
 	cityPath := t.TempDir()
 
 	if err := WithState(cityPath, func(state *State) error {
