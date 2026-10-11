@@ -6644,24 +6644,27 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 
 	done := make(chan struct{})
 	go func() {
 		h.ServeHTTP(rec, req)
 		close(done)
 	}()
+
+	body := waitForRecorderSubstring(t, rec, "hello", 2*time.Second)
+	cancel()
 	<-done
 
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
 	}
-	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") {
-		t.Errorf("stream body missing initial turn: %s", rec.Body.String())
+	if !strings.Contains(body, "event: turn") || !strings.Contains(body, "hello") {
+		t.Errorf("stream body missing initial turn: %s", body)
 	}
 }
 
@@ -6934,12 +6937,8 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 		close(done)
 	}()
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if strings.Contains(rec.BodyString(), "after first boundary") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if body := waitForRecorderSubstring(t, rec, "after first boundary", 500*time.Millisecond); !strings.Contains(body, "after first boundary") {
+		t.Fatalf("stream body missing initial turns: %s", body)
 	}
 
 	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -6960,14 +6959,15 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 		t.Fatalf("append transcript: %v", err)
 	}
 
+	if body := waitForRecorderSubstring(t, rec, "after second boundary", 2*time.Second); !strings.Contains(body, "after second boundary") {
+		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
+	}
+	cancel()
 	<-done
 
 	body := rec.BodyString()
 	if !strings.Contains(body, "bridge turn") {
 		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
-	}
-	if !strings.Contains(body, "after second boundary") {
-		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
 	}
 }
 
@@ -7684,14 +7684,22 @@ func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
 		`{"uuid":"4","parentUuid":"3","type":"tool_result","message":"{\"role\":\"tool\",\"content\":\"internal raw detail\"}","timestamp":"2025-01-01T00:00:03Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	rec := newSyncResponseRecorder()
 
-	body := rec.Body.String()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, "world", 2*time.Second)
+	cancel()
+	<-done
+
 	if !strings.Contains(body, "hello") || !strings.Contains(body, "world") {
 		t.Fatalf("conversation stream body missing display turns: %s", body)
 	}
@@ -7722,14 +7730,22 @@ func TestHandleSessionStreamConversationRedactsThinkingText(t *testing.T) {
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"private chain of thought\"},{\"type\":\"text\",\"text\":\"visible answer\"}]}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	rec := newSyncResponseRecorder()
 
-	body := rec.Body.String()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, "visible answer", 2*time.Second)
+	cancel()
+	<-done
+
 	if !strings.Contains(body, "visible answer") {
 		t.Fatalf("conversation stream body missing visible assistant answer: %s", body)
 	}
@@ -7763,14 +7779,22 @@ func TestHandleSessionStreamRawUsesLatestCompactionTail(t *testing.T) {
 		`{"uuid":"c","parentUuid":"cb1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after second boundary\"}","timestamp":"2025-01-01T00:00:04Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	rec := newSyncResponseRecorder()
 
-	body := rec.Body.String()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, "after second boundary", 2*time.Second)
+	cancel()
+	<-done
+
 	if !strings.Contains(body, "after second boundary") {
 		t.Fatalf("raw stream body missing latest compaction tail: %s", body)
 	}
@@ -8101,14 +8125,22 @@ func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 		t.Fatalf("WriteFile codex session: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	rec := newSyncResponseRecorder()
 
-	body := rec.Body.String()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	body := waitForRecorderSubstring(t, rec, "You've hit your usage limit.", 2*time.Second)
+	cancel()
+	<-done
+
 	if !strings.Contains(body, "You've hit your usage limit.") {
 		t.Fatalf("conversation stream body missing Codex system error: %s", body)
 	}
