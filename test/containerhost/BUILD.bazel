@@ -44,6 +44,7 @@ go_test(
         "GC_SESSION_DOCKER_SCRIPT": "$(rootpath //scripts:gc-session-docker)",
         "GC_SESSION_K8S_SCRIPT": "$(rootpath //contrib:session-scripts/gc-session-k8s)",
     },
+    shard_count = 3,
     deps = [
         "//internal/bazeltest",
         "//internal/runtime",
