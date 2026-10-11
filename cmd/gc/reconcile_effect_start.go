@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -133,7 +134,7 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 		case prepared == nil:
 			return txStep{Fail: causePrepare, Err: prepErr}
 		}
-		return txStep{Write: startCommitPatch(prepared, v.Row, v.Now), Done: true, Facts: noted}
+		return txStep{Write: startCommit(prepared, v.Row, v.Now), Done: true, Facts: noted}
 	}
 }
 
@@ -162,6 +163,17 @@ func runtimeCause(row session.Info, rt *txRuntime) string {
 		return causeOccupied
 	}
 	return causeAttribution
+}
+
+// startCommit is startCommitPatch writing the state legacy's next tick
+// heals a started row to: awake where it writes active, its state_reason
+// kept (every canonical reader reads both as active).
+func startCommit(prepared *preparedStart, row session.Info, now time.Time) session.MetadataPatch {
+	patch := startCommitPatch(prepared, row, now)
+	if patch["state"] == string(session.StateActive) {
+		patch["state"] = string(session.StateAwake)
+	}
+	return patch
 }
 
 // creating reports a row in the creating state: S1's uncommitted intent.

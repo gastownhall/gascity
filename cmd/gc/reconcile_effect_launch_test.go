@@ -90,7 +90,7 @@ func TestLaunchCommitsThePreWakeToken(t *testing.T) {
 		t.Fatalf("settlement %+v, want landed, noted, with %+v", s, want)
 	}
 	token := k.meta("instance_token")
-	if k.meta("generation") != "4" || token == "tok" || k.meta("state") != "active" || k.meta("started_config_hash") == "" {
+	if k.meta("generation") != "4" || token == "tok" || k.meta("state") != "awake" || k.meta("started_config_hash") == "" {
 		t.Fatalf("row: generation %q token %q state %q", k.meta("generation"), token, k.meta("state"))
 	}
 	if st := k.starts(); len(st) != 1 || !st[0].FreshOnly || st[0].Token != token || !st[0].Created {
@@ -823,7 +823,7 @@ func TestLaunchCommitLandedThenContextEnds(t *testing.T) {
 	k.on(seamAfterWrite, func() {})                                   // PreWake's write
 	k.on(seamAfterWrite, func() { cancel(context.DeadlineExceeded) }) // the commit's write
 	s := k.run(ctx, effectSpecs[intentStart])
-	if s.Outcome != settledLanded || k.meta("state") != "active" || guard.breaker(k0).Status().State != resilience.StateClosed {
+	if s.Outcome != settledLanded || k.meta("state") != "awake" || guard.breaker(k0).Status().State != resilience.StateClosed {
 		t.Fatalf("settlement %+v, state %q, breaker %v; want landed, active, closed", s, k.meta("state"), guard.breaker(k0).Status().State)
 	}
 }
@@ -998,5 +998,28 @@ func TestPlannerHandsItsGuardToTheStartAndFlushes(t *testing.T) {
 	rt.planner.submit(w, &allocDecision{}, []intent{{Kind: intentStart, Key: rowKeyOf("gc-1")}})
 	if handed != guard {
 		t.Fatalf("the pass's start caps carry guard %p, want the host's %p", handed, guard)
+	}
+}
+
+// Kills the heartbeat-hold exemption widened or lost (v5.9i): A17's respawn
+// launches through an agent heartbeat's hold; an A18 start over the same row,
+// and A17 over an operator's hold, are refused held.
+func TestPreWakeExemptsTheHeartbeatHoldForA17Only(t *testing.T) {
+	soon := gatherNow.Add(time.Hour).Format(time.RFC3339)
+	for _, c := range []struct {
+		name, reason string
+		meta         []string
+		landed       bool
+	}{
+		{"A17 through a heartbeat hold", decideHeartbeatRespawn, []string{"held_until", soon}, true},
+		{"A18 over a heartbeat hold", decideStart, []string{"held_until", soon}, false},
+		{"A17 over an operator's hold", decideHeartbeatRespawn, []string{"held_until", soon, "sleep_intent", "user-hold"}, false},
+	} {
+		k, _ := launchKit(t, "asleep", c.meta...)
+		k.it.Reason = c.reason
+		s := k.runKind()
+		if landed := s.Outcome == settledLanded; landed != c.landed || (!landed && s.Cause != causeHeld) {
+			t.Errorf("%s: settlement %+v, want landed %v (else refused held)", c.name, s, c.landed)
+		}
 	}
 }

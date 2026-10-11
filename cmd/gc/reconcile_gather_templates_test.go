@@ -107,13 +107,19 @@ func (c *templateCity) pool(t *testing.T) session.Info {
 	})
 }
 
-// Kills a manual or pool row resolved on another kind's path, or with
-// another agent: the resolver's params equal those legacy's overlay puts in
-// desired state for the row (manual: sessionBeadQualifiedNameInfo and the
-// row's alias; pool: canonicalSessionIdentityWithConfigInfo's instance and
-// the trigger env).
+// Kills a manual row resolved on another kind's path, or with another
+// agent, and a wanted pool seat resolved off legacy's realize path: a manual
+// row's params equal those legacy's overlay puts in desired state
+// (sessionBeadQualifiedNameInfo and the row's alias); a pool seat takes its
+// slot's instance identity and instance agent, as realizePoolDesiredSessions
+// gives it (the session differential compares its start with legacy's).
 func TestTemplateResolverMatchesLegacyOverlay(t *testing.T) {
-	for _, kind := range []string{"manual", "pool"} {
+	c := newTemplateCity(t)
+	pool := newTemplateResolver(c.params()).Resolve(c.pool(t))
+	if pool.Err != nil || pool.TP.InstanceName != "polecat-2" || pool.TP.PoolSlot != 2 || pool.Agent == nil || pool.Agent.QualifiedName() != "polecat-2" {
+		t.Fatalf("pool seat: %+v (agent %v, err %v), want slot 2's instance polecat-2", pool.TP, pool.Agent, pool.Err)
+	}
+	for _, kind := range []string{"manual"} {
 		t.Run(kind, func(t *testing.T) {
 			c := newTemplateCity(t)
 			info := map[string]func(*testing.T) session.Info{"manual": c.manual, "pool": c.pool}[kind](t)
@@ -481,8 +487,8 @@ func TestTemplateResolverResolvesFromTheRowAlone(t *testing.T) {
 	bp := newAgentBuildParams("test-city", c.cityPath, c.cfg, runtime.NewFake(), templatesNow, counting, io.Discard)
 	counting.reads = 0
 	got := newTemplateResolver(bp).Resolve(info)
-	if got.Err != nil || got.Agent == nil || got.Agent.QualifiedName() != "polecat" || counting.reads != 0 {
-		t.Fatalf("resolution %+v (agent %v, err %v) after %d store reads; want polecat from the row alone", got.TP, got.Agent, got.Err, counting.reads)
+	if got.Err != nil || got.Agent == nil || got.Agent.QualifiedName() != "polecat-3" || counting.reads != 0 {
+		t.Fatalf("resolution %+v (agent %v, err %v) after %d store reads; want slot 3 of polecat from the row alone", got.TP, got.Agent, got.Err, counting.reads)
 	}
 	f := newGatherFixture(t, poolRow("gc-1", "", 1, "asleep", "common_name", "worker"))
 	resolved := 0

@@ -111,7 +111,7 @@ func TestAdoptCommitsAliveCurrentUncommittedRow(t *testing.T) {
 	if s.Outcome != settledLanded || len(s.Facts.Events) != 0 || s.Facts.Noted == nil || !s.Facts.Noted.At.Equal(since) {
 		t.Fatalf("settlement %+v, want landed, noted at the read's since, with no event", s)
 	}
-	if k.meta("state") != "active" || k.meta("pending_create_claim") != "" || k.meta("started_config_hash") == "" || k.meta("instance_token") != "tok" || k.meta("sleep_reason") != "" {
+	if k.meta("state") != "awake" || k.meta("pending_create_claim") != "" || k.meta("started_config_hash") == "" || k.meta("instance_token") != "tok" || k.meta("sleep_reason") != "" {
 		t.Fatalf("row after the adopt: state %q claim %q hash %q token %q sleep_reason %q", k.meta("state"), k.meta("pending_create_claim"), k.meta("started_config_hash"), k.meta("instance_token"), k.meta("sleep_reason"))
 	}
 }

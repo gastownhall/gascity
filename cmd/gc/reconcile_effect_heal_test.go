@@ -379,7 +379,7 @@ func TestAwakeHealDecidesAgainOnTheFreshRow(t *testing.T) {
 // marker is set lands the heal and the marker's clear in its one CAS, the
 // merged patch decided again on the fresh row.
 func TestFreshHealLandsItsFoldedItemsInOneCAS(t *testing.T) {
-	c := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
+	c := newHealCase(t, livenessGone, desireSleep, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
 	it, s := c.run(t, gone().tmux(), nil)
 	if it.Kind != intentRowHealFresh || s.Outcome != settledLanded {
 		t.Fatalf("intent (%q, %q), settlement %+v, want the fresh heal landed", it.Kind, it.Reason, s)
@@ -405,7 +405,7 @@ func TestFreshHealDecidesItsFoldOnTheFreshRow(t *testing.T) {
 		if c.marker != "" {
 			meta = append(meta, "detached_at", c.marker)
 		}
-		hc := newHealCase(t, livenessGone, desireWake, meta...)
+		hc := newHealCase(t, livenessGone, desireSleep, meta...)
 		hc.before = func() {
 			if err := hc.store.SetMetadataBatch(hc.k.ID, map[string]string{"detached_at": c.write}); err != nil {
 				t.Error(err)
@@ -435,7 +435,7 @@ func TestOnlyFreshKindsRestOnTheRuntime(t *testing.T) {
 		rests rests
 	}{
 		{"creating heal", newHealCase(t, livenessGone, desireNone, "state", "creating"), intentRowHealFresh, restRuntime},
-		{"dead-runtime heal", newHealCase(t, livenessGone, desireWake, "state", "active"), intentRowHealFresh, restRuntime},
+		{"dead-runtime heal", newHealCase(t, livenessGone, desireSleep, "state", "active"), intentRowHealFresh, restRuntime},
 		{"awake heal", ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle"), intentRowHealFresh, restRuntime},
 		{"stranded clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour)), intentRowHeal, 0},
 		{"claim clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true"), intentRowHeal, 0},
@@ -504,7 +504,7 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 	}
 	rows := map[string]func() *healCase{
 		"creating":     func() *healCase { return newHealCase(t, livenessGone, desireNone, "state", "creating") },
-		"dead runtime": func() *healCase { return newHealCase(t, livenessGone, desireWake, "state", "active") },
+		"dead runtime": func() *healCase { return newHealCase(t, livenessGone, desireSleep, "state", "active") },
 		"asleep, own":  func() *healCase { return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle") },
 	}
 	for rowName, row := range rows {

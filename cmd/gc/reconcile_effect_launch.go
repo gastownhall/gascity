@@ -129,8 +129,9 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 			}
 		}
 	}
-	_, _, patch := preWakePatch(v.Row, v.Now, f.token)
-	next := foldInfo(foldInfo(v.Row, patch), f.bind)
+	base := foldInfo(v.Row, v.It.Patch) // a dead committed row's heal and accrual (A6 item 4)
+	_, _, patch := preWakePatch(base, v.Now, f.token)
+	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
 	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent {
@@ -173,14 +174,19 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return txStep{Refuse: causeSessionName}
-	case session.HoldsInfo(v.Row, v.Now).In&preWakeHolds != 0 || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
+	case session.HoldsInfo(v.Row, v.Now).In&preWakeHoldsFor(v) != 0 || session.IsKillPendingInfo(v.Row, v.Now): // TODO(R7): Disposition
 		return txStep{Refuse: causeHeld}
 	case v.RT.Class != rtAbsent:
 		return txStep{Refuse: causeRuntimePresent}
 	}
 	tp := ticket.launch.tp
-	_, _, patch := preWakePatch(v.Row, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
+	base := foldInfo(v.Row, v.It.Patch)
+	patch := maps.Clone(v.It.Patch)
+	if patch == nil {
+		patch = session.MetadataPatch{}
+	}
+	_, _, wake := preWakePatch(base, v.Now, f.token)
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
 	if len(f.reset) > 0 {
@@ -195,6 +201,15 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
 	return txStep{Write: patch, Facts: effectFacts{Work: f.work}, Pass: launchPass{launchRow: launch, transcript: transcript, ticket: ticket}}
+}
+
+// preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
+// by the agent heartbeat's hold it respawns through (v5.9i).
+func preWakeHoldsFor(v txView) session.Hold {
+	if v.It.Reason == decideHeartbeatRespawn && heartbeatHeld(v.Row, v.Now) {
+		return preWakeHolds &^ session.HoldTimer
+	}
+	return preWakeHolds
 }
 
 // triggerEnvKeys are the template env keys a row's trigger stamps
@@ -236,6 +251,9 @@ type startOutcome struct {
 // its slack, the stale-key wait after a start with a key, and the commit's
 // reads.
 func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, error) {
+	if res, ok := in.w.Templates.launchTemplate(in.row, c.start.clock.Now()); ok { // the bound row, at the tick (its prompt's beacon)
+		in.tp, in.agent = res.TP, res.Agent
+	}
 	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.transcript)
 	if err != nil {
 		return startOutcome{}, err
@@ -302,7 +320,7 @@ func commitStep(v txView) txStep {
 	default:
 		return txStep{Refuse: cause}
 	}
-	patch := startCommitPatch(out.prepared, v.Row, v.Now)
+	patch := startCommit(out.prepared, v.Row, v.Now)
 	maps.Copy(patch, out.mcp)
 	if out.accrued {
 		patch[startupHealthActiveCountMetadataKey], patch[startupHealthActiveKindMetadataKey] = "0", ""

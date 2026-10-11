@@ -265,7 +265,10 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 			return k
 		}
 	}
-	if a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
+	// An agent heartbeat's hold (held_until with no intent) does not hold
+	// A17's respawn (v5.9i): waking a row it alone holds is no violation.
+	heartbeat := len(owned) == 1 && owned[0] == "held_until" && !quarantined && strings.TrimSpace(m["sleep_intent"]) == ""
+	if !heartbeat && a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
 		return "state"
 	}
 	return ""

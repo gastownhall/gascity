@@ -1,6 +1,8 @@
 package main
 
 import (
+	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,14 +143,67 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // asleep with runtime-missing, which A21's pool-slot close can free; a named
 // row no close arm takes would otherwise read active forever. A row still
 // holding a claim is armClaimClear's first, as legacy projects it
-// start-pending. A heartbeat-held row waits for A17 (C5b): healed, A21 would
-// close the seat legacy respawns through its hold (SESS-602).
+// start-pending. The heal carries the death's accrual (deadRuntimePatch). A
+// row a start arm restarts this pass (A17, A18) gets that start here: it
+// carries the same patch, with A6's later items folded in, into its
+// PreWake's CAS, so the restart takes no extra pass, as legacy heals and
+// wakes in one tick.
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || heartbeatHeld(info, r.w.Now) || !r.freshGone() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
 		return intent{}, false
 	}
-	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, asleepHealPatch(info))
+	if it, ok := r.restart(); ok && it.Kind == intentStart {
+		r.rests |= it.Rests
+		return it, true
+	}
+	patch, _ := deadRuntimePatch(r)
+	return r.heal(intentRowHealFresh, decideDeadRuntimeHeal, patch)
+}
+
+// deadRuntimePatch is legacy's write for a committed row whose runtime is
+// gone, in legacy's order: the state heal (SESS-531), then the death's
+// accrual (SESS-537 a wake failure inside the stability threshold, SESS-538
+// churn before the productivity threshold, or a productive death's churn
+// clear), each edge-triggered by clearing last_woke_at. A drain the row asked
+// for is no crash. The provider-screen lane (rate limit, terminal error) is
+// C5a3's classification; a wake failure's conversation reset is the PreWake's
+// stale-key clear, which probes the transcript as legacy's does.
+//
+// accrued reports a wake failure or churn recorded, after which legacy skips
+// the row for the tick ("record, fold, continue"): A18 starts it on the next
+// pass, as legacy's next tick does.
+func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
+	info := r.row.Info
+	patch = asleepHealPatch(info)
+	_, draining := activeStop(r.row)
+	until := r.w.Now.Add(defaultQuarantineDuration)
+	var accrual session.ExitAccrual
+	switch session.DecideSessionExit(session.ExitFacts{
+		SubprocessProvider: r.w.Env != nil && r.w.Env.Cfg != nil && r.w.Env.Cfg.Session.Provider == "subprocess",
+		DrainPending:       draining, PendingCreateClaim: info.PendingCreateClaim, SleepReason: info.SleepReason, LastWokeAt: info.LastWokeAt,
+		Now: r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
+	}) {
+	case session.ExitRapidCrash:
+		attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
+		accrual = session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, until)
+	case session.ExitChurn:
+		if strings.TrimSpace(foldInfo(info, patch).SessionKey) != "" {
+			maps.Copy(patch, session.ConversationResetPatch(false))
+		}
+		cycles, _ := strconv.Atoi(info.ChurnCount)
+		accrual = session.ChurnAccrualPatch(cycles, defaultMaxChurnCycles, until)
+	case session.ExitProductiveDeath:
+		if info.ChurnCount != "" && info.ChurnCount != "0" {
+			patch["churn_count"] = "0"
+		}
+		return patch, false
+	default:
+		return patch, false
+	}
+	maps.Copy(patch, accrual.Patch)
+	patch["last_woke_at"] = ""
+	return patch, true
 }
 
 // heartbeatHeld reports a live hold no sleep intent explains: SESS-602's

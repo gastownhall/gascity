@@ -401,10 +401,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return s.lane.cache },
-		Templates: func(*reconcileEnv, time.Time) templateResolver {
-			return templateResolver{Resolve: func(info session.Info) templateResolution {
-				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
-			}}
+		Episodes: func() (map[string]session.StartupHealthEpisode, error) {
+			return readStartupHealthEpisodes(s.legs[0].cache)
+		},
+		// The production resolver over the sessions leg, so a v2 start
+		// launches the template legacy's start launches.
+		Templates: func(env *reconcileEnv, now time.Time) templateResolver {
+			return newTemplateResolver(newAgentBuildParams("test-city", s.env.CityPath, env.Cfg, env.SP, now, s.legs[0].cache, io.Discard))
 		},
 		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
 	}

@@ -284,7 +284,8 @@ func TestSimStabilityClearsAcrossTime(t *testing.T) {
 // Kills the detached-at marker (v5.8 A6 item 7; SESS-533/535/536) lost or
 // stuck across time, on an interactive row under a sleep policy: a detach
 // stamps the pass time, an attach clears it, the next detach stamps its own
-// time, and the runtime's death clears it in the dead-runtime heal's one CAS.
+// time, and the runtime's death clears it in the same-pass restart's PreWake
+// CAS, which carries the dead-runtime heal.
 func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), workFor("gc-1"))
 	s.cfg.Agents[0].SleepAfterIdle = "5m"
@@ -309,8 +310,8 @@ func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 			t.Fatalf("at %s: detached_at %q, want %q", s.clk.Now().Sub(plannerT0), got, want)
 		}
 	}
-	if m := s.gc1(); m["state"] != "asleep" {
-		t.Fatalf("row %v, want the dead runtime healed asleep", m)
+	if m := s.gc1(); m["state"] != "awake" || m["generation"] != "2" {
+		t.Fatalf("row %v, want the wanted row restarted in the pass its runtime died", m)
 	}
 	s.noViolations(t)
 }
@@ -319,8 +320,8 @@ func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
 // or named rows: a pool row AL1 wants asleep (quarantined, its work waiting)
 // whose runtime dies heals to asleep with runtime-missing and its
 // continuation reset, which A21's pool-slot close can free. A heartbeat-held
-// row waits for A17 while its hold runs, and heals once the timer heal has
-// cleared the expired hold.
+// one heals alike: A17 would respawn it through its hold, but its quarantine
+// holds the respawn.
 func TestSimDeadRuntimeHealFreesAnUnwantedRow(t *testing.T) {
 	for _, held := range []bool{false, true} {
 		t.Run(fmt.Sprintf("held %t", held), func(t *testing.T) { deadRuntimeHealAcrossTime(t, held) })
@@ -339,7 +340,7 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 	s.sp.mu.Unlock()
 	s.advance(simPatrol)
 	s.settle()
-	if got := s.gc1()["state"]; held != (got == "active") {
+	if got := s.gc1()["state"]; got != "asleep" {
 		t.Fatalf("held %t: state %q after the runtime died", held, got)
 	}
 	s.advance(2 * time.Minute)

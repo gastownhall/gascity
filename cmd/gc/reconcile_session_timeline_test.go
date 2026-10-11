@@ -512,7 +512,9 @@ func runTimeline(t *testing.T, f timelineFixture, arms func([]rowArm) []rowArm, 
 		}
 		if st.Op != nil {
 			st.Op(lw.twin(t))
+			vw.s.sp.external = true // an operator's step, not a v2 effect (I4/I5 judge v2's kills only)
 			st.Op(vw.twin(t))
+			vw.s.sp.external = false
 			vw.delivered()
 			r.lprev, r.vprev = lw.outcome(t), vw.outcome(t)
 			state = r.n.view(r.lprev, r.lprev, lw.sp.simProvider)
@@ -850,18 +852,23 @@ func tlPol(id string) map[string]string {
 
 func tlIdent() map[string]string { return map[string]string{"row:gc-1:*identity": "A7 identity"} }
 
-// tlStartState is the row and runtime legacy's start of row id under name
-// leaves, and tlStarted that start in its own step; v2 leaves both to A18.
-func tlStartState(id, name string) map[string]string {
-	return map[string]string{"row:" + id + ":*start": "A18 start", "runtime:" + name: "A18 start"}
+// tlStartState is the row and runtime a start of row gc-1 under s-gc-1
+// leaves, and tlStarted that start in its own step, accounted to cause: a
+// start one copy makes and the other does not.
+func tlStartState(cause string) map[string]string {
+	return map[string]string{"row:gc-1:*start": cause, "runtime:s-gc-1": cause}
 }
 
-func tlStarted(id, name, subject string) map[string]string {
-	return tlMerged(tlStartState(id, name), map[string]string{"provider:Start " + name: "A18 start", "provider:RemoveMeta " + name: "A18 start", "event:session.woke " + subject + " null": "A18 start"})
+func tlStarted(subject, cause string) map[string]string {
+	return tlMerged(tlStartState(cause), map[string]string{"provider:Start s-gc-1": cause, "provider:RemoveMeta s-gc-1": cause, "event:session.woke " + subject + " null": cause})
 }
 
-func tlAccrued() map[string]string {
-	return map[string]string{"row:gc-1:*accrual": "stability-accrual"}
+// tlRestarted is a restart of row gc-1 under s-gc-1 both copies make, as
+// subject: legacy's runtime metadata clears (§12.2 #38), v2's session.woke
+// recorded when the start's settlement drains, a pass later, and v2's commit
+// writing the awake state legacy's next tick heals its active to.
+func tlRestarted(subject string) map[string]string {
+	return map[string]string{"provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears", "event:session.woke " + subject + " null": "woke-at-drain", "row:gc-1:state": "commit-writes-awake"}
 }
 
 // stabilityTimeline is SESS-537..540 through time, on a pool of one whose
@@ -904,11 +911,10 @@ func stabilityTimeline() []timelineFixture {
 	// the stability clear.
 	drained := map[string]string{"provider:SetMeta s-gc-1": "A20 drain-begin", "provider:RemoveMeta s-gc-1": "A20 drain-begin"}
 	lagged := map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}
-	restarted := tlStarted("gc-1", "s-gc-1", "worker")
 	return []timelineFixture{
-		crashAfter(29*time.Second, tlMerged(restarted, tlAccrued())),
-		crashAfter(31*time.Second, tlMerged(tlAccrued(), map[string]string{"row:gc-1:last_woke_at": "stability-accrual"})),
-		crashAfter(5*time.Minute, restarted),
+		crashAfter(29*time.Second, tlRestarted("worker")),
+		crashAfter(31*time.Second, nil),
+		crashAfter(5*time.Minute, tlRestarted("worker")),
 		quarantinedAt(29*time.Second, map[string]map[string]string{
 			"seed": drained, "alive": drained, "settled": tlMerged(drained, lagged),
 		}),
@@ -986,7 +992,10 @@ func idleTimeline() []timelineFixture {
 		}, chatStanding, map[string]map[string]string{
 			"idle past sleep_after_idle": sleeping,
 			"the next pass":              slept,
-			"the sleep policy changes":   tlMerged(tlStarted("gc-c", chatName, "chat"), map[string]string{"row:gc-c:*idle": "A20 idle-sleep"}),
+			"the sleep policy changes": {
+				"row:gc-c:*idle": "A20 idle-sleep", "runtime:" + chatName: "A20 idle-sleep",
+				"provider:Start " + chatName: "A20 idle-sleep", "provider:RemoveMeta " + chatName: "A20 idle-sleep", "event:session.woke chat null": "A20 idle-sleep",
+			},
 		})
 	idle.Setup = func(tw twin) {
 		tw.sp.mu.Lock()
@@ -1106,18 +1115,23 @@ func operatorTimeline() []timelineFixture {
 			tw.t.Fatal(err)
 		}
 	}
-	restarted := tlMerged(tlIdent(), tlStarted("gc-1", "s-gc-1", "worker-1"))
-	// woken is the woken row: legacy restarts it, consuming the wake request
-	// (D7) in its start, which v2 leaves to A18; settled, the row it leaves.
-	wakeRequest := map[string]string{"row:gc-1:wake_request": "A18 start", "row:gc-1:wake_requested_at": "A18 start"}
-	woken := tlMerged(restarted, wakeRequest)
-	settled := tlMerged(tlIdent(), tlStartState("gc-1", "s-gc-1"), wakeRequest)
+	// restarted is a restart both copies make: legacy's runtime metadata
+	// clears and its next tick's active-to-awake heal.
+	restarted := tlMerged(tlIdent(), tlRestarted("worker-1"))
+	// woken is the managed-suspended row woken: legacy heals it asleep and
+	// restarts it, consuming the wake request (D7) in its start; v2 keeps it
+	// suspended (mc-92clf), so it neither restarts nor consumes the wake;
+	// settled, the row each leaves.
+	unhealed := "suspended-row-heal"
+	wakeRequest := map[string]string{"row:gc-1:wake_request": unhealed, "row:gc-1:wake_requested_at": unhealed}
+	woken := tlMerged(tlIdent(), tlStarted("worker-1", unhealed), wakeRequest)
+	settled := tlMerged(tlIdent(), tlStartState(unhealed), wakeRequest)
 	// healed is legacy's state heal of the suspended row whose runtime is
 	// gone: asleep, under the hold; v2 keeps it suspended.
 	healed := map[string]string{"row:gc-1:state": "suspended-row-heal"}
 	// restamped is the suspend stamp a legacy start keeps and v2's heal of
 	// the woken, still-dead row replaces.
-	restamped := map[string]string{"row:gc-1:suspended_at": "A18 start", "row:gc-1:slept_at": "A18 start"}
+	restamped := map[string]string{"row:gc-1:suspended_at": unhealed, "row:gc-1:slept_at": unhealed}
 	// gc session suspend with no controller to own it (Manager.Suspend): the
 	// runtime stops and the row takes the operator hold
 	// (the disposition's Suspend cell) in one step, so its work, assigned by
@@ -1135,7 +1149,7 @@ func operatorTimeline() []timelineFixture {
 			{Name: "wake", Advance: 20 * time.Second, Op: wake},
 			{Name: "the next pass", Advance: time.Minute},
 		}, standing, map[string]map[string]string{
-			"seed": tlAliasSeed(), "suspend": tlMerged(tlIdent(), healed), "wake": tlMerged(woken, restamped), "the next pass": tlMerged(settled, restamped),
+			"seed": tlAliasSeed(), "suspend": tlMerged(tlIdent(), healed), "wake": tlMerged(restarted, restamped, healed), "the next pass": tlMerged(tlIdent(), restamped),
 		})
 	// gc session suspend under a controller writes the same operator hold
 	// (session.Store.OperatorSuspend) on a live runtime, and legacy drains
@@ -1175,7 +1189,7 @@ func operatorTimeline() []timelineFixture {
 	// releases it and closes the seat with no fresh seat (owner ruling B1).
 	kill := func(blocked bool) timelineFixture {
 		name, work := "kill a seat holding a ready claim", tlClaim("open", "gc-1")
-		graced := tlMerged(restarted, map[string]string{"row:gc-1:sleep_reason": "A18 start"})
+		graced := restarted
 		if blocked {
 			name = "kill a seat holding a dep-blocked claim"
 			work = append(work, parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}})
@@ -1211,7 +1225,7 @@ func operatorTimeline() []timelineFixture {
 			}},
 			{Name: "the next pass", Advance: time.Minute},
 		}, standing, map[string]map[string]string{
-			"seed": tlAliasSeed(), "swap": tlMerged(restarted, tlAccrued()), "the next pass": tlMerged(tlIdent(), tlStartState("gc-1", "s-gc-1"), tlAccrued()),
+			"seed": tlAliasSeed(), "swap": restarted, "the next pass": tlIdent(),
 		})
 	// A kill fence and a quarantine, each holding the row from waking for its
 	// work until it expires. Legacy heals the expired quarantine under the
@@ -1224,9 +1238,7 @@ func operatorTimeline() []timelineFixture {
 			{Name: "the kill fence expires", At: 6 * time.Minute},
 		}, tlIdent(), map[string]map[string]string{
 			"the quarantine expires": {"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal"},
-			"the kill fence expires": tlMerged(tlPol("gc-1"), restarted, map[string]string{
-				"row:gc-1:sleep_reason": "A18 start", "row:gc-1:currently_processing_bead_id": "A18 start", "row:gc-1:*fenced": "§12.2#35 fenced-timer-heal",
-			}),
+			"the kill fence expires": tlMerged(tlPol("gc-1"), restarted, map[string]string{"row:gc-1:*fenced": "§12.2#35 fenced-timer-heal", "row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence}
 }
