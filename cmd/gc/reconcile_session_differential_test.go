@@ -1863,7 +1863,7 @@ func TestFreshDrainBeginsReachAdmission(t *testing.T) {
 		}},
 		{"no-wake-reason", intentDrainBeginFresh + ":gc-c", parityFixture{
 			City:     chatNapping,
-			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine", "alias", "chat", "agent_name", "chat", "session_origin", "named")}, // its identity converged: A7 takes no pass
 			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
 		}},
 	} {
