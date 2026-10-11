@@ -64,7 +64,7 @@ type plannerRuntime struct {
 	lane    atomic.Pointer[externalReadsLane] // built at start
 	env     atomic.Pointer[reconcileEnv]
 	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
-	softReload func(intent reloadIntent, r *reloadControlReply)
+	softReload func(ctx context.Context, intent reloadIntent, r *reloadControlReply)
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
 	readyOnce  sync.Once

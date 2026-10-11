@@ -286,6 +286,11 @@ const (
 	// site's facts: the drain basis, so an agent's heartbeat (held_until)
 	// cannot starve the begin; its Decide re-decides on the fresh row.
 	premiseDrainBasis
+	// premiseBaseline: a baseline write (A8). The default premise with the
+	// registry's FactsBaseline site's facts: the incarnation, the stored
+	// config hash and the stop request; its Decide re-decides on the fresh
+	// row.
+	premiseBaseline
 )
 
 // section is one span of an effect under the row's session mutation lock,
@@ -838,11 +843,13 @@ func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string)
 			return []string{"no own write"}
 		}
 		return session.FactsCommit.Moved(fresh, t.facts0)
-	case premiseDefault, premiseClose, premiseDrainBasis:
+	case premiseDefault, premiseClose, premiseDrainBasis, premiseBaseline:
 		site := session.FactsDefault
 		switch {
 		case rule == premiseDrainBasis:
 			site = session.FactsDrainBasis
+		case rule == premiseBaseline:
+			site = session.FactsBaseline
 		case t.started:
 			site = session.FactsAfterStart
 		}

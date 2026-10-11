@@ -168,6 +168,14 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = healRec.keys
 		}},
+		{"v2 A8 baseline effect", "core_hash_breakdown live_hash started_config_hash started_launch_hash started_live_hash started_provision_hash", []string{"cmd/gc/reconcile_baseline.go:baselinePatch"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "started_config_hash", "v5:core")
+			baseRec := newSessionKeyRecorder(c.store)
+			if it, st := c.run(t, nil, baseRec); it.Kind != intentBaseline || st.Outcome != settledLanded {
+				t.Fatalf("A8 settled %+v for %+v", st, it)
+			}
+			rec.keys = baseRec.keys
+		}},
 		{"waits, claim markers and the circuit breaker", "continuation_claim_nudge_at continuation_claim_nudge_count continuation_claim_nudge_generation continuation_claim_nudge_root continuation_claim_nudge_store_ref continuation_claim_nudge_work execution_claim_nudge_at execution_claim_nudge_count execution_claim_nudge_root execution_claim_nudge_store_ref execution_claim_nudge_work session_circuit_last_observed session_circuit_last_progress session_circuit_last_restart session_circuit_open_restart_count session_circuit_opened_at session_circuit_progress_signature session_circuit_reset_generation session_circuit_restarts session_circuit_state sleep_intent wait_hold wait_lookup_capped_at wait_lookup_capped_label wait_lookup_capped_limit wait_lookup_capped_source", []string{"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced", "cmd/gc/cmd_wait.go:doSessionWait", "internal/session/waits.go:StampWaitLookupCapMetadata", "cmd/gc/idle_nudge.go:writeContinuationClaimMarker", "cmd/gc/execution_backstop.go:writeExecutionClaimMarker", "cmd/gc/session_circuit_breaker.go:sessionCircuitBreaker.metadataLocked"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			id := fieldRow(t, rec.MemStore, "state", "active", "wait_hold", "true", "sleep_intent", "wait-hold")
 			front := sessionFrontDoor(rec)
@@ -320,9 +328,12 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			return fieldBead(t, env.store, b.ID).Metadata
 		}},
 		"internal/session/lifecycle_transition.go:PreWakePatch": {
-			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending"},
-			patchSite(func(session.Info) session.MetadataPatch {
-				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now})
+			[]string{
+				"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "detached_at", ago(time.Hour), "sleep_intent", "idle-stop-pending",
+				"started_config_hash", "v6:core", "started_live_hash", "v6:live", "live_hash", "v6:live",
+			},
+			patchSite(func(session.Info) session.MetadataPatch { // a fresh wake, which clears the baseline too
+				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
 			}),
 		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {

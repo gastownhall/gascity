@@ -1299,6 +1299,15 @@ func parityFixtures() []parityFixture {
 			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "configured_named_mode", "on_demand", "started_config_hash", "v5:core")},
 			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
 		},
+		// A wanted asleep named row whose start a gate holds (a quarantine)
+		// is rebaselined too: A8 leaves only a row its start commits this
+		// pass, so a later drift repair (C7b) never takes a v5 hash for a
+		// drift and rotates its key.
+		{
+			Name: "a wanted asleep named row its start holds is rebaselined", Behaviors: []string{"SESS-567"}, City: chat(false),
+			Rows:    []parityRow{chatRow("gc-c", "1", "session_name", "chat", "started_config_hash", "v5:core", "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
 		// A10's rollback (C5a2's effect): legacy rolls an undesired pending
 		// create back past its deadline; v2's arm waits for the effect.
 		{

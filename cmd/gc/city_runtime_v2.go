@@ -265,7 +265,7 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 	r := cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
 	cr.v2.publishEnv()
 	if r.Outcome != reloadOutcomeFailed {
-		cr.v2.softReload(reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
+		cr.v2.softReload(p.ctx, reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
 	cr.v2.planner.markDirty("reload")
 	p.manualReply = r

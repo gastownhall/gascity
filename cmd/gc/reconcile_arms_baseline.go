@@ -21,22 +21,23 @@ const (
 // armBaseline is A8. A legacy or version-mismatched stored config hash is
 // rebaselined, whatever the liveness, as legacy's silent rebaseline does (no
 // drain, no restart); a missing or empty one never is (the next start commit
-// baselines it), nor is a row its start will commit this pass. Once the core
+// baselines it), nor is a row the start arms start this pass (the start
+// commits it). Once the core
 // hash matches, an alive row's empty live hash with no session_live config
 // is backfilled, and a legacy or mismatched one rebaselined, as legacy's
 // alive drift block does. Under an open soft reload for this generation, a
-// desired row's drifted config is accepted once (legacy's
+// desired row's drifted config is accepted (legacy's
 // acceptConfigDriftAcrossSessions), with a config-drift stop request still
 // only requested canceled in the same CAS. The hashes are this
 // generation's template for the row as written (the memo).
 func armBaseline(r *rowFacts) (intent, bool) {
 	info, e := r.row.Info, r.entry
 	stored := strings.TrimSpace(info.StartedConfigHash)
-	if e == nil || (e.Desired == desireWake && e.Liveness.startCandidate()) {
+	if e == nil {
 		return intent{}, false
 	}
 	cfg, core, ok := r.w.coreHash(info)
-	if !ok {
+	if !ok || r.startsThisPass() {
 		return intent{}, false
 	}
 	switch storedLive, live := info.StartedLiveHash, runtime.LiveFingerprint(cfg); {
@@ -46,7 +47,7 @@ func armBaseline(r *rowFacts) (intent, bool) {
 		if req, ok := activeStop(r.row); ok && req.Reason == drainConfigDrift && req.Phase == stopRequested {
 			maps.Copy(patch, stopCancelPatch())
 		}
-		return r.heal(intentBaseline, decideBaselineSoftReload, patch)
+		return r.heal(intentBaseline, r.w.SoftReload.Reason, patch)
 	case stored != core || e.Liveness != livenessAlive || storedLive == live:
 		return intent{}, false
 	case storedLive == "" && len(cfg.SessionLive) == 0:
@@ -72,5 +73,18 @@ func (w *World) coreHash(info session.Info) (runtime.Config, string, bool) {
 // owesSoftReload reports a desired row whose drifted stored hash the open
 // soft reload has yet to accept; a missing one is never drift.
 func (w *World) owesSoftReload(k rowKey, e *selectionEntry, stored, core string) bool {
-	return stored != "" && stored != core && e.InDesired && w.SoftReload.accepts(k, w.Env.Gen)
+	return stored != "" && stored != core && e.InDesired && w.Env != nil && w.SoftReload.accepts(k, w.Env.Gen)
+}
+
+// owesSoftReload is World's, but for a row the start arms start this pass,
+// which A8 leaves to its start's commit: the rule A8 decides by.
+func (r *rowFacts) owesSoftReload(stored, core string) bool {
+	return r.w.owesSoftReload(r.k, r.entry, stored, core) && !r.startsThisPass()
+}
+
+// startsThisPass reports a start the start arms (A17, A18) propose for the
+// row this pass.
+func (r *rowFacts) startsThisPass() bool {
+	it, ok := r.restart()
+	return ok && it.Kind == intentStart
 }

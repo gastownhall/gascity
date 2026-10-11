@@ -87,7 +87,7 @@ type World struct {
 	Bucket      bucketState
 	Boot        bootState
 	Paused      bool            // starts paused for a provider swap (P7)
-	SoftReload  *softReloadView // an open soft reload, for A8 (M2)
+	SoftReload  *softReloadView // the open soft reload this pass read, for A8 (M2)
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool

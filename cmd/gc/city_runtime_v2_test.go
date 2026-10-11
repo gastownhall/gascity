@@ -442,7 +442,7 @@ func TestCityRuntimeV2ReloadReplyAfterPublish(t *testing.T) {
 	rt.publishEnv()
 	doneCh := cr.activeReload.doneCh
 	var amendGen uint64
-	rt.softReload = func(intent reloadIntent, r *reloadControlReply) {
+	rt.softReload = func(_ context.Context, intent reloadIntent, r *reloadControlReply) {
 		amendGen = rt.env.Load().Gen
 		v2SoftReloadUnavailable(intent, r)
 	}

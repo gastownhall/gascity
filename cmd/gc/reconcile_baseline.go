@@ -11,9 +11,10 @@ import (
 // started_config_hash, started_provision_hash, started_launch_hash,
 // core_hash_breakdown, started_live_hash and live_hash only through
 // baselinePatch, and through the legacy builders the reused paths emit
-// (CommitStartedPatch, ConversationResetPatch, RestartRequestPatch), and
-// cleared only through clearBaseline.
-// TestBaselineKeysOnlyThroughTheBuilder lints it.
+// (CommitStartedPatch, ConversationResetPatch, RestartRequestPatch,
+// PreWakePatch's fresh wake), and the create and reopen effects' starting
+// state. The session field registry declares each writer, and
+// TestSessionFieldsFlowsWriteTheirKeys runs them.
 
 // baselineReason is why a baseline moves; it picks the keys written.
 type baselineReason string
@@ -49,11 +50,4 @@ func baselinePatch(cfg runtime.Config, reason baselineReason) session.MetadataPa
 	patch["started_launch_hash"] = runtime.LaunchFingerprint(cfg)
 	patch["core_hash_breakdown"] = string(breakdown)
 	return patch
-}
-
-// clearBaseline is the stored config hash cleared with a continuation reset,
-// with the priming markers its clear always takes (S19's lifetime rule): a
-// missing hash never drifts, and the next start commit baselines it.
-func clearBaseline() session.MetadataPatch {
-	return session.MetadataPatch{"started_config_hash": "", session.PrimedAtMetadataKey: "", session.PrimingAttemptedAtMetadataKey: "", session.PromptHashMetadataKey: ""}
 }

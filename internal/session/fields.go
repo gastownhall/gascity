@@ -193,7 +193,8 @@ func with(fields []Field, asClear bool, site Site, keys ...string) []Field {
 
 // fields is the registry, grouped by class, then the writers of v2's create
 // (C1) and named reopen effects, which stamp a row's whole starting state.
-var fields = withObserved(with(with(with(with(registry, false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
+var fields = withObserved(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
+	"started_config_hash", "started_provision_hash", "started_launch_hash", "core_hash_breakdown", "started_live_hash", "live_hash"), false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
 	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 	"continuation_claim_nudge_count", "continuation_claim_nudge_at", "execution_claim_nudge_work", "execution_claim_nudge_root",
@@ -239,6 +240,9 @@ var observed = []struct {
 	{legacy(srcTransition, "ConfigDriftResetPatch"), true, []string{"restart_requested"}},
 	{legacy(srcTransition, "PreWakePatch"), false, []string{"sleep_reason"}},
 	{legacy(srcTransition, "PreWakePatch"), true, []string{"sleep_intent"}},
+	// A fresh wake's conversation reset (applyFreshWakeConversationReset),
+	// which v2's PreWake reuses: the baseline cleared for its commit.
+	{legacy(srcTransition, "PreWakePatch"), true, []string{"started_config_hash", "started_live_hash", "live_hash"}},
 	{legacy(srcTransition, "RestartRequestPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash"}},
 	{legacy(srcTransition, "RetireNamedSessionPatch"), false, []string{"pending_create_claim", "pending_create_started_at", "state", "state_reason"}},
 	{op(srcManager, "Manager.createBeadOnly"), false, []string{"continuation_epoch", "instance_token", "pending_create_claim", "pending_create_started_at", "provider", "resume_command", "resume_flag", "resume_style", "session_id_flag", "session_origin", "state", "work_dir"}},

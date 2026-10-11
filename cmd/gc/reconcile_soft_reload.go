@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"maps"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,27 +17,44 @@ import (
 // reply until it is done. A newer request, or a pass under a newer
 // generation, closes it.
 
-// softReloadReplyBound bounds only the reload's reply.
-const softReloadReplyBound = 30 * time.Second
+const (
+	// softReloadReplyBound bounds only the reload's reply.
+	softReloadReplyBound = 30 * time.Second
+	// softReloadRetries bounds a row's transient refusals (premise, CAS,
+	// redecided, name-busy) before it counts failed; each retry waits out
+	// the row's backoff.
+	softReloadRetries = 3
+)
+
+// softReloadSeq numbers requests, so an acceptance settles only its own.
+var softReloadSeq atomic.Uint64
 
 // softReloadRequest is one soft reload's acceptance.
 type softReloadRequest struct {
-	gen  uint64
-	done chan struct{} // closed once every drifted row was attempted, or the request closed
+	gen    uint64
+	reason string        // its acceptances' decide reason, which carries its number
+	done   chan struct{} // closed once every drifted row was attempted, or the request closed
 
 	mu        sync.Mutex
 	closed    bool
 	attempted map[rowKey]bool
+	retried   map[rowKey]int
 	result    softReloadAcceptanceResult
 }
 
 func newSoftReloadRequest(gen uint64) *softReloadRequest {
-	return &softReloadRequest{gen: gen, done: make(chan struct{}), attempted: make(map[rowKey]bool)}
+	return &softReloadRequest{
+		gen: gen, reason: decideBaselineSoftReload + "#" + strconv.FormatUint(softReloadSeq.Add(1), 10),
+		done: make(chan struct{}), attempted: make(map[rowKey]bool), retried: make(map[rowKey]int),
+	}
 }
 
-// softReloadView is what a pass reads of an open request.
+// softReloadView is what a pass reads of an open request: the request
+// itself, which only it closes, and the rows already attempted.
 type softReloadView struct {
+	Req       *softReloadRequest
 	Gen       uint64
+	Reason    string
 	Attempted map[rowKey]bool
 }
 
@@ -53,18 +73,24 @@ func (q *softReloadRequest) view() *softReloadView {
 	if q.closed {
 		return nil
 	}
-	return &softReloadView{Gen: q.gen, Attempted: maps.Clone(q.attempted)}
+	return &softReloadView{Req: q, Gen: q.gen, Reason: q.reason, Attempted: maps.Clone(q.attempted)}
 }
 
-// settle records s, an A8 acceptance, as attempted: accepted when it
-// landed, failed (by row ID) otherwise.
+// settle records s, one of q's own acceptances: accepted when it landed;
+// a transient refusal retries, up to softReloadRetries; anything else
+// counts failed (by row ID).
 func (q *softReloadRequest) settle(s settlement) {
-	if q == nil || s.Kind != intentBaseline || s.Reason != decideBaselineSoftReload {
+	if q == nil || s.Kind != intentBaseline || s.Reason != q.reason {
 		return
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed || q.attempted[s.Key] {
+		return
+	}
+	transient := s.Outcome == settledRefused && (s.Cause == causePremise || s.Cause == causeCAS || s.Cause == causeRedecided || s.Cause == causeNameBusy)
+	if transient && q.retried[s.Key] < softReloadRetries-1 {
+		q.retried[s.Key]++
 		return
 	}
 	q.attempted[s.Key] = true
@@ -96,26 +122,39 @@ func (q *softReloadRequest) reply(r *reloadControlReply) {
 	r.Warnings = append(r.Warnings, q.result.warnings()...)
 }
 
-// closeSoftReload closes the open request this pass read once no row is
-// owed an acceptance (a row in flight, or decided by an earlier arm, still
-// is). A pass under a newer generation closes it at once.
-func (p *planner) closeSoftReload(w *World, a *allocDecision) {
-	q := p.softReload.Load()
-	if q == nil || w.SoftReload == nil {
+// closeSoftReload closes the request this pass read, and only it: at once
+// under a newer generation; never from a pass under an older one, which
+// read its env before the reload published; otherwise once a complete
+// census owes no row an acceptance (a row in flight, or decided by an
+// earlier arm, still is). Its open count is the sessions leg's open rows,
+// as legacy counts them.
+func closeSoftReload(w *World, a *allocDecision) {
+	v := w.SoftReload
+	if v == nil {
 		return
 	}
-	desired := false
+	if w.Env.Gen > v.Gen {
+		v.Req.close(0, false)
+		return
+	}
+	if _, complete := w.Census.complete(); !complete || w.Env.Gen < v.Gen {
+		return
+	}
+	desired, open := false, 0
 	for k, e := range a.Snapshot.Entries {
 		desired = desired || e.InDesired
-		row, ok := w.Census.Rows[k]
-		if !ok || w.SoftReload.Gen != w.Env.Gen {
+		r := &rowFacts{w: w, k: k, entry: e}
+		if r.row, r.found = w.Census.Rows[k]; !r.found {
 			continue
 		}
-		if _, core, ok := w.coreHash(row.Info); ok && w.owesSoftReload(k, e, strings.TrimSpace(row.Info.StartedConfigHash), core) {
+		if len(w.Census.Legs) > 0 && k.Leg == w.Census.Legs[0].Ref {
+			open++
+		}
+		if _, core, ok := w.coreHash(r.row.Info); ok && r.owesSoftReload(strings.TrimSpace(r.row.Info.StartedConfigHash), core) {
 			return
 		}
 	}
-	q.close(len(w.Census.Rows), !desired)
+	v.Req.close(open, !desired)
 }
 
 // openSoftReload makes q the planner's open request, closing an older one.
@@ -128,8 +167,9 @@ func (p *planner) openSoftReload(q *softReloadRequest) {
 
 // acceptSoftReload is the reload's soft-reload hook under v2: it opens a
 // request for the published env's generation and amends r once every
-// drifted row was attempted, or at the bound.
-func (rt *plannerRuntime) acceptSoftReload(intent reloadIntent, r *reloadControlReply) {
+// drifted row was attempted, at the bound, or when ctx ends or the planner
+// stops.
+func (rt *plannerRuntime) acceptSoftReload(ctx context.Context, intent reloadIntent, r *reloadControlReply) {
 	env := rt.env.Load()
 	switch {
 	case !intent.Soft || env == nil:
@@ -145,6 +185,8 @@ func (rt *plannerRuntime) acceptSoftReload(intent reloadIntent, r *reloadControl
 	select {
 	case <-q.done:
 	case <-t.C():
+	case <-ctx.Done():
+	case <-rt.planner.done:
 	}
 	q.reply(r)
 }
