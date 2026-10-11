@@ -380,12 +380,16 @@ func managedDoltStartWaitForPortFree(host string, port int, retryWindow time.Dur
 	return managedDoltPortAvailableFn(host, port)
 }
 
+// managedDoltStartAddressInUseDefaultPoll is the default poll interval,
+// overridable in tests to avoid multi-second waits.
+var managedDoltStartAddressInUseDefaultPoll = 2 * time.Second
+
 // managedDoltStartAddressInUsePollInterval returns the per-iteration sleep for
 // managedDoltStartWaitForPortFree. Normally 2s; shrunk to the retry window
 // when the window is shorter so at least one check happens before the
 // deadline.
 func managedDoltStartAddressInUsePollInterval(retryWindow time.Duration) time.Duration {
-	const defaultPoll = 2 * time.Second
+	defaultPoll := managedDoltStartAddressInUseDefaultPoll
 	if retryWindow > 0 && retryWindow < defaultPoll {
 		return retryWindow
 	}

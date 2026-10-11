@@ -169,22 +169,25 @@ func TestManagedDoltStartAddressInUsePollInterval(t *testing.T) {
 // once, AND the flag flip to happen between the first sleep and the second
 // poll. Setup:
 //
-//   - window = 5s, so poll = default 2s (managedDoltStartAddressInUsePollInterval)
-//   - flag flips to "free" at 1s (during the first sleep)
-//   - first poll at t=0 returns busy, then sleep(2s)
-//   - second poll at t=2s returns free → in-loop return true
+//   - window = 200ms, poll = 20ms (managedDoltStartAddressInUseDefaultPoll)
+//   - flag flips to "free" at 10ms (during the first sleep)
+//   - first poll at t=0 returns busy, then sleep(20ms)
+//   - second poll at t=20ms returns free → in-loop return true
 //
-// We assert elapsed roughly matches that second-poll wake (~2s), well below
-// the 5s deadline; if the post-deadline check were the only path, elapsed
-// would be ≥ 5s. We also assert at least one sleep happened (elapsed > 1.5s),
+// We assert elapsed roughly matches that second-poll wake (~20ms), well below
+// the 200ms deadline; if the post-deadline check were the only path, elapsed
+// would be ≥ 200ms. We also assert at least one sleep happened (elapsed >= 10ms),
 // so a degenerate "first poll already true" wouldn't accidentally pass.
 func TestManagedDoltStartWaitForPortFree_WakesMidWindowOnInLoopCheck(t *testing.T) {
 	orig := managedDoltPortAvailableFn
 	defer func() { managedDoltPortAvailableFn = orig }()
+	origPoll := managedDoltStartAddressInUseDefaultPoll
+	managedDoltStartAddressInUseDefaultPoll = 20 * time.Millisecond
+	defer func() { managedDoltStartAddressInUseDefaultPoll = origPoll }()
 
 	var free int32
 	go func() {
-		time.Sleep(1 * time.Second)
+		time.Sleep(10 * time.Millisecond)
 		atomic.StoreInt32(&free, 1)
 	}()
 	managedDoltPortAvailableFn = func(_ string, _ int) bool {
@@ -192,16 +195,16 @@ func TestManagedDoltStartWaitForPortFree_WakesMidWindowOnInLoopCheck(t *testing.
 	}
 
 	start := time.Now()
-	got := managedDoltStartWaitForPortFree("0.0.0.0", 17360, 5*time.Second)
+	got := managedDoltStartWaitForPortFree("0.0.0.0", 17360, 200*time.Millisecond)
 	elapsed := time.Since(start)
 	if !got {
 		t.Fatalf("expected port to become free within window, got false (elapsed=%s)", elapsed)
 	}
-	if elapsed < 1500*time.Millisecond {
-		t.Fatalf("expected at least one sleep before wake (~2s); only waited %s — degenerate first-poll-true path?", elapsed)
+	if elapsed < 10*time.Millisecond {
+		t.Fatalf("expected at least one sleep before wake (~20ms); only waited %s — degenerate first-poll-true path?", elapsed)
 	}
-	if elapsed > 4*time.Second {
-		t.Fatalf("wake should fire on second poll (~2s), but waited %s; in-loop wake path may be broken (post-deadline final check would be ~5s)", elapsed)
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("wake should fire on second poll (~20ms), but waited %s; in-loop wake path may be broken (post-deadline final check would be ~200ms)", elapsed)
 	}
 }
 
