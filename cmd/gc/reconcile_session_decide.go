@@ -84,7 +84,7 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 //
 //gc:pure
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
-	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k], partial: a.Snapshot.Mode == modePartial}
+	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k], partial: len(a.Snapshot.Partial.Global) > 0}
 	r.row, r.found = w.Census.Rows[k]
 	if f := w.fresh; f != nil && f.k == k {
 		r.fresh = f.rt
@@ -140,7 +140,8 @@ type rowFacts struct {
 	next  time.Time
 	rests rests      // what the arm deciding reads through the fresh accessors
 	fresh *txRuntime // the effect's fresh runtime read (World.withRuntime), else nil
-	// partial is a partial pass (P-3): nothing closes.
+	// partial is a pass with a global partial cause (P-3): nothing closes.
+	// Not the snapshot's mode, which a suspended city overwrites.
 	partial bool
 }
 

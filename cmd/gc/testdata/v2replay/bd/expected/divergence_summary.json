@@ -6,6 +6,7 @@
   "legacy_no_action_records": {},
   "divergences_by_family": {
     "harness gap": 1,
-    "unexplained": 2
+    "replay approximation": 1,
+    "unexplained": 1
   }
 }

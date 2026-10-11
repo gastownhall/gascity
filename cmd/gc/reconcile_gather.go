@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -561,7 +562,22 @@ func (m *gatherMemo) sleepPolicies(cfg *config.City, env *reconcileEnv, rows []c
 // censusPhantoms is c's SESS-080 phantoms under cfg (World.Phantoms).
 func censusPhantoms(c *sessionCensus, cfg *config.City, cityName string) map[rowKey][]string {
 	out := map[rowKey][]string{}
+	if cfg == nil || len(cfg.NamedSessions) == 0 {
+		return out
+	}
+	// names are the configured names' runtime names, built once: only a row
+	// under one can be a phantom, so the predicate runs on those alone.
+	names := map[string]bool{}
+	city := cmp.Or(strings.TrimSpace(cityName), config.EffectiveCityName(cfg, ""))
+	for i := range cfg.NamedSessions {
+		if identity := cfg.NamedSessions[i].QualifiedName(); identity != "" {
+			names[config.NamedSessionRuntimeName(city, cfg.Workspace, identity)] = true
+		}
+	}
 	for k, row := range c.Rows {
+		if !names[strings.TrimSpace(row.Info.SessionNameMetadata)] {
+			continue
+		}
 		identity, ok := recyclableDeadConfiguredNamePhantomInfo(row.Info, cfg, cityName)
 		if !ok {
 			continue

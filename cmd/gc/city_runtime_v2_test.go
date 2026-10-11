@@ -1617,13 +1617,17 @@ func TestV2ExecutorSeesThePreserveSessionsShutdown(t *testing.T) {
 }
 
 // Kills the v2 stranded-work detector never running: the controller's one
-// alerter reaches the planner host, and the started lane's orphan-release
-// step holds it (D25, D26).
+// alerter reaches the planner host and the planner (A21's close cascade
+// strands through it), and the started lane's orphan-release step holds it
+// (D25, D26).
 func TestV2LaneHoldsTheControllersStrandedAlerter(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
 	rt := attachTestV2(t, cr)
 	if rt.host.stranded == nil || rt.host.stranded != cr.strandedClaimAlerter() {
 		t.Fatalf("host alerter = %p, want the controller's %p", rt.host.stranded, cr.strandedClaimAlerter())
+	}
+	if rt.planner.stranded != cr.strandedClaimAlerter() {
+		t.Fatal("the planner does not hold the controller's alerter")
 	}
 	rt.publishEnv()
 	rt.start(context.Background())

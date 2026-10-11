@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"maps"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +30,7 @@ type closeCase struct {
 	k     rowKey
 	cfg   *config.City
 	rec   *events.Fake
+	bare  bool // run without the close's around: the effect alone holds
 }
 
 func newCloseCase(t *testing.T, liveness rowLiveness, desired desire, meta ...string) *closeCase {
@@ -69,7 +73,11 @@ func (c *closeCase) run(t *testing.T, sp runtime.Provider) settlement {
 	p := newEffectPass(&w, c.a)
 	p.held.release = newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, io.Discard)
 	p.held.release.cfg = c.cfg
-	return runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	spec := effectSpecs[it.Kind]
+	if c.bare {
+		spec.around = nil
+	}
+	return runTx(context.Background(), p, it, spec, nil)
 }
 
 func (c *closeCase) row(t *testing.T) beads.Bead {
@@ -99,8 +107,10 @@ func TestArmCloseDecides(t *testing.T) {
 		drain    string
 		meta     []string
 		partial  bool
-		want     string // decide reason, "" for none
-		check    func(t *testing.T, it intent)
+		// citySuspended is a city suspend.
+		citySuspended bool
+		want          string // decide reason, "" for none
+		check         func(t *testing.T, it intent)
 	}{
 		{
 			name: "a committed gone row AL1 drains as orphaned (A21 owns it, not A6)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active"},
@@ -111,10 +121,26 @@ func TestArmCloseDecides(t *testing.T) {
 			},
 		},
 		{
-			name: "a suspended drain closes with its reason", liveness: livenessGone, desired: desireDrain, drain: drainSuspended, meta: []string{"state", "asleep"},
+			name: "an agent-suspended pool seat closes with its reason, releasing as legacy's orphan does", liveness: livenessGone, desired: desireDrain, drain: drainSuspended, meta: []string{"state", "asleep"},
 			want: decideCloseOrphan, check: func(t *testing.T, it intent) {
-				if it.Patch["state"] != "suspended" || it.Closing.Orphaned {
-					t.Errorf("patch %v closing %+v, want suspended, not orphaned", it.Patch, it.Closing)
+				if it.Patch["state"] != "suspended" || !it.Closing.Orphaned {
+					t.Errorf("patch %v closing %+v, want suspended and orphaned", it.Patch, it.Closing)
+				}
+			},
+		},
+		{
+			name: "a suspended configured named row keeps its work", liveness: livenessGone, desired: desireDrain, drain: drainSuspended, meta: []string{"state", "asleep", "configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", ""},
+			want: decideCloseOrphan, check: func(t *testing.T, it intent) {
+				if it.Closing.Orphaned {
+					t.Errorf("closing %+v, want not orphaned", it.Closing)
+				}
+			},
+		},
+		{
+			name: "a city suspend keeps a pool seat's work", liveness: livenessGone, desired: desireDrain, drain: drainSuspended, meta: []string{"state", "asleep"}, citySuspended: true,
+			want: decideCloseOrphan, check: func(t *testing.T, it intent) {
+				if it.Closing.Orphaned {
+					t.Errorf("closing %+v, want not orphaned", it.Closing)
 				}
 			},
 		},
@@ -161,11 +187,21 @@ func TestArmCloseDecides(t *testing.T) {
 			},
 		},
 		{name: "a user-held slot keeps it", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "sleep_intent", "user-hold"}},
+		{name: "a desired floor seat asleep for no wake reason keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "no-wake-reason", "slept_at", at(-time.Hour)}},
+		{name: "a desired seat asleep for config drift keeps its slot", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour)}},
+		{name: "an undesired pool row under a user hold keeps its slot (§12.2 #27)", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "sleep_intent", "user-hold"}},
+		{name: "an undesired pool row under a wait hold keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "wait_hold", "w-1"}},
+		{name: "an undesired pool row under a quarantine keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep", "quarantined_until", at(time.Hour)}},
+		{name: "an undesired pool row under a hold timer keeps its slot", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended", "held_until", at(time.Hour)}},
+		{name: "an undesired suspended pool row with no hold closes", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "suspended"}, want: decideCloseOrphan},
 		{
-			name: "a wisp-tier suspended row frees its slot (A10)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "suspended", "session_origin", "ephemeral"},
-			want: decideClosePoolSlot,
+			name: "a future-dated marker counts as aged (§12.2 #24)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), strandedEventEmittedKey, at(time.Hour)},
+			want: decideClosePoolSlot, check: func(t *testing.T, it intent) {
+				if !it.Closing.Repair {
+					t.Errorf("closing %+v, want the repair", it.Closing)
+				}
+			},
 		},
-		{name: "a held wisp-tier row keeps it (§12.2 #27)", liveness: livenessGone, desired: desireSleep, meta: []string{"state", "suspended", "session_origin", "ephemeral", "held_until", at(time.Hour)}},
 		{name: "a live runtime", liveness: livenessAlive, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "asleep"}},
 		{name: "a dead row that claims a live runtime is C5c2's", liveness: livenessDead, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "active"}},
 	} {
@@ -174,8 +210,11 @@ func TestArmCloseDecides(t *testing.T) {
 			e := c.entry()
 			e.Reason, e.DrainReason = tc.reason, tc.drain
 			if tc.partial {
-				c.a.Snapshot.Mode = modePartial
+				// A suspended city overwrites the partial mode; the global
+				// cause still holds the close (SESS-060).
+				c.a.Snapshot.Mode, c.a.Snapshot.Partial.Global = modeSuspended, []string{causeStoreQueryPartial}
 			}
+			c.w.CitySuspended = tc.citySuspended
 			it := c.decide()
 			if it.Reason != tc.want && (tc.want != "" || it.Kind == intentClose) {
 				t.Fatalf("decideRow = (%q, %q), want %q", it.Kind, it.Reason, tc.want)
@@ -205,9 +244,22 @@ func TestArmCloseKeepsAPhantomsIdentity(t *testing.T) {
 }
 
 // The close effect, end to end on a gone runtime (C3 steps 2-5).
+// Each case runs through the close's around and without it: the precheck
+// saves a lease, and the effect alone keeps every claim it must (B1, L5).
 func TestCloseEffect(t *testing.T) {
+	for _, bare := range []bool{false, true} {
+		t.Run(map[bool]string{false: "around", true: "bare"}[bare], func(t *testing.T) { closeEffectCases(t, bare) })
+	}
+}
+
+func closeEffectCases(t *testing.T, bare bool) {
+	mk := func(t *testing.T, liveness rowLiveness, desired desire, meta ...string) *closeCase {
+		c := newCloseCase(t, liveness, desired, meta...)
+		c.bare = bare
+		return c
+	}
 	t.Run("a committed gone orphan closes, and its cascade runs", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireDrain, "state", "active")
+		c := mk(t, livenessGone, desireDrain, "state", "active")
 		c.entry().DrainReason = drainOrphaned
 		s := c.run(t, gone().tmux())
 		if s.Outcome != settledLanded || !s.Closed {
@@ -218,20 +270,20 @@ func TestCloseEffect(t *testing.T) {
 		}
 	})
 	t.Run("work holds the close, with no lease taken", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireDrain, "state", "asleep")
-		c.entry().DrainReason = drainSuspended
+		c := mk(t, livenessGone, desireDrain, "state", "asleep")
+		c.entry().DrainReason, c.w.CitySuspended = drainSuspended, true
 		c.work(t, "in_progress", routedClaim())
 		before := c.row(t).Metadata[session.RuntimeLeaseEpochKey]
 		s := c.run(t, gone().tmux())
 		if s.Outcome != settledRefused || s.Cause != causeHasWork {
 			t.Fatalf("settlement %+v, want refused has-work", s)
 		}
-		if b := c.row(t); b.Status == "closed" || b.Metadata[session.RuntimeLeaseEpochKey] != before {
+		if b := c.row(t); b.Status == "closed" || !bare && b.Metadata[session.RuntimeLeaseEpochKey] != before {
 			t.Fatalf("row %s epoch %q (was %q), want open and unleased", b.Status, b.Metadata[session.RuntimeLeaseEpochKey], before)
 		}
 	})
 	t.Run("an orphaned orphan releases its served claim, then closes (SESS-082)", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireDrain, "state", "asleep")
+		c := mk(t, livenessGone, desireDrain, "state", "asleep")
 		c.entry().DrainReason = drainOrphaned
 		claim := c.work(t, "in_progress", routedClaim())
 		s := c.run(t, gone().tmux())
@@ -243,7 +295,7 @@ func TestCloseEffect(t *testing.T) {
 		}
 	})
 	t.Run("an orphaned orphan closes over a claim no lane serves, keeping it (O5)", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireDrain, "state", "asleep")
+		c := mk(t, livenessGone, desireDrain, "state", "asleep")
 		c.entry().DrainReason = drainOrphaned
 		claim := c.work(t, "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
 		s := c.run(t, gone().tmux())
@@ -251,15 +303,32 @@ func TestCloseEffect(t *testing.T) {
 			t.Fatalf("settlement %+v, want the close landed", s)
 		}
 		got, _ := c.store.Get(claim.ID)
-		if got.Assignee != c.k.ID || got.Metadata[beadmeta.StrandedSessionMetadataKey] != c.k.ID {
-			t.Fatalf("claim assignee %q stamp %q, want kept and stamped", got.Assignee, got.Metadata[beadmeta.StrandedSessionMetadataKey])
+		if got.Assignee != c.k.ID {
+			t.Fatalf("claim assignee %q, want kept", got.Assignee)
+		}
+		if bare {
+			return // the stamp and alert are the around's cascade
+		}
+		if got.Metadata[beadmeta.StrandedSessionMetadataKey] != c.k.ID {
+			t.Fatalf("claim stamp %q, want stamped", got.Metadata[beadmeta.StrandedSessionMetadataKey])
 		}
 		if evts, _ := c.rec.List(events.Filter{Type: events.SessionStrandedClaims}); len(evts) != 1 {
 			t.Fatalf("session.stranded_claims = %d, want 1", len(evts))
 		}
 	})
+	t.Run("a suspended orphan keeps a claim no lane serves and stays open", func(t *testing.T) {
+		c := mk(t, livenessGone, desireDrain, "state", "asleep")
+		c.entry().DrainReason, c.w.CitySuspended = drainSuspended, true
+		claim := c.work(t, "in_progress", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+		if s := c.run(t, gone().tmux()); s.Cause != causeHasWork || c.row(t).Status == "closed" {
+			t.Fatalf("settlement %+v, want refused has-work: only an orphaned orphan closes over stranded work", s)
+		}
+		if got, _ := c.store.Get(claim.ID); got.Assignee != c.k.ID {
+			t.Fatalf("claim assignee %q, want kept", got.Assignee)
+		}
+	})
 	t.Run("an unmarked pool slot with work is stamped stranded (SESS-624)", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		c.work(t, "in_progress", routedClaim())
 		s := c.run(t, gone().tmux())
 		b := c.row(t)
@@ -271,7 +340,7 @@ func TestCloseEffect(t *testing.T) {
 		}
 	})
 	t.Run("an aged marker unclaims, then closes stranded-repair (SESS-625)", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		claim := c.work(t, "in_progress", routedClaim())
 		s := c.run(t, gone().tmux())
 		if b := c.row(t); s.Outcome != settledLanded || b.Metadata["state"] != strandedRepairCloseReason {
@@ -282,7 +351,7 @@ func TestCloseEffect(t *testing.T) {
 		}
 	})
 	t.Run("a killed seat gives back its unexecuted claim, then closes (B1)", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		claim := c.work(t, "open", routedClaim())
 		s := c.run(t, gone().tmux())
 		if s.Outcome != settledLanded || c.row(t).Status != "closed" {
@@ -293,19 +362,30 @@ func TestCloseEffect(t *testing.T) {
 		}
 	})
 	t.Run("a killed seat holding started work keeps it, unleased (B1)", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		started := c.work(t, "in_progress", routedClaim())
 		before := c.row(t).Metadata[session.RuntimeLeaseEpochKey]
 		s := c.run(t, gone().tmux())
-		if s.Cause != causeHasWork || c.row(t).Status == "closed" || c.row(t).Metadata[session.RuntimeLeaseEpochKey] != before {
+		if s.Cause != causeHasWork || c.row(t).Status == "closed" || !bare && c.row(t).Metadata[session.RuntimeLeaseEpochKey] != before {
 			t.Fatalf("settlement %+v, want refused has-work", s)
 		}
 		if got, _ := c.store.Get(started.ID); got.Assignee != c.k.ID {
 			t.Fatalf("started claim assignee %q, want kept", got.Assignee)
 		}
 	})
+	t.Run("a killed seat keeps an open claim its row names current (B1)", func(t *testing.T) {
+		c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		claim := killedSeatNamesClaim(t, c)
+		before := c.row(t).Metadata[session.RuntimeLeaseEpochKey]
+		if s := c.run(t, gone().tmux()); s.Cause != causeHasWork || c.row(t).Status == "closed" || !bare && c.row(t).Metadata[session.RuntimeLeaseEpochKey] != before {
+			t.Fatalf("settlement %+v, want refused has-work (with the around, unleased)", s)
+		}
+		if got, _ := c.store.Get(claim.ID); got.Assignee != c.k.ID {
+			t.Fatalf("named claim assignee %q, want kept", got.Assignee)
+		}
+	})
 	t.Run("a live pane refuses", func(t *testing.T) {
-		c := newCloseCase(t, livenessGone, desireDrain, "state", "asleep")
+		c := mk(t, livenessGone, desireDrain, "state", "asleep")
 		c.entry().DrainReason = drainOrphaned
 		live := &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: "1"}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"}}
 		s := c.run(t, live.tmux())
@@ -313,6 +393,34 @@ func TestCloseEffect(t *testing.T) {
 			t.Fatalf("settlement %+v, want refused", s)
 		}
 	})
+}
+
+// killedSeatNamesClaim gives c's row an open claim it names as its current
+// bead: B1's execution evidence beyond in_progress.
+func killedSeatNamesClaim(t *testing.T, c *closeCase) beads.Bead {
+	t.Helper()
+	claim := c.work(t, "open", routedClaim())
+	if err := c.store.SetMetadataBatch(c.k.ID, map[string]string{session.CurrentBeadIDKey: claim.ID}); err != nil {
+		t.Fatal(err)
+	}
+	c.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c.store))
+	return claim
+}
+
+// flakyListStore fails List while fail is set.
+type flakyListStore struct {
+	beads.Store
+	fail *atomic.Bool
+}
+
+// ConditionalWritesResolveTarget keeps the inner store's fenced writes.
+func (s flakyListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+func (s flakyListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.fail.Load() {
+		return nil, errors.New("transient list failure")
+	}
+	return s.Store.List(q)
 }
 
 // corpseRead is a fresh read that finds a corpse of the close case's row;
@@ -362,8 +470,9 @@ func TestCloseEffectEdges(t *testing.T) {
 	t.Run("a corpse on a row that claims a live runtime is not A21's", func(t *testing.T) {
 		c := newCloseCase(t, livenessGone, desireDrain, "state", "active")
 		c.entry().DrainReason = drainOrphaned
-		if s := c.run(t, corpseRead(c, false, false).tmux()); s.Cause != causeRedecided || c.row(t).Status == "closed" {
-			t.Fatalf("settlement %+v, want refused redecided", s)
+		f := corpseRead(c, false, false)
+		if s := c.run(t, f.tmux()); s.Cause != causeRedecided || c.row(t).Status == "closed" || f.Fake.CountCalls("KillCorpseObject", "s-close") != 0 {
+			t.Fatalf("settlement %+v kills %d, want refused redecided with no kill", s, f.Fake.CountCalls("KillCorpseObject", "s-close"))
 		}
 	})
 	t.Run("a live pane refuses live-pane", func(t *testing.T) {
@@ -396,6 +505,73 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("settlement %+v, want refused release-failed and the row open", s)
 		}
 	})
+	t.Run("a precheck read failure runs the effect, which keeps a named claim (B1)", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		claim := killedSeatNamesClaim(t, c)
+		var fail atomic.Bool
+		fail.Store(true)
+		c.w.WorkLegs = testWorkLegs(c.w.CityPath, c.cfg, flakyListStore{Store: c.store, fail: &fail}, nil)
+		orig := withRowMutationLock
+		withRowMutationLock = func(id string, fn func() error) error {
+			fail.Store(false) // the effect's first section: the precheck is over
+			return orig(id, fn)
+		}
+		t.Cleanup(func() { withRowMutationLock = orig })
+		s := c.run(t, gone().tmux())
+		if got, _ := c.store.Get(claim.ID); got.Assignee != c.k.ID || s.Cause != causeHasWork {
+			t.Fatalf("settlement %+v claim assignee %q, want refused has-work with the claim kept", s, got.Assignee)
+		}
+	})
+	t.Run("a detached probe alive keeps the slot unstamped (SESS-624)", func(t *testing.T) {
+		installFakeTmux(t, "exit 0")
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c.work(t, "in_progress", detachedClaim())
+		s := c.run(t, gone().tmux())
+		if b := c.row(t); s.Cause != causeStranded || b.Metadata[strandedEventEmittedKey] != "" || len(s.Facts.Events) != 0 {
+			t.Fatalf("settlement %+v marker %q, want refused stranded with no marker and no event", s, b.Metadata[strandedEventEmittedKey])
+		}
+	})
+	t.Run("a detached probe dead stamps the slot (SESS-624)", func(t *testing.T) {
+		installFakeTmux(t, "exit 1")
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c.work(t, "in_progress", detachedClaim())
+		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || c.row(t).Metadata[strandedEventEmittedKey] == "" {
+			t.Fatalf("settlement %+v, want the marker stamped", s)
+		}
+	})
+	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
+		installFakeTmux(t, "exit 0") // the claim's detached probe is alive
+		c := orphan(t)
+		claim := c.work(t, "in_progress", detachedClaim())
+		s := c.run(t, gone().tmux())
+		if got, _ := c.store.Get(claim.ID); c.row(t).Status == "closed" || got.Assignee != c.k.ID {
+			t.Fatalf("settlement %+v row %s claim assignee %q, want the row open and the claim kept", s, c.row(t).Status, got.Assignee)
+		}
+	})
+	t.Run("the cascade releases nothing on a row open again", func(t *testing.T) {
+		c := orphan(t)
+		claim := c.work(t, "in_progress", routedClaim())
+		rel := newCloseReleases(c.w, &strandedClaimAlerts{rec: c.rec}, io.Discard)
+		rel.cfg = c.cfg
+		rel.cascade(context.Background(), c.decide()) // the row never closed
+		if got, _ := c.store.Get(claim.ID); got.Assignee != c.k.ID {
+			t.Fatalf("claim assignee %q, want kept: the cascade runs only on a closed row", got.Assignee)
+		}
+	})
+	t.Run("a probe left without time counts as not alive", func(t *testing.T) {
+		installFakeTmux(t, "exit 0") // alive, were it asked
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		claim := c.work(t, "in_progress", detachedClaim())
+		w := *c.w
+		w.Env = &reconcileEnv{Cfg: c.cfg}
+		ctx, cancel := context.WithTimeout(context.Background(), detachedProbeDefaultTimeout/2)
+		defer cancel()
+		v := txView{It: c.decide(), World: &w, Row: c.w.Census.Rows[c.k].Info, Fence: txFence{Work: &txWork{}}}
+		got, err := strandedProbe(ctx, effectReads{legs: c.w.WorkLegs}, v)
+		if err != nil || got.alive || !slices.Equal(got.ids, []string{claim.ID}) {
+			t.Fatalf("probe = %+v, %v: want the claim counted stranded, unprobed", got, err)
+		}
+	})
 	t.Run("an unparseable marker with work takes no lease", func(t *testing.T) {
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), strandedEventEmittedKey, "soon")
 		c.work(t, "in_progress", routedClaim())
@@ -404,6 +580,14 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("settlement %+v epoch %q (was %q), want refused has-work with no lease", s, c.row(t).Metadata[session.RuntimeLeaseEpochKey], before)
 		}
 	})
+}
+
+// detachedClaim is a routed claim with a detached runtime installFakeTmux
+// answers for.
+func detachedClaim() map[string]string {
+	meta := routedClaim()
+	meta[beadmeta.DetachedMetadataKey] = "tmux:gctest-c5c1:handoff"
+	return meta
 }
 
 // L5's identity set by kind (O4): a close reads the narrow ReleaseScope, any

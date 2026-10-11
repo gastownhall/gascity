@@ -74,13 +74,14 @@ func asClose(sec section) section {
 	return sec
 }
 
-// strandedOnlyProbe reads, for an orphaned orphan whose L5 still finds work
-// after its release, whether every claim left is one no lane serves under
-// the cascade's rule: the close then lands over them, and the cascade keeps,
-// stamps and alerts on them (O5, revised).
+// strandedOnlyProbe reads, for an orphan whose L5 still finds work after
+// its release, whether every claim left is one no lane serves under the
+// cascade's rule: an orphaned orphan's close then lands over them (closeStep
+// decides which), and the cascade keeps, stamps and alerts on them (O5,
+// revised).
 func strandedOnlyProbe(_ context.Context, r effectReads, v txView) (bool, error) {
 	c := v.It.Closing
-	if c.Kind != closeOrphan || !c.Orphaned || v.Fence.Work == nil || v.Fence.Work.Free || v.World.Env == nil {
+	if c.Kind != closeOrphan || v.Fence.Work == nil || v.Fence.Work.Free || v.World.Env == nil {
 		return false, nil
 	}
 	scope := releaseScope(v.Row, v.World.Env.Cfg)
@@ -162,9 +163,13 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	}
 	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
 	out := strandedWork{searched: true}
+	deadline, bounded := ctx.Deadline()
 	for _, item := range work {
 		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
-		if spec == "" || probeDetachedWork(ctx, spec).Status != detachedProbeAlive {
+		// The probes share the Probe's bound: one left without time to run
+		// counts as not alive, as a timed-out probe does, so the stamp lands
+		// within the bound however many claims there are.
+		if spec == "" || bounded && time.Until(deadline) < detachedProbeDefaultTimeout || probeDetachedWork(ctx, spec).Status != detachedProbeAlive {
 			out.ids = append(out.ids, item.bead.ID)
 		}
 	}
@@ -266,13 +271,13 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 // closeAround runs the close, then its cascade once it landed. It runs
 // nothing when its precheck finds work the close's branches cannot act on:
 // the close would only refuse has-work, after taking the row's lease record.
-func closeAround(_ context.Context, a aroundCaps, run func() settlement) settlement {
+func closeAround(ctx context.Context, a aroundCaps, run func() settlement) settlement {
 	if !closeWorthRunning(a) {
 		return refused(causeHasWork)
 	}
 	s := run()
 	if s.Closed && a.release != nil {
-		a.release.cascade(a.it)
+		a.release.cascade(ctx, a.it)
 	}
 	return s
 }
@@ -300,26 +305,23 @@ func closeWorthRunning(a aroundCaps) bool {
 		return true
 	}
 	seat := releaseSeatOfInfo(c.Row)
-	direct := func(b beads.Bead) bool { _, ok := releaseRoute(cfg, b, seat.fallback, laneDirect); return ok }
+	// direct is the release's own lane rule: the killed seat's release
+	// stamps the seat's route (seatRoute), the orphan's none.
+	direct := func(b beads.Bead, fallback string) bool {
+		_, ok := releaseRoute(cfg, b, fallback, laneDirect)
+		return ok
+	}
 	switch {
 	case c.Killed:
-		started := slices.ContainsFunc(hits, func(h seatWorkHit) bool {
-			return h.bead.Status == "in_progress" || startedBy(c.Row, h.bead.ID)
-		})
-		return !started && slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead) })
+		started := slices.ContainsFunc(hits, func(h seatWorkHit) bool { return h.bead.Status == "in_progress" || seat.started[h.bead.ID] })
+		return !started && slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead, seat.fallback) })
 	case c.Kind == closeOrphan && c.Orphaned:
-		return slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead) }) ||
+		return slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead, "") }) ||
 			onlyStrandedWork(seatWorkFor(a.reads.legs, scope), c.Row)
 	case c.Kind == closePoolSlot:
 		return c.Repair || strings.TrimSpace(c.Row.StrandedEventEmittedAt) == ""
 	}
 	return false
-}
-
-// startedBy reports that info names id as the work it executes
-// (currently_processing_bead_id, current_claim_bead_id): execution evidence.
-func startedBy(info session.Info, id string) bool {
-	return id != "" && (strings.TrimSpace(info.CurrentlyProcessingBeadID) == id || strings.TrimSpace(info.CurrentClaimBeadID) == id)
 }
 
 // closeReleases are what a close's releases write through: the pass's raw
@@ -361,26 +363,50 @@ func (c *closeReleases) release(r closeRelease) (closeReleased, error) {
 // through ReleaseClaims, alerting on what no lane serves; then, for a pool
 // slot, prune its worker worktree when safe. Each step is best-effort, as
 // legacy's: errors go to stderr, and the orphan release is the fallback.
-func (c *closeReleases) cascade(it intent) {
+func (c *closeReleases) cascade(ctx context.Context, it intent) {
 	store := c.stores[it.Key.Leg]
 	if store == nil {
 		return
 	}
-	cancelStateAssignedToRetiredSessionBead(store, it.Key.ID, c.now, c.stderr)
 	b, err := store.Get(it.Key.ID)
-	if err != nil {
+	switch {
+	case err != nil:
 		fmt.Fprintf(c.stderr, "v2 close: reading closed session %s: %v\n", it.Key.ID, err) //nolint:errcheck // best-effort stderr
 		return
+	case b.Status != "closed": // reopened since its close: its claims are its own again
+		return
 	}
-	if it.Closing.Kind != closeFailedCreate {
+	cancelStateAssignedToRetiredSessionBead(store, it.Key.ID, c.now, c.stderr)
+	deadline, _ := ctx.Deadline() // the effect's: the cascade writes nothing past it
+	if it.Closing.Kind != closeFailedCreate && ctx.Err() == nil {
 		preserve := assigneePreserveSet(it.Closing.Preserve)
-		sw := seatWorkFor(c.legs, releaseScopeOfBead(b, c.cfg).except(preserve))
-		out := releaseWorkFromClosedSessionBeadExcept(store, sw, b, preserve, c.stderr)
+		scope := releaseScopeOfBead(b, c.cfg).except(preserve)
+		if err := clearSessionCurrentClaim(store, b.ID); err != nil {
+			fmt.Fprintf(c.stderr, "session beads: clearing current claim on closing session %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+		}
+		out, err := ReleaseClaims(seatWorkFor(c.legs, scope), scope, releaseSeatOfBead(b), releaseCloseCascade, ReleaseOpts{Late: true, Deadline: deadline})
+		logRelease(c.stderr, "closing", b.ID, out, err)
 		strand(c.alerts, releaseSeatOfBead(b), strings.TrimSpace(b.Metadata["state"]), out, c.now, c.stderr)
 	}
-	if it.Closing.Kind == closePoolSlot && c.cfg != nil {
+	if it.Closing.Kind == closePoolSlot && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {
 		pruneAgentHomeWorktreeIfSafeInfo(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
 	}
+}
+
+// workDirInUse reports an open session row on store, other than closed,
+// whose work dir is closed's: a successor in the same slot, whose worktree
+// the prune would remove (the cascade runs after the lease, not ordered
+// against the next pass). A failed read counts as in use.
+func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool {
+	dir := strings.TrimSpace(closed.Metadata[beadmeta.WorkDirMetadataKey])
+	if dir == "" {
+		return false
+	}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel, Metadata: map[string]string{beadmeta.WorkDirMetadataKey: dir}})
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(rows, func(r beads.Bead) bool { return r.ID != closed.ID && r.Status != "closed" })
 }
 
 // newCloseReleases is w's close release handles, alerting through alerts.

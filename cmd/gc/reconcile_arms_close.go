@@ -65,8 +65,7 @@ func armClose(r *rowFacts) (intent, bool) {
 	case e.Desired == desireNone && e.Reason == reasonFailedCreate:
 		it.Reason, it.Patch = decideCloseFailedCreate, failedCreateClosePatch(now)
 		it.Closing = closeSpec{Kind: closeFailedCreate}
-	case e.Desired == desireSleep && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) &&
-		(isPoolSessionSlotFreeableInfo(info, now) || wispSlotFreeable(info, now)):
+	case e.Desired == desireSleep && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) && isPoolSessionSlotFreeableInfo(info, now):
 		killed := strings.TrimSpace(info.SleepReason) == string(session.SleepReasonKilled)
 		aged, held := r.strandedMarker()
 		if held && !killed {
@@ -74,11 +73,16 @@ func armClose(r *rowFacts) (intent, bool) {
 		}
 		it.Reason, it.Patch = decideClosePoolSlot, session.ClosePatch(now, cmp.Or(strings.TrimSpace(info.SleepReason), "drained"))
 		it.Closing = closeSpec{Kind: closePoolSlot, Killed: killed, Repair: aged && !killed, Template: e.Template}
-	case e.Desired == desireDrain && e.DrainReason != "" && !info.PendingCreateClaim:
+	case e.Desired == desireDrain && e.DrainReason != "" && !info.PendingCreateClaim && !deliberatelyHeldPoolRow(info, now):
 		// An undesired pending create is A10's rollback, never a close. The
-		// close reason is the drain's: orphaned, or suspended (§12.2).
+		// close reason is the drain's: orphaned, or suspended (§12.2 #17).
+		// Its work is released as legacy's orphan close releases it: an
+		// agent's suspend keeps only a configured named row's work for its
+		// return, and legacy closes the rest as orphaned (SESS-082); a city
+		// suspend keeps every row's.
+		orphaned := e.DrainReason == drainOrphaned || !r.w.CitySuspended && !isNamedSessionInfo(info)
 		it.Reason, it.Patch = decideCloseOrphan, session.ClosePatch(now, e.DrainReason)
-		it.Closing = closeSpec{Kind: closeOrphan, Orphaned: e.DrainReason == drainOrphaned, Template: e.Template}
+		it.Closing = closeSpec{Kind: closeOrphan, Orphaned: orphaned, Template: e.Template}
 		if keep, ok := r.w.Phantoms[r.k]; ok {
 			// Both forms a claim on the configured identity can carry.
 			it.Closing.Phantom, it.Closing.Preserve = true, keep
@@ -110,21 +114,19 @@ func (r *rowFacts) freshClosable() bool {
 	return false
 }
 
-// wispSlotFreeable is A10's wisp-tier pool slot: an ephemeral row asleep or
-// suspended, in any state no deliberate hold (user-hold, wait-hold, a future
-// or unreadable held_until or quarantined_until) parks it in. Legacy's
-// MAINT-051 sweep, which does not run under v2, closes these whatever holds
-// them (§12.2 row 27).
+// deliberatelyHeldPoolRow is an undesired pool row a deliberate hold parks:
+// a user hold, a wait hold, or a future or unreadable held_until or
+// quarantined_until. A21 keeps its slot until the hold ends, stricter than
+// legacy's MAINT-051 sweep, which closes it whatever holds it (§12.2 #27,
+// v5.7 A10).
 //
 // TODO(R7): Disposition's KeepsSlot answers this from the hold kernel.
-func wispSlotFreeable(info session.Info, now time.Time) bool {
-	switch session.State(strings.TrimSpace(info.MetadataState)) {
-	case session.StateAsleep, session.StateSuspended:
-	default:
+func deliberatelyHeldPoolRow(info session.Info, now time.Time) bool {
+	if !isPoolManagedSessionInfo(info) {
 		return false
 	}
 	h := session.HoldsInfo(info, now)
-	return isEphemeralSessionInfo(info) && (h.In|h.Unknown)&(session.HoldUser|session.HoldWait|session.HoldTimer|session.HoldQuarantine) == 0
+	return (h.In|h.Unknown)&(session.HoldUser|session.HoldWait|session.HoldTimer|session.HoldQuarantine) != 0
 }
 
 // strandedMarker reads the stranded marker (SESS-624). held: it is still

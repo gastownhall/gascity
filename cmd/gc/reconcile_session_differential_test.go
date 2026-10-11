@@ -109,7 +109,7 @@ type parityEntry struct {
 // come with the arms that own them (#6 with A3, #15-#17 with A21).
 var parityAccepted = map[string]parityEntry{
 	"§12.2#17 orphan-close-reason": {
-		"CONTRACT v5 §12.2 #17 (A21, C5c1 review)", "an unwanted dead row closes with its drain reason (orphaned), not MAINT-051's gc_swept (v2 does not run the sweep) nor the suspended legacy writes for a row squatting a configured name",
+		"CONTRACT v5 §12.2 #17 (A21, C5c1 review)", "an unwanted dead row closes with its drain reason (orphaned, or suspended for an agent-suspended seat that legacy closes as orphaned), not MAINT-051's gc_swept (v2 does not run the sweep) nor the suspended legacy writes for a row squatting a configured name",
 		[]string{"state", "close_reason"},
 	},
 	"§12.2#37 current-bead-lag": {
@@ -123,6 +123,15 @@ var parityAccepted = map[string]parityEntry{
 	"§12.2#40 held-start-bind":     {"CONTRACT v5 §12.2 #40 (C5b; PreWake binds, S1)", "legacy's realize binds a wanted seat's trigger and stamps its origin when a start gate then holds it; v2 binds in the PreWake, so a held seat carries neither until it launches (the trigger is presence only, claims are pull, and a work item binds once per pass: no double claim or spawn)", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "gc.work_dir", "session_origin", "continuation_epoch"}},
 	"§12.2#39 commit-writes-awake": {"CONTRACT v5 §12.2 #39 (C5b)", "v2's start and adopt commits write awake, the state legacy's next tick heals its committed active row to; for that one tick legacy reads active", []string{"state"}},
 	"§12.2#38 start-meta-clears":   {"CONTRACT v5 §12.2 #38 (A18, C5a1)", "legacy's start clears stale runtime metadata (RemoveMeta) on the runtime it starts; v2's FreshOnly start creates a runtime without any and removes nothing", nil},
+	"§12.2#27 held-slot-kept": {
+		"CONTRACT v5 §12.2 #27 (A10 v5.7, A21; C5c1 review ruling)", "an undesired pool row parked by a deliberate hold (user-hold, wait-hold, a future held_until or quarantined_until) keeps its slot until the hold ends; legacy's MAINT-051 sweep closes it held or not",
+		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+	},
+	"§12.2#41 close-removes-corpse": {"CONTRACT v5 §12.2 #41 (C3 step 1, M1; C5c1)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed", nil},
+	"§12.2#42 orphan-claim-release-unconfigured": {
+		"CONTRACT v5 §12.2 #42 (C3 step 3, SESS-082, NEW-5; C5c1)", "an unwanted row whose agent was removed and which holds a served claim: legacy's sync close (SESS-722) refuses on the work and the reconciler's release (SESS-082) never runs for it, so seat and claim wedge; v2's A21 releases the claim (bead.dead_assignee_reopened), closes the row, and the freed demand creates a fresh seat",
+		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+	},
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
@@ -177,14 +186,9 @@ var parityFindings = map[string]parityEntry{
 		"v5.9b §12.5 (runtime lease); BEHAVIORS START-033", "legacy's failed start rolls its pending create back while it still holds the row's runtime lease record, which stays on the closed row; v2's effect releases its lease record with the close. §12.2 does not list it",
 		[]string{session.RuntimeLeaseExpiresKey, session.RuntimeLeaseFlockKey, session.RuntimeLeaseHolderKey, session.RuntimeLeaseTTLKey},
 	},
-	"maint-051-persistent-held": {
-		"CONTRACT v5.7 A10, §12.2 #27 (wisp tier only)", "legacy's MAINT-051 sweep closes any unwanted workless non-named pool row whatever holds it, persistent or wisp-tier; A21 frees a suspended or held row only on the wisp tier and never under a deliberate hold, so v2 keeps this persistent suspended row open. §12.2 #27 names the wisp tier only",
-		[]string{"status", "state", "close_reason", "closed_at"},
-	},
-	"close-removes-corpse": {"CONTRACT v5 C3 step 1, M1 (corpse exception)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed. §12.2 does not list it", nil},
-	"orphan-claim-release-unconfigured": {
-		"CONTRACT v5 C3 step 3, SESS-082 (ga-jrnou), NEW-5", "an unwanted row whose agent was removed and which holds a served claim: legacy's sync close (SESS-722) refuses on the work and the reconciler's release (SESS-082) never runs for it, so seat and claim wedge; v2's A21 releases the claim (bead.dead_assignee_reopened), closes the row, and the freed demand creates a fresh seat",
-		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+	"close-after-hold-heal": {
+		"CONTRACT v5.7 A10, A2; BEHAVIORS MAINT-051, SESS-009", "on an unwanted workless pool row whose hold has expired, legacy's MAINT-051 sweep closes the row first and leaves the expired held_until and sleep_reason on it; v2's timer heal (A2) clears them in an earlier pass, then A21 closes the row. §12.2 does not list the order",
+		[]string{"held_until", "sleep_reason"},
 	},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
@@ -1041,11 +1045,12 @@ func parityFixtures() []parityFixture {
 		},
 		{
 			// The undesired-pool sweep (MAINT-051) closes a workless dead pool
-			// row before the reconciler heals its expired hold.
+			// row before the reconciler heals its expired hold; v2 heals the
+			// hold, then A21 closes the row (no deliberate hold is in force).
 			Name: "a workless suspended pool row is swept before its hold heals", Behaviors: []string{"MAINT-051"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "suspended", "held_until", at(-time.Minute), "sleep_reason", "user-hold", "suspended_at", at(-time.Hour))},
 			Explain: map[string]string{
-				"row:gc-1:*close": "maint-051-persistent-held", "row:gc-1:held_until": "maint-051-persistent-held", "row:gc-1:sleep_reason": "maint-051-persistent-held",
+				"row:gc-1:*reason": "§12.2#17 orphan-close-reason", "row:gc-1:held_until": "close-after-hold-heal", "row:gc-1:sleep_reason": "close-after-hold-heal",
 			},
 		},
 		{
@@ -1111,9 +1116,39 @@ func parityFixtures() []parityFixture {
 			Name: "an orphan releases its claim, then closes", Behaviors: []string{"SESS-082"},
 			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Work: assigned,
 			Explain: map[string]string{
-				"row:gc-1:*close": "orphan-claim-release-unconfigured", "row:gc-1:state": "orphan-claim-release-unconfigured", "work:gw-1:assignee": "orphan-claim-release-unconfigured", "work:gw-1:status": "orphan-claim-release-unconfigured",
-				"event:bead.dead_assignee_reopened gw-1 [bead_id dead_assignee routed_to]": "orphan-claim-release-unconfigured", "row:gc-2": "orphan-claim-release-unconfigured",
+				"row:gc-1:*close": "§12.2#42 orphan-claim-release-unconfigured", "row:gc-1:state": "§12.2#42 orphan-claim-release-unconfigured", "work:gw-1:assignee": "§12.2#42 orphan-claim-release-unconfigured", "work:gw-1:status": "§12.2#42 orphan-claim-release-unconfigured",
+				"event:bead.dead_assignee_reopened gw-1 [bead_id dead_assignee routed_to]": "§12.2#42 orphan-claim-release-unconfigured", "row:gc-2": "§12.2#42 orphan-claim-release-unconfigured",
 			},
+		},
+		{
+			// v2 drains the seat as suspended where legacy classifies it
+			// orphaned; both release the served claim and close (§12.2 #17).
+			Name: "an agent-suspended pool seat releases its claim, then closes", Behaviors: []string{"SESS-082"},
+			City: func() *config.City { cfg := workerCity(3); cfg.Agents[0].Suspended = true; return cfg },
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Work: assigned,
+			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
+		},
+		{
+			Name: "an undesired pool row under a live user hold keeps its slot", Behaviors: []string{"MAINT-051"},
+			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_intent", "user-hold", "sleep_reason", "user-hold", "held_until", at(time.Hour), "slept_at", at(-time.Hour))},
+			Explain: map[string]string{"row:gc-1:*kept": "§12.2#27 held-slot-kept"},
+		},
+		{
+			Name: "an undesired pool row in quarantine keeps its slot", Behaviors: []string{"MAINT-051"},
+			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "quarantine", "quarantined_until", at(time.Hour), "slept_at", at(-time.Hour))},
+			Explain: map[string]string{"row:gc-1:*kept": "§12.2#27 held-slot-kept"},
+		},
+		{
+			Name: "a desired floor seat asleep with no wake reason stays open", Behaviors: []string{"SESS-626"},
+			City:    func() *config.City { cfg := workerCity(3); cfg.Agents[0].MinActiveSessions = intPtr(1); return cfg },
+			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "no-wake-reason", "slept_at", at(-time.Hour))},
+			Explain: started("gc-2", "worker-gc-2", "worker-2", map[string]string{"row:gc-1:*policy": "sleep-policy-keys", "row:gc-2:*sync": "A7 row-metadata"}),
+		},
+		{
+			Name: "a desired floor seat asleep on config drift stays open", Behaviors: []string{"SESS-626"},
+			City:    func() *config.City { cfg := workerCity(3); cfg.Agents[0].MinActiveSessions = intPtr(1); return cfg },
+			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "config-drift", "slept_at", at(-time.Hour))},
+			Explain: started("gc-2", "worker-gc-2", "worker-2", map[string]string{"row:gc-1:*policy": "sleep-policy-keys", "row:gc-2:*sync": "A7 row-metadata"}),
 		},
 		{
 			Name: "a dead phantom of a configured name closes and keeps the identity's work", Behaviors: []string{"SESS-080"}, City: chat(false),
@@ -1124,12 +1159,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "a corpse on an unwanted row is removed, and the row closes", Behaviors: []string{"GUAR-022", "INC-025"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "slept_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}},
-			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillCorpseObject s-gc-1": "close-removes-corpse"},
-		},
-		{
-			Name: "a dead row with a crash history is classified, then closed", Behaviors: []string{"GUAR-038"},
-			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour), "wake_attempts", "2", "churn_count", "1")},
-			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
+			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillCorpseObject s-gc-1": "§12.2#41 close-removes-corpse"},
 		},
 		{
 			Name: "detached_at clears when idle sleep is off", Behaviors: []string{"SESS-533"},

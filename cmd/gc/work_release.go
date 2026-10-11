@@ -131,7 +131,16 @@ func releaseSeatOfBead(b beads.Bead) releaseSeat {
 }
 
 func releaseSeatOfInfo(info sessionpkg.Info) releaseSeat {
-	return releaseSeat{id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info)}
+	s := releaseSeat{id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info)}
+	for _, id := range []string{info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID} {
+		if id = strings.TrimSpace(id); id != "" {
+			if s.started == nil {
+				s.started = make(map[string]bool, 2)
+			}
+			s.started[id] = true
+		}
+	}
+	return s
 }
 
 // ReleaseOpts adjusts one release.

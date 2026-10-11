@@ -219,7 +219,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !suspendKey[k]) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -234,6 +234,14 @@ func (s *sim) checkWrite(w simWrite) {
 // A21's orphan close ends a suspended row whose agent is gone. Its deliberate
 // holds (a kill fence, a hold timer, a quarantine) it never ends.
 var suspendKey = map[string]bool{"state": true, "suspended_at": true}
+
+// closeEndsSuspend reports whether a close may change k on b at t: k is a
+// suspend's key and no deliberate hold is in force or unreadable (§12.2 #27).
+// A held suspended row is never closed.
+func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
+	h := session.Holds(b.Metadata, t)
+	return suspendKey[k] && (h.In|h.Unknown)&(session.HoldUser|session.HoldWait|session.HoldTimer|session.HoldQuarantine) == 0
+}
 
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
@@ -528,5 +536,39 @@ func TestDormantChangeFollowsRule2(t *testing.T) {
 		if got := dormantChange(beads.Bead{Metadata: c.meta}, woken, at, false); got == "" {
 			t.Errorf("%s: a wake is no violation", c.name)
 		}
+	}
+}
+
+// I15's close relaxation ends a bare suspend and nothing an operator holds
+// (§12.2 #27): a held suspended row is never closed.
+func TestCloseEndsSuspend(t *testing.T) {
+	now := gatherNow
+	later, bad := now.Add(time.Hour).Format(time.RFC3339), "soon"
+	for _, tc := range []struct {
+		name string
+		meta []string
+		want bool
+	}{
+		{"a bare suspend", nil, true},
+		{"a user hold", []string{"sleep_intent", "user-hold"}, false},
+		{"a hold timer", []string{"held_until", later}, false},
+		{"an unreadable hold timer", []string{"held_until", bad}, false},
+		{"a quarantine", []string{"quarantined_until", later}, false},
+		{"a wait hold", []string{"wait_hold", "true"}, false},
+		{"an expired hold timer", []string{"held_until", now.Add(-time.Hour).Format(time.RFC3339)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := map[string]string{"state": string(session.StateSuspended), "suspended_at": now.Add(-time.Hour).Format(time.RFC3339)}
+			for i := 0; i+1 < len(tc.meta); i += 2 {
+				m[tc.meta[i]] = tc.meta[i+1]
+			}
+			after := maps.Clone(m)
+			maps.Copy(after, session.ClosePatch(now, "orphaned"))
+			b := beads.Bead{ID: "gc-1", Status: "open", Metadata: m}
+			k := dormantChange(b, after, now, false)
+			if got := k != "" && closeEndsSuspend(b, k, now); got != tc.want {
+				t.Fatalf("change %q exempted = %t, want %t", k, got, tc.want)
+			}
+		})
 	}
 }
