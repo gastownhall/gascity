@@ -1005,11 +1005,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 		select {
 		case <-ticker.C:
-			// Patrol scans every reconciler state authoritatively, so any
-			// pending event-driven fires are redundant — drop them.
-			pokeDB.cancelPending()
-			ctrlDB.cancelPending()
-			runTick("patrol")
+			runTick(patrolTickTrigger(pokeDB, ctrlDB))
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Arm the debouncer; the deferred fire runs runTick("poke")
@@ -1160,19 +1156,40 @@ func (d *tickDebouncer) arm(delay time.Duration) {
 }
 
 // cancelPending stops an armed timer and discards a queued fire, if
-// any. Used when a higher-priority tick (e.g. the periodic patrol)
-// supersedes whatever caused the pending fire.
-func (d *tickDebouncer) cancelPending() {
+// any, and reports whether it did either. Used when a higher-priority
+// tick (e.g. the periodic patrol) supersedes whatever caused the pending
+// fire.
+func (d *tickDebouncer) cancelPending() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	pending := false
 	if d.timer != nil {
-		d.timer.Stop()
+		pending = d.timer.Stop()
 		d.timer = nil
 	}
 	select {
 	case <-d.fireCh:
+		pending = true
 	default:
 	}
+	return pending
+}
+
+// patrolTickTrigger is the trigger of the tick a patrol fire runs. The
+// patrol supersedes pending event-driven fires, so they are dropped, but
+// it does not cover a pending poke: a patrol tick reads the session
+// snapshot from the cache and may reuse the demand snapshot, while a poke
+// tick reads the sessions live and rebuilds demand. `gc session new`
+// writes its bead in its own process, and on a city whose sessions live in
+// the city store nothing else tells the cache, so a dropped poke left the
+// new session unseen until some later poke (mc-03yxh). When a poke was
+// pending, the tick runs as that poke.
+func patrolTickTrigger(pokeDB, ctrlDB *tickDebouncer) string {
+	ctrlDB.cancelPending()
+	if pokeDB.cancelPending() {
+		return "poke"
+	}
+	return "patrol"
 }
 
 // fired returns the channel that emits when a debounced fire is due.
