@@ -733,14 +733,21 @@ var externalOps = []struct {
 	name string
 	fn   func(s *sim, l *simLeg, b beads.Bead)
 }{
-	{"hold", func(s *sim, l *simLeg, b beads.Bead) {
-		s.setMeta(l, b.ID, "held_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "user-hold")
+	{"operator-hold", func(s *sim, l *simLeg, b beads.Bead) { // gc session suspend under a controller: the hold, on a live runtime
+		_, _ = session.NewStore(beads.SessionStore{Store: l.backing}).OperatorSuspend(b.ID, s.clk.Now())
+	}},
+	{"operator-resume", func(s *sim, l *simLeg, b beads.Bead) { // gc session resume: the operator's hold consumed
+		_, _ = session.NewStore(beads.SessionStore{Store: l.backing}).ApplyDispositionFresh(b.ID, session.ActorOperator, session.DispEvent{Kind: session.EvResume}, nil, s.clk.Now())
+	}},
+	{"heartbeat", func(s *sim, l *simLeg, b beads.Bead) { // gc runtime heartbeat: held_until alone, an operator's suspend left as it is
+		until := s.clk.Now().Add(time.Duration(1+s.rng.IntN(120)) * time.Second)
+		_, _ = session.NewStore(beads.SessionStore{Store: l.backing}).ApplyDispositionFresh(b.ID, session.ActorAgent, session.DispEvent{Kind: session.EvHeartbeat, Until: until}, nil, s.clk.Now())
 	}},
 	{"quarantine", func(s *sim, l *simLeg, b beads.Bead) {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if err := l.backing.SetMetadataBatch(b.ID, session.KillPendingPatch(s.clk.Now())); err != nil {
+		if _, err := writeSessionKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, errSessionKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])
@@ -1130,6 +1137,9 @@ func (s *sim) lastTimer() time.Time {
 	}
 	for _, b := range s.snapshot() {
 		for k, grace := range map[string]time.Duration{"held_until": 0, "quarantined_until": 0, "slept_at": session.KillPendingGrace} {
+			if k == "held_until" && b.Metadata["sleep_intent"] == string(session.SleepReasonUserHold) {
+				continue // an operator's hold, which no timer ends
+			}
 			if at, err := time.Parse(time.RFC3339, b.Metadata[k]); err == nil {
 				later(at.Add(grace))
 			}

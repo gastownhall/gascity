@@ -2539,15 +2539,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		}
 	case infoErr == nil:
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
-		patch["synced_at"] = now.Format(time.RFC3339)
-		if session.HoldsInfo(info, now).In&session.HoldUser != 0 {
-			patch["held_until"] = "" // as the fence's: no heartbeat-shaped hold left behind
-		}
-		for k, v := range session.ClearWakeRequestPatch() {
-			patch[k] = v
-		}
-		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
+		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
+			return killSleepPatch(b.Metadata, now), true
+		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
 	}

@@ -210,9 +210,10 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 }
 
 // preWakeHoldsFor is preWakeHolds for v's intent: A17's respawn is not held
-// by the agent heartbeat's hold it respawns through (v5.9i).
+// by the agent heartbeat's hold it respawns through (v5.9i), which the
+// premise holds the fresh row to.
 func preWakeHoldsFor(v txView) session.Hold {
-	if v.It.Reason == decideHeartbeatRespawn && heartbeatHeld(v.Row, v.Now) {
+	if v.It.Reason == decideHeartbeatRespawn {
 		return preWakeHolds &^ session.HoldTimer
 	}
 	return preWakeHolds

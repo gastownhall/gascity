@@ -859,18 +859,24 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		transitions = append(transitions, name+"/"+reason+"/"+transition)
 	}
 	t.Cleanup(func() { recordDrainTransition = saved })
+	var quarantined []string
+	savedQ := recordAgentQuarantine
+	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
+	t.Cleanup(func() { recordAgentQuarantine = savedQ })
 	f := effectFacts{
-		Events:     []events.Event{{Type: "session.test"}},
-		Transition: &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
-		Work:       &workVerdict{BeadID: "gc-w1", Refused: true},
-		Noted:      &notedRuntime{Name: "s1", At: plannerT0},
+		Events:      []events.Event{{Type: "session.test"}},
+		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
+		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
+		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
+		Quarantined: "worker-1",
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
-		"Events":     len(rec.events) == 1,
-		"Transition": slices.Equal(transitions, []string{"s/idle/cancel"}),
-		"Work":       p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
-		"Noted":      cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
+		"Events":      len(rec.events) == 1,
+		"Transition":  slices.Equal(transitions, []string{"s/idle/cancel"}),
+		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
+		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

@@ -1,5 +1,7 @@
 package main
 
+import "github.com/gastownhall/gascity/internal/config"
+
 // The fresh heal: A6's heals whose patch rests on the runtime (CONTRACT v5
 // A6; R2, reads propose and effects decide). The asleep heals rest on the
 // inventory reading the name gone, which can lag a runtime that came up after
@@ -41,6 +43,13 @@ var healSections = []section{{Decide: func(v txView) txStep {
 	step := redecideRow(v)
 	if step.Refuse == causeRedecided {
 		step.Refuse = healCause(v)
+	}
+	if v.It.Reason == decideDeadRuntimeHeal && step.Write["quarantined_until"] != "" { // the death's accrual quarantines
+		var cfg *config.City
+		if v.World.Env != nil {
+			cfg = v.World.Env.Cfg
+		}
+		step.Facts.Quarantined = sessionAgentMetricIdentityInfo(v.Row, cfg)
 	}
 	return step
 }}}

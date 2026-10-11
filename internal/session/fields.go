@@ -159,8 +159,11 @@ var (
 	v2SatisfiedWake = Site{Mode: ModeV2, File: srcHeals}.pending("mc-fmhlc", "A6's satisfied-wake clear (D7)")
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
 		"S2's adopt commit clears the wake request (D7)")
-	v2Accrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
-		"S3/S5 accrue a failed or dying start (SESS-537/538)")
+	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538);
+	// v2StartAccrual is C5a2's of a failed start.
+	v2Accrual      = v2(srcHeals, "deadRuntimePatch")
+	v2StartAccrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
+		"S3/S5 accrue a failed start (SESS-537)")
 	opCreate = op(srcManager, "Manager.createBeadOnly")
 	// opConsumeHold is an operator's resume consuming a user hold (#7424's
 	// interim D8 consume; D8 B's lease-fenced consume replaces it).
@@ -277,8 +280,8 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
-	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), op("cmd/gc/cmd_session_kill_fence.go", "killSleepPatch"))},
+	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual, v2StartAccrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
 	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
 	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold)},
@@ -302,8 +305,8 @@ var registry = slices.Concat([]Field{
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"))},
 
 	// Counters.
-	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
-	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual)},
+	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
+	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
 	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},

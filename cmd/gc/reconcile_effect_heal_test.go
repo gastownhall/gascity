@@ -553,3 +553,16 @@ func TestRedecideRowDecidesOnTheFreshRead(t *testing.T) {
 		t.Fatalf("no fresh read: step %+v, want the pass's facts decided (the heal written)", step)
 	}
 }
+
+// Kills a quarantining death accrual that records no quarantine telemetry:
+// the landed heal's facts carry the agent (legacy's RecordAgentQuarantine
+// after its accrual write), and an accrual below the limit carries none.
+func TestDeadRuntimeQuarantineRecordsTheAgent(t *testing.T) {
+	for attempts, want := range map[string]string{"4": "worker", "1": ""} {
+		c := newHealCase(t, livenessGone, desireWake, "state", "active", "last_woke_at", gatherNow.Add(-10*time.Second).Format(time.RFC3339), "wake_attempts", attempts)
+		it, s := c.run(t, gone().tmux(), nil)
+		if it.Reason != decideDeadRuntimeHeal || s.Outcome != settledLanded || s.Facts.Quarantined != want {
+			t.Fatalf("wake_attempts %s: intent %q, settlement %+v, want the heal landed recording quarantine %q", attempts, it.Reason, s, want)
+		}
+	}
+}

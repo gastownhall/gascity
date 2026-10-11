@@ -416,6 +416,9 @@ type effectFacts struct {
 	// Noted is a fresh read that found the row's runtime alive and Current,
 	// which the planner notes in the observation cache (v5 O4).
 	Noted *notedRuntime
+	// Quarantined is the agent a landed death accrual quarantined, for
+	// legacy's RecordAgentQuarantine.
+	Quarantined string
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -425,7 +428,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == ""
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -433,6 +436,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Transition = cmp.Or(g.Transition, f.Transition)
 	f.Work = cmp.Or(g.Work, f.Work)
 	f.Noted = cmp.Or(g.Noted, f.Noted)
+	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
 }
 
 // Transaction causes. A refusal backs the row off (P4).

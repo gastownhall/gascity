@@ -175,7 +175,8 @@ func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 	switch session.DecideSessionExit(session.ExitFacts{
 		SubprocessProvider: r.w.Env != nil && r.w.Env.Cfg != nil && r.w.Env.Cfg.Session.Provider == "subprocess",
 		DrainPending:       draining, PendingCreateClaim: info.PendingCreateClaim, SleepReason: info.SleepReason, LastWokeAt: info.LastWokeAt,
-		Now: r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
+		StartUncommitted: strings.TrimSpace(info.PendingCreateStartedAt) != "",
+		Now:              r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
 	}) {
 	case session.ExitRapidCrash:
 		// Legacy resets the conversation unless a probe finds its transcript;

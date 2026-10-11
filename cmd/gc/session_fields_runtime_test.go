@@ -391,6 +391,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, m, id).Metadata
 			},
 		},
+		"cmd/gc/cmd_session_kill_fence.go:killSleepPatch": {
+			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour)},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := m.SetMetadataBatch(id, killSleepPatch(fieldBead(t, m, id).Metadata, now)); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/manager.go:Manager.Suspend": {
 			[]string{"state", "asleep", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			func(t *testing.T, meta []string) map[string]string {
