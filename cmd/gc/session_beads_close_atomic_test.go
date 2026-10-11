@@ -533,8 +533,8 @@ func TestControllerClosesYieldToAKillFenceThatLandsInTheWindow(t *testing.T) {
 			if path.close(race, created.ID, &stderr) {
 				t.Fatalf("%s closed a row under a fresh kill fence", path.name)
 			}
-			if !strings.Contains(stderr.String(), session.ErrSessionKillPending.Error()) {
-				t.Fatalf("stderr = %q, want the kill-pending yield reported", stderr.String())
+			if !strings.Contains(stderr.String(), "refused (moved)") {
+				t.Fatalf("stderr = %q, want the yield reported (CommitClose's moved)", stderr.String())
 			}
 			got, err := store.Get(created.ID)
 			if err != nil {

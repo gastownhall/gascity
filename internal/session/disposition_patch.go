@@ -176,7 +176,7 @@ var (
 		"internal/session.(*Store).commitIf": true, "internal/session.(*Store).applyPatchIfLifecycleUnchanged": true,
 		"internal/session.(*Store).ApplyPatchIfLifecycleUnchanged": true, "internal/session.(*Store).ApplyPatchIfLifecycleUnchangedUnder": true,
 		"internal/session.(*Store).UpdateMetadataFenced": true, "internal/session.(*Store).UpdateRowFenced": true, "internal/session.(*Store).WithPendingCreateRollback": true,
-		"internal/session.(*Store).CloseWithTerminalPatch": true, "internal/session.(*Store).CloseWithTerminalPatchUnder": true,
+		"internal/session.(*Store).CommitClose":     true,
 		"internal/session.(*Store).closeAtomically": true, "internal/session.(*Store).RollbackPendingCreateAtomically": true,
 		"internal/session.(*Store).RollbackPendingCreateAtomicallyUnder": true, "internal/session.(*Store).CommitStartedIfCurrent": true,
 		"internal/session.(*Store).CommitStartedIfCurrentUnder": true, "internal/session.(*Store).setMetadataValue": true,

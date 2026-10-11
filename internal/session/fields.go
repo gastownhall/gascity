@@ -446,7 +446,7 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "mirrorStartupHealthEpisodeMetadata")), "startup_health_active_count", "startup_health_active_kind"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/warm_bind_nudge.go", "deliverWarmBindClaimNudge")), "warm_bind_nudged_for_trigger"),
 	// The runtime lease (L1). Legacy writes it too, so no key is new.
-	same(ClassLease, false, sites(leaseAcquire, v2("cmd/gc/reconcile_fenced_store.go", "fencedWriter.closeWithTerminalPatch")),
+	same(ClassLease, false, sites(leaseAcquire, v2("cmd/gc/reconcile_fenced_store.go", "fencedWriter.closeRow")),
 		RuntimeLeaseHolderKey, RuntimeLeaseExpiresKey, RuntimeLeaseTTLKey, RuntimeLeaseFlockKey),
 	same(ClassLease, false, sites(leaseAcquire), RuntimeLeaseEpochKey),
 )

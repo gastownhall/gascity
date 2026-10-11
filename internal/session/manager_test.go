@@ -383,7 +383,6 @@ func TestCreate(t *testing.T) {
 // retirement path that stranded canonical identity after the S19 stage-2 fix.
 func TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity(t *testing.T) {
 	store := beads.NewMemStore()
-	mgr := newTestManager(t, store, runtime.NewFake())
 
 	b, err := store.Create(beads.Bead{
 		Type: BeadType,
@@ -400,14 +399,8 @@ func TestRetireConfiguredNamedSessionIdentifiersFreesCanonicalIdentity(t *testin
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := mgr.retireConfiguredNamedSessionIdentifiers(b.ID, b); err != nil {
-		t.Fatalf("retireConfiguredNamedSessionIdentifiers: %v", err)
-	}
-
-	got, err := store.Get(b.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
+	got := b
+	got.Metadata = retiredIdentifiersPatch(b).Apply(b.Metadata)
 	if v := got.Metadata[CanonicalInstanceNameMetadata]; v != "" {
 		t.Errorf("%s = %q, want cleared", CanonicalInstanceNameMetadata, v)
 	}
@@ -5982,4 +5975,56 @@ func runtimeOnlyActor(t testing.TB, m *Manager, id string) Actor {
 	t.Cleanup(l.Release)
 	by.Lease = l
 	return by
+}
+
+// TestCloseIsOneTerminalClose: an operator's close lands the Retire cell's
+// clears and the wake pin with the closed status (op.close).
+func TestCloseIsOneTerminalClose(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"pin_awake": "true", "wait_hold": "true", "sleep_intent": "wait-hold"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	b, _ := store.Get(info.ID)
+	if b.Status != "closed" || b.Metadata["pin_awake"] != "" || b.Metadata["wait_hold"] != "" || b.Metadata["sleep_intent"] != "" {
+		t.Fatalf("row = %s %v, want closed with its pin and holds cleared", b.Status, b.Metadata)
+	}
+}
+
+// stopHookFake runs onStop as a runtime stops.
+type stopHookFake struct {
+	*runtime.Fake
+	onStop func()
+}
+
+func (f stopHookFake) Stop(name string) error {
+	f.onStop()
+	return f.Fake.Stop(name)
+}
+
+// TestCloseRefusesANewIncarnation: an operator's close that a new
+// incarnation overtook after its read closes nothing and says so (op.close).
+func TestCloseRefusesANewIncarnation(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := stopHookFake{Fake: runtime.NewFake()}
+	mgr := newTestManager(t, store, sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.onStop = func() { _ = store.SetMetadata(info.ID, "instance_token", "a-new-one") }
+	mgr = newTestManager(t, store, sp)
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); !errors.Is(err, ErrSessionCloseSuperseded) {
+		t.Fatalf("Close = %v, want ErrSessionCloseSuperseded", err)
+	}
+	if b, _ := store.Get(info.ID); b.Status != "open" {
+		t.Fatalf("status = %s, want the new incarnation's row open", b.Status)
+	}
 }

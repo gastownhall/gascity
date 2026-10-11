@@ -2837,7 +2837,7 @@ func sessionFrontDoor(store beads.Store) *session.Store {
 }
 
 // sessionInfoFromBead projects a session bead a caller decided to close into
-// the Info the terminal close fences on (session.Store.CloseWithTerminalPatch).
+// the Info the terminal close fences on (session.Store.CommitClose).
 func sessionInfoFromBead(b beads.Bead) session.Info {
 	return session.ReconcileRowsFromBeads([]beads.Bead{b})[0].Info
 }
@@ -2882,6 +2882,21 @@ func failedCreateCloseLife(now time.Time) session.MetadataPatch {
 	return patch
 }
 
+// commitLegacyClose is CommitClose for a close the controller decided on
+// expected (legacy.close), its refusal or failure logged for what it closes.
+// A failure is 0.
+func commitLegacyClose(front *session.Store, expected session.Info, terminal session.MetadataPatch, now time.Time, stderr io.Writer, what string) session.CommitResult {
+	res, err := front.CommitClose(session.Decide(expected, session.FactsLegacyClose), terminal, now)
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "session beads: closing %s %s: %v\n", what, expected.ID, err) //nolint:errcheck
+		return 0
+	case res == session.CommitMoved, res == session.CommitContended:
+		fmt.Fprintf(stderr, "session beads: closing %s %s: refused (%s): %v\n", what, expected.ID, res, session.ErrSessionCloseSuperseded) //nolint:errcheck
+	}
+	return res
+}
+
 // closeFailedCreateBead closes the session expected describes as failed-create.
 // expected is the row the caller decided to close on.
 func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now time.Time, stderr io.Writer) bool {
@@ -2901,8 +2916,9 @@ func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now 
 	// would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
 	// reports false either way, so the reconciler re-runs the close.
-	if _, err := sessFront.CloseWithTerminalPatch(expected, failedCreateClosePatch(expected, now), "gc: close failed-create session "+id, now); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
+	switch commitLegacyClose(sessFront, expected, failedCreateClosePatch(expected, now), now, stderr, "failed-create bead") {
+	case session.CommitLanded, session.CommitClosed:
+	default:
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
@@ -4068,7 +4084,7 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// reads, the first included, must still carry the lifecycle facts and
 	// incarnation of expected, the row the caller decided on. A wake, wake
 	// request, or new incarnation that landed after that decision makes it
-	// write nothing and report false (session.ErrSessionCloseSuperseded), and
+	// write nothing and report false (session.CommitMoved), and
 	// the next tick decides again. If a concurrent closer wins instead, this call reports false and
 	// leaves the release cascade to that closer. If the row it reads carries a
 	// fresh `gc session kill` fence (#6749), the kill owns the row: the close
@@ -4077,12 +4093,7 @@ func closeBeadPreservingAssignees(store beads.Store, sw *SeatWork, expected sess
 	// with the metadata ordered first. There the metadata may land while the
 	// Close fails; the helper then reports failure and the reconciler re-runs
 	// the close next tick, so no bead is durably left half-closed.
-	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(expected, session.ClosePatch(now, reason), "gc: close session "+id, now)
-	if err != nil {
-		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
-		return false
-	}
-	if !closed {
+	if commitLegacyClose(sessionFrontDoor(store), expected, session.ClosePatch(now, reason), now, stderr, "session") != session.CommitLanded {
 		return false
 	}
 	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;
