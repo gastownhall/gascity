@@ -23,7 +23,7 @@ the rest are task-oriented.
 - [Use JSON from the gc CLI](/guides/using-json-from-gc) — drive `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
 - [Connect an External Client](/guides/connected-clients) — bring a chat, voice, or bot front end into a city conversation: send turns to an agent over HTTP and receive its replies on a callback.
 - [Set Up a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment) — give a by-hand multi-human, multi-agent workflow a better home by writing the method down once.
-- [Verify Managed Worktrees](/guides/managed-worktrees) — verify dependent work starts from its required input and recover from stale branches without overwriting work.
+- [Configure Managed Worktrees](/guides/managed-worktrees) — verify dependent work starts from its required input and recover from stale branches without overwriting work.
 
 See also the [Troubleshooting runbooks](/troubleshooting/dolt-bloat-recovery)
 for operational recovery procedures, and the [Reference](/reference/index)

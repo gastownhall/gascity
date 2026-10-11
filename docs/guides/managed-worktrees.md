@@ -1,121 +1,118 @@
 ---
-title: Verify Managed Worktrees
-description: Keep dependent work based on the required input commit while preserving existing changes.
+title: Configure Managed Worktrees
+description: Choose workspace inputs and reuse policies for pack workflows.
 ---
 
-Dependent tasks need the output of their prerequisites in their starting
-history. A leftover workspace may have the right branch name and ownership
-record but still be missing that input after a branch reset.
+Packs decide where work runs and how its checkout is prepared. Managed
+worktrees give each work item its own branch and checkout, with checks that
+the workspace belongs to that item and contains its required starting commit.
 
-`gc worktree ensure` and `gc worktree verify` check that a managed workspace's
-current commit contains its required input commit. Extra commits above that
-input remain usable. A workspace missing the input is refused, with its branch
-and working files preserved.
+This guide covers workspace choices, the input to supply, and the behavior
+you can expect from `gc worktree`. See [Understanding Packs](/guides/understanding-packs)
+for importing and customizing a pack, and the
+[worktree CLI reference](/reference/cli#gc-worktree) for the complete flag list.
 
-## Before and after
+## Choose A Workspace Approach
 
-These diagrams apply to callers of `gc worktree ensure` or `gc worktree verify`.
-A workflow that runs `git worktree add` directly does not receive this guard.
+| Approach | Where you configure it | Behavior |
+|---|---|---|
+| Shared checkout | The worker's `work_dir` | Work runs in the selected directory. Tasks share its files and branch. |
+| Git worktree | A pack's preparation script or formula step runs `git worktree add` | Tasks have separate checkouts. The pack implements input selection, ownership and reuse checks. |
+| Managed worktree | A pack's preparation script or formula step calls `gc worktree ensure` and `gc worktree verify` | Each workspace has an attached branch and recorded ownership. Reuse checks its identity and required input commit. |
 
-In this example, the workflow has selected the combined A/B commit as C's
-required input, but C's branch has been reset behind it.
+Setting `work_dir` chooses a working directory; it does not create a worktree
+or enable the managed-worktree checks. Check the preparation step in the pack
+version you use to see which approach it implements.
 
-Before the ancestry check:
+## Choose The Input Commit
 
-```mermaid
-sequenceDiagram
-    participant F as Workflow
-    participant G as Workspace check
-    participant C as Task C workspace
-    F->>G: Verify C with recorded A/B input
-    G->>C: Check branch and ownership
-    C-->>G: Correct identity, older HEAD
-    G-->>F: Accept workspace
-    Note over F,C: C can continue without the required A/B changes
-```
+Supply `--base` with the commit the task needs to start from. It must be
+available in the local repository. For independent work, this might be a
+selected commit from the project's default branch. For dependent work, it
+should be the result of integrating the accepted prerequisite outputs.
 
-With the ancestry check:
+Prefer a commit SHA when the input must stay fixed across retries. A branch
+or tag supplied as `--base` is resolved when the worktree is created, and that
+commit is recorded. `--base-sha` lets a caller check the recorded SHA when
+reusing the workspace. The worktree commands do not fetch or integrate
+prerequisite outputs for you.
 
-```mermaid
-sequenceDiagram
-    participant F as Workflow
-    participant G as Workspace check
-    participant C as Task C workspace
-    F->>G: Verify C with recorded A/B input
-    G->>C: Check identity and input ancestry
-    C-->>G: Required A/B commit is absent from HEAD history
-    G-->>F: Refuse reuse and report missing input
-    Note over F,C: Preserve C's branch and files for recovery
-```
+## Prepare A Managed Workspace
 
-When C's history contains the required input, verification succeeds and
-retains C's additional commits. This proves ancestry only. The workflow must
-select accepted predecessor outputs, integrate them into an exact input commit,
-and validate the resulting behavior before giving that output to D.
+Call `gc worktree ensure` from the pack's workspace preparation step. Give each
+work item a distinct path and branch, and keep its ownership values consistent
+when verifying or reusing it.
 
-## Supply the input for a dependent task
-
-For example, tasks A and B finish independent changes. Integrate their outputs
-in the repository, then supply that combined commit as task C's base. When D
-depends on C, supply C's resulting commit as D's base.
-
-Use a distinct workspace and branch for each task. Replace these example paths,
-commit and ownership values with the ones selected by your workflow:
+For example, replace these paths, input SHA and work identity with the values
+selected by your pack:
 
 ```bash
-repo=/path/to/rig
-root=/path/to/workspaces
-input_commit=REPLACE_WITH_COMBINED_A_AND_B_COMMIT_SHA
-
 gc worktree ensure \
-  --repo "$repo" --root "$root" --path "$root/task-c" \
-  --branch work/task-c --base "$input_commit" \
-  --bead task-c --store-ref city:example \
-  --creator workflow --owner workspace-provisioner \
-  --generation attempt-1 --lifecycle active --json
+  --repo /path/to/project --root /path/to/workspaces \
+  --path /path/to/workspaces/task-c --branch work/task-c \
+  --base REPLACE_WITH_INPUT_COMMIT_SHA \
+  --bead task-c --store-ref city:my-city \
+  --creator do-work --owner workspace-provisioner \
+  --generation attempt-1 --json
 ```
 
-The base must resolve to a commit in the local repository. `--base-sha` can
-also pin the resolved commit when reusing a workspace. A same-named tag does
-not change which local branch is checked for reuse.
+The path must be a direct child of `--root`. The bead and store identify the
+task; creator and owner identify its provisioner. Generation must match when
+the workspace is reused. Each creation also gets an attempt ID, which binds
+cleanup to that specific workspace.
 
-To inspect an existing workspace, use `gc worktree verify` with the same
-identity and base flags. To plan creation or reuse without changing anything,
-add `--dry-run` to `gc worktree ensure`. Dry-run planning applies the same
-required-input check and can refuse a stale branch before creating a directory.
+The command returns a JSON report with the workspace and its recorded
+provenance. The preparation step should retain that report and give the worker
+the resulting workspace path only after the command succeeds.
 
-## Recover when the required input is missing
+| Option | Use it to |
+|---|---|
+| `--base` | Select the required starting commit or a locally resolvable ref. |
+| `--base-sha` | Check that a reused workspace records the expected input SHA. |
+| `--dry-run` | Plan creation or reuse without changing the repository or filesystem. The same input checks apply. |
+| `--json` | Return a structured report for the pack's next step. |
 
-A refusal such as `HEAD ... does not contain recorded base ...` means the
-branch's history no longer contains the input recorded for the workspace.
-An existing branch without a workspace can also be refused when it lacks the
-supplied base.
+Use `gc worktree verify` with the matching path, branch, ownership and input
+flags to check a workspace without changing it. See the
+[configuration reference](/reference/config) for `work_dir` path handling and
+[Understanding Formulas](/guides/understanding-formulas) for composing preparation
+and implementation steps.
 
-1. Inspect the branch and preserve any committed and uncommitted work. A refusal
-   does not reset, rebase, delete or overwrite the workspace.
-2. Use `gc worktree ensure` to create a fresh workspace path and branch based
-   on the required input, or deliberately integrate that input into the
-   existing branch after reviewing its changes.
-3. Run `gc worktree verify` with the selected workspace's matching path,
-   branch, ownership and required input before continuing dependent work.
+## Reuse And Recovery
 
-The check validates the supplied or recorded input. It does not automatically
-find newer prerequisite outputs, merge them, or rewrite the ownership record.
-When inputs change, the workflow must select the new base and a compatible
-workspace explicitly.
+A managed workspace is reusable when its identity matches and its current
+commit descends from the recorded input. Additional commits remain usable.
+If that input is missing from the branch's history, verification and reuse
+fail, including dry-run planning. The refusal leaves existing branches and
+working files intact.
 
-## Keep workflow and acceptance checks separate
+If you see `HEAD ... does not contain recorded base ...`:
 
-- **Worktree:** verify that this checkout descends from the recorded input.
-- **Workflow:** select accepted predecessor outputs, integrate them, and pass
-  the exact result to the dependent task through the native worktree commands.
-- **Acceptance:** run project tests, requirement-specific checks and independent
-  review against the exact integrated commit. A subsequent commit invalidates
-  that evidence; ancestry alone does not show that behavior survived.
+1. Inspect the branch and any uncommitted work.
+2. Create a distinct workspace and branch from the required input, or review
+   and integrate that input into the existing branch.
+3. Verify the selected workspace with its matching identity and input before
+   continuing.
 
-Closing a work record is warning-only by default. Its commit and outcome
-metadata do not establish functional correctness. Workflow checks must enforce
-acceptance explicitly.
+Changing the workflow's input requires an explicit workspace decision. The
+commands do not automatically reset a branch or update its recorded base.
 
-See the [worktree CLI reference](/reference/cli#gc-worktree) for the complete
-flag set and cleanup safety checks.
+## Guarantees For Dependent Work
+
+Managed-worktree verification checks the repository, path, attached branch,
+recorded ownership and input ancestry. It proves that the required commit is
+in the checkout's history.
+
+The pack still controls two other parts of delivery:
+
+- **Input selection:** wait for the required work, select accepted outputs,
+  integrate them, and supply that exact result as the next task's input.
+- **Behavior:** run project tests and any task-specific checks against the
+  resulting commit, and bind review to that same commit. A later change needs
+  fresh evidence; retaining the input in history does not ensure its behavior
+  remains intact.
+
+For removal, use [gc worktree cleanup](/reference/cli#gc-worktree-cleanup) with
+the attempt ID returned during creation. Cleanup also checks ownership and Git
+safety. It refuses dirty workspaces, commits reachable from no branch, tag or
+remote-tracking ref, and HEADs not merged into `--base`.
