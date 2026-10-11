@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -2911,5 +2912,311 @@ func TestCmdStopBodyDoesNotProbeRecordedRowsAnAttestedListingOmits(t *testing.T)
 	}
 	if got := sp.probes.Load(); got != 0 {
 		t.Errorf("gc stop made %d probe(s) of recorded rows an attested listing left out, want 0; stdout = %q, stderr = %q", got, stdout.String(), stderr.String())
+	}
+}
+
+// sweepCountingProvider is a countingExecProvider (an exec pack: no optional
+// capabilities, every read a round trip) that also counts Stop calls, and
+// whose listing shows the running members of listed (nil: a blind listing).
+type sweepCountingProvider struct {
+	*countingExecProvider
+	listed []string
+	stopMu sync.Mutex
+	stops  map[string]int
+}
+
+func newSweepCountingProvider(fake *runtime.Fake, listed ...string) *sweepCountingProvider {
+	sp := &sweepCountingProvider{countingExecProvider: newCountingExecProvider(fake), listed: listed, stops: make(map[string]int)}
+	sp.exitOnInterrupt = true
+	return sp
+}
+
+func (p *sweepCountingProvider) ListRunning(string) ([]string, error) {
+	var out []string
+	for _, name := range p.listed {
+		if p.fake.IsRunning(name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+func (p *sweepCountingProvider) Stop(name string) error {
+	p.stopMu.Lock()
+	p.stops[name]++
+	p.stopMu.Unlock()
+	return p.fake.Stop(name)
+}
+
+func (p *sweepCountingProvider) stopCounts() map[string]int {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+	return maps.Clone(p.stops)
+}
+
+// The standalone stop's sweep of the city's recorded sessions reads each
+// candidate once, and no stop-level probe reads a found name again before its
+// interrupt (only the worker boundary's own reads follow): the found names
+// are stopped in the orphan pass as already probed. The sweep skips the
+// configured names (the configured pass observes those) and the names the
+// runtime lists (the orphan pass reads those from the list), and a configured
+// name the list does not show is handed to gracefulStopAll as already
+// observed too. Each name is stopped by one pass only.
+//
+// The counts are every IsRunning read the stop makes of each name:
+//   - probe (configured): the reads of its worker observation and of its stop
+//     through the worker boundary: 9, or 13 with a grace window (the interrupt
+//     pass, the poll and pass 2).
+//   - a swept name: the sweep (1), the stop's reads through the worker boundary
+//     (3), then with a grace window the poll and pass 2 (2 more).
+//   - a listed name: the stop's reads through the worker boundary only.
+//
+// Any extra read before an interrupt (the sweep probing a configured or listed
+// name, or a pass probing a name its caller already probed) adds one.
+func TestCmdStopBodyReadsSweptSessionsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		listed []string
+		want   map[string]map[string]int // shutdown_timeout -> name -> IsRunning reads
+	}{
+		{
+			name: "blind",
+			want: map[string]map[string]int{
+				"0s": {"probe": 9, "idler-1": 4, "idler-2": 4, "idler-asleep": 1},
+				"1s": {"probe": 13, "idler-1": 6, "idler-2": 6, "idler-asleep": 1},
+			},
+		},
+		{
+			name:   "listing shows idler-2",
+			listed: []string{"idler-2"},
+			want: map[string]map[string]int{
+				"0s": {"probe": 9, "idler-1": 4, "idler-2": 3, "idler-asleep": 1},
+				"1s": {"probe": 13, "idler-1": 6, "idler-2": 3, "idler-asleep": 1},
+			},
+		},
+	} {
+		for _, timeout := range []string{"0s", "1s"} {
+			t.Run(tc.name+"/shutdown_timeout="+timeout, func(t *testing.T) {
+				fake := runtime.NewFake()
+				startStopTestSessions(t, fake, "probe", "idler-1", "idler-2")
+				sp := newSweepCountingProvider(fake, tc.listed...)
+				one := 1
+				cityDir, cfg := stopTestCityWithRecordedSessions(t, timeout, []config.Agent{{Name: "probe", MaxActiveSessions: &one}}, sp,
+					map[string]string{"session_name": "probe", "template": "probe", "state": "awake"},
+					map[string]string{"session_name": "idler-1", "template": "idler", "state": "awake"},
+					map[string]string{"session_name": "idler-2", "template": "idler", "state": "draining"},
+					map[string]string{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+				)
+
+				var stdout, stderr lockedBuffer
+				if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+					t.Fatalf("cmdStopBody = %d; stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+				}
+				for _, name := range []string{"probe", "idler-1", "idler-2"} {
+					if fake.IsRunning(name) {
+						t.Errorf("%s survived the stop; stdout = %q", name, stdout.String())
+					}
+				}
+				if got, want := sp.counts("IsRunning"), tc.want[timeout]; !maps.Equal(got, want) {
+					t.Errorf("IsRunning reads = %v, want %v", got, want)
+				}
+				// An unconfigured template's interrupt is a stop through the
+				// worker boundary, and pass 2 cleans the exited session up
+				// again; the configured probe is stopped by its own pass only.
+				wantStops := map[string]int{"probe": 1, "idler-1": 1, "idler-2": 1}
+				if timeout != "0s" {
+					wantStops = map[string]int{"probe": 1, "idler-1": 2, "idler-2": 2}
+				}
+				if got := sp.stopCounts(); !maps.Equal(got, wantStops) {
+					t.Errorf("Stop calls = %v, want %v", got, wantStops)
+				}
+			})
+		}
+	}
+}
+
+// The default wall-clock cap counts configured targets only, so the
+// standalone stop grows it by one pass's budget for the recorded sessions its
+// sweep found running, priced serially when a found name's template is not
+// configured (the stop then falls back to serial order). A name whose probe
+// failed is reported, not stopped, and buys no time, also when another
+// name's probe found it running: the extension is priced for the running
+// names only.
+func TestCmdStopBodyGrowsTheDefaultCapForSweptSessions(t *testing.T) {
+	one := 1
+	for _, tc := range []struct {
+		name     string
+		agents   []config.Agent
+		template string
+		probeErr []string // names whose sweep probe fails
+		serial   bool
+		grows    bool
+	}{
+		{name: "unconfigured template", agents: []config.Agent{{Name: "probe", MaxActiveSessions: &one}}, template: "idler", serial: true, grows: true},
+		{name: "configured template", agents: []config.Agent{{Name: "probe", MaxActiveSessions: &one}, {Name: "idler", MaxActiveSessions: &one}}, template: "idler", grows: true},
+		{name: "probe failed", agents: []config.Agent{{Name: "probe", MaxActiveSessions: &one}}, template: "idler", probeErr: []string{"idler-1", "idler-2"}},
+		{name: "one running, one probe failed", agents: []config.Agent{{Name: "probe", MaxActiveSessions: &one}}, template: "idler", probeErr: []string{"idler-2"}, serial: true, grows: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			startStopTestSessions(t, fake, "idler-1", "idler-2")
+			sp := blindProbeProvider{blindListProvider: blindListProvider{fake}}
+			if len(tc.probeErr) > 0 {
+				sp.probeErr = make(map[string]error, len(tc.probeErr))
+				for _, name := range tc.probeErr {
+					sp.probeErr[name] = errors.New("is-running: transport error")
+				}
+			}
+			cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", tc.agents, sp,
+				// The configured idler's own named session, asleep, so the
+				// recorded idler-N rows stay outside the configuration.
+				map[string]string{"session_name": "idler", "template": tc.template, "state": "asleep"},
+				map[string]string{"session_name": "idler-1", "template": tc.template, "state": "awake"},
+				map[string]string{"session_name": "idler-2", "template": tc.template, "state": "awake"},
+			)
+
+			var extensions []time.Duration
+			var stdout, stderr lockedBuffer
+			code := cmdStopBodyWithoutSuccessExtendingCap(cityDir, cfg, false, &stdout, &stderr, func(d time.Duration) { extensions = append(extensions, d) })
+			if !tc.grows {
+				if len(extensions) != 0 {
+					t.Errorf("cap extensions = %v, want none", extensions)
+				}
+				if code == 0 {
+					t.Errorf("cmdStopBody = 0 over sessions it could not observe; stderr = %q", stderr.String())
+				}
+				if !fake.IsRunning("idler-1") || !fake.IsRunning("idler-2") {
+					t.Error("a session the sweep could not observe was stopped; want it reported and left")
+				}
+				if !strings.Contains(stderr.String(), "could not observe recorded session(s) idler-1, idler-2") {
+					t.Errorf("stderr does not report the unobserved sessions; stderr = %q", stderr.String())
+				}
+				return
+			}
+			running := 2 - len(tc.probeErr)
+			if want := []time.Duration{stopCapExtensionForRecorded(cfg, running, tc.serial)}; !slices.Equal(extensions, want) {
+				t.Errorf("cap extensions = %v, want %v (priced for the %d session(s) found running)", extensions, want, running)
+			}
+			if len(tc.probeErr) == 0 {
+				if code != 0 {
+					t.Fatalf("cmdStopBody = %d; stderr = %q", code, stderr.String())
+				}
+				return
+			}
+			if code == 0 {
+				t.Errorf("cmdStopBody = 0 over a session it could not observe; stderr = %q", stderr.String())
+			}
+			if fake.IsRunning("idler-1") {
+				t.Error("idler-1, found running by the sweep, survived the stop")
+			}
+			if !fake.IsRunning("idler-2") {
+				t.Error("idler-2, whose probe failed, was stopped; want it reported and left")
+			}
+			if !strings.Contains(stderr.String(), "could not observe recorded session(s) idler-2") {
+				t.Errorf("stderr does not report the unobserved session; stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestStopCapExtensionForRecorded(t *testing.T) {
+	cfg := &config.City{Daemon: config.DaemonConfig{ShutdownTimeout: "5s"}}
+	interrupt := interruptPerTargetTimeout(cfg)
+	for _, tc := range []struct {
+		recorded int
+		serial   bool
+		want     time.Duration
+	}{
+		{recorded: 0, want: 0},
+		{recorded: 1, want: interrupt + 5*time.Second + stopPerTargetTimeoutDefault},
+		{recorded: 4, want: interrupt + 5*time.Second + 2*stopPerTargetTimeoutDefault},
+		{recorded: 4, serial: true, want: interrupt + 5*time.Second + 4*stopPerTargetTimeoutDefault},
+		{recorded: 17, want: 2*interrupt + 5*time.Second + 6*stopPerTargetTimeoutDefault},
+	} {
+		if got := stopCapExtensionForRecorded(cfg, tc.recorded, tc.serial); got != tc.want {
+			t.Errorf("stopCapExtensionForRecorded(%d, serial=%v) = %s, want %s", tc.recorded, tc.serial, got, tc.want)
+		}
+	}
+}
+
+// A stop body that grows the cap gets the extra time; one that does not times
+// out at the cap, and the timeout names the cap that fired.
+func TestRunStopWithExtendableWallClockCap(t *testing.T) {
+	t.Run("extended", func(t *testing.T) {
+		var stderr lockedBuffer
+		out := runStopWithExtendableWallClockCap(50*time.Millisecond, &stderr, nil, func(extendCap func(time.Duration)) stopCommandOutcome {
+			extendCap(2 * time.Second)
+			// Outlive the original cap: only the extension lets this finish.
+			<-time.After(200 * time.Millisecond)
+			return stopCommandOutcome{code: 0, cityPath: "/city"}
+		})
+		if out.code != 0 || out.cityPath != "/city" {
+			t.Fatalf("outcome = %+v, want the body's success; stderr = %q", out, stderr.String())
+		}
+	})
+	t.Run("not extended", func(t *testing.T) {
+		var stderr lockedBuffer
+		release := make(chan struct{})
+		defer close(release)
+		out := runStopWithExtendableWallClockCap(50*time.Millisecond, &stderr, nil, func(extendCap func(time.Duration)) stopCommandOutcome {
+			extendCap(100 * time.Millisecond)
+			<-release
+			return stopCommandOutcome{}
+		})
+		if out.code != 1 {
+			t.Fatalf("outcome = %+v, want a timeout", out)
+		}
+		if !strings.Contains(stderr.String(), "timed out after 150ms") {
+			t.Errorf("stderr = %q, want the extended cap named", stderr.String())
+		}
+	})
+}
+
+// leaseCheckingProvider is a blindListProvider whose Stop records whether the
+// runtime name's flock was free while it ran.
+type leaseCheckingProvider struct {
+	blindListProvider
+	cityDir string
+	mu      sync.Mutex
+	free    map[string]bool
+}
+
+func (p *leaseCheckingProvider) Stop(name string) error {
+	lease, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: p.cityDir, Name: name})
+	p.mu.Lock()
+	p.free[name] = err == nil
+	p.mu.Unlock()
+	if err == nil {
+		lease.Release()
+	}
+	return p.Fake.Stop(name)
+}
+
+// The standalone stop holds each crash-left creating row's flock from before
+// its probe until its stop returns, so no start can begin under the stop.
+func TestCmdStopBodyHoldsTheFlockWhileStoppingAnInterruptedStart(t *testing.T) {
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "idler-crashed-start")
+	sp := &leaseCheckingProvider{blindListProvider: blindListProvider{fake}, free: make(map[string]bool)}
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp,
+		map[string]string{"session_name": "idler-crashed-start", "template": "idler", "state": "creating"},
+	)
+	sp.cityDir = cityDir
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody = %d; stderr = %q", code, stderr.String())
+	}
+	if fake.IsRunning("idler-crashed-start") {
+		t.Fatal("idler-crashed-start survived the stop")
+	}
+	sp.mu.Lock()
+	free, stopped := sp.free["idler-crashed-start"]
+	sp.mu.Unlock()
+	if !stopped {
+		t.Fatal("the stop never called Stop on idler-crashed-start")
+	}
+	if free {
+		t.Error("the runtime name's flock was free while its stop ran; a start could have begun under the stop")
 	}
 }

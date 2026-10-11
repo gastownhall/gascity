@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -165,31 +167,53 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		return stopCommandOutcome{code: 1, cityPath: cityPath}
 	}
 
-	stopLoadedCity := func() stopCommandOutcome {
+	stopLoadedCity := func(extendCap func(time.Duration)) stopCommandOutcome {
 		return stopCommandOutcome{
-			code:         cmdStopBodyWithoutSuccess(cityPath, cfg, force, stopStdout, stderr),
+			code:         cmdStopBodyWithoutSuccessExtendingCap(cityPath, cfg, force, stopStdout, stderr, extendCap),
 			cityPath:     cityPath,
 			unregistered: unregisteredFromSupervisor,
 		}
 	}
 	if wallClockCapApplied {
-		return stopLoadedCity()
+		// The operator's --timeout is the cap; the stop does not grow it.
+		return stopLoadedCity(nil)
 	}
-	return runStopWithWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
+	return runStopWithExtendableWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
 }
 
 func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, unregisterTx *supervisorUnregisterTransaction, stop func() stopCommandOutcome) stopCommandOutcome {
+	return runStopWithExtendableWallClockCap(wallClockCap, stderr, unregisterTx, func(func(time.Duration)) stopCommandOutcome { return stop() })
+}
+
+// runStopWithExtendableWallClockCap is runStopWithWallClockCap whose stop body
+// may grow the cap once it learns of work the cap was not sized for (the
+// default cap counts the configured targets only; see
+// stopCapExtensionForRecorded). An extension that arrives after the cap fired
+// changes nothing: the stop has already timed out.
+func runStopWithExtendableWallClockCap(wallClockCap time.Duration, stderr io.Writer, unregisterTx *supervisorUnregisterTransaction, stop func(extendCap func(time.Duration)) stopCommandOutcome) stopCommandOutcome {
+	var capMu sync.Mutex
+	deadline := time.Now().Add(wallClockCap)
+	timer := time.NewTimer(wallClockCap)
+	defer timer.Stop()
+	extendCap := func(d time.Duration) {
+		if d <= 0 {
+			return
+		}
+		capMu.Lock()
+		defer capMu.Unlock()
+		wallClockCap += d
+		deadline = deadline.Add(d)
+		timer.Reset(time.Until(deadline))
+	}
 	doneCh := make(chan stopCommandOutcome, 1)
 	bodyDone := make(chan struct{})
 	go func() {
 		defer close(bodyDone)
-		doneCh <- stop()
+		doneCh <- stop(extendCap)
 	}()
 	if h := stopBodyLifecycleHook; h != nil {
 		h(bodyDone)
 	}
-	timer := time.NewTimer(wallClockCap)
-	defer timer.Stop()
 
 	select {
 	case out := <-doneCh:
@@ -206,7 +230,10 @@ func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, unreg
 		if unregisterTx != nil {
 			rollback = unregisterTx.rollback()
 		}
-		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
+		capMu.Lock()
+		firedCap := wallClockCap
+		capMu.Unlock()
+		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", firedCap) //nolint:errcheck // best-effort stderr
 		writeSupervisorUnregisterRollback(stderr, "gc stop", "wall-clock timeout", rollback)
 		return stopCommandOutcome{code: 1}
 	}
@@ -299,6 +326,36 @@ func defaultStopWallClockTimeout(cfg *config.City) time.Duration {
 	return 2*onePass + stopPerTargetTimeoutDefault
 }
 
+// stopCapExtensionForRecorded is how much the standalone stop grows the
+// default wall-clock cap by when its sweep of the city's recorded sessions
+// (storeRecordedSweep) found sessions running that the runtime could not list.
+// The default cap counts configured targets only, and these are stopped in a
+// pass of their own (stopOrphans), so they get one pass's budget, priced as
+// defaultStopWallClockTimeout prices a pass. A target whose template the
+// configuration no longer names sends the whole pass to serial stop order
+// (stopTargetsBounded), so serial prices each such pass's stops one at a
+// time. Only sessions a probe reported running count: an unknown one is not
+// stopped by this pass (it is reported instead), and a runtime whose probes
+// fail must not buy itself a longer stop.
+func stopCapExtensionForRecorded(cfg *config.City, recorded int, serial bool) time.Duration {
+	if recorded <= 0 {
+		return 0
+	}
+	base := 5 * time.Second
+	if cfg != nil {
+		if d := cfg.Daemon.ShutdownTimeoutDuration(); d > 0 {
+			base = d
+		}
+	}
+	stopWaves := ceilDiv(recorded, defaultMaxParallelStopsPerWave)
+	if serial {
+		stopWaves = recorded
+	}
+	return time.Duration(ceilDiv(recorded, defaultMaxParallelInterrupts))*interruptPerTargetTimeout(cfg) +
+		base +
+		time.Duration(stopWaves)*stopPerTargetTimeoutDefault
+}
+
 func estimatedConfiguredStopTargets(cfg *config.City) int {
 	if cfg == nil || len(cfg.Agents) == 0 {
 		return 1
@@ -353,6 +410,13 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 // success record. The command writes that record only after the bounded worker
 // returns, so a timed-out worker cannot report a late success.
 func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
+	return cmdStopBodyWithoutSuccessExtendingCap(cityPath, cfg, force, stdout, stderr, nil)
+}
+
+// cmdStopBodyWithoutSuccessExtendingCap is cmdStopBodyWithoutSuccess under a
+// default wall-clock cap that extendCap grows (nil when the cap is the
+// operator's --timeout, or there is none).
+func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
 	cityName := loadedCityName(cfg, cityPath)
 
 	// If a controller is running, ask it to shut down (it stops agents).
@@ -431,23 +495,41 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// but only if the runtime can list them. One that cannot (an exec pack whose
 	// list-running is unsupported reads as an empty inventory) would leave them
 	// running past the stop, with no controller left to reap them. Also stop the
-	// city's own recorded sessions that a per-name probe reports running or
-	// cannot rule out (doStopWithoutSuccess withholds success for an unknown).
-	// Only when the runtime's listing answers: one whose listing fails is
-	// unreachable, its per-name probes would each wait out the provider's
-	// timeout, and the stop already reports the incomplete inventory
-	// (recordedSweepAllowed). That costs an attested runtime nothing and an
-	// unattested one a listing call.
+	// city's recorded sessions that are neither configured nor listed and that a
+	// per-name probe reports running or cannot rule out. Only when the runtime's
+	// listing answers: one whose listing fails is unreachable, its per-name
+	// probes would each wait out the provider's timeout, and the stop already
+	// reports the incomplete inventory (recordedSweepAllowed). That costs an
+	// attested runtime nothing and an unattested one a listing call.
+	//
+	// The listed names are skipped as well as the configured ones: a listed
+	// session outside the configuration is the orphan sweep's already, and
+	// probing it here would only add a round trip. What the sweep finds
+	// running joins the orphan pass, not the configured one: the configured
+	// sessions are stopped first, exactly as without the sweep, and the found
+	// names are handed on as already probed (knownUnlisted), so no stop-level
+	// probe reads them again (the worker boundary's own reads remain). The
+	// default wall-clock cap counts configured targets only, so it grows by
+	// that pass's budget (stopCapExtensionForRecorded). A name whose probe
+	// failed is unknown, not running: like a configured name whose
+	// observation failed, it is reported and the stop is not confirmed.
 	// unreachable records that listing call failing; the check of rows left
 	// creating below then does not probe them either.
 	unreachable := false
+	var recorded, recordedUnknown []string
 	if !runtime.ListRunningAttested(sp) {
-		_, listErr := sp.ListRunning("")
+		listed, listErr := sp.ListRunning("")
 		unreachable = listErr != nil
 		if recordedSweepAllowed(sp, listErr) {
-			for _, sn := range storeRecordedRunningOutside(desired, sessionFrontDoor(sessStore), sp, "gc stop", stderr) {
-				sessionNames = append(sessionNames, sn)
-				desired[sn] = true
+			skip := maps.Clone(desired)
+			for _, name := range listed {
+				skip[strings.TrimSpace(name)] = true
+			}
+			var found []string
+			found, recordedUnknown = storeRecordedSweep(skip, sessionFrontDoor(sessStore), sp, "gc stop", stderr)
+			recorded = slices.DeleteFunc(found, func(sn string) bool { return slices.Contains(recordedUnknown, sn) })
+			if extendCap != nil && len(recorded) > 0 {
+				extendCap(stopCapExtensionForRecorded(cfg, len(recorded), !stopTargetsAllResolved(recorded, cfg, sessStore)))
 			}
 		}
 	}
@@ -482,8 +564,16 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// not in the current config). An orphan sweep that could not see the
 	// whole runtime leaves the stop unconfirmed, but the remaining cleanup
 	// below still runs: it only retires things this stop owns.
-	if !stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr) && code == 0 {
+	if !stopOrphans(sp, desired, recorded, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr) && code == 0 {
 		fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete, so sessions outside the configuration may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+		code = 1
+	}
+	if len(recordedUnknown) > 0 {
+		slices.Sort(recordedUnknown)
+		// The sweep could not observe these. As doStopWithoutSuccess does for
+		// a configured name it cannot observe and the runtime does not list,
+		// leave them, report them and withhold success.
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: could not observe recorded session(s) %s, so they may still be running; resolve the runtime error and run gc stop again\n", strings.Join(recordedUnknown, ", ")) //nolint:errcheck // best-effort stderr
 		code = 1
 	}
 
@@ -893,20 +983,37 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
 //
+// recorded holds the city's recorded sessions the runtime did not list that
+// the caller's own per-name probe found running or could not rule out
+// (storeRecordedSweep). They are stopped in the same pass, and no stop-level
+// probe reads them again before their interrupt (the worker boundary's own
+// reads remain).
+//
 // It reports whether its runtime inventory was complete. False means an
 // orphan may have been invisible to the sweep and may still be running.
-func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
+func stopOrphans(sp runtime.Provider, desired map[string]bool, recorded []string, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) bool {
 	running, complete := listRunningForStop(sp, stderr)
 	var orphans []string
-	for _, name := range running {
-		if desired[name] {
+	seen := make(map[string]bool, len(running)+len(recorded))
+	for _, name := range append(running, recorded...) {
+		if desired[name] || seen[name] {
 			continue
 		}
+		seen[name] = true
 		orphans = append(orphans, name)
 	}
-	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
+	var known map[string]bool
+	for _, name := range recorded {
+		if seen[name] && !slices.Contains(running, name) {
+			if known == nil {
+				known = make(map[string]bool)
+			}
+			known[name] = true
+		}
+	}
+	gracefulStopAllWithForceSignal(orphans, known, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
 	return complete
 }
 
@@ -1121,12 +1228,14 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 	// unlisted holds the running names the runtime inventory did not show,
 	// so gracefulStopAll reads them per name without probing them again.
 	var unlisted map[string]bool
+	observed := observeStopTargets(sessionNames, sp, cfg, store)
 	for _, sn := range sessionNames {
 		sn = strings.TrimSpace(sn)
 		if sn == "" {
 			continue
 		}
-		alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+		obs := observed[sn]
+		alive, err := obs.running, obs.err
 		switch {
 		case err == nil && alive:
 			running = append(running, sn)
@@ -1161,4 +1270,54 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 		return 1
 	}
 	return 0
+}
+
+// observeStopTargets reads each name's worker observation for
+// doStopWithoutSuccess, defaultMaxParallelInterrupts at a time. On a remote
+// runtime one observation is several provider round trips (liveness,
+// metadata, activity), so reading a city's names one after another would
+// spend the stop's wall-clock cap before its first interrupt. Each name is
+// read once; the caller walks the answers in its own order.
+func observeStopTargets(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store) map[string]stopProbe {
+	var names []string
+	seen := make(map[string]bool, len(sessionNames))
+	for _, sn := range sessionNames {
+		sn = strings.TrimSpace(sn)
+		if sn == "" || seen[sn] {
+			continue
+		}
+		seen[sn] = true
+		names = append(names, sn)
+	}
+	results := make([]stopProbe, len(names))
+	sem := make(chan struct{}, defaultMaxParallelInterrupts)
+	var wg sync.WaitGroup
+	for i, sn := range names {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+			results[i] = stopProbe{running: alive, err: err}
+		}()
+	}
+	wg.Wait()
+	out := make(map[string]stopProbe, len(names))
+	for i, sn := range names {
+		out[sn] = results[i]
+	}
+	return out
+}
+
+// stopTargetsAllResolved reports whether every name resolves to a configured
+// template, so that stopTargetsBounded stops them in parallel waves rather
+// than falling back to serial order.
+func stopTargetsAllResolved(names []string, cfg *config.City, store beads.Store) bool {
+	for _, target := range stopTargetsForNames(names, cfg, store, nil) {
+		if !target.resolved {
+			return false
+		}
+	}
+	return true
 }

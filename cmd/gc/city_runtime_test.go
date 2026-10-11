@@ -8210,6 +8210,18 @@ func (p *countingExecProvider) callsAfter(name string) []string {
 	return nil
 }
 
+// callsBefore returns the methods called on name before its first Interrupt
+// (all of them when it was never interrupted).
+func (p *countingExecProvider) callsBefore(name string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	calls := p.log[name]
+	if i := slices.Index(calls, "Interrupt"); i >= 0 {
+		return slices.Clone(calls[:i])
+	}
+	return slices.Clone(calls)
+}
+
 func (p *countingExecProvider) counts(method string) map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -8365,6 +8377,14 @@ func TestStopReadsUnlistedSessionsWithOneProbeEach(t *testing.T) {
 		for _, name := range []string{"up-1", "up-2"} {
 			if got := sp.callsAfter(name); !slices.Equal(got, []string{"IsRunning", "IsRunning"}) {
 				t.Errorf("%s: reads after its interrupt = %v, want [IsRunning IsRunning] (the poll and pass 2)", name, got)
+			}
+			// Before its interrupt: the sweep's probe, then the worker
+			// boundary's own reads of the session it interrupts.
+			// unlistedSessionSet reads nothing more, because the sweep handed
+			// both names on as known.
+			want := append([]string{"IsRunning"}, "IsRunning", "IsRunning", "IsAttached", "GetLastActivity", "IsRunning", "IsRunning", "IsRunning")
+			if got := sp.callsBefore(name); !slices.Equal(got, want) {
+				t.Errorf("%s: reads before its interrupt = %v, want %v (the sweep's probe, then the worker boundary's reads)", name, got, want)
 			}
 		}
 	})

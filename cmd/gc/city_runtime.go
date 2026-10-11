@@ -5004,6 +5004,16 @@ func (cr *CityRuntime) shutdown() {
 		// row (an unprobed row is a session left running past a stop that
 		// reports success); the probes run wide, so a hung backend costs about
 		// one op timeout.
+		//
+		// Under a supervisor this shutdown runs inside stopManagedCity's
+		// budget: shutdown_timeout, then 5 x shutdown_timeout once forced (30 s
+		// in all by default). The budget is not grown for the names the sweep
+		// adds. A shutdown that outlasts it (a hung backend's op timeout, or
+		// a slow remote runtime with several sessions to stop) still stops
+		// them, but the supervisor reports the city's stop as failed and
+		// retires the bead provider while this shutdown may still be writing
+		// session beads. A runtime that lists slowly reaches the same overrun
+		// without the sweep.
 		var recorded []string
 		if cr.ownedCity.Load() && recordedSweepAllowed(cr.sp, listErr) {
 			recorded = storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, "shutdown", cr.stderr)
@@ -5071,14 +5081,27 @@ func (cr *CityRuntime) shutdown() {
 // Every candidate is probed, storeSweepMaxParallelProbes at a time, forced
 // stop or not: a row left unprobed would be a session left running while the
 // stop reports success.
+//
+// Callers hand found to gracefulStopAllWithForceSignal as knownUnlisted, so
+// no stop-level probe reads these names again before their interrupt; the
+// worker boundary's own reads of each name (inside the interrupt and the
+// stop) remain.
 func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) []string {
+	found, _ := storeRecordedSweep(skip, sessFront, sp, prefix, stderr)
+	return found
+}
+
+// storeRecordedSweep is storeRecordedRunningOutside that also returns the
+// subset of found whose probe failed (unknown, not known running), for a stop
+// that must withhold success over a session it could not observe.
+func storeRecordedSweep(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) (found, unknown []string) {
 	if !sessFront.Backed() || sp == nil || runtime.ListRunningAttested(sp) {
-		return nil
+		return nil, nil
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: listing the city's sessions: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]bool)
 	var candidates []string
@@ -5091,13 +5114,17 @@ func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Sto
 		candidates = append(candidates, name)
 	}
 	probed := probeNamesRunning(sp, candidates, storeSweepMaxParallelProbes)
-	var found []string
 	for _, name := range candidates {
-		if p := probed[name]; p.err != nil || p.running {
+		p := probed[name]
+		if p.err != nil || p.running {
 			found = append(found, name)
 		}
+		if p.err != nil {
+			fmt.Fprintf(stderr, "%s: observing recorded session %s: %v\n", prefix, name, p.err) //nolint:errcheck // best-effort stderr
+			unknown = append(unknown, name)
+		}
 	}
-	return found
+	return found, unknown
 }
 
 // recordedSweepAllowed reports whether a stop should sweep the city's
