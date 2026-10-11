@@ -144,6 +144,10 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
 	},
+	"§12.2#58 wait-nudge-bead": {
+		"CONTRACT v5 §12.2 #58 (owner ruling at the #7612 review; C8)", "legacy delivers a ready wait's nudge with the waiter's restart; v2's waits step queues it as a nudge bead for the waiter and stamps its nudge_id on the wait",
+		nil,
+	},
 }
 
 // parityStartKeys are the row keys a legacy start writes.
@@ -209,11 +213,6 @@ var parityFindings = map[string]parityEntry{
 		"C6b1, C6b2 (A20, A4; owner to add a §12.2 row)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch and delivers the wait's nudge with the start; v2 drains and restarts it the same way, a pass or more later (drain-stop-lag)",
 		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
-	// Not lag: the nudge goes another way (#7612 review, item 4).
-	"wait-nudge-bead": {
-		"C8 (the waits step's nudge delivery; owner to add a §12.2 row)", "legacy delivers a ready wait's nudge with the waiter's restart; v2's waits step queues it as a nudge bead for the waiter and stamps its nudge_id on the wait",
-		nil,
-	},
 }
 
 // parityUnported is legacy behavior that belongs to an arm or effect kind
@@ -260,6 +259,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// table rows.
 	intentStop:        regexp.MustCompile(`\bA4\b`),
 	intentSignalFresh: regexp.MustCompile(`\bA20\b`),
+	// A11's ack signal (C6c2) owns the D5 ack rows.
+	intentSignalAck: regexp.MustCompile(`\bA11\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
 	intentRekey:       regexp.MustCompile(`\bS4\b`),

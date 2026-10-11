@@ -270,7 +270,9 @@ func stopCloseStep(v txView, work finalizeWork, _ error) txStep {
 	if !stopChoice(v, work).CloseSeat {
 		return txStep{Refuse: causeRedecided}
 	}
-	return txStep{Terminal: session.ClosePatch(v.Now, "drained"), Facts: stopFacts(v, out, nil), Done: true}
+	terminal := session.ClosePatch(v.Now, "drained")
+	maps.Copy(terminal, stopVoidResiduePatch()) // a closed row keeps no stop request
+	return txStep{Terminal: terminal, Facts: stopFacts(v, out, nil), Done: true}
 }
 
 // passStopped hands the stop's outcome to the premise close.
@@ -295,7 +297,7 @@ func stopFinalizeStep(v txView, work finalizeWork, _ error) txStep {
 	// the fresh row in the same CAS, as legacy's ApplySleep splits it: the
 	// cell keeps an operator's hold, a wait's intent and an intent it cannot
 	// read, and clears the idle stop's transient.
-	patch := choice.Patch
+	patch := maps.Clone(choice.Patch) // a builder may hand back a shared map
 	if _, ok := activeStop(newCensusRow(v.It.Key, v.Row)); ok {
 		maps.Copy(patch, stopVoidResiduePatch())
 	}

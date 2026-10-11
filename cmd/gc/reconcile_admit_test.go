@@ -435,7 +435,7 @@ func TestAdmitPausedDefersStartsAndCreates(t *testing.T) {
 // start, adopt or rekey on the boot gate (P2): exactly the six destructive
 // families defer, with cause boot-gate.
 func TestAdmitBootGateClosedDefersExactlyTheSixKinds(t *testing.T) {
-	gated := []string{intentClose, intentDrainBegin, intentDrainBeginFresh, intentRollback, intentSignal, intentSignalFresh, intentStop, intentZombie}
+	gated := []string{intentClose, intentDrainBegin, intentDrainBeginFresh, intentRollback, intentSignal, intentSignalAck, intentSignalFresh, intentStop, intentZombie}
 	in := admitIn(50, 50)
 	in.BootOpen = false
 	var intents []intent

@@ -33,6 +33,7 @@ const (
 	intentDrainBeginFresh = "drain-begin-fresh" // a begin that reads fresh legs (F4) or re-proves idleness
 	intentSignal          = "signal"            // D2
 	intentSignalFresh     = "signal-fresh"      // a signal that reads fresh legs or revalidates claims
+	intentSignalAck       = "signal-ack"        // A11's: reads the runtime, to void an ack older than it
 	intentDrainCancel     = "drain-cancel"      // A19
 	intentDrainVoid       = "drain-void"        // A19
 	intentStop            = "stop"              // the stop verb with its finalize (D3, D4)

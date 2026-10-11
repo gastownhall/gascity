@@ -1336,9 +1336,9 @@ func operatorTimeline() []timelineFixture {
 	}
 	// nudgeQueued is the wait's nudge v2's waits step queues for the
 	// waiter, gc-3, where legacy delivers it with the restart.
-	nudgeQueued := map[string]string{"work:gc-2:nudge_id": "wait-nudge-bead", "work:gc-3": "wait-nudge-bead"}
+	nudgeQueued := map[string]string{"work:gc-2:nudge_id": "§12.2#58 wait-nudge-bead", "work:gc-3": "§12.2#58 wait-nudge-bead"}
 	for _, k := range []string{"agent", "deliver_after", "expires_at", "labels", "message", "nudge_id", "reference_json", "session_id", "source", "state", "status", "title", "type"} {
-		nudgeQueued["work:gc-3:"+k] = "wait-nudge-bead"
+		nudgeQueued["work:gc-3:"+k] = "§12.2#58 wait-nudge-bead"
 	}
 	waiter := tlFixture("a waiter sleeps", napping, []parityRow{tlRow("gc-1", 1, time.Hour)},
 		append(tlClaim("in_progress", "s-gc-1"), parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}}), []simRuntime{tlLive("gc-1")},

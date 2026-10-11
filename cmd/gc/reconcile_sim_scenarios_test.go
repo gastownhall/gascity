@@ -751,3 +751,51 @@ func TestSimConfigDriftWaitsForTheHumanThenDrains(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// Scenario J27 B (C6a ruling 3, v5.9g; D1, D5): an agent acks its drain,
+// its runtime dies, and Manager.ensureRunning restarts it at the same
+// generation and token before the controller's next pass. The restarted
+// runtime is never stopped for its predecessor's ack: the ack signal's
+// fresh read finds a runtime created after the ack, and voids the ack half.
+// With no restart the ack stops the acked runtime.
+func TestSimJ27StaleAckAcrossSameGenerationRestart(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"), gc1Work())
+		s.settle()
+		commit, err := checkDrainAckRow(s.legs[0].backing, "gc-1", false, "tok-1", s.clk.Now())
+		if err == nil {
+			err = commit()
+		}
+		if err != nil {
+			t.Fatalf("restarted %t: the agent's ack: %v", restarted, err)
+		}
+		s.audit("drain-ack")
+		s.legs[0].cache.ApplyEvent("bead.updated", s.legs[0].events[len(s.legs[0].events)-1]) // the census sees the CLI's write
+		s.advance(5 * time.Second)
+		s.sp.mu.Lock()
+		acked := s.sp.rts["s-gc-1"].object
+		if restarted {
+			s.sp.drop("s-gc-1")
+			s.sp.put("s-gc-1", "gc-1", s.gc1()["generation"], "tok-1")
+		}
+		s.sp.mu.Unlock()
+		for range 3 {
+			s.settle()
+			s.advance(time.Minute)
+		}
+		var stopped []int64
+		for _, k := range s.sp.kills {
+			if k.Name == "s-gc-1" && k.Hit != nil {
+				stopped = append(stopped, k.Hit.object)
+			}
+		}
+		m := s.gc1()
+		switch {
+		case restarted && (len(stopped) != 0 || m[session.DrainAckIncarnationKey] != "" || m["state_reason"] == session.DrainAckStopPendingReason):
+			t.Errorf("restarted: stopped objects %v, row %v; want none stopped and the ack voided", stopped, m)
+		case !restarted && !slices.Contains(stopped, acked):
+			t.Errorf("not restarted: stopped objects %v, want the acked runtime $%d stopped", stopped, acked)
+		}
+		s.noViolations(t)
+	}
+}

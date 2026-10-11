@@ -107,6 +107,7 @@ var effectSpecs = map[string]effectSpec{
 	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},                                                                                 // A20 (C6a2)
 	intentSignal:          {class: capRowWrites, bootGated: true, sections: signalSections},                                                                                                              // A20's signal (C6b1)
 	intentSignalFresh:     {class: capProbing, bootGated: true, needs: signalFreshNeeds, sections: signalSections},                                                                                       // A20's signal (C6b1)
+	intentSignalAck:       {class: capProbing, bootGated: true, needs: needs{Runtime: true}, sections: signalSections},                                                                                   // A11 (C6c2)
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections},                                                                                                                           // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections},                                                                                                                           // A19 (C6a)
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, needsFor: stopNeeds, caps: capReadStores | capProviderStop, sections: stopSections},            // A4 (C6b2)

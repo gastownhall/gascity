@@ -349,21 +349,21 @@ row:gc-1:state legacy="active" v2="awake" [wait-sleep-lag]
 provider:RemoveMeta s-gc-1 resolved
 row:gc-1:state resolved
 row:gc-1:stranded_event_emitted_at resolved
-work:gc-2:nudge_id legacy="" v2="wait-gc-2-0-1" [wait-nudge-bead]
-work:gc-3 legacy="" v2="present" [wait-nudge-bead]
-work:gc-3:agent legacy="" v2="worker-1" [wait-nudge-bead]
-work:gc-3:deliver_after legacy="" v2="T+1m20s" [wait-nudge-bead]
-work:gc-3:expires_at legacy="" v2="<wall>" [wait-nudge-bead]
-work:gc-3:labels legacy="" v2="agent:worker-1,gc:nudge,nudge:wait-gc-2-0-1,source:wait" [wait-nudge-bead]
-work:gc-3:message legacy="" v2="Wait satisfied (gc-2): Wait satisfied." [wait-nudge-bead]
-work:gc-3:nudge_id legacy="" v2="wait-gc-2-0-1" [wait-nudge-bead]
-work:gc-3:reference_json legacy="" v2="{\"kind\":\"bead\",\"id\":\"gc-2\"}" [wait-nudge-bead]
-work:gc-3:session_id legacy="" v2="gc-1" [wait-nudge-bead]
-work:gc-3:source legacy="" v2="wait" [wait-nudge-bead]
-work:gc-3:state legacy="" v2="queued" [wait-nudge-bead]
-work:gc-3:status legacy="" v2="open" [wait-nudge-bead]
-work:gc-3:title legacy="" v2="nudge:wait-gc-2-0-1" [wait-nudge-bead]
-work:gc-3:type legacy="" v2="chore" [wait-nudge-bead]
+work:gc-2:nudge_id legacy="" v2="wait-gc-2-0-1" [§12.2#58 wait-nudge-bead]
+work:gc-3 legacy="" v2="present" [§12.2#58 wait-nudge-bead]
+work:gc-3:agent legacy="" v2="worker-1" [§12.2#58 wait-nudge-bead]
+work:gc-3:deliver_after legacy="" v2="T+1m20s" [§12.2#58 wait-nudge-bead]
+work:gc-3:expires_at legacy="" v2="<wall>" [§12.2#58 wait-nudge-bead]
+work:gc-3:labels legacy="" v2="agent:worker-1,gc:nudge,nudge:wait-gc-2-0-1,source:wait" [§12.2#58 wait-nudge-bead]
+work:gc-3:message legacy="" v2="Wait satisfied (gc-2): Wait satisfied." [§12.2#58 wait-nudge-bead]
+work:gc-3:nudge_id legacy="" v2="wait-gc-2-0-1" [§12.2#58 wait-nudge-bead]
+work:gc-3:reference_json legacy="" v2="{\"kind\":\"bead\",\"id\":\"gc-2\"}" [§12.2#58 wait-nudge-bead]
+work:gc-3:session_id legacy="" v2="gc-1" [§12.2#58 wait-nudge-bead]
+work:gc-3:source legacy="" v2="wait" [§12.2#58 wait-nudge-bead]
+work:gc-3:state legacy="" v2="queued" [§12.2#58 wait-nudge-bead]
+work:gc-3:status legacy="" v2="open" [§12.2#58 wait-nudge-bead]
+work:gc-3:title legacy="" v2="nudge:wait-gc-2-0-1" [§12.2#58 wait-nudge-bead]
+work:gc-3:type legacy="" v2="chore" [§12.2#58 wait-nudge-bead]
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
 @ +0s
@@ -447,6 +447,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:Stop s-gc-1 legacy="" v2="1" [drain-stop-lag]
 row:gc-1:close_reason resolved
 row:gc-1:closed_at legacy="T+4m0s" v2="T+4m20s" [drain-stop-lag]
+row:gc-1:drain_intent_at resolved
+row:gc-1:drain_intent_incarnation resolved
+row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+4m0s" v2="T+4m20s" [§12.2#51 a7-lag]
@@ -486,6 +489,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:Stop s-gc-1 legacy="" v2="1" [drain-stop-lag]
 row:gc-1:close_reason resolved
 row:gc-1:closed_at legacy="T+0s" v2="T+20s" [drain-stop-lag]
+row:gc-1:drain_intent_at resolved
+row:gc-1:drain_intent_incarnation resolved
+row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+0s" v2="T+20s" [§12.2#51 a7-lag]
@@ -525,6 +531,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:Stop s-gc-1 legacy="" v2="1" [drain-stop-lag]
 row:gc-1:close_reason resolved
 row:gc-1:closed_at legacy="T+0s" v2="T+20s" [drain-stop-lag]
+row:gc-1:drain_intent_at resolved
+row:gc-1:drain_intent_incarnation resolved
+row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+0s" v2="T+20s" [§12.2#51 a7-lag]
@@ -565,6 +574,9 @@ event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1",
 provider:Stop s-gc-1 legacy="" v2="1" [drain-stop-lag]
 row:gc-1:close_reason resolved
 row:gc-1:closed_at legacy="T+7m0s" v2="T+7m20s" [drain-stop-lag]
+row:gc-1:drain_intent_at resolved
+row:gc-1:drain_intent_incarnation resolved
+row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+7m0s" v2="T+7m20s" [§12.2#51 a7-lag]

@@ -418,7 +418,19 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			patchSite(func(session.Info) session.MetadataPatch { return session.KillPendingPatch(now) }),
 		},
 		"internal/session/resume_user_hold.go:Manager.consumeUserHold": {
-			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute), "provider", "claude"},
+			append([]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute), "provider", "claude"}, staleStopRequest()...),
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				city := t.TempDir()
+				if err := session.NewManagerWithOptions(m, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
+		"internal/session/chat.go:Manager.confirmLiveSessionState": { // an operator's attach starts the runtime
+			append([]string{"state", "asleep", "provider", "claude"}, staleStopRequest()...),
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
@@ -552,6 +564,10 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return stopVoidResiduePatch() }),
 		},
+		"cmd/gc/reconcile_stop_request.go:stopAckVoidPatch": {
+			[]string{session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, ago(time.Minute)},
+			patchSite(func(session.Info) session.MetadataPatch { return stopAckVoidPatch() }),
+		},
 	}
 	declared := map[string][]string{} // a built clear site -> the keys it must clear
 	pending := map[string]bool{}      // a built site whose clear is still pending
@@ -638,4 +654,13 @@ func wholeDispositionClass(keys map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// staleStopRequest is both halves of a stop request on a row, as a runtime
+// that acked before its row was restarted left it.
+func staleStopRequest() []string {
+	return []string{
+		session.DrainIntentReasonKey, "idle", session.DrainIntentAtKey, rowAt(-time.Hour), session.DrainIntentIncarnationKey, "3",
+		session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Hour),
+	}
 }

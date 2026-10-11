@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -582,9 +583,9 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 				return err
 			}
 			defer release()
-			return m.consumeUserHold(consume, m.now())
+			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
 			return err
 		}
 		return nil
@@ -729,9 +730,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
 	if consumes {
-		return m.consumeUserHold(consume, m.now())
+		var clears MetadataPatch
+		if started {
+			clears = restartStopRequestClears(b.Metadata)
+		}
+		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -851,11 +856,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
 	if b == nil {
 		return nil
 	}
 	batch := make(map[string]string)
+	if started {
+		maps.Copy(batch, restartStopRequestClears(b.Metadata))
+	}
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)

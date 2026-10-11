@@ -49,6 +49,7 @@ type stopRequest struct {
 	Phase  stopPhase
 	Reason string    // the drain reason; empty for a bare ack or a bare legacy stop-pending row
 	At     time.Time // when the drain began; zero when unparseable or absent
+	AckAt  time.Time // when an acked request's ack landed; zero when unparseable
 	// Synthesized marks a bare legacy stop-pending row (rule 3).
 	Synthesized bool
 	// Residue marks, on no request, a half of the row's generation that
@@ -86,6 +87,7 @@ func activeStop(row censusRow) (stopRequest, bool) {
 		req.Phase, req.Synthesized = stopSignaled, !intent
 	case acked:
 		req.Phase = stopAcked
+		req.AckAt, _ = parseRFC3339Metadata(k.rawAckAt)
 	case intent:
 		req.Phase = stopRequested
 	default:
@@ -116,6 +118,12 @@ func stopCancelPatch() session.MetadataPatch {
 func cancelsStop(patch session.MetadataPatch) bool {
 	reason, ok := patch[session.DrainIntentReasonKey]
 	return ok && reason == ""
+}
+
+// stopAckVoidPatch clears the request half: A11's void of an ack older
+// than the runtime it would stop.
+func stopAckVoidPatch() session.MetadataPatch {
+	return session.MetadataPatch{session.DrainAckIncarnationKey: "", session.DrainAckAtKey: ""}
 }
 
 // stopVoidResiduePatch clears both halves of a request rule 2 ended.
