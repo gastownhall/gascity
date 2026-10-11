@@ -2077,8 +2077,27 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 }
 
+// asyncStartCity is a city dir for a test whose starts run async, and the
+// option that joins those starts to a tracker. The tracker's wait is
+// registered right after the dir, so it runs after every later cleanup (a
+// gated provider's release) and before the dir's removal (cleanups run LIFO):
+// a released start still writing under <city>/.gc (its runtime lease's lock
+// file) would otherwise race RemoveAll (mc-f9s2j). The wait is bounded; a
+// start still running then is a leak the test reports.
+func asyncStartCity(t *testing.T) (string, startExecutionOption) {
+	t.Helper()
+	city := t.TempDir()
+	starts := &asyncStartTracker{}
+	t.Cleanup(func() {
+		if !starts.wait(5 * time.Second) {
+			t.Error("async starts still running 5s into cleanup")
+		}
+	})
+	return city, withAsyncStartTracker(starts)
+}
+
 func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	maxWakes := 8
 	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
@@ -2143,6 +2162,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	if woken != defaultStartDependencyRecheckBatchSize {
 		t.Fatalf("first async woken = %d, want dependency-recheck batch size %d", woken, defaultStartDependencyRecheckBatchSize)
@@ -2177,6 +2197,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		&secondStderr,
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	if woken != 0 {
 		t.Fatalf("second async woken = %d, want 0 after dependency loss", woken)
@@ -2191,7 +2212,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 }
 
 func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2242,6 +2263,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 			ioDiscard{},
 			nil,
 			withAsyncStartExecution(),
+			trackStarts,
 		)
 	}()
 
@@ -2285,7 +2307,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 0, 0, time.UTC)}
 	sp := newGatedStartProvider()
@@ -2334,6 +2356,7 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	wantWoken := maxWakes
 	if woken != wantWoken {
@@ -2480,7 +2503,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCancel(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 20, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2527,6 +2550,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 		withAsyncStartLimiter(limiter),
 	); got != 0 {
 		t.Fatalf("woken = %d, want 0 while async limiter is full", got)
@@ -2614,7 +2638,7 @@ func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
 }
 
 func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 1, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2665,6 +2689,7 @@ func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testi
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0 after cancellation", woken)
@@ -2838,7 +2863,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	store := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 27, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2883,6 +2908,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	); got != 0 {
 		t.Fatalf("woken = %d, want 0 when async preparation fails after preWake", got)
 	}
@@ -3011,7 +3037,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 }
 
 func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.T) {
-	testCity := t.TempDir()
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3053,6 +3079,7 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 		withAsyncStartFollowUp(func() {
 			select {
 			case followUp <- struct{}{}:
