@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,8 @@ import (
 // plannerMinGap is the shortest time from one pass's start to the next's.
 const plannerMinGap = 250 * time.Millisecond
 
-// plannerPaceFactor spaces pass starts at this many times the last pass's
-// duration, which keeps the duty cycle near 1/plannerPaceFactor.
+// plannerPaceFactor spaces pass starts at this many times the pace duration
+// (paceGap), which keeps the duty cycle near 1/plannerPaceFactor.
 const plannerPaceFactor = 4
 
 // passFunc runs one pass at now. C2c1 supplies gather, allocate, decideRow
@@ -111,10 +112,10 @@ type bootState struct {
 func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && b.RecordingSeen }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, fairSeed, boot, last, rowTrace, memo and stalled; other
-// goroutines reach the planner through markDirty, the settlement queue, the
-// execution-stalled inbox, the start pause and stop, and read what a pass
-// publishes through out.
+// backoff, bucket, fairSeed, boot, last, rowTrace, idleProbes, memo and
+// stalled; other goroutines reach the planner through markDirty, the
+// settlement queue, the execution-stalled inbox, the start pause and stop,
+// and read what a pass publishes through out.
 type planner struct {
 	clock       plannerClock
 	seam        txSeamFunc           // every pass's (effectPass.seam): stagingSeam's, or a test's
@@ -124,6 +125,7 @@ type planner struct {
 	effects     *effectExecutor          // submits what admission lets through; nil while trace-only
 	creates     *createEffects           // runs create effects on effects; nil defers creates (no-effect)
 	rec         events.Recorder          // settlements' events; nil records none
+	stranded    *strandedClaimAlerts     // the controller's session.stranded_claims alerter
 	stderr      io.Writer
 	metrics     *passMetrics
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
@@ -141,12 +143,20 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
-	memo     gatherMemo
-	out      passOutputs
-	obs      passObserver
+	// aliasOwed are the rows whose alias write landed with their runtime
+	// not yet synced (A7's runtime-alias sync): set by the write's fact,
+	// cleared when the sync settles.
+	aliasOwed map[rowKey]bool
+	// idleProbes are the idle begins submitted to prove an agent idle, by
+	// row, which paceIdleProbes holds a patrol apart.
+	idleProbes map[rowKey]idleProbe
+	memo       gatherMemo
+	out        passOutputs
+	obs        passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
 	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	softReload    atomic.Pointer[softReloadRequest] // the open soft reload (M2)
 	stalled       map[string]executionStalledRequest
 	stalledMu     sync.Mutex
 	stalledPosted []executionStalledRequest
@@ -163,13 +173,14 @@ type planner struct {
 func newPlanner(clock plannerClock, patrol func() time.Duration, pass passFunc, inflight plannerInflight, stopEffects func(time.Time), stderr io.Writer) *planner {
 	p := &planner{
 		clock: clock, patrol: patrol, pass: pass, stopEffects: stopEffects, stderr: stderr,
-		metrics:  newPassMetrics(),
-		inflight: inflight,
-		backoff:  newBackoffTable(),
-		rowTrace: make(map[rowKey]string),
-		dirty:    make(chan struct{}, 1),
-		quit:     make(chan struct{}),
-		done:     make(chan struct{}),
+		metrics:   newPassMetrics(),
+		inflight:  inflight,
+		backoff:   newBackoffTable(),
+		rowTrace:  make(map[rowKey]string),
+		aliasOwed: make(map[rowKey]bool),
+		dirty:     make(chan struct{}, 1),
+		quit:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	p.settlements.wake = func() { p.markDirty("settlement") }
 	return p
@@ -222,6 +233,21 @@ func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalled
 	return out
 }
 
+// aliasOwedFor forgets the owed runtime-alias syncs of rows a complete c
+// holds closed, and returns the pass's copy.
+func (p *planner) aliasOwedFor(c *sessionCensus) map[rowKey]bool {
+	if len(p.aliasOwed) == 0 {
+		return nil
+	}
+	complete, ok := c.complete()
+	for k := range p.aliasOwed {
+		if ok && complete.Closed(k) {
+			delete(p.aliasOwed, k)
+		}
+	}
+	return maps.Clone(p.aliasOwed)
+}
+
 // pauseStarts and resumeStarts bracket a provider swap; the pass reads
 // startsPaused and admits no start while it is set.
 func (p *planner) pauseStarts()       { p.paused.Store(true) }
@@ -232,8 +258,7 @@ func (p *planner) startsPaused() bool { return p.paused.Load() }
 // a dirty mark, the patrol interval after the last pass ends (bounding a lost
 // wake, R-6), or the last pass's earliest row deadline. One timer serves the
 // patrol, the row deadline and the pacing wait. An owed pass starts at once
-// if the planner is idle; otherwise it waits until max(plannerMinGap,
-// plannerPaceFactor × last duration) after the last start.
+// if the planner is idle; otherwise it waits paceGap after the last start.
 func (p *planner) run(ctx context.Context) {
 	p.running.Store(true)
 	defer close(p.done)
@@ -248,7 +273,7 @@ func (p *planner) run(ctx context.Context) {
 		now := p.clock.Now()
 		wakeAt := due
 		if owed {
-			wakeAt = p.last.Start.Add(max(plannerMinGap, plannerPaceFactor*p.last.Duration))
+			wakeAt = p.last.Start.Add(p.paceGap())
 			if !now.Before(wakeAt) {
 				owed = false
 				res := p.runPass(now)
@@ -274,6 +299,18 @@ func (p *planner) run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// paceGap is the wait from the last pass's start to an owed pass's
+// (CONTRACT v5.9j P1): plannerPaceFactor times the last pass's duration,
+// at least plannerMinGap, and at most the patrol's due time, one patrol
+// after the last pass ended. So the idle time after a pass is at least
+// min(3 × its duration, the patrol): passes run at most a quarter of the
+// time, or d/(d+patrol) for a pass of d longer than a third of the patrol,
+// and an owed pass is never later than the patrol would have run it. A 101s
+// freeze once bought a 404s stall (staging J40 C); now at most a patrol.
+func (p *planner) paceGap() time.Duration {
+	return max(plannerMinGap, min(plannerPaceFactor*p.last.Duration, p.last.Duration+p.patrol()))
 }
 
 // runPass applies the settlements posted since the last pass
@@ -318,6 +355,10 @@ func (p *planner) drainSettlements(now time.Time) {
 		if !s.Late {
 			p.backoffSettled(s)
 			p.observeSettlement(s)
+			p.softReload.Load().settle(s)
+			if s.Kind == intentRuntimeAlias && (s.Outcome == settledLanded || s.Outcome == settledNoop) {
+				delete(p.aliasOwed, s.Key)
+			}
 		}
 	}
 	for _, s := range items {
@@ -326,9 +367,10 @@ func (p *planner) drainSettlements(now time.Time) {
 }
 
 // applyFacts applies an effect's facts, on time or late alike: its events to
-// the recorder, each recovered alone; its drain transition to legacy's
-// telemetry; its worktree verdict to the work item's backoff record
-// (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+// the recorder, each recovered alone; its drain transition and its
+// quarantine to legacy's telemetry; its worktree verdict to the work item's
+// backoff record (C6.5(a)); an alias write's owed runtime sync to the
+// planner's set. Every field is consumed here (TestApplyFactsConsumesEveryField).
 func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	for _, ev := range f.Events {
 		if p.rec != nil {
@@ -337,6 +379,12 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 	if t := f.Transition; t != nil {
 		recordDrainTransition(context.Background(), t.Name, t.Reason, t.Transition)
+	}
+	if f.Quarantined != "" {
+		recordAgentQuarantine(context.Background(), f.Quarantined)
+	}
+	if f.AliasOwed != nil {
+		p.aliasOwed[*f.AliasOwed] = true
 	}
 	switch {
 	case f.Work == nil:
@@ -356,8 +404,12 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 }
 
-// recordDrainTransition is legacy's drain telemetry; a test reads it.
-var recordDrainTransition = telemetry.RecordDrainTransition
+// recordDrainTransition and recordAgentQuarantine are legacy's drain and
+// quarantine telemetry; a test reads them.
+var (
+	recordDrainTransition = telemetry.RecordDrainTransition
+	recordAgentQuarantine = telemetry.RecordAgentQuarantine
+)
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
 // pass record; a panicking recorder is logged and skips this event only.
@@ -374,7 +426,8 @@ func (p *planner) record(ev events.Event) {
 }
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
-// resets its record; a refusal, failure or ambiguous outcome (an abandoned
+// resets its record; a refusal (a landing with a cause, a heal written in a
+// refusal's stead, included), failure or ambiguous outcome (an abandoned
 // write) backs it off with its cause, except a swap pause and an endpoint-gate
 // refusal, deferrals the gate itself paces.
 func (p *planner) backoffSettled(s settlement) {
@@ -384,9 +437,9 @@ func (p *planner) backoffSettled(s settlement) {
 	}
 	switch {
 	case key == "":
-	case s.Outcome == settledLanded || s.Outcome == settledNoop:
+	case s.Outcome == settledLanded && s.Cause == "" || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
+	case (s.Outcome == settledRefused || s.Outcome == settledLanded || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate && s.Cause != causeCapacity:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

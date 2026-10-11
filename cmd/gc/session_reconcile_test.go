@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -1239,6 +1240,71 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 	// The fold reflects a persisted clear: the store must carry it too.
 	if persisted, err := store.Get(session.ID); err != nil || persisted.Metadata["held_until"] != "" {
 		t.Errorf("store held_until = %q (err %v), want cleared", persisted.Metadata["held_until"], err)
+	}
+}
+
+// TestHealExpiredTimers_KeepsAnOperatorSuspend: an operator's suspend whose
+// held_until has passed keeps its intent and stamp; only the expired timer
+// goes (the TimerTick cell, main's heal). Every operator suspend is ∞, so an
+// expired one was shortened by a race or an undo, never meant to end.
+func TestHealExpiredTimers_KeepsAnOperatorSuspend(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"held_until":   now.Add(-time.Hour).Format(time.RFC3339),
+		"sleep_intent": "user-hold",
+		"suspended_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+		"sleep_reason": "user-hold",
+	})
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})
+	if got.HeldUntil != "" || got.SleepIntent != "user-hold" || got.SuspendedAt == "" {
+		t.Errorf("after the heal held_until=%q sleep_intent=%q suspended_at=%q, want the timer gone and the suspend kept",
+			got.HeldUntil, got.SleepIntent, got.SuspendedAt)
+	}
+}
+
+// dj2UpdateHook runs hook once, before the first Update reaches the store.
+type dj2UpdateHook struct {
+	beads.Store
+	hook func()
+	done bool
+}
+
+func (s *dj2UpdateHook) Update(id string, opts beads.UpdateOpts) error {
+	if !s.done && s.hook != nil {
+		s.done = true
+		s.hook()
+	}
+	return s.Store.Update(id, opts)
+}
+
+// TestHeartbeatRaceThenTimerHealKeepsTheSuspend (DJ2): on a store without
+// CAS a heartbeat racing an operator suspend shortens its held_until to the
+// heartbeat's (the D-I residual); when that time passes, the timer heal keeps
+// the operator's suspend.
+func TestHeartbeatRaceThenTimerHealKeepsTheSuspend(t *testing.T) {
+	const sessionName, beadID = "testpack__beater", "bead-789"
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{makeSessionBead(beadID, sessionName)}, nil)
+	if err := mem.SetMetadata(beadID, "state", "active"); err != nil {
+		t.Fatal(err)
+	}
+	w := &dj2UpdateHook{Store: mem}
+	w.hook = func() {
+		if _, err := sessionFrontDoor(mem).OperatorSuspend(beadID, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var so, se bytes.Buffer
+	if code := doRuntimeHeartbeat(w, time.Hour, sessionName, sessionName, false, &so, &se); code != 0 {
+		t.Fatalf("heartbeat exit %d: %s", code, se.String())
+	}
+	info, err := sessionFrontDoor(mem).Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healExpiredTimersInfo(info, sessionFrontDoor(mem), &clock.Fake{Time: time.Now().Add(2 * time.Hour)})
+	if healed, _ := mem.Get(beadID); healed.Metadata["sleep_intent"] != "user-hold" {
+		t.Errorf("after the heal sleep_intent=%q held_until=%q: the raced suspend was healed away", healed.Metadata["sleep_intent"], healed.Metadata["held_until"])
 	}
 }
 

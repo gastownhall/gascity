@@ -596,9 +596,16 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 		return nil, err
 	}
 	state := State(strings.TrimSpace(sessionBead.Metadata["state"]))
-	batch := ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"], now)
+	// An operator's wake is the disposition's Wake cell: every blocker goes,
+	// an operator's suspend included (D-J 1); the lifecycle is
+	// ClearWakeBlockersPatch's, with the explicit wake request.
+	life := LifecycleOnly(ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"], now))
 	for k, v := range RequestExplicitWakePatch(string(WakeCauseExplicit), now) {
-		batch[k] = v
+		life[k] = v
+	}
+	batch, _, err := MoveDisposition(sessionBead.Metadata, infoFromPersistedBead(sessionBead), ActorOperator, DispEvent{Kind: EvWake}, func(Disposition, Disposition, Info) MetadataPatch { return life }, now)
+	if err != nil {
+		return nil, err
 	}
 	if view.BaseState == BaseStateArchived && view.ContinuityEligible {
 		batch["archived_at"] = ""

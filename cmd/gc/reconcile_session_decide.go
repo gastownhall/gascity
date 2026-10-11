@@ -23,10 +23,13 @@ const (
 // timerHealPatch clears an expired hold, then an expired quarantine judged
 // against the post-hold sleep_reason (SESS-009/010: the order is
 // load-bearing), and clears unknown-state markers on a known-state row
-// (SESS-047). requeue is the time until the earliest timer still running.
+// (SESS-047). The timers are the disposition's TimerTick cell, the lifecycle
+// the expired-timer builders'. requeue is the time until the earliest timer
+// still running.
 func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, time.Duration) {
 	patch := session.MetadataPatch{}
 	var requeue time.Duration
+	expired := false
 	sleepReason := row.SleepReason
 	for _, timer := range []struct {
 		at    string
@@ -39,6 +42,7 @@ func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, tim
 		switch {
 		case t.IsZero():
 		case now.After(t):
+			expired = true
 			for k, v := range timer.clear(sleepReason) {
 				patch[k] = v
 			}
@@ -49,6 +53,9 @@ func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, tim
 			// RFC3339 has whole seconds; a second past the timer it has expired.
 			requeue = earlierRequeue(requeue, t.Sub(now)+time.Second)
 		}
+	}
+	if expired {
+		maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvTimerTick}, now).Fold())
 	}
 	for key, value := range map[string]string{
 		unknownStateFirstSeenKey: row.UnknownStateFirstSeen,
@@ -84,7 +91,7 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 //
 //gc:pure
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
-	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
+	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k], partial: len(a.Snapshot.Partial.Global) > 0}
 	r.row, r.found = w.Census.Rows[k]
 	if f := w.fresh; f != nil && f.k == k {
 		r.fresh = f.rt
@@ -95,10 +102,13 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 			if it.Kind != "" { // a hold has no effect to read anything
 				it.Rests = r.rests
 			}
+			it.Key = k
 			if arm.name == "A6" && it.Kind != "" {
 				it.Patch = r.fold(it.Patch, rowArms[i+1:])
+				if it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal {
+					it = r.startHealed(it)
+				}
 			}
-			it.Key = k
 			return it, r.next
 		}
 	}
@@ -137,6 +147,9 @@ type rowFacts struct {
 	next  time.Time
 	rests rests      // what the arm deciding reads through the fresh accessors
 	fresh *txRuntime // the effect's fresh runtime read (World.withRuntime), else nil
+	// partial is a pass with a global partial cause (P-3): nothing closes.
+	// Not the snapshot's mode, which a suspended city overwrites.
+	partial bool
 }
 
 // rests are the fresh facts a decision rests on (EFFECT-STRUCTURE §2.2;
@@ -177,7 +190,7 @@ type rowArm struct {
 // rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
 // (A1, A6) takes one line per row. Later PRs insert their arms at their
 // numbers: A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline
-// (C7c), A10-A18, A20's begin (C6a2) and A21.
+// (C7c), A11-A17 and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A1", armCensusOnly},
@@ -193,8 +206,18 @@ var rowArms = []rowArm{
 	{"A6", armDetachedAt},
 	{"A6", armStrandedClear},
 	{"A6", armCurrentBead},
+	{"A7", armRowMetadata},
+	{"A8", armBaseline},
 	{"A9", armLivenessUnknown},
+	{"A10", armAdopt},
+	{"A10", armRollback},
+	{"A14", armConfigDrift},
+	{"A16", armExecutionStalled},
+	{"A17", armHeartbeatRespawn},
+	{"A18", armStart},
 	{"A19", armDrainVoidCancel},
+	{"A20", armDrainBegin},
+	{"A21", armClose},
 }
 
 // decideRow's other reasons.

@@ -510,6 +510,45 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for SlingChildOutcomeOutcome.
+const (
+	Failed  SlingChildOutcomeOutcome = "failed"
+	Routed  SlingChildOutcomeOutcome = "routed"
+	Skipped SlingChildOutcomeOutcome = "skipped"
+)
+
+// Valid indicates whether the value is a known member of the SlingChildOutcomeOutcome enum.
+func (e SlingChildOutcomeOutcome) Valid() bool {
+	switch e {
+	case Failed:
+		return true
+	case Routed:
+		return true
+	case Skipped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SlingResponseStatus.
+const (
+	Partial SlingResponseStatus = "partial"
+	Slung   SlingResponseStatus = "slung"
+)
+
+// Valid indicates whether the value is a known member of the SlingResponseStatus enum.
+func (e SlingResponseStatus) Valid() bool {
+	switch e {
+	case Partial:
+		return true
+	case Slung:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StatusConditionalWriteStoreVerdictLatch.
 const (
 	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
@@ -3963,6 +4002,24 @@ type SessionResponse struct {
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
 
+// SessionStrandedClaimsPayload defines model for SessionStrandedClaimsPayload.
+type SessionStrandedClaimsPayload struct {
+	// Claims The stranded claims, sorted by bead ID.
+	Claims *[]StrandedClaim `json:"claims"`
+
+	// Kind What left the claims on the seat: its close reason (drained, orphaned, ...), killed, retired, or manual (gc session close).
+	Kind string `json:"kind"`
+
+	// SessionId Canonical session bead ID of the closed or retired seat holding the claims.
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Template of the seat, when set.
+	Template *string `json:"template,omitempty"`
+}
+
 // SessionStrandedPayload defines model for SessionStrandedPayload.
 type SessionStrandedPayload struct {
 	// SessionId Canonical session bead ID for the stranded pool session (also the envelope Subject).
@@ -4975,6 +5032,46 @@ type SlingBatchSummary struct {
 	Total int64 `json:"total"`
 }
 
+// SlingChildConflict defines model for SlingChildConflict.
+type SlingChildConflict struct {
+	// BlockingWorkflowIds Live workflow roots that refused the launch.
+	BlockingWorkflowIds *[]string `json:"blocking_workflow_ids"`
+
+	// Hint Command that deletes the blocking workflows. Re-slinging with force launches beside them instead.
+	Hint string `json:"hint"`
+
+	// SourceBeadId Source bead whose live workflow refused the launch.
+	SourceBeadId string `json:"source_bead_id"`
+}
+
+// SlingChildOutcome defines model for SlingChildOutcome.
+type SlingChildOutcome struct {
+	// BeadId Child bead ID.
+	BeadId   string              `json:"bead_id"`
+	Conflict *SlingChildConflict `json:"conflict,omitempty"`
+
+	// Formula Formula attached to the child, when one was.
+	Formula *string `json:"formula,omitempty"`
+
+	// MoleculeId Root of the formula wisp attached to the child, when a non-graph formula was attached.
+	MoleculeId *string `json:"molecule_id,omitempty"`
+
+	// Outcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+	Outcome SlingChildOutcomeOutcome `json:"outcome"`
+
+	// Reason Why routing the child failed. Present only for outcome failed.
+	Reason *string `json:"reason,omitempty"`
+
+	// Status The child's bead status when it was skipped because it was not open.
+	Status *string `json:"status,omitempty"`
+
+	// WorkflowId Graph workflow launched for the child, when one was.
+	WorkflowId *string `json:"workflow_id,omitempty"`
+}
+
+// SlingChildOutcomeOutcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+type SlingChildOutcomeOutcome string
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
 	// AttachedBeadId Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -5029,6 +5126,9 @@ type SlingResponse struct {
 	Batch          *SlingBatchSummary `json:"batch,omitempty"`
 	Bead           *string            `json:"bead,omitempty"`
 
+	// Children One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+	Children *[]SlingChildOutcome `json:"children,omitempty"`
+
 	// ConvoyId Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
 	ConvoyId *string `json:"convoy_id,omitempty"`
 
@@ -5038,14 +5138,19 @@ type SlingResponse struct {
 	Mode         *string `json:"mode,omitempty"`
 
 	// MoleculeId Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
-	MoleculeId *string   `json:"molecule_id,omitempty"`
-	RootBeadId *string   `json:"root_bead_id,omitempty"`
-	Run        *RunRef   `json:"run,omitempty"`
-	Status     string    `json:"status"`
-	Target     string    `json:"target"`
-	Warnings   *[]string `json:"warnings,omitempty"`
-	WorkflowId *string   `json:"workflow_id,omitempty"`
+	MoleculeId *string `json:"molecule_id,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	Run        *RunRef `json:"run,omitempty"`
+
+	// Status slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+	Status     SlingResponseStatus `json:"status"`
+	Target     string              `json:"target"`
+	Warnings   *[]string           `json:"warnings,omitempty"`
+	WorkflowId *string             `json:"workflow_id,omitempty"`
 }
+
+// SlingResponseStatus slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+type SlingResponseStatus string
 
 // Status defines model for Status.
 type Status struct {
@@ -5383,6 +5488,18 @@ type StoreMaintenanceFailedPayload struct {
 	ErrorMsg     string  `json:"error_msg"`
 	SnapshotPath *string `json:"snapshot_path,omitempty"`
 	Stage        string  `json:"stage"`
+}
+
+// StrandedClaim defines model for StrandedClaim.
+type StrandedClaim struct {
+	// BeadId The claim's work bead ID.
+	BeadId string `json:"bead_id"`
+
+	// Reason Why it was kept: unserved-route.
+	Reason string `json:"reason"`
+
+	// Route The route the claim would be released into, when it has one: no configured agent serves it.
+	Route *string `json:"route,omitempty"`
 }
 
 // SubmissionCapabilities defines model for SubmissionCapabilities.
@@ -6937,6 +7054,22 @@ type TypedEventStreamEnvelopeSessionStranded struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionStrandedClaims defines model for TypedEventStreamEnvelopeSessionStrandedClaims.
+type TypedEventStreamEnvelopeSessionStrandedClaims struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionStrandedClaimsPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionSuspended defines model for TypedEventStreamEnvelopeSessionSuspended.
@@ -8708,6 +8841,23 @@ type TypedTaggedEventStreamEnvelopeSessionStranded struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionStrandedClaims defines model for TypedTaggedEventStreamEnvelopeSessionStrandedClaims.
+type TypedTaggedEventStreamEnvelopeSessionStrandedClaims struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          SessionStrandedClaimsPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionSuspended defines model for TypedTaggedEventStreamEnvelopeSessionSuspended.
@@ -11766,6 +11916,32 @@ func (t *EventPayload) FromSessionResetStalledPayload(v SessionResetStalledPaylo
 
 // MergeSessionResetStalledPayload performs a merge with any union data inside the EventPayload, using the provided SessionResetStalledPayload
 func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionStrandedClaimsPayload returns the union data inside the EventPayload as a SessionStrandedClaimsPayload
+func (t EventPayload) AsSessionStrandedClaimsPayload() (SessionStrandedClaimsPayload, error) {
+	var body SessionStrandedClaimsPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStrandedClaimsPayload overwrites any union data inside the EventPayload as the provided SessionStrandedClaimsPayload
+func (t *EventPayload) FromSessionStrandedClaimsPayload(v SessionStrandedClaimsPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStrandedClaimsPayload performs a merge with any union data inside the EventPayload, using the provided SessionStrandedClaimsPayload
+func (t *EventPayload) MergeSessionStrandedClaimsPayload(v SessionStrandedClaimsPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16273,6 +16449,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStranded(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionStrandedClaims returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionStrandedClaims
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionStrandedClaims() (TypedEventStreamEnvelopeSessionStrandedClaims, error) {
+	var body TypedEventStreamEnvelopeSessionStrandedClaims
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionStrandedClaims overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionStrandedClaims(v TypedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionStrandedClaims performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionStrandedClaims(v TypedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionSuspended returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionSuspended
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionSuspended() (TypedEventStreamEnvelopeSessionSuspended, error) {
 	var body TypedEventStreamEnvelopeSessionSuspended
@@ -17019,6 +17223,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
 		return t.AsTypedEventStreamEnvelopeSessionStranded()
+	case "session.stranded_claims":
+		return t.AsTypedEventStreamEnvelopeSessionStrandedClaims()
 	case "session.suspended":
 		return t.AsTypedEventStreamEnvelopeSessionSuspended()
 	case "session.undrained":
@@ -19452,6 +19658,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionStrandedClaims returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionStrandedClaims() (TypedTaggedEventStreamEnvelopeSessionStrandedClaims, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionStrandedClaims overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionStrandedClaims(v TypedTaggedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionStrandedClaims performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionStrandedClaims
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionStrandedClaims(v TypedTaggedEventStreamEnvelopeSessionStrandedClaims) error {
+	v.Type = "session.stranded_claims"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionSuspended returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionSuspended
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionSuspended() (TypedTaggedEventStreamEnvelopeSessionSuspended, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionSuspended
@@ -20198,6 +20432,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStopped()
 	case "session.stranded":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionStranded()
+	case "session.stranded_claims":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionStrandedClaims()
 	case "session.suspended":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionSuspended()
 	case "session.undrained":

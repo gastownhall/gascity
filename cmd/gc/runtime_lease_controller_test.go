@@ -280,11 +280,11 @@ func TestDeadCorpseCleanupSkipsAHeldName(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr strings.Builder
-	if got := cleanupDeadRuntimeSessionCorpses(city, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
+	if got := cleanupDeadRuntimeSessionCorpses(city, store, testSeatWork(city, nil, store, nil), snapshot, nil, sp, nil, nil, &stderr); got != 0 || len(sp.stopped) != 0 {
 		t.Fatalf("cleanup under a held name = %d (stopped %v), want none", got, sp.stopped)
 	}
 	held.Release()
-	if got := cleanupDeadRuntimeSessionCorpses(city, store, nil, nil, snapshot, nil, sp, nil, nil, &stderr); got != 1 {
+	if got := cleanupDeadRuntimeSessionCorpses(city, store, testSeatWork(city, nil, store, nil), snapshot, nil, sp, nil, nil, &stderr); got != 1 {
 		t.Fatalf("cleanup of a free name = %d, want 1; stderr %q", got, stderr.String())
 	}
 }
@@ -593,7 +593,7 @@ func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	b := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&b)
 	decided := sessionInfoFromBead(mustGetBead(t, env.store, b.ID))
-	if err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+	if _, err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifiedStop(t.TempDir(), sessionpkg.Decide(decided, sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); !errors.Is(err, sessionpkg.ErrKillPremiseMoved) || !env.sp.IsRunning("worker") {

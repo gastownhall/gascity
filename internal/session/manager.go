@@ -1255,6 +1255,40 @@ func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand
 	})
 }
 
+// suspendRollback is the restore of a failed stop's suspend w over the row
+// meta reads now: nothing unless meta still carries the suspend's stamp, and
+// then Was for each key w changed that meta still reads as w wrote it.
+// rollbackSuspend writes suspendRollback on a fresh read, fenced.
+func (m *Manager) rollbackSuspend(id string, suspended DispositionWrite) error {
+	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
+		return suspendRollback(id, suspended, p.Metadata)
+	})
+	return err
+}
+
+// stampSoftSuspend writes a suspend that holds nothing (the chat idle
+// auto-suspend, the city stop sweep): patch's state and stamp.
+func (m *Manager) stampSoftSuspend(id string, patch MetadataPatch) error {
+	if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
+		return fmt.Errorf("updating suspension state: %w", err)
+	}
+	return nil
+}
+
+func suspendRollback(id string, w DispositionWrite, meta map[string]string) MetadataPatch {
+	if w.Wrote == nil || meta["suspended_at"] != w.Wrote["suspended_at"] {
+		return nil
+	}
+	restore := MetadataPatch{}
+	for k, v := range LifecycleOnly(w.Wrote) {
+		if meta[k] == v && w.Was[k] != v {
+			restore[k] = w.Was[k]
+		}
+	}
+	// The class keys' undo is the Suspend cell's.
+	return UndoDisposition(w.Was, w.Wrote, meta).Into(id, restore)
+}
+
 // suspendIntent distinguishes an operator's explicit, targeted suspend from the
 // city-shutdown sweep (ActorSweep). `gc stop` / `gc restart` issue suspend
 // across every session bead with no state pre-filter, so the sweep needs
@@ -1313,12 +1347,13 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			// Idempotent, except that an operator's suspend of a row left
-			// suspended without the user hold (by the shutdown sweep) writes
-			// the hold: a suspended state alone does not stop legacy's
-			// assigned-work wake.
-			if intent == suspendIntentOperator && Holds(b.Metadata, m.now()).In&HoldUser == 0 {
-				return m.PersistedStore().OperatorSuspend(id, m.now())
+			// An operator's suspend of a suspended row writes the hold (a
+			// suspended state alone, as the shutdown sweep leaves it, does not
+			// stop legacy's assigned-work wake), or stamps the one in force
+			// again; the runtime is already down.
+			if intent == suspendIntentOperator {
+				_, err := m.PersistedStore().OperatorSuspend(id, m.now())
+				return err
 			}
 			return nil
 		}
@@ -1392,33 +1427,26 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			return err
 		}
 
-		// An operator's suspend is OperatorSuspendPatch's one shape, fenced,
+		// An operator's suspend is the disposition's Suspend cell, fenced,
 		// and written BEFORE the runtime goes: the user hold keeps legacy's
 		// assigned-work wake and its heartbeat crash recovery from undoing it,
 		// so a tick between the write and the stop drains the row instead of
 		// restarting it. It supersedes any pending wake request (D7). A failed
 		// stop restores the row.
 		if intent == suspendIntentOperator {
-			now := m.now()
-			if err := m.PersistedStore().OperatorSuspend(id, now); err != nil {
+			suspended, err := m.PersistedStore().OperatorSuspend(id, m.now())
+			if err != nil {
 				return fmt.Errorf("updating suspension state: %w", err)
 			}
 			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
 				// The runtime is still live: restore what the suspend wrote, as
 				// a failed kill's rollback does, so the row never reads
-				// suspended over a live runtime. Fenced, and only while the row
-				// still carries this suspend's hold and stamp.
-				written := OperatorSuspendPatch(now)
-				prior := MetadataPatch{}
-				for k := range written {
-					prior[k] = b.Metadata[k]
-				}
-				if _, rbErr := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
-					if p.Metadata["held_until"] != written["held_until"] || p.Metadata["suspended_at"] != written["suspended_at"] {
-						return nil
-					}
-					return prior
-				}); rbErr != nil {
+				// suspended over a live runtime. Decided on a fresh read and
+				// fenced: only while the row still carries this suspend's
+				// stamp, and only the keys the suspend changed that still read
+				// as it wrote them, so a write since (a wait, a quarantine)
+				// stands.
+				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
 					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
 				}
 				return err
@@ -1436,7 +1464,6 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// the shutdown sweep leaves the wake for the next start.
 		patch := MetadataPatch{
 			"state":        string(StateSuspended),
-			"suspended_at": m.now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
 		}
@@ -1445,11 +1472,9 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				patch[k] = v
 			}
 		}
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
-			return fmt.Errorf("updating suspension state: %w", err)
-		}
-
-		return nil
+		// The stamp is the disposition's SuspendSoft cell (no hold).
+		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
+		return m.stampSoftSuspend(id, patch)
 	})
 }
 
@@ -1570,7 +1595,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 			log.Printf("session %s: closing after capped wait cancellation lookup", id)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id); err != nil {
+		if err := m.clearWakeAndHoldOverrides(id, b.Metadata); err != nil {
 			return err
 		}
 		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
@@ -1586,12 +1611,9 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 	return result, err
 }
 
-func (m *Manager) clearWakeAndHoldOverrides(id string) error {
-	update := map[string]string{
-		"pin_awake":    "",
-		"held_until":   "",
-		"sleep_intent": "",
-	}
+func (m *Manager) clearWakeAndHoldOverrides(id string, meta map[string]string) error {
+	// The holds go as a retired row's (the disposition's Retire cell).
+	update := CellInto(id, meta, ActorController, DispEvent{Kind: EvRetire}, m.now(), MetadataPatch{"pin_awake": ""})
 	if err := m.store.SetMetadataBatch(id, update); err != nil {
 		return fmt.Errorf("clearing wake and hold overrides: %w", err)
 	}
