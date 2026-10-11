@@ -314,9 +314,9 @@ var registry = slices.Concat([]Field{
 	// Markers.
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
 	{Key: "stranded_event_emitted_at", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionStrandedDiagnostic")), Clears: sites(v2(srcHeals, "armStrandedClear"))},
-	// D2's idle latch: v2 reads it through configWakeSuppressedInfo and has
-	// no writer yet (DIF-M2).
-	{Key: "sleep_policy_fingerprint", Class: ClassMarker, Writers: sites(sleepPolicy[0], Site{Mode: ModeV2, File: srcStopKeys}.pending("mc-v3jws", "D2: the idle drain begin's CAS writes the latch")), Readers: sites(v2(srcSleep, "configWakeSuppressedInfoWithError"))},
+	// D2's idle latch: A20's idle begin writes it in its CAS (C6a2); v2
+	// reads it through configWakeSuppressedInfo.
+	{Key: "sleep_policy_fingerprint", Class: ClassMarker, Writers: sites(sleepPolicy[0], v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")), Readers: sites(v2(srcSleep, "configWakeSuppressedInfoWithError"))},
 	{Key: CurrentBeadIDKey, Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_bead_cycle.go", "recordCurrentBeadIDOnWake"), v2(srcHeals, "armCurrentBead"))},
 	{Key: beadmeta.CurrentClaimBeadIDMetadataKey, Class: ClassMarker, Writers: sites(op("internal/session/store.go", "Store.SetCurrentClaim"))},
 	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},

@@ -1556,6 +1556,7 @@ go_test(
         "reconcile_arms_start_test.go",
         "reconcile_dirty_test.go",
         "reconcile_effect_create_test.go",
+        "reconcile_effect_drain_test.go",
         "reconcile_effect_heal_test.go",
         "reconcile_effect_launch_test.go",
         "reconcile_effect_lease_test.go",

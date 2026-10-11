@@ -361,8 +361,8 @@ func deadRuntimeHealAcrossTime(t *testing.T, held bool) {
 // the 30s, on a dead runtime or on an uncommitted row is reported, and so is,
 // on a stable row, a rewrite of the quarantine or a stop request.
 func TestSimI15StabilityCarveOut(t *testing.T) {
-	quarantined := func(state string, woke time.Duration) beads.Bead {
-		return poolRow("gc-1", "worker", 1, state, "instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour))
+	quarantined := func(state string, woke time.Duration, meta ...string) beads.Bead {
+		return poolRow("gc-1", "worker", 1, state, append([]string{"instance_token", "tok-1", "last_woke_at", rowAt(woke), "quarantined_until", rowAt(time.Hour)}, meta...)...)
 	}
 	clearQ := session.MetadataPatch{"quarantined_until": ""}
 	for _, tc := range []struct {
@@ -375,7 +375,7 @@ func TestSimI15StabilityCarveOut(t *testing.T) {
 		{"dead runtime", quarantined("active", -time.Hour), true, clearQ},
 		{"uncommitted", quarantined("creating", -time.Hour), false, clearQ},
 		{"stable, the quarantine rewritten", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": rowAt(2 * time.Hour)}},
-		{"stable, a stop request", quarantined("active", -time.Hour), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
+		{"stable, a stop request on a user-hold row", quarantined("active", -time.Hour, "sleep_intent", "user-hold"), false, session.MetadataPatch{"quarantined_until": "", session.DrainIntentReasonKey: "idle"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			write := func(r *rowFacts) (intent, bool) {

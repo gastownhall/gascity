@@ -173,6 +173,12 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 // cannot run (startHealed).
 func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, accrued bool) {
 	info := r.row.Info
+	if strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+		// SESS-532: an idle stop was pending, so the death is the idle
+		// sleep it asked for, which accrues nothing: legacy's
+		// SleepPatch(idle), which keeps the pre-drain sleep_policy_fingerprint.
+		return session.SleepPatch(r.w.Now, drainIdle), false
+	}
 	patch = session.MetadataPatch{}
 	if heal {
 		patch = asleepHealPatch(info)

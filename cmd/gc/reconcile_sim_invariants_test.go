@@ -225,18 +225,21 @@ func (s *sim) checkWrite(w simWrite) {
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
 // timer and sleep reason, though A6's stability clear may clear the
 // quarantine's timer on a row its pass read stable (v5.8, SESS-539; stable,
-// sim.stable); no dormant row is woken or given a stop request, though one it
-// holds may be cleared.
+// sim.stable). No such row is woken. Only an operator-dormant row (D1 rule
+// 2: killed, suspended, or sleep_intent=user-hold) is never given a stop
+// request, though one it holds may be cleared; a hold or quarantine alone
+// is not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
 	reason := session.SleepReason(m["sleep_reason"])
 	var owned []string
+	dormant := strings.TrimSpace(m["sleep_intent"]) == string(session.SleepReasonUserHold)
 	if session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], t) {
-		owned = append(owned, "state", "state_reason", "sleep_reason", "slept_at")
+		owned, dormant = append(owned, "state", "state_reason", "sleep_reason", "slept_at"), true
 	}
 	if m["state"] == string(session.StateSuspended) {
-		owned = append(owned, "state", "suspended_at")
+		owned, dormant = append(owned, "state", "suspended_at"), true
 	}
 	if until("held_until") {
 		owned = append(owned, "held_until")
@@ -253,23 +256,20 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) 
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if len(owned) == 0 && !quarantined {
-		return ""
-	}
 	for _, k := range owned {
 		if a[k] != m[k] {
 			return k
 		}
 	}
 	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
-		if a[k] != m[k] && a[k] != "" {
+		if dormant && a[k] != m[k] && a[k] != "" {
 			return k
 		}
 	}
 	// An agent heartbeat's hold (held_until with no intent) does not hold
 	// A17's respawn (v5.9i): waking a row it alone holds is no violation.
 	heartbeat := len(owned) == 1 && owned[0] == "held_until" && !quarantined && strings.TrimSpace(m["sleep_intent"]) == ""
-	if !heartbeat && a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
+	if (dormant || quarantined || len(owned) > 0) && !heartbeat && a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
 		return "state"
 	}
 	return ""
@@ -482,5 +482,36 @@ func TestSimChecksBite(t *testing.T) {
 				t.Errorf("the check reported %q, want an %sviolation", s.failures, c.inv)
 			}
 		})
+	}
+}
+
+// Kills an I15 checker whose dormant set strays from D1 rule 2: a stop
+// request on a held or quarantined row is no violation; on a user-hold,
+// suspended or killed row it is. Waking any of them is (the C6a2 review's
+// must-fix: any operator-owned row woken is a violation).
+func TestDormantChangeFollowsRule2(t *testing.T) {
+	at := plannerT0
+	soon := at.Add(time.Minute).Format(time.RFC3339)
+	for _, c := range []struct {
+		name    string
+		meta    map[string]string
+		dormant bool
+	}{
+		{"held", map[string]string{"held_until": soon, "sleep_reason": "user-hold"}, false},
+		{"quarantined", map[string]string{"quarantined_until": soon, "sleep_reason": "quarantine"}, false},
+		{"user-hold", map[string]string{"sleep_intent": "user-hold"}, true},
+		{"suspended", map[string]string{"state": "suspended"}, true},
+		{"killed", map[string]string{"state": "asleep", "state_reason": session.KillPendingReason, "sleep_reason": "killed", "slept_at": at.Format(time.RFC3339)}, true},
+	} {
+		after := maps.Clone(c.meta)
+		after[session.DrainIntentReasonKey] = "orphaned"
+		if got := dormantChange(beads.Bead{Metadata: c.meta}, after, at, false); (got != "") != c.dormant {
+			t.Errorf("%s: dormantChange = %q, want a violation %v", c.name, got, c.dormant)
+		}
+		woken := maps.Clone(c.meta)
+		woken["state"] = "active"
+		if got := dormantChange(beads.Bead{Metadata: c.meta}, woken, at, false); got == "" {
+			t.Errorf("%s: a wake is no violation", c.name)
+		}
 	}
 }

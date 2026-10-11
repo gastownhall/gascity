@@ -911,7 +911,7 @@ func stabilityTimeline() []timelineFixture {
 	// drained is legacy's drain of the quarantined row, begun and vetoed in
 	// a tick and its follow-up; lagged, v2's current-bead stamp a pass after
 	// the stability clear.
-	drained := map[string]string{"provider:SetMeta s-gc-1": "A20 drain-begin", "provider:RemoveMeta s-gc-1": "A20 drain-begin"}
+	drained := map[string]string{"provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop"}
 	lagged := map[string]string{"row:gc-1:currently_processing_bead_id": "§12.2#37 current-bead-lag"}
 	return []timelineFixture{
 		crashAfter(29*time.Second, tlRestarted()),
@@ -972,12 +972,12 @@ func idleTimeline() []timelineFixture {
 	// slept is legacy's idle sleep of gc-c, its runtime stopped, which v2
 	// leaves to A20.
 	slept := map[string]string{
-		"row:gc-c:*idle": "A20 idle-sleep", "row:gc-c:state": "A20 idle-sleep", "row:gc-c:last_woke_at": "A20 idle-sleep", "runtime:" + chatName: "A20 idle-sleep",
+		"row:gc-c:*idle": "A4 idle-sleep", "row:gc-c:state": "A4 idle-sleep", "row:gc-c:last_woke_at": "A4 idle-sleep", "runtime:" + chatName: "A4 idle-sleep",
 	}
 	// sleeping is slept with the drain's calls and event.
 	sleeping := tlMerged(slept, map[string]string{
-		"provider:SetMeta " + chatName: "A20 idle-sleep", "provider:RemoveMeta " + chatName: "A20 idle-sleep", "provider:Stop " + chatName: "A20 idle-sleep",
-		`event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"}`: "A20 idle-sleep",
+		"provider:SetMeta " + chatName: "A4 idle-sleep", "provider:RemoveMeta " + chatName: "A4 idle-sleep", "provider:Stop " + chatName: "A4 idle-sleep",
+		`event:session.stopped chat {"reason":"drain acknowledged","session_id":"gc-c","template":"chat"}`: "A4 idle-sleep",
 	})
 	chatStanding := tlMerged(tlPol("gc-c"), map[string]string{"row:gc-c:*sync": "A7 row-metadata"})
 	// Legacy's idle probe succeeds (WaitForIdle answers idle), so it begins
@@ -995,8 +995,8 @@ func idleTimeline() []timelineFixture {
 			"idle past sleep_after_idle": sleeping,
 			"the next pass":              slept,
 			"the sleep policy changes": {
-				"row:gc-c:*idle": "A20 idle-sleep", "runtime:" + chatName: "A20 idle-sleep",
-				"provider:Start " + chatName: "A20 idle-sleep", "provider:RemoveMeta " + chatName: "A20 idle-sleep", "event:session.woke chat null": "A20 idle-sleep",
+				"row:gc-c:*idle": "A4 idle-sleep", "runtime:" + chatName: "A4 idle-sleep",
+				"provider:Start " + chatName: "A4 idle-sleep", "provider:RemoveMeta " + chatName: "A4 idle-sleep", "event:session.woke chat null": "A4 idle-sleep",
 			},
 		})
 	idle.Setup = func(tw twin) {
@@ -1011,16 +1011,20 @@ func idleTimeline() []timelineFixture {
 				tw.sp.SetActivity("s-gc-1", tw.now)
 				tw.runtime("gc-1", func(rt simRuntime) *simRuntime { rt.attached = false; return &rt })
 			}},
+			// Its idle probe fails (WaitForIdle is not idle): legacy probes
+			// every tick and drains nothing, and v2's idle begin is a no-op,
+			// never a backoff (C6a2 review 2c), probed at most once a patrol
+			// (review 1a).
 			{Name: "idle past sleep_after_idle", Advance: 6 * time.Minute},
 		}, tlMerged(tlPol("gc-1"), tlIdent(), tlAliasMeta()), map[string]map[string]string{"seed": tlAliasSeed()})
 	// retired is legacy's drain of gc-1, acknowledged and stopped, and the
 	// pool slot's close; v2 leaves the drain to A20 and the close to A21.
 	retired := map[string]string{
-		"row:gc-1:*drain": "A20 drain-begin", "runtime:s-gc-1": "A20 drain-begin", "row:gc-1:*close": "A21 close", "row:gc-1:*sync": "A7 row-metadata",
+		"row:gc-1:*drain": "A4 drain-stop", "runtime:s-gc-1": "A4 drain-stop", "row:gc-1:*close": "A21 close", "row:gc-1:*sync": "A7 row-metadata",
 	}
 	retiring := map[string]string{
-		"provider:SetMeta s-gc-1": "A20 drain-begin", "provider:RemoveMeta s-gc-1": "A20 drain-begin", "provider:Stop s-gc-1": "A20 drain-begin",
-		`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`: "A20 drain-begin",
+		"provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop", "provider:Stop s-gc-1": "A4 drain-stop",
+		`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`: "A4 drain-stop",
 	}
 	// An unwanted row woken a minute ago: legacy keeps it for the 5m wake
 	// grace (INC-003), then drains it and retires its slot.
@@ -1122,10 +1126,10 @@ func operatorTimeline() []timelineFixture {
 	restarted := tlMerged(tlIdent(), tlRestarted())
 	// woken is the managed-suspended row woken: legacy, whose drain stopped
 	// it, restarts it, consuming the wake request (D7) in its start; v2
-	// drains no managed suspend (A20, unported), so its runtime stays up and
+	// signals no managed suspend's drain (A4, unported), so its runtime stays up and
 	// the wake neither restarts the row nor is consumed; settled, the row
 	// each leaves.
-	undrained := "A20 managed-suspend"
+	undrained := "A4 managed-suspend"
 	wakeRequest := map[string]string{"row:gc-1:wake_request": undrained, "row:gc-1:wake_requested_at": undrained}
 	woken := tlMerged(tlIdent(), tlStarted("worker-1", undrained), wakeRequest)
 	settled := tlMerged(tlIdent(), tlStartState(undrained), wakeRequest)
@@ -1163,7 +1167,7 @@ func operatorTimeline() []timelineFixture {
 	// R7b2 it keeps suspended_at (the disposition's Sleep cell). Then gc
 	// session wake restarts it.
 	drainedRow := map[string]string{
-		"row:gc-1:*drain": "A20 drain-begin", "row:gc-1:sleep_reason": "A20 drain-begin", "row:gc-1:last_woke_at": "A20 drain-begin",
+		"row:gc-1:*drain": "A4 drain-stop", "row:gc-1:sleep_reason": "A4 drain-stop", "row:gc-1:last_woke_at": "A4 drain-stop",
 	}
 	managed := tlFixture("a managed suspend drains, then wake", tlCity,
 		[]parityRow{tlRow("gc-1", 1, time.Hour)}, tlClaim("in_progress", "s-gc-1"), []simRuntime{tlLive("gc-1")},
@@ -1180,13 +1184,13 @@ func operatorTimeline() []timelineFixture {
 		}, standing, map[string]map[string]string{
 			"seed": tlAliasSeed(),
 			"suspend": tlMerged(tlIdent(), drainedRow, healed, map[string]string{
-				"runtime:s-gc-1": "A20 drain-begin", "provider:SetMeta s-gc-1": "A20 drain-begin", "provider:RemoveMeta s-gc-1": "A20 drain-begin", "provider:Stop s-gc-1": "A20 drain-begin",
-				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "A20 drain-begin",
-				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "A20 drain-begin",
+				"runtime:s-gc-1": "A4 drain-stop", "provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop", "provider:Stop s-gc-1": "A4 drain-stop",
+				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "A4 drain-stop",
+				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "A4 drain-stop",
 			}),
-			"past the drain timeout": tlMerged(tlIdent(), drainedRow, healed, map[string]string{"runtime:s-gc-1": "A20 drain-begin"}),
+			"past the drain timeout": tlMerged(tlIdent(), drainedRow, healed, map[string]string{"runtime:s-gc-1": "A4 drain-stop"}),
 			"wake":                   tlMerged(woken, drainedRow),
-			"the next pass":          tlMerged(settled, map[string]string{"row:gc-1:*drain": "A20 drain-begin"}),
+			"the next pass":          tlMerged(settled, map[string]string{"row:gc-1:*drain": "A4 drain-stop"}),
 		})
 	// gc session kill (the fence, then the stop) on a seat holding only an
 	// open claim. Ready, the claim restarts the seat in place past the
@@ -1252,7 +1256,7 @@ func operatorTimeline() []timelineFixture {
 	// wait_hold. When the wait's dependency closes, legacy wakes it through
 	// the idle latch: the wait's own intent is no explicit sleep intent
 	// (explicitSleepIntentInfo), so its claim is not stranded.
-	waitDrained := tlMerged(tlIdent(), drainedRow, map[string]string{"runtime:s-gc-1": "A20 drain-begin", "row:gc-1:state": "A20 drain-begin", "row:gc-1:*stranded": "A21 stranded", "row:gc-1:detached_at": "A20 wait-sleep"})
+	waitDrained := tlMerged(tlIdent(), drainedRow, map[string]string{"runtime:s-gc-1": "A4 drain-stop", "row:gc-1:state": "A4 drain-stop", "row:gc-1:*stranded": "A21 stranded", "row:gc-1:detached_at": "A4 wait-sleep"})
 	napping := func() *config.City {
 		cfg := tlCity()
 		cfg.Agents[0].SleepAfterIdle = "5m"
@@ -1262,7 +1266,7 @@ func operatorTimeline() []timelineFixture {
 	// waiter, gc-3.
 	nudgeQueued := map[string]string{}
 	for _, k := range []string{"agent", "deliver_after", "expires_at", "labels", "message", "nudge_id", "reference_json", "session_id", "source", "state", "status", "title", "type"} {
-		nudgeQueued["work:gc-3:"+k] = "A20 wait-sleep"
+		nudgeQueued["work:gc-3:"+k] = "A4 wait-sleep"
 	}
 	waiter := tlFixture("a waiter sleeps", napping, []parityRow{tlRow("gc-1", 1, time.Hour)},
 		append(tlClaim("in_progress", "s-gc-1"), parityRow{ID: "gw-2", Title: "gw-2", Type: "task", Status: "open", Metadata: map[string]string{}}), []simRuntime{tlLive("gc-1")},
@@ -1287,14 +1291,14 @@ func operatorTimeline() []timelineFixture {
 		}, standing, map[string]map[string]string{
 			"seed": tlAliasSeed(),
 			"wait": tlMerged(waitDrained, map[string]string{
-				"provider:SetMeta s-gc-1": "A20 drain-begin", "provider:RemoveMeta s-gc-1": "A20 drain-begin", "provider:Stop s-gc-1": "A20 drain-begin",
-				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "A20 drain-begin",
-				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "A20 drain-begin",
+				"provider:SetMeta s-gc-1": "A4 drain-stop", "provider:RemoveMeta s-gc-1": "A4 drain-stop", "provider:Stop s-gc-1": "A4 drain-stop",
+				`event:session.drain_acked_with_assigned_work worker {"bead_id":"gw-1","bead_status":"in_progress","reason":"drain_acked_with_assigned_work","session_id":"gc-1","template":"worker"}`: "A4 drain-stop",
+				`event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"}`:                                                                                 "A4 drain-stop",
 				`event:session.stranded gc-1 {"session_id":"gc-1","session_name":"s-gc-1","template":"worker","work_bead_ids":["gw-1"]}`:                                                               "A21 stranded",
 			}),
 			"the wait turns ready": tlMerged(tlIdent(), map[string]string{
-				"row:gc-1:*waitsleep": "A20 wait-sleep", "runtime:s-gc-1": "A20 wait-sleep", "provider:Start s-gc-1": "A20 wait-sleep", "provider:RemoveMeta s-gc-1": "A20 wait-sleep",
-				"event:session.woke worker-1 null": "A20 wait-sleep", "work:gc-2:nudge_id": "A20 wait-sleep", "work:gc-3": "A20 wait-sleep",
+				"row:gc-1:*waitsleep": "A4 wait-sleep", "runtime:s-gc-1": "A4 wait-sleep", "provider:Start s-gc-1": "A4 wait-sleep", "provider:RemoveMeta s-gc-1": "A4 wait-sleep",
+				"event:session.woke worker-1 null": "A4 wait-sleep", "work:gc-2:nudge_id": "A4 wait-sleep", "work:gc-3": "A4 wait-sleep",
 			}, nudgeQueued),
 		})
 	return []timelineFixture{suspend, managed, kill(false), kill(true), swap, fence, waiter}

@@ -111,10 +111,10 @@ type bootState struct {
 func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && b.RecordingSeen }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, fairSeed, boot, last, rowTrace, memo and stalled; other
-// goroutines reach the planner through markDirty, the settlement queue, the
-// execution-stalled inbox, the start pause and stop, and read what a pass
-// publishes through out.
+// backoff, bucket, fairSeed, boot, last, rowTrace, idleProbes, memo and
+// stalled; other goroutines reach the planner through markDirty, the
+// settlement queue, the execution-stalled inbox, the start pause and stop,
+// and read what a pass publishes through out.
 type planner struct {
 	clock       plannerClock
 	seam        txSeamFunc           // every pass's (effectPass.seam): stagingSeam's, or a test's
@@ -141,9 +141,12 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
-	memo     gatherMemo
-	out      passOutputs
-	obs      passObserver
+	// idleProbes are the idle begins submitted to prove an agent idle, by
+	// row, which paceIdleProbes holds a patrol apart.
+	idleProbes map[rowKey]idleProbe
+	memo       gatherMemo
+	out        passOutputs
+	obs        passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
 	// (C7b1); C8's step posts them to stalledPosted under stalledMu.

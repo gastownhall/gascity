@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -333,6 +334,7 @@ type sim struct {
 	parkCh   chan *simEffect
 	postCh   chan settlement
 	posted   []settlement // posts not yet awaited
+	notIdle  []string     // released idle probes that found the agent busy, as intentKeys
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
@@ -431,12 +433,17 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
 	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
 	s.p.effects = s.x
-	withSpecs(t, func(specs map[string]effectSpec) {
-		if o.specs != nil {
-			o.specs(specs)
-		}
-		s.gate(specs)
-	})
+	if simPristineSpecs == nil {
+		simPristineSpecs = effectSpecs
+		t.Cleanup(func() { simPristineSpecs = nil })
+	}
+	saved := effectSpecs
+	effectSpecs = maps.Clone(simPristineSpecs)
+	t.Cleanup(func() { effectSpecs = saved })
+	if o.specs != nil {
+		o.specs(effectSpecs)
+	}
+	s.gate(effectSpecs)
 	s.p.seam = s.atSeam
 	s.locks = observeRowLocks(t)
 	if o.rowLock != nil {
@@ -461,7 +468,9 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 		gen := 1 + s.rng.IntN(3)
 		token := fmt.Sprintf("tok-%s-%d", id, gen)
 		state := []string{"asleep", "active", "awake", "creating", "asleep"}[s.rng.IntN(5)]
-		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token, "last_woke_at", s.rel(-time.Duration(s.rng.IntN(90)) * time.Second)}
+		// Woken up to 10m ago: some inside INC-003's 5m grace, some past it,
+		// so the corpus admits A20's begins (C6a2 review).
+		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token, "last_woke_at", s.rel(-time.Duration(s.rng.IntN(600)) * time.Second)}
 		switch at := s.rel(time.Duration(s.rng.IntN(240)-120) * time.Second); s.rng.IntN(6) {
 		case 0:
 			meta = append(meta, "held_until", at, "sleep_reason", "user-hold")
@@ -489,6 +498,11 @@ func (s *sim) rel(d time.Duration) string { return s.clk.Now().Add(d).UTC().Form
 
 // gate wraps every effect in specs (around, outside the spec's own) so it
 // parks until a step releases it.
+// simPristineSpecs are the specs before any sim in the test gated them: a
+// second sim gates these, never the first one's gated effects, whose
+// effects would park on the first sim's channel.
+var simPristineSpecs map[string]effectSpec
+
 func (s *sim) gate(specs map[string]effectSpec) {
 	for kind, spec := range specs {
 		if !spec.runs() {
@@ -564,9 +578,17 @@ func (s *sim) pass() {
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
 	census, obs := s.observed()
+	for _, d := range rec.Deferred {
+		if strings.HasPrefix(d.Cause, "rests-") {
+			s.t.Fatalf("seed %d: %s:%s deferred for its rests (%s): a fresh kind's arm must record what it rests on (ruling (c))", s.seed, d.Kind, d.Key.ID, d.Cause)
+		}
+	}
 	for _, it := range rec.Admitted {
 		if it.Kind == intentStart {
 			s.admitted = append(s.admitted, now)
+		}
+		if it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh {
+			simDrainBegins.Add(1)
 		}
 		if census != nil {
 			info := census.Rows[it.Key].Info
@@ -613,6 +635,9 @@ func (s *sim) release(i int) {
 		s.t.Fatalf("seed %d: effect %s %v never returned", s.seed, e.it.Kind, e.it.Key)
 	}
 	s.logf("effect %s %s: outcome %d %s (late %t)", e.it.Kind, e.it.Key.ID, res.Outcome, res.Cause, e.settled)
+	if res.Outcome == settledNoop && res.Cause == causeNotIdle {
+		s.notIdle = append(s.notIdle, intentKeys([]intent{e.it})...)
+	}
 	for _, c := range after {
 		c(res)
 	}
@@ -1175,7 +1200,18 @@ func simSeeds(t *testing.T) []uint64 {
 
 // Kills any merged path that breaks an invariant a run can observe: every
 // seed runs simSteps steps, then quiesces.
+// simDrainBegins counts the A20 begins the sims admitted.
+var simDrainBegins atomic.Int64
+
 func TestSimCorpus(t *testing.T) {
+	before := simDrainBegins.Load()
+	t.Cleanup(func() {
+		// Kills a corpus that never exercises A20 (C6a2 review): every
+		// undesired row inside the grace, or already requested.
+		if !t.Failed() && simDrainBegins.Load() == before {
+			t.Error("the sim corpus admitted no A20 drain begin")
+		}
+	})
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})

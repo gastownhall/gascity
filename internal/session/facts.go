@@ -64,6 +64,8 @@ const (
 	FactsAfterStart FactsSite = "v2.tx.after-start"
 	// FactsCommit is a v2 transaction's commit after its own write (v5 S2).
 	FactsCommit FactsSite = "v2.tx.commit"
+	// FactsDrainBasis is a v2 drain begin's premise: the drain basis alone.
+	FactsDrainBasis FactsSite = "v2.tx.drain-basis"
 	// FactsLegacyKill is a legacy controller kill decided on a tick's row.
 	FactsLegacyKill FactsSite = "legacy.kill"
 	// FactsLegacyStopPending is a legacy drain's basis, read at the drain's
@@ -114,6 +116,10 @@ var factsSites = map[FactsSite]factsSite{
 		Only:   []string{"instance_token"},
 		States: []string{string(StateCreating), string(StateActive), string(StateAwake)},
 		Reason: "S2's commit: the row still carries the token the effect wrote and is creating, active or awake; holds do not veto it, so an agent's heartbeat held_until during startup cannot orphan the runtime it started, while a suspend or a kill moves state and refuses",
+	},
+	FactsDrainBasis: {
+		Only:   append(slices.Clone(drainBasisKeys), "pin_awake"),
+		Reason: "a v2 drain begin (A20) rests on the drain basis the legacy drain's begin does (FactsLegacyStopPending), and on an operator's pin (pin_awake): the incarnation, the operator's intent and requests. An agent's heartbeat writes held_until alone and must not starve the begin (#3994), as holds do not veto FactsCommit; the begin re-decides on the fresh row inside the CAS (redecideRow) for everything else",
 	},
 	// TODO(R8 ratchet, mc-z9o37): widen to the whole disposition class
 	// (drainBasisKeys' intent keys), caller by caller, with a test each.

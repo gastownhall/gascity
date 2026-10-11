@@ -281,6 +281,11 @@ const (
 	// no kill fence (tx.decide); a row already closed is a no-op that ends the
 	// effect.
 	premiseClose
+	// premiseDrainBasis: a drain begin (A20). Open, carrying the locked
+	// runtime name, at the basis expected, with the registry's FactsDrainBasis
+	// site's facts: the drain basis, so an agent's heartbeat (held_until)
+	// cannot starve the begin; its Decide re-decides on the fresh row.
+	premiseDrainBasis
 )
 
 // section is one span of an effect under the row's session mutation lock,
@@ -833,9 +838,12 @@ func (t *tx) premise(rule premiseRule, row session.Info, meta map[string]string)
 			return []string{"no own write"}
 		}
 		return session.FactsCommit.Moved(fresh, t.facts0)
-	case premiseDefault, premiseClose:
+	case premiseDefault, premiseClose, premiseDrainBasis:
 		site := session.FactsDefault
-		if t.started {
+		switch {
+		case rule == premiseDrainBasis:
+			site = session.FactsDrainBasis
+		case t.started:
 			site = session.FactsAfterStart
 		}
 		moved = site.Moved(t.compared(fresh), t.compared(t.facts0))

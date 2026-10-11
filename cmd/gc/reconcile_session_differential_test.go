@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -85,6 +86,10 @@ type parityFixture struct {
 	// legacy's provider answers it, and v2's observation cache holds the
 	// probe's fact.
 	Pending []string
+	// Idle names the rows whose runtime was last active an hour before the
+	// fixture and answers WaitForIdle idle: legacy's idle probe and v2's
+	// activity fact (I3) and fresh idle proof read the same provider.
+	Idle    []string
 	Explain map[string]string
 }
 
@@ -154,6 +159,10 @@ var parityFindings = map[string]parityEntry{
 	// the conversation of a provider without a keyed transcript. v2's
 	// dead-runtime accrual writes that reset (deadRuntimePatch); C5a2's
 	// start failure must write the same ConversationResetPatch(true).
+	"idle-activity-unread": {
+		"BEHAVIORS SESS-601/585 (A20 idle begin, AL1 stage 6b); C6a2 replay finding (owner to rule)", "legacy idle-sleeps a live row its probe reads idle past sleep_after_idle (its drain, latch, signal and stop in one tick); v2's AL1 suppresses a live row only on a known I3 activity fact (configSleepSuppressed), and no observer sets LastActivityKnown, so v2 never decides the idle sleep of a live non-interactive or always-named session (AL1's idle stage covers on-demand and pool rows from detached_at), and A20's idle begin and latch do not fire there (C6a2b)",
+		[]string{"detached_at", "drain_at", "last_woke_at", "sleep_reason", "slept_at", "state"},
+	},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
 
@@ -167,20 +176,21 @@ var parityUnported = map[string]parityEntry{
 	// provider.health_gate_alert). v2's A18 skips a red provider's start
 	// (TestDecideRowStartGates) but keeps no episode and records no alert.
 	// Owner: the C5b follow-up PR, with episode-mirror.
-	"rollback A10":   {"C5a2 (the rollback effect; A10's arm, C5b)", "legacy closes an undesired pending create past its never-started deadline; v2's A10 proposes the rollback once C5a2 registers its effect", []string{"status", "state", "close_reason", "closed_at"}},
-	"A21 close":      {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
-	"A21 stranded":   {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
-	"A7 identity":    {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
-	"A20 idle-sleep": {"C6a2, BEHAVIORS SESS-532", "legacy drains an idle row (its probe answers idle) and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2 registers no drain-policy arm yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at"}, parityStartKeys...)},
-	"A20 managed-suspend": {
-		"C6a2 (A20 + D2)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2 registers no drain-begin arm yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
-		append([]string{"state", "wake_request", "wake_requested_at"}, parityStartKeys...),
+	"rollback A10":  {"C5a2 (the rollback effect; A10's arm, C5b)", "legacy closes an undesired pending create past its never-started deadline; v2's A10 proposes the rollback once C5a2 registers its effect", []string{"status", "state", "close_reason", "closed_at"}},
+	"A21 close":     {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
+	"A21 stranded":  {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
+	"A7 identity":   {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
+	"A4 idle-sleep": {"C6b1, C6b2 (A4 + D4)", "legacy signals an idle drain in the tick it begins it and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input, and starts it again when its policy changes; v2's begin (A20) writes the stop request and the fingerprint, and registers no signal or finalize yet, so its runtime stays up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
+	"A4 managed-suspend": {
+		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a managed suspend (the operator hold on a live runtime) to a stop, so a later wake restarts the row and its start consumes the request (D7); v2's A20 writes the stop request and registers no signal or stop verb yet, so the runtime stays up and the wake neither restarts the row nor is consumed",
+		append([]string{"state", "wake_request", "wake_requested_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
-	"A20 drain-begin": {"C6a2 (A20 + D2)", "legacy begins a drain v2 does not: on a live row its quarantine keeps from waking (canceled again once its work vetoes it), on an unwanted row past the INC-003 grace, and on a managed suspend; v2 registers no drain-begin arm yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
-	"A21 killed-seat": {"C5c1 (#7314), owner ruling B1 (CONTRACT C3 killed pool seats)", "past the kill grace legacy releases a killed seat's open claim and closes it, and the freed demand creates and starts a fresh seat; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
-	"A20 wait-sleep": {
-		"C6a2 (A20 + D2)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch (a wait's own intent is no explicit sleep intent) and delivers the wait's nudge with the start; v2 registers no drain-begin arm yet, so the waiter's runtime stays up and its waits step queues the nudge to it live",
-		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at"}, parityStartKeys...),
+	"A4 drain-stop":             {"C6b1, C6b2 (A4 + D3, D4)", "legacy signals and stops a drain in the tick it begins it (its drain-ack mark, the provider's meta and Stop); v2's begin (A20) writes only the stop request (D1), which legacy never writes, and registers no signal or stop verb yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
+	"signal-fresh idle-respawn": {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
+	"A21 killed-seat":           {"C5c1 (#7314), owner ruling B1 (CONTRACT C3 killed pool seats)", "past the kill grace legacy releases a killed seat's open claim and closes it, and the freed demand creates and starts a fresh seat; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
+	"A4 wait-sleep": {
+		"C6b1, C6b2 (A4 + D3, D4)", "legacy drains a waiter to a sleep on its wait hold and, once the wait turns ready, starts it again through the idle latch (a wait's own intent is no explicit sleep intent) and delivers the wait's nudge with the start; v2's begin (A20) writes the stop request and registers no signal or stop verb yet, so the waiter's runtime stays up and its waits step queues the nudge to it live",
+		append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", "stranded_event_emitted_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...),
 	},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
@@ -202,6 +212,10 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// A19's two kinds own exactly its rows.
 	intentDrainCancel: regexp.MustCompile(`\bA19\b`),
 	intentDrainVoid:   regexp.MustCompile(`\bA19\b`),
+	// A20's two begin kinds own its rows: the begin, its grace, its keeps
+	// and the D2 policy table it shares with A19.
+	intentDrainBegin:      regexp.MustCompile(`\bA20\b`),
+	intentDrainBeginFresh: regexp.MustCompile(`\bA20\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
 	intentRekey: regexp.MustCompile(`\bS4\b`),
@@ -294,6 +308,10 @@ func (f parityFixture) place(p *simProvider) {
 				*p.rts[b.Metadata["session_name"]] = placed
 				if slices.Contains(f.Pending, rt.id) {
 					p.SetPendingInteraction(b.Metadata["session_name"], &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
+				}
+				if slices.Contains(f.Idle, rt.id) {
+					p.SetActivity(b.Metadata["session_name"], parityNow.Add(-time.Hour))
+					p.WaitForIdleErrors[b.Metadata["session_name"]] = nil
 				}
 			}
 		}
@@ -769,6 +787,7 @@ func (w *v2World) settle(t *testing.T, name string) parityOutcome {
 func (w *v2World) once(t *testing.T) bool {
 	s := w.s
 	before := s.snapshot()
+	s.notIdle = nil
 	s.inventory()
 	for _, id := range w.pending {
 		s.lane.cache.Note("s-"+id, FactPending, ObsYes, s.clk.Now(), SourceProbe, "")
@@ -792,6 +811,9 @@ func (w *v2World) once(t *testing.T) bool {
 		w.repaired = now
 	}
 	s.audit("v2")
+	// An idle probe that found the agent busy acts on nothing, as legacy's
+	// probes, which its drains leave out.
+	admitted = slices.DeleteFunc(admitted, func(k string) bool { return slices.Contains(s.notIdle, k) })
 	return len(admitted) > 0 || !maps.EqualFunc(before, s.snapshot(), sameParityBead)
 }
 
@@ -896,6 +918,56 @@ func parityFixtures() []parityFixture {
 			cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
 			return cfg
 		}
+	}
+	// chatNapping is chat's city, its named session idle-sleeping after five
+	// minutes.
+	chatNapping := func() *config.City {
+		cfg := chat(false)()
+		cfg.Agents[1].SleepAfterIdle = "5m"
+		return cfg
+	}
+	// onDemand is chat's on-demand named row, awake, with meta; chatLive its
+	// runtime; chatStanding its standing findings.
+	onDemand := func(meta ...string) parityRow {
+		return chatRow("gc-c", "1", append([]string{"state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c"}, meta...)...)
+	}
+	chatLive := simRuntime{id: "gc-c", epoch: "1", token: "tok-gc-c"}
+	chatStanding := map[string]string{"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata"}
+	// stopsInTick is legacy's same-tick signal, stop and sleep of the named
+	// session after its begin, which v2 leaves to A4 (C6b1, C6b2); v2's begin
+	// writes the stop request.
+	stopsInTick := func(entry string) map[string]string {
+		return map[string]string{
+			"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata", "row:gc-c:*stop": entry,
+			"row:gc-c:state": entry, "row:gc-c:last_woke_at": entry, "row:gc-c:detached_at": entry,
+			"provider:SetMeta chat": entry, "provider:RemoveMeta chat": entry, "provider:Stop chat": entry,
+			"event:session.stopped chat [reason session_id template]": entry,
+		}
+	}
+	// latchCompared replaces explain's sleep-policy wildcard for gc-c with
+	// the policy keys that differ there, by name, so the latch value
+	// (sleep_policy_fingerprint) is compared.
+	latchCompared := func(explain map[string]string) map[string]string {
+		out := maps.Clone(explain)
+		delete(out, "row:gc-c:*policy")
+		for _, k := range []string{"requested_sleep_after_idle", "effective_sleep_after_idle", "sleep_policy_source", "sleep_capability"} {
+			out["row:gc-c:"+k] = "sleep-policy-keys"
+		}
+		return out
+	}
+	// chatOnDemand is chat's city with its named session on demand, idle
+	// after five minutes.
+	chatOnDemand := func() *config.City {
+		cfg := chat(false)()
+		cfg.Agents[1].SleepAfterIdle = "5m"
+		cfg.NamedSessions[0].Mode = "on_demand"
+		return cfg
+	}
+	// suspendedWorker is the worker city with its agent suspended in config.
+	suspendedWorker := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents[0].Suspended = true
+		return cfg
 	}
 	// explain merges the alive wanted row gc-1's standing findings with more.
 	explain := func(more map[string]string) map[string]string {
@@ -1036,6 +1108,94 @@ func parityFixtures() []parityFixture {
 				"provider:Start s-gc-1": "§12.2#3 R16", "provider:RemoveMeta s-gc-1": "§12.2#3 R16", "event:session.woke worker-1 []": "§12.2#3 R16",
 				"event:session.drain_acked_with_assigned_work worker [bead_id bead_status reason session_id template]": "§12.2#3 R16", "event:session.stopped worker [reason session_id template]": "§12.2#3 R16",
 			}),
+		},
+		{
+			// An unwanted row woken a minute ago: both keep it for INC-003's
+			// grace.
+			Name: "an unwanted row inside the wake grace is kept", Behaviors: []string{"INC-003"},
+			Rows: []parityRow{awake()}, Runtimes: []simRuntime{live},
+		},
+		{
+			// A suspended agent's row past the grace, with in-progress work:
+			// both keep it open (the undesired-drain work keep).
+			Name: "an undesired row with assigned work is kept open", Behaviors: []string{"SESS-074"}, City: suspendedWorker,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{live},
+		},
+		{
+			// An always named session idle past sleep_after_idle: both begin
+			// its idle drain and write the latch, the row's sleep policy
+			// fingerprint; legacy also signals and stops it in the tick (A4).
+			Name: "an idle drain begin writes the sleep policy fingerprint", Behaviors: []string{"SESS-601"}, City: chatNapping,
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}}, Idle: []string{"gc-c"},
+			Explain: map[string]string{
+				"row:gc-c:*policy": "sleep-policy-keys", "row:gc-c:*sync": "A7 row-metadata", "row:gc-c:*idle": "idle-activity-unread",
+				"provider:SetMeta chat": "idle-activity-unread", "provider:RemoveMeta chat": "idle-activity-unread", "provider:Stop chat": "idle-activity-unread",
+				"event:session.stopped chat [reason session_id template]": "idle-activity-unread",
+			},
+		},
+		{
+			// A pool row awake only for ready, unclaimed assigned work, idle
+			// past its sleep time: legacy begins an idle-respawn drain.
+			Name: "an idle pool row awake only for unclaimed work", Behaviors: []string{"SESS-614"}, City: napping,
+			Rows: []parityRow{awake("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))}, Work: []parityRow{routedDemandBead("gw-1")}, Runtimes: []simRuntime{live}, Idle: []string{"gc-1"},
+			// Legacy also creates and starts the replacement seat gc-2.
+			Explain: explain(map[string]string{
+				"row:gc-1:*respawn": "signal-fresh idle-respawn", "provider:SetMeta s-gc-1": "signal-fresh idle-respawn", "provider:RemoveMeta s-gc-1": "signal-fresh idle-respawn",
+				"provider:Stop s-gc-1": "signal-fresh idle-respawn", "event:session.stopped worker [reason session_id template]": "signal-fresh idle-respawn",
+				"row:gc-2": "signal-fresh idle-respawn", "provider:Start worker-gc-2": "signal-fresh idle-respawn", "provider:RemoveMeta worker-gc-2": "signal-fresh idle-respawn",
+				"event:session.woke worker-1 []": "signal-fresh idle-respawn",
+			}),
+		},
+		{
+			// A woken row's leftover idle-stop-pending mark is cleared.
+			Name: "a woken row clears its idle-stop-pending mark", Behaviors: []string{"SESS-616"},
+			Rows: []parityRow{awake("sleep_intent", "idle-stop-pending")}, Work: assigned, Runtimes: []simRuntime{live}, Explain: explain(nil),
+		},
+		{
+			// A heartbeat hold (held_until, no intent) keeps a live Sleep row
+			// running: no drain begins.
+			Name: "a heartbeat hold keeps a live row undrained", Behaviors: []string{"SESS-617"}, City: chatOnDemand,
+			Rows:     []parityRow{onDemand("last_woke_at", at(-time.Hour), "held_until", at(time.Hour))},
+			Runtimes: []simRuntime{chatLive},
+			Explain:  chatStanding,
+		},
+		{
+			// Reason selection: a live quarantined Sleep row with no intent
+			// and no work drains for no wake reason; the lenses do not cancel
+			// it (DRAIN-022, DRAIN-501).
+			Name: "a live quarantined row drains for no wake reason", Behaviors: []string{"SESS-618", "DRAIN-022", "DRAIN-501"}, City: chatOnDemand,
+			Rows:     []parityRow{onDemand("last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
+			Runtimes: []simRuntime{chatLive},
+			Explain:  stopsInTick("A4 drain-stop"),
+		},
+		{
+			// An idle on-demand named session holding a live claim (its
+			// in-progress work) is not idle-drained: legacy's live-claim and
+			// claimed-work vetoes, v2's AL1 claimed-work exemption.
+			Name: "an idle session holding a live claim is not drained", Behaviors: []string{"SESS-619"}, City: chatOnDemand,
+			Rows:     []parityRow{onDemand("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Work:     []parityRow{{ID: "gw-1", Title: "gw-1", Type: "task", Status: "in_progress", Assignee: "gc-c", Metadata: map[string]string{}}},
+			Runtimes: []simRuntime{chatLive}, Idle: []string{"gc-c"},
+			Explain: chatStanding,
+		},
+		{
+			// An idle on-demand named session proved idle: both begin its
+			// idle drain (SESS-621's gate passed).
+			// Its latch is compared: every other sleep-policy key is explained
+			// by name, the fingerprint is not (SESS-601, D2's idle latch).
+			Name: "an idle on-demand session proved idle begins its idle drain", Behaviors: []string{"SESS-621", "SESS-601"}, City: chatOnDemand,
+			Rows:     []parityRow{onDemand("last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Runtimes: []simRuntime{chatLive}, Idle: []string{"gc-c"},
+			Explain: latchCompared(stopsInTick("A4 idle-sleep")),
+		},
+		{
+			// An idle stop pending whose runtime is gone finishes the sleep
+			// (legacy's SleepPatch(idle), keeping the latch): A6's
+			// dead-runtime heal writes it (C6a2 review 1c).
+			Name: "an idle stop pending with its runtime gone finishes the sleep", Behaviors: []string{"SESS-532"}, City: chatOnDemand,
+			Rows:    []parityRow{onDemand("last_woke_at", at(-time.Hour), "sleep_intent", "idle-stop-pending", "sleep_policy_fingerprint", "pre-drain")},
+			Explain: latchCompared(chatStanding),
 		},
 		{
 			Name: "an empty row type is repaired", Behaviors: []string{"SESS-701"},
@@ -1495,5 +1655,151 @@ func TestTimelineExplainsAreStepScoped(t *testing.T) {
 		if _, got := f.explains(aspect); got != want {
 			t.Errorf("explains(%q) = %t, want %t", aspect, got, want)
 		}
+	}
+}
+
+// TestFreshDrainBeginsReachAdmission (C6a2 review must-fix 1). Kills a fresh
+// begin (idle, no-wake-reason) deferred before admission, which never runs:
+// through the real gather, allocation and admission, an idle on-demand named
+// session's begin and a live quarantined one's no-wake-reason begin are
+// admitted, and no pass defers an intent for its rests.
+func TestFreshDrainBeginsReachAdmission(t *testing.T) {
+	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
+	chatNapping := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true", SleepAfterIdle: "5m"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
+	for _, c := range []struct {
+		name, want string
+		f          parityFixture
+	}{
+		{"idle", intentDrainBeginFresh + ":gc-c", parityFixture{
+			City:     chatNapping,
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
+		}},
+		{"no-wake-reason", intentDrainBeginFresh + ":gc-c", parityFixture{
+			City:     chatNapping,
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			w := newV2World(t, c.f, cityPath, c.f.beads(), nil, "", nil)
+			var admitted []string
+			for pass := 0; pass < 3; pass++ {
+				w.s.inventory()
+				w.s.pass()
+				rec := w.s.p.out.record.Load()
+				admitted = append(admitted, intentKeys(rec.Admitted)...)
+				for _, d := range rec.Deferred {
+					if strings.HasPrefix(d.Cause, "rests-") {
+						t.Fatalf("pass %d deferred %s:%s for its rests (%s)", pass, d.Kind, d.Key.ID, d.Cause)
+					}
+				}
+				for len(w.s.parked) > 0 {
+					w.s.release(0)
+				}
+			}
+			if !slices.Contains(admitted, c.want) {
+				t.Fatalf("admitted %v, want %s", admitted, c.want)
+			}
+		})
+	}
+}
+
+// TestIdleProbesPaceAPatrolApart (C6a2 review 1a). Kills a busy agent's
+// idle begin probed again on every settlement's pass, 4x the pass duration
+// apart, taking the probe cap from other rows' heals and stops: after a
+// probe that finds the agent busy, the passes inside the patrol defer the
+// begin before admission (idle-paced), and the first pass a patrol later
+// probes again. A new incarnation is not paced.
+func TestIdleProbesPaceAPatrolApart(t *testing.T) {
+	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
+	cfg := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true", SleepAfterIdle: "5m"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
+	f := parityFixture{
+		City:     cfg,
+		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-time.Hour), "detached_at", at(-time.Hour))},
+		Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
+	}
+	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)
+	w.s.sp.WaitForIdleErrors["chat"] = errors.New("busy")
+	begin := intentDrainBeginFresh + ":gc-c"
+	pass := func() (admitted bool, cause string) {
+		w.s.inventory()
+		w.s.pass()
+		rec := w.s.p.out.record.Load()
+		for len(w.s.parked) > 0 {
+			w.s.release(0)
+		}
+		for _, d := range rec.Deferred {
+			if d.Kind+":"+d.Key.ID == begin {
+				cause = d.Cause
+			}
+		}
+		return slices.Contains(intentKeys(rec.Admitted), begin), cause
+	}
+	if ok, cause := pass(); !ok || !slices.Contains(w.s.notIdle, begin) {
+		t.Fatalf("first pass: admitted %t (deferred %q), probes %v; want the begin probed and found busy", ok, cause, w.s.notIdle)
+	}
+	for i, step := range []time.Duration{0, simPatrol / 2} {
+		w.s.advance(step)
+		if ok, cause := pass(); ok || cause != causeIdlePaced {
+			t.Fatalf("pass %d inside the patrol: admitted %t, deferred %q; want it paced", i, ok, cause)
+		}
+	}
+	w.s.advance(simPatrol / 2)
+	if ok, cause := pass(); !ok {
+		t.Fatalf("a patrol after the probe: deferred %q, want the begin probed again", cause)
+	}
+	// The pace is the incarnation's: a probe recorded for another basis
+	// holds nothing.
+	probe := w.s.p.idleProbes[rowKeyOf("gc-c")]
+	probe.Basis.Incarnation++
+	w.s.p.idleProbes[rowKeyOf("gc-c")] = probe
+	if ok, cause := pass(); !ok {
+		t.Fatalf("a probe of another incarnation: deferred %q, want the begin probed", cause)
+	}
+}
+
+// TestIdlePaceHoldsOnlyIdleProbes (C6a2 review 1a). Kills a pace that holds
+// a row's begin that would not probe: once the row's reason is no longer
+// idle (a no-wake-reason begin), its begin passes, though the row's last
+// idle probe is inside the patrol.
+func TestIdlePaceHoldsOnlyIdleProbes(t *testing.T) {
+	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
+	cfg := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true", SleepAfterIdle: "5m"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
+	f := parityFixture{
+		City:     cfg,
+		Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "on_demand", "instance_token", "tok-gc-c", "last_woke_at", at(-10*time.Second), "quarantined_until", at(time.Hour), "sleep_reason", "quarantine")},
+		Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c"}},
+	}
+	w := newV2World(t, f, t.TempDir(), f.beads(), nil, "", nil)
+	k := rowKeyOf("gc-c")
+	var admitted []string
+	for pass := 0; pass < 3; pass++ {
+		w.s.p.idleProbes = map[rowKey]idleProbe{k: {Basis: rowBasis{Incarnation: 1, InstanceToken: "tok-gc-c"}, At: w.s.clk.Now()}}
+		w.s.inventory()
+		w.s.pass()
+		admitted = append(admitted, intentKeys(w.s.p.out.record.Load().Admitted)...)
+		for len(w.s.parked) > 0 {
+			w.s.release(0)
+		}
+	}
+	if !slices.Contains(admitted, intentDrainBeginFresh+":gc-c") {
+		t.Fatalf("a no-wake-reason begin after an idle probe: admitted %v; want the begin", admitted)
 	}
 }

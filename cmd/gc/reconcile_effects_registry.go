@@ -90,8 +90,8 @@ var effectSpecs = map[string]effectSpec{
 	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                                 // C1, C2
 	intentRekey:           {class: capProbing, needs: needs{Runtime: true, Lease: true}, sections: rekeySections}, // A3: writes the incarnation under the row's lease record
 	intentZombie:          {class: capProbing, bootGated: true, needs: needs{Lease: true}},
-	intentDrainBegin:      {class: capRowWrites, bootGated: true},
-	intentDrainBeginFresh: {class: capProbing, bootGated: true},
+	intentDrainBegin:      {class: capRowWrites, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections}, // A20 (C6a2)
+	intentDrainBeginFresh: {class: capProbing, bootGated: true, needsFor: drainBeginNeeds, sections: drainBeginSections},   // A20 (C6a2)
 	intentSignal:          {class: capRowWrites, bootGated: true},
 	intentSignalFresh:     {class: capProbing, bootGated: true},
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
