@@ -1230,6 +1230,12 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
+	return s.rewriteBead(id, func(b Bead) Bead { return applySQLiteUpdateOpts(b, opts) })
+}
+
+// rewriteBead replaces id's row with apply's edit of it in one transaction,
+// bumping the claim fence when the edit moves ownership.
+func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1245,7 +1251,7 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 			return err
 		}
 		before := b
-		b = applySQLiteUpdateOpts(b, opts)
+		b = apply(b)
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
@@ -1339,7 +1345,13 @@ func (s *SQLiteStore) Reopen(id string) error {
 		return nil
 	}
 	status := "open"
-	return s.Update(id, UpdateOpts{Status: &status})
+	return s.rewriteBead(id, func(row Bead) Bead {
+		row = applySQLiteUpdateOpts(row, UpdateOpts{Status: &status})
+		// The old close's reason must not feed the next close, whatever
+		// status the bead is reopened from (dropCloseReasonMetadata).
+		dropCloseReasonMetadata(&row)
+		return row
+	})
 }
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.

@@ -980,20 +980,26 @@ func finalizeDrainAckStoppedSession(
 	if info.RestartRequested == "true" {
 		batch["restart_requested"] = ""
 	}
-	// Decided from the tick's snapshot, so the write keeps an operator's user
-	// hold that a fresh read still shows (ApplyKeepingUserHold).
-	written, err := sessionFrontDoor(store).ApplyKeepingUserHold(info.ID, batch)
+	// Decided from the tick's snapshot, so written on a fresh read. A drain
+	// that keeps assigned work completes as a sleep: the disposition's Sleep
+	// cell (ApplySleep). A bare drain-ack is no disposition move, so an idle
+	// stop's intent stays for the next pass's idle sleep
+	// (recoverPendingIdleSleepInfo): ApplyLifecycle.
+	write := sessionFrontDoor(store).ApplyLifecycle
+	if hasAssignedWork {
+		write = sessionFrontDoor(store).ApplySleep
+	}
+	written, err := write(info.ID, batch)
 	if err == nil && written == nil {
 		err = errors.New("row closed")
 	}
+	foldedInfo := info.ApplyPatch(written)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
 		// Store write failed, so nothing changed — the snapshot must stay unchanged
 		// (zero result → applyTo no-op).
 		return drainAckFinalizeResult{}
 	}
-	batch = written
-	foldedInfo := info.ApplyPatch(batch)
 	// The raw metadata mirror loop is dropped (Step 5b): ApplyPatchInfo persisted
 	// the drain-ack batch and folded it onto the caller's coherent Info in one step
 	// (write-returns-Info, Step 6d), and no later this-tick reader consumes the raw
@@ -1609,6 +1615,16 @@ func explicitWakePendingInfo(info sessionpkg.Info) bool {
 		return false
 	}
 	return true
+}
+
+// explicitSleepIntentInfo reports a sleep intent the idle latch's demand
+// override must honor: any but a wait's own wait-hold. A wait hold already
+// suppresses every demand wake but pending-create, an explicit wake and its
+// wait turning ready (computeAwakeSet), and a sleeping waiter keeps its
+// intent (D-J 3), so counting it here would refuse the wait-ready wake of a
+// waiter holding work under an idle policy and strand its claim.
+func explicitSleepIntentInfo(info sessionpkg.Info) bool {
+	return info.SleepIntent != "" && strings.TrimSpace(info.SleepIntent) != string(sessionpkg.SleepReasonWaitHold)
 }
 
 // wakeDemandOverridesSleepSuppression reports whether a wake the awake set
@@ -4337,7 +4353,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplateInfo(info, cfg)
-			hasExplicitSleepIntent := info.SleepIntent != ""
+			hasExplicitSleepIntent := explicitSleepIntentInfo(info)
 			explicitWake := explicitWakePendingInfo(info)
 			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent, explicitWake)
 			if !demandOverrides {
@@ -6988,8 +7004,13 @@ func beginIdleRespawnDrainIfIdle(
 	}
 	if info.SleepIntent == "idle-stop-pending" {
 		// The tick clears the idle intent after this (clearIdleStopPending):
-		// clear it here, so the drain's basis is the row the tick leaves.
-		patch["sleep_intent"] = ""
+		// clear it here (the IdleStopEnd cell), so the drain's basis is the
+		// row the tick leaves.
+		if ended, err := sessionpkg.DispositionOfInfo(info).Apply(sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvIdleStopEnd}, sessionpkg.State(info.MetadataState), time.Time{}); err == nil {
+			for k, v := range ended.Changed() {
+				patch[k] = v
+			}
+		}
 	}
 	if sessFront == nil {
 		return false, nil, errors.New("session store is unavailable")

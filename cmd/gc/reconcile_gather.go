@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -302,13 +303,16 @@ func censusDemandEnv(c *sessionCensus, store beads.Store, rigs map[string]beads.
 
 // templateMemoKey is what one row's template resolution reads off the row:
 // the row's ID (the session bead ID and pool-name ownership), the template
-// and identity fields its kind's path reads (rowTemplateResolver), and the
-// trigger fields resolveTemplateForSessionBeadInfo stamps.
+// and identity fields its kind's path reads (rowTemplateResolver), the
+// trigger fields resolveTemplateForSessionBeadInfo stamps, and whether a
+// pool seat's unassigned alias defers (poolRuntimeAliasIsDeferredInfo, which
+// the realize path reads off the state, the claim and an alias conflict).
 type templateMemoKey struct {
 	ID, Template, CommonName, SessionName, SessionNameExplicit, AgentName, Alias string
 	Origin, ManualMetadata, PoolSlot, NamedIdentity                              string
 	Named, PoolManaged, DependencyOnly                                           bool
 	TriggerBeadID, TriggerStoreRef, Pack                                         string
+	AliasDeferred                                                                bool
 }
 
 func templateMemoKeyOf(info session.Info) templateMemoKey {
@@ -319,6 +323,7 @@ func templateMemoKeyOf(info session.Info) templateMemoKey {
 		NamedIdentity: info.ConfiguredNamedIdentity, Named: info.ConfiguredNamedSession, PoolManaged: info.PoolManaged,
 		DependencyOnly: info.DependencyOnly,
 		TriggerBeadID:  info.TriggerBeadID, TriggerStoreRef: info.TriggerBeadStoreRef, Pack: info.Pack,
+		AliasDeferred: poolRuntimeAliasIsDeferredInfo(info),
 	}
 }
 
@@ -335,7 +340,11 @@ type templateResolution struct {
 // resolved agent's side effects before its launch (on an effect's).
 type templateResolver struct {
 	Resolve func(info session.Info) templateResolution
-	Install func(agent *config.Agent, tp TemplateParams)
+	// ResolveAt resolves one row with its beacon at now: the launch's
+	// resolution of the row it starts, as legacy binds, then resolves, at
+	// the tick (on an effect's goroutine).
+	ResolveAt func(info session.Info, now time.Time) templateResolution
+	Install   func(agent *config.Agent, tp TemplateParams)
 	// Retry asks for a new resolver on the next pass: this one's params
 	// failed to load the city's or a rig's skill catalog, which legacy loads
 	// again each tick.
@@ -350,10 +359,17 @@ type templateResolver struct {
 // resolveDiscoveredSessionTemplate. Resolving writes no store; it does
 // legacy's local work-dir staging. Each row resolves against a snapshot of
 // itself alone, so its session bead ID is its own without a store read.
+// Resolutions serialize on templateResolveMu, the planner's and the
+// launches' alike, as legacy resolves on one goroutine.
 func newTemplateResolver(bp *agentBuildParams) templateResolver {
-	resolve := func(info session.Info) templateResolution {
+	resolveAt := func(info session.Info, now time.Time) templateResolution {
+		templateResolveMu.Lock()
+		defer templateResolveMu.Unlock()
 		row := *bp
 		row.sessionBeads = newSessionBeadSnapshotFromInfos([]session.Info{info})
+		if !now.IsZero() {
+			row.beaconTime = now
+		}
 		cfg := bp.city
 		if isNamedSessionInfo(info) {
 			identity := namedSessionIdentityInfo(info)
@@ -368,11 +384,21 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 		if agent == nil {
 			return templateResolution{Err: fmt.Errorf("template %q not configured", info.Template)}
 		}
+		if slot, _ := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); (slot > 0 || agent.UsesCanonicalSingletonPoolIdentity()) && info.PoolManaged && !isManualSessionInfoForAgent(info, agent) {
+			// A wanted pool seat: legacy's realize path (realizePoolDesiredSessions).
+			resolveAgent, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, slot)
+			tp, err := resolveTemplateForSessionBeadInfo(&row, resolveAgent, qualifiedInstance, buildFingerprintExtra(resolveAgent), info)
+			if err == nil {
+				applyPoolInstanceIdentity(&tp, agent, qualifiedInstance, poolSlot, info)
+			}
+			return templateResolution{TP: tp, Agent: resolveAgent, Err: err}
+		}
 		tp, err := resolveDiscoveredSessionTemplate(&row, cfg, agent, info)
 		return templateResolution{TP: tp, Agent: agent, Err: err}
 	}
 	install := func(agent *config.Agent, tp TemplateParams) { installAgentSideEffects(bp, agent, tp, bp.stderr) }
-	return templateResolver{Resolve: resolve, Install: install, Retry: bp.skillCatalogFailed || len(bp.failedRigSkillCatalogs) > 0}
+	resolve := func(info session.Info) templateResolution { return resolveAt(info, time.Time{}) }
+	return templateResolver{Resolve: resolve, ResolveAt: resolveAt, Install: install, Retry: bp.skillCatalogFailed || len(bp.failedRigSkillCatalogs) > 0}
 }
 
 // templateMemo is one generation's template resolutions (S-17). It is
@@ -380,9 +406,20 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 // memo, so an effect may read the one it was handed from any goroutine.
 // Readers must not edit an entry's TemplateParams.
 type templateMemo struct {
-	Gen     uint64
-	entries map[templateMemoKey]templateResolution
-	install func(agent *config.Agent, tp TemplateParams)
+	Gen       uint64
+	entries   map[templateMemoKey]templateResolution
+	install   func(agent *config.Agent, tp TemplateParams)
+	resolveAt func(info session.Info, now time.Time) templateResolution
+}
+
+// launchTemplate is info's template resolved at now, for its launch, and
+// false when the memo has no resolver or the resolution failed.
+func (m *templateMemo) launchTemplate(info session.Info, now time.Time) (templateResolution, bool) {
+	if m == nil || m.resolveAt == nil {
+		return templateResolution{}, false
+	}
+	res := m.resolveAt(info, now)
+	return res, res.Err == nil
 }
 
 // installSideEffects installs agent's side effects for a launch of tp
@@ -439,7 +476,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 		if e.Templates != nil {
 			m.resolver = e.Templates(env, now)
 		}
-		m.templates.Store(&templateMemo{Gen: env.Gen, install: m.resolver.Install})
+		m.templates.Store(&templateMemo{Gen: env.Gen, install: m.resolver.Install, resolveAt: m.resolver.ResolveAt})
 	}
 	if m.resolver.Resolve == nil {
 		return
@@ -463,7 +500,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 		next[k] = r
 	}
 	if missed || len(next) != len(cur.entries) {
-		m.templates.Store(&templateMemo{Gen: env.Gen, entries: next, install: cur.install})
+		m.templates.Store(&templateMemo{Gen: env.Gen, entries: next, install: cur.install, resolveAt: cur.resolveAt})
 	}
 }
 

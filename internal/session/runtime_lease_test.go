@@ -183,6 +183,7 @@ func TestRuntimeLeaseExcludesSharersAndKeepsTheEpoch(t *testing.T) {
 // TestRuntimeLeaseNameFlockOnly: a lease with no row (the closed-row reaper)
 // still excludes every holder of the name's flock.
 func TestRuntimeLeaseNameFlockOnly(t *testing.T) {
+	ExpectNoCityRefusalsForTest(t) // it checks a request with no city is refused
 	f, city := newLeaseFixture(t), t.TempDir()
 	reaper, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
 	if err != nil || reaper.Epoch() != 0 {

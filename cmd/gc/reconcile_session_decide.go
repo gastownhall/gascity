@@ -95,10 +95,13 @@ func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time)
 			if it.Kind != "" { // a hold has no effect to read anything
 				it.Rests = r.rests
 			}
+			it.Key = k
 			if arm.name == "A6" && it.Kind != "" {
 				it.Patch = r.fold(it.Patch, rowArms[i+1:])
+				if it.Kind == intentRowHeal || it.Reason == decideDeadRuntimeHeal {
+					it = r.startHealed(it)
+				}
 			}
-			it.Key = k
 			return it, r.next
 		}
 	}
@@ -177,7 +180,7 @@ type rowArm struct {
 // rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
 // (A1, A6) takes one line per row. Later PRs insert their arms at their
 // numbers: A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline
-// (C7c), A10-A18, A20's begin (C6a2) and A21.
+// (C7c), A10's rollback (C5a2), A11-A17, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A1", armCensusOnly},
@@ -194,6 +197,9 @@ var rowArms = []rowArm{
 	{"A6", armStrandedClear},
 	{"A6", armCurrentBead},
 	{"A9", armLivenessUnknown},
+	{"A10", armAdopt},
+	{"A17", armHeartbeatRespawn},
+	{"A18", armStart},
 	{"A19", armDrainVoidCancel},
 }
 

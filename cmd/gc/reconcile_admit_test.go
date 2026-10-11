@@ -333,6 +333,33 @@ func TestAdmitOpenEndpointAdmitsNothing(t *testing.T) {
 	}
 }
 
+// Kills a heal lost behind its start (should-fix 2): a start that carries
+// its A6 heal and is deferred (an open endpoint, the row-repeated rule
+// aside) admits the heal in its stead, as the row write it is, under the
+// row write's own cap; a start without one admits nothing.
+func TestAdmitHealsInsteadOfADeferredStart(t *testing.T) {
+	in := admitIn(5, 1)
+	shut := map[endpointKey]endpointView{"provider:a": {Gate: gateShut}}
+	in.Endpoints = shut
+	healed := func(i int) intent {
+		it := startOn(i, "provider:a", time.Duration(i))
+		it.Heal = &intent{Kind: intentRowHealFresh, Key: it.Key, Patch: session.MetadataPatch{"state": "asleep"}}
+		return it
+	}
+	res := admit(in, []intent{healed(1), healed(2), startOn(3, "provider:a", 3)})
+	if got := keysOf(res.Admitted); !slices.Equal(got, []string{intentRowHealFresh + ":gc-1"}) || res.Admitted[0].Patch["state"] != "asleep" {
+		t.Fatalf("admitted %v, want gc-1's heal alone (one row write)", got)
+	}
+	if got := causesOf(res.Deferred); len(got) != 3 || got["start:gc-1"] != causeEndpointGate || got["start:gc-2"] != causeEndpointGate {
+		t.Fatalf("deferred %v, want the three starts on the endpoint", got)
+	}
+	twice := admitIn(5, 4)
+	twice.Endpoints = shut
+	if res := admit(twice, []intent{healed(1), healed(1)}); len(res.Admitted) != 1 {
+		t.Fatalf("admitted %v, want one heal for a row proposed twice", keysOf(res.Admitted))
+	}
+}
+
 // Kills rank inversion (START-009): starts go oldest wakeFairnessTime first,
 // and a never-woken row ranks by its CreatedAt.
 func TestAdmitLRUOrderUsesWakeFairnessTime(t *testing.T) {

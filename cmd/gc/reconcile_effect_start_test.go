@@ -47,6 +47,14 @@ func (k *txKit) runtimeAs(id, token string, mark func(*simRuntime)) {
 	}
 }
 
+// resolvesAs keys row's template resolution for as too: a row whose state a
+// case changes may change whether its seat's alias defers (the memo key).
+func (k *txKit) resolvesAs(row, as session.Info) {
+	if res, ok := k.p.World.Templates.lookup(row); ok {
+		k.p.World.Templates.entries[templateMemoKeyOf(as)] = res
+	}
+}
+
 // runKind runs the kit's intent under its kind's production spec.
 func (k *txKit) runKind() settlement {
 	return k.run(context.Background(), effectSpecs[k.it.Kind])
@@ -87,6 +95,7 @@ func TestStartResolutionTable(t *testing.T) {
 			r, v := row, txView{World: k.p.World, RT: &c.rt, Now: gatherNow}
 			r.MetadataState = c.state
 			v.Row = r
+			k.resolvesAs(row, r)
 			step := verbStep(c.adopt)(v, prepared, nil)
 			if step.Refuse != c.refuse || (len(step.Write) > 0) != c.write || step.Done != c.done {
 				t.Fatalf("step %+v, want refuse %q, write %v, done %v", step, c.refuse, c.write, c.done)
@@ -111,7 +120,7 @@ func TestAdoptCommitsAliveCurrentUncommittedRow(t *testing.T) {
 	if s.Outcome != settledLanded || len(s.Facts.Events) != 0 || s.Facts.Noted == nil || !s.Facts.Noted.At.Equal(since) {
 		t.Fatalf("settlement %+v, want landed, noted at the read's since, with no event", s)
 	}
-	if k.meta("state") != "active" || k.meta("pending_create_claim") != "" || k.meta("started_config_hash") == "" || k.meta("instance_token") != "tok" || k.meta("sleep_reason") != "" {
+	if k.meta("state") != "awake" || k.meta("pending_create_claim") != "" || k.meta("started_config_hash") == "" || k.meta("instance_token") != "tok" || k.meta("sleep_reason") != "" {
 		t.Fatalf("row after the adopt: state %q claim %q hash %q token %q sleep_reason %q", k.meta("state"), k.meta("pending_create_claim"), k.meta("started_config_hash"), k.meta("instance_token"), k.meta("sleep_reason"))
 	}
 }
@@ -147,6 +156,7 @@ func TestVerbStepJudgesCommittedRowsByIdentityFirst(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			r := row
 			r.MetadataState = c.state
+			k.resolvesAs(row, r)
 			v := txView{World: k.p.World, RT: &txRuntime{Class: rtAlive, Same: true, Identity: c.id}, Now: since, Row: r}
 			var err error
 			if c.prepared == nil {
@@ -358,7 +368,8 @@ var stateWriters = map[string]string{
 	"cmd/gc/session_reconciler.go:reconcileSessionBeadsTracedWithNamedDemand": "legacy reconciler",
 	"internal/session/chat.go:Manager.confirmLiveSessionState":                "Manager: CLI/API start confirms active",
 	"internal/session/holds.go:holdMeta":                                      "read model, not a write",
-	"internal/session/resume_user_hold.go:consumeUserHoldPatch":               "patch builder (operator resume consumes a user hold)",
+	"internal/session/disposition.go:DispositionOfInfo":                       "read model, not a write",
+	"internal/session/resume_user_hold.go:consumeUserHoldLife":                "patch builder (operator resume consumes a user hold)",
 	"internal/session/lifecycle_exits.go:RateLimitQuarantinePatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:AcknowledgeDrainPatch":          "patch builder",
 	"internal/session/lifecycle_transition.go:ArchivePatch":                   "patch builder",
@@ -369,7 +380,7 @@ var stateWriters = map[string]string{
 	"internal/session/lifecycle_transition.go:ConfigDriftResetPatch":          "patch builder",
 	"internal/session/lifecycle_transition.go:ConfirmStartedPatch":            "patch builder",
 	"internal/session/lifecycle_transition.go:PreWakePatch":                   "patch builder (S1's PreWake)",
-	"internal/session/lifecycle_transition.go:OperatorSuspendPatch":           "patch builder (operator suspend)",
+	"internal/session/store.go:operatorSuspendLife":                           "patch builder (operator suspend)",
 	"internal/session/lifecycle_transition.go:QuarantinePatch":                "patch builder",
 	"internal/session/lifecycle_transition.go:ReactivatePatch":                "patch builder",
 	"internal/session/lifecycle_transition.go:RequestWakePatch":               "patch builder",

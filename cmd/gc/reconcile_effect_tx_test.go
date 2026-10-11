@@ -859,18 +859,24 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		transitions = append(transitions, name+"/"+reason+"/"+transition)
 	}
 	t.Cleanup(func() { recordDrainTransition = saved })
+	var quarantined []string
+	savedQ := recordAgentQuarantine
+	recordAgentQuarantine = func(_ context.Context, agent string) { quarantined = append(quarantined, agent) }
+	t.Cleanup(func() { recordAgentQuarantine = savedQ })
 	f := effectFacts{
-		Events:     []events.Event{{Type: "session.test"}},
-		Transition: &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
-		Work:       &workVerdict{BeadID: "gc-w1", Refused: true},
-		Noted:      &notedRuntime{Name: "s1", At: plannerT0},
+		Events:      []events.Event{{Type: "session.test"}},
+		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
+		Work:        &workVerdict{BeadID: "gc-w1", Refused: true},
+		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
+		Quarantined: "worker-1",
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
-		"Events":     len(rec.events) == 1,
-		"Transition": slices.Equal(transitions, []string{"s/idle/cancel"}),
-		"Work":       p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
-		"Noted":      cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
+		"Events":      len(rec.events) == 1,
+		"Transition":  slices.Equal(transitions, []string{"s/idle/cancel"}),
+		"Work":        p.backoff.Snapshot()[workBackoffKey("gc-w1")].Cause == createStageWorktree,
+		"Noted":       cache.Snapshot().ByName["s1"].Listed.Value == ObsYes,
+		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {
@@ -1449,5 +1455,23 @@ func TestTxCloseLandedSignal(t *testing.T) {
 	k.fail = map[txSeam]error{seamAfterWrite: errors.New("staging fault")}
 	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Cause != causeInjected || s.Outcome != settledAmbiguous || !s.Closed || k.status() != "closed" {
 		t.Fatalf("settlement %+v, row %s; want ambiguous and closed, the fault injected", s, k.status())
+	}
+}
+
+// Kills a cause attached to a landing its last step did not write (the C5b-3
+// review): a section that writes, then one that ends with a cause and no
+// write (C5c1's already-closed), settles landed with no cause; a step whose
+// own write ends the effect with a cause keeps it (healInstead).
+func TestLandedCauseOnlyFromTheWritingStep(t *testing.T) {
+	ends := section{Decide: func(txView) txStep { return txStep{Done: true, Cause: "already-closed"} }}
+	k := newTxKit(t)
+	if s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark(txKeyA)}, ends}}); s.Outcome != settledLanded || s.Cause != "" {
+		t.Fatalf("settlement %+v, want landed with no cause", s)
+	}
+	writes := section{Decide: func(txView) txStep {
+		return txStep{Write: session.MetadataPatch{txKeyA: "1"}, Done: true, Cause: causeHeld}
+	}}
+	if s := newTxKit(t).run(context.Background(), effectSpec{sections: []section{writes}}); s.Outcome != settledLanded || s.Cause != causeHeld {
+		t.Fatalf("settlement %+v, want landed with cause %q", s, causeHeld)
 	}
 }

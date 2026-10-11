@@ -952,7 +952,7 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 		return
 	}
 	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
-	_, _ = sessFront.ApplyKeepingUserHold(info.ID, batch)
+	_, _ = sessFront.ApplySleep(info.ID, batch)
 }
 
 // verifiedStop stops the session d decided on after verifying the

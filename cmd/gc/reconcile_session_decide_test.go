@@ -60,7 +60,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		}
 		last = n
 	}
-	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A9", "A19"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A9", "A10", "A17", "A18", "A19"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 
@@ -117,7 +117,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 				delete(a.Snapshot.Entries, k)
 			}
 			it, next := decideRow(w, a, k)
-			if fresh := it.Kind == intentRekey || it.Kind == intentRowHealFresh; fresh != (it.Rests != 0) || it.Kind == "" && it.Rests != 0 {
+			if fresh := it.Kind == intentRekey || it.Kind == intentRowHealFresh || it.Kind == intentStart || it.Kind == intentAdopt; fresh != (it.Rests != 0) || it.Kind == "" && it.Rests != 0 {
 				t.Errorf("%s: kind %q rests %b: a fresh kind records its rests, a plain one none (ruling (c))", tc.name, it.Kind, it.Rests)
 			}
 			if it.Kind != tc.wantKind || it.Reason != tc.want || it.Key != k {

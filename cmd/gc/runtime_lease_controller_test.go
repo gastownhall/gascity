@@ -593,7 +593,7 @@ func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	b := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&b)
 	decided := sessionInfoFromBead(mustGetBead(t, env.store, b.ID))
-	if err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+	if _, err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifiedStop(t.TempDir(), sessionpkg.Decide(decided, sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); !errors.Is(err, sessionpkg.ErrKillPremiseMoved) || !env.sp.IsRunning("worker") {

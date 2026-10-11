@@ -573,13 +573,13 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		// whose drain has not stopped it yet) consumes the hold too, under the
 		// runtime lease (tried, not waited for: a busy lease is the
 		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
-		if premise := liveUserHoldPremise(b.Metadata, by, m.now()); premise != nil {
+		if consume, ok := liveUserHoldDecision(b, by); ok {
 			_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
 			if err != nil {
 				return err
 			}
 			defer release()
-			return m.consumeUserHold(id, premise, m.now())
+			return m.consumeUserHold(consume, m.now())
 		}
 		if err := m.confirmLiveSessionState(id, &b); err != nil {
 			return err
@@ -646,9 +646,10 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	started := false
 	// An operator's resume of a row the operator holds consumes the hold, but
 	// only once the runtime is up (resume_user_hold.go).
-	var holdPremise map[string]string
+	var consume Decided
+	consumes := false
 	if by.consumesHold() {
-		holdPremise = userHoldPremise(b.Metadata, m.now())
+		consume, consumes = userHoldDecision(b)
 	}
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
@@ -724,8 +725,8 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
-	if holdPremise != nil {
-		return m.consumeUserHold(id, holdPremise, m.now())
+	if consumes {
+		return m.consumeUserHold(consume, m.now())
 	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
@@ -1061,7 +1062,7 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 }
 
 func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, immediate bool) (SubmitOutcome, error) {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
 	}
 	var outcome SubmitOutcome
@@ -1102,7 +1103,7 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 // other callers that need bounded startup without attaching a terminal. A
 // dormant row it may not resume as its actor returns ErrResumeHeld.
 func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionStartLock(ctx, id, func() error {
@@ -1119,10 +1120,7 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // bridge while they still own commit/rollback bookkeeping above the worker
 // boundary. It runs under by.Lease, the caller's.
 func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
-	if err := m.checkActor(by); err != nil {
-		return err
-	}
-	if err := by.CheckStarts(); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return err
 	}
 	return withSessionMutationLock(id, func() error {
@@ -1166,7 +1164,7 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // an operational error. A held row the actor may not resume returns
 // ErrResumeHeld, queueing nothing, so the caller queues it and says why.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
-	if err := m.checkActor(by); err != nil {
+	if err := m.checkStarter(by); err != nil {
 		return false, err
 	}
 	var delivered bool
@@ -1343,6 +1341,9 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	}
 	workDir := b.Metadata["work_dir"]
 	if workDir == "" {
+		if path := m.acpCaptureTranscriptPath(b); path != "" {
+			return path, TranscriptFound, nil
+		}
 		return "", TranscriptNoWorkDir, nil
 	}
 	provider := strings.TrimSpace(b.Metadata["provider_kind"])
@@ -1353,6 +1354,12 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 		searchPaths = sessionlog.DefaultSearchPaths()
 	}
 	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
+		return path, TranscriptFound, nil
+	}
+	// An ACP session's transcript is the capture gc wrote itself. A keyed
+	// native transcript (above) still wins; the workdir fallbacks below could
+	// return an unrelated provider's file.
+	if path := m.acpCaptureTranscriptPath(b); path != "" {
 		return path, TranscriptFound, nil
 	}
 	// zcode carries no session_key — no session-id flag, no hook plugin — so

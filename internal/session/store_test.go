@@ -198,11 +198,11 @@ func TestGetReflectsApplyPatch(t *testing.T) {
 }
 
 // TestSleepEmitsSleepPatch proves the typed Sleep method writes the row
-// SleepPatch produces, keeping an operator's user-hold intent the row carries
-// (ApplyKeepingUserHold).
+// SleepPatch produces, keeping an operator's user-hold intent and a wait's
+// intent the row carries (ApplySleep, D-J 3).
 func TestSleepEmitsSleepPatch(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	for intent, want := range map[string]string{"": "", "idle-stop-pending": "", "user-hold": "user-hold"} {
+	for intent, want := range map[string]string{"": "", "idle-stop-pending": "", "user-hold": "user-hold", "wait-hold": "wait-hold"} {
 		b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active", "sleep_intent": intent})
 		is, _ := recordingStore(t, b)
 		if err := is.Sleep("s-1", "idle-timeout", now); err != nil {
@@ -219,22 +219,23 @@ func TestSleepEmitsSleepPatch(t *testing.T) {
 	}
 }
 
-// TestSetWaitHoldClearWritesEmptyStrings proves clearing wait-hold emits the
-// empty-string writes the raw cmd_wait.go clear did.
+// TestSetWaitHoldClearWritesEmptyStrings proves clearing a wait hold writes
+// the WaitEnd cell's move, fenced on a fresh read: the wait and its own
+// intent, as empty strings, and no other key.
 func TestSetWaitHoldClearWritesEmptyStrings(t *testing.T) {
-	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "x"})
+	b := sessionBeadFixture("s-1", "open", map[string]string{"wait_hold": "x", "sleep_intent": "wait-hold"})
 	is, rec := recordingStore(t, b)
 
 	if err := is.SetWaitHold("s-1", false, ""); err != nil {
 		t.Fatalf("SetWaitHold: %v", err)
 	}
-	calls := rec.CallsForOp("SetMetadataBatch")
+	calls := rec.CallsForOp("Update")
 	if len(calls) != 1 {
-		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
+		t.Fatalf("want 1 Update, got %d", len(calls))
 	}
 	want := map[string]string{"wait_hold": "", "sleep_intent": ""}
-	if !reflect.DeepEqual(calls[0].Metadata, want) {
-		t.Errorf("clear batch = %#v, want %#v", calls[0].Metadata, want)
+	if !reflect.DeepEqual(calls[0].Opts.Metadata, want) {
+		t.Errorf("clear batch = %#v, want %#v", calls[0].Opts.Metadata, want)
 	}
 }
 

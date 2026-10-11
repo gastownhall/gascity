@@ -107,13 +107,31 @@ func (c *templateCity) pool(t *testing.T) session.Info {
 	})
 }
 
-// Kills a manual or pool row resolved on another kind's path, or with
-// another agent: the resolver's params equal those legacy's overlay puts in
-// desired state for the row (manual: sessionBeadQualifiedNameInfo and the
-// row's alias; pool: canonicalSessionIdentityWithConfigInfo's instance and
-// the trigger env).
+// Kills a manual row resolved on another kind's path, or with another
+// agent, and a wanted pool seat resolved off legacy's realize path: a manual
+// row's params equal those legacy's overlay puts in desired state
+// (sessionBeadQualifiedNameInfo and the row's alias); a pool seat takes its
+// slot's instance identity and instance agent, as realizePoolDesiredSessions
+// gives it (the session differential compares its start with legacy's).
 func TestTemplateResolverMatchesLegacyOverlay(t *testing.T) {
-	for _, kind := range []string{"manual", "pool"} {
+	c := newTemplateCity(t)
+	pool := newTemplateResolver(c.params()).Resolve(c.pool(t))
+	if pool.Err != nil || pool.TP.InstanceName != "polecat-2" || pool.TP.PoolSlot != 2 || pool.Agent == nil || pool.Agent.QualifiedName() != "polecat-2" {
+		t.Fatalf("pool seat: %+v (agent %v, err %v), want slot 2's instance polecat-2", pool.TP, pool.Agent, pool.Err)
+	}
+	// A canonical singleton's and a namepool's seats take realize's identity
+	// too: the agent's name and the slot's pool name.
+	c.cfg.Agents = append(c.cfg.Agents,
+		config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+		config.Agent{Name: "crew", StartCommand: "true", MaxActiveSessions: intPtr(3), NamepoolNames: []string{"alice", "bob", "carol"}})
+	for template, want := range map[string]string{"solo": "solo", "crew": "bob"} {
+		slot := map[string]string{"solo": "0", "crew": "2"}[template]
+		seat := c.row(t, map[string]string{"template": template, "session_name": "s-" + template, "state": "asleep", "pool_slot": slot, "pool_managed": "true"})
+		if got := newTemplateResolver(c.params()).Resolve(seat); got.Err != nil || got.TP.Alias != want || got.TP.Env["GC_ALIAS"] != want {
+			t.Fatalf("%s seat: alias %q GC_ALIAS %q (err %v), want realize's %q", template, got.TP.Alias, got.TP.Env["GC_ALIAS"], got.Err, want)
+		}
+	}
+	for _, kind := range []string{"manual"} {
 		t.Run(kind, func(t *testing.T) {
 			c := newTemplateCity(t)
 			info := map[string]func(*testing.T) session.Info{"manual": c.manual, "pool": c.pool}[kind](t)
@@ -240,14 +258,22 @@ func TestTemplateResolutionExtractionLeavesLegacyUnchanged(t *testing.T) {
 // rows only.
 func TestTemplateMemoKeyCoversResolverReads(t *testing.T) {
 	c := newTemplateCity(t)
-	r := newTemplateResolver(c.params())
 	keyed := map[string]bool{
 		"ID": true, "Template": true, "CommonName": true, "SessionNameMetadata": true, "SessionNameExplicit": true,
 		"AgentName": true, "Alias": true, "SessionOrigin": true, "ManualSessionMetadata": true, "PoolSlot": true,
 		"ConfiguredNamedIdentity": true, "ConfiguredNamedSession": true, "PoolManaged": true, "DependencyOnly": true,
 		"TriggerBeadID": true, "TriggerBeadStoreRef": true, "Pack": true, "Closed": true,
 	}
-	for _, info := range []session.Info{c.named(t, nil), c.manual(t), c.pool(t)} {
+	c.cfg.Agents = append(c.cfg.Agents,
+		config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
+		config.Agent{Name: "crew", StartCommand: "true", MaxActiveSessions: intPtr(3), NamepoolNames: []string{"alice", "bob", "carol"}})
+	r := newTemplateResolver(c.params())
+	seat := func(template, slot string) session.Info { // a pool seat whose identity realize stamps on its slot
+		return c.row(t, map[string]string{"template": template, "session_name": "s-" + template, "state": "asleep", "pool_slot": slot, "pool_managed": "true"})
+	}
+	// The realize path reads these only through whether the alias defers.
+	deferral := map[string]bool{"MetadataState": true, "PendingCreateClaimMetadata": true, "PoolAliasConflict": true}
+	for _, info := range []session.Info{c.named(t, nil), c.manual(t), c.pool(t), seat("solo", "0"), seat("crew", "2")} {
 		want := r.Resolve(info)
 		v := reflect.ValueOf(info)
 		for i := range v.NumField() {
@@ -264,10 +290,11 @@ func TestTemplateMemoKeyCoversResolverReads(t *testing.T) {
 			default:
 				continue
 			}
-			if inKey := templateMemoKeyOf(changed) != templateMemoKeyOf(info); inKey != (keyed[name] && name != "Closed") {
+			deferred := deferral[name] && poolRuntimeAliasIsDeferredInfo(changed) != poolRuntimeAliasIsDeferredInfo(info)
+			if inKey := templateMemoKeyOf(changed) != templateMemoKeyOf(info); inKey != (keyed[name] && name != "Closed" || deferred) {
 				t.Fatalf("%s: in the key = %v, listed as keyed = %v", name, inKey, keyed[name])
 			}
-			if keyed[name] {
+			if keyed[name] || deferred {
 				continue
 			}
 			if got := r.Resolve(changed); !reflect.DeepEqual(got, want) {
@@ -481,8 +508,8 @@ func TestTemplateResolverResolvesFromTheRowAlone(t *testing.T) {
 	bp := newAgentBuildParams("test-city", c.cityPath, c.cfg, runtime.NewFake(), templatesNow, counting, io.Discard)
 	counting.reads = 0
 	got := newTemplateResolver(bp).Resolve(info)
-	if got.Err != nil || got.Agent == nil || got.Agent.QualifiedName() != "polecat" || counting.reads != 0 {
-		t.Fatalf("resolution %+v (agent %v, err %v) after %d store reads; want polecat from the row alone", got.TP, got.Agent, got.Err, counting.reads)
+	if got.Err != nil || got.Agent == nil || got.Agent.QualifiedName() != "polecat-3" || counting.reads != 0 {
+		t.Fatalf("resolution %+v (agent %v, err %v) after %d store reads; want slot 3 of polecat from the row alone", got.TP, got.Agent, got.Err, counting.reads)
 	}
 	f := newGatherFixture(t, poolRow("gc-1", "", 1, "asleep", "common_name", "worker"))
 	resolved := 0
