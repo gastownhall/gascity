@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,8 +60,26 @@ func writeGrants(t *testing.T, file string, node yaml.Node) []string {
 	}
 }
 
+// scopeGrants decodes an explicit permissions scope map into its access
+// level per scope. A missing block or a shorthand string fails the test:
+// every block pinned here is an explicit scope map.
+func scopeGrants(t *testing.T, where string, node yaml.Node) map[string]string {
+	t.Helper()
+	if node.Kind == 0 {
+		t.Fatalf("%s: no permissions block", where)
+	}
+	if node.Kind != yaml.MappingNode {
+		t.Fatalf("%s: permissions must be an explicit scope map, got node kind %v", where, node.Kind)
+	}
+	var grants map[string]string
+	if err := node.Decode(&grants); err != nil {
+		t.Fatalf("%s: decode permissions: %v", where, err)
+	}
+	return grants
+}
+
 // TestWorkflowLevelPermissionsAreReadOnly guards against Scorecard
-// TokenPermissions regressions (alerts 67, 68, 248): a write grant at
+// TokenPermissions regressions (alerts 67, 248, 442, 375): a write grant at
 // workflow level is inherited by every job, so writes must be declared on
 // the individual jobs that need them.
 func TestWorkflowLevelPermissionsAreReadOnly(t *testing.T) {
@@ -83,34 +103,36 @@ func TestWorkflowLevelPermissionsAreReadOnly(t *testing.T) {
 	}
 }
 
-// TestWorkflowWritePermissionsAreJobScoped pins the job-level grants that
-// were moved off the workflow level, so dropping one breaks here instead of
-// at runtime.
+// TestWorkflowWritePermissionsAreJobScoped pins the exact permissions block
+// of each job that took a write grant off the workflow level. A job-level
+// block replaces the workflow default rather than merging with it, so a
+// dropped read or a widened grant fails here, not at runtime or in a
+// Scorecard alert.
 func TestWorkflowWritePermissionsAreJobScoped(t *testing.T) {
 	cases := []struct {
-		file       string
-		writeJob   string
-		wantWrites []string
+		file     string
+		writeJob string
+		want     map[string]string
 	}{
 		{
-			file:       "docs-autofix.yml",
-			writeJob:   "autofix",
-			wantWrites: []string{"contents", "pull-requests"},
+			file:     "docs-autofix.yml",
+			writeJob: "autofix",
+			want:     map[string]string{"contents": "write", "pull-requests": "write", "actions": "read"},
 		},
 		{
-			file:       "codeql.yml",
-			writeJob:   "analyze",
-			wantWrites: []string{"security-events"},
+			file:     "codeql.yml",
+			writeJob: "analyze",
+			want:     map[string]string{"actions": "read", "contents": "read", "security-events": "write"},
 		},
 		{
-			file:       "dispatch-labeled-pr-suite.yml",
-			writeJob:   "dispatch-suite",
-			wantWrites: []string{"actions"},
+			file:     "dispatch-labeled-pr-suite.yml",
+			writeJob: "dispatch-suite",
+			want:     map[string]string{"actions": "write", "contents": "read", "pull-requests": "read"},
 		},
 		{
-			file:       "ci-verdict-watchdog.yml",
-			writeJob:   "flag-cancelled-while-queued", //nolint:misspell // workflow job ID
-			wantWrites: []string{"checks"},
+			file:     "ci-verdict-watchdog.yml",
+			writeJob: "flag-cancelled-while-queued", //nolint:misspell // workflow job ID
+			want:     map[string]string{"checks": "write", "actions": "read"},
 		},
 	}
 
@@ -121,15 +143,30 @@ func TestWorkflowWritePermissionsAreJobScoped(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s: expected job %q not found", tc.file, tc.writeJob)
 			}
-			got := map[string]bool{}
-			for _, scope := range writeGrants(t, tc.file, job.Permissions) {
-				got[scope] = true
-			}
-			for _, scope := range tc.wantWrites {
-				if !got[scope] {
-					t.Errorf("%s: job %q must declare %s: write", tc.file, tc.writeJob, scope)
-				}
+			got := scopeGrants(t, fmt.Sprintf("%s job %q", tc.file, tc.writeJob), job.Permissions)
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("%s: job %q permissions = %v, want exactly %v", tc.file, tc.writeJob, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCodeQLRunnerPolicyRunsOnTheWorkflowGrant pins the other half of the
+// codeql.yml split: runner-policy declares no permissions block of its own,
+// so it runs on the workflow-level grant, which must stay exactly
+// actions: read and contents: read.
+func TestCodeQLRunnerPolicyRunsOnTheWorkflowGrant(t *testing.T) {
+	const file, jobName = "codeql.yml", "runner-policy"
+	wf := parseWorkflowPermissions(t, filepath.Join(repoRoot(t), ".github", "workflows", file))
+	job, ok := wf.Jobs[jobName]
+	if !ok {
+		t.Fatalf("%s: expected job %q not found", file, jobName)
+	}
+	if job.Permissions.Kind != 0 {
+		t.Errorf("%s: job %q must run on the workflow-level grant, not its own permissions block", file, jobName)
+	}
+	want := map[string]string{"actions": "read", "contents": "read"}
+	if got := scopeGrants(t, file+" workflow level", wf.Permissions); !maps.Equal(got, want) {
+		t.Errorf("%s: workflow-level permissions = %v, want exactly %v", file, got, want)
 	}
 }
