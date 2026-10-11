@@ -928,8 +928,46 @@ func TestClearStrandedStampRechecksTheLiveRow(t *testing.T) {
 	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "true" {
 		t.Fatalf("stamp %v, want the fresh stamp kept", got.Metadata)
 	}
+	clearStrandedStamp(store, claim.ID, "gc-1", true) // Y01: a reopened seat the live stamp no longer names
+	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "true" {
+		t.Fatalf("stamp %v, want kept: it names gc-2, not the reopened gc-1", got.Metadata)
+	}
 	clearStrandedStamp(store, claim.ID, "gc-2", true)
 	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
 		t.Fatalf("stamp %v, want cleared once its seat reopened", got.Metadata)
+	}
+}
+
+// laggingListStore answers List from a frozen copy: a cache that lags the
+// live rows Get reads.
+type laggingListStore struct {
+	beads.Store
+	rows []beads.Bead
+}
+
+func (s laggingListStore) List(beads.ListQuery) ([]beads.Bead, error) { return s.rows, nil }
+
+// ConditionalWritesResolveTarget keeps the inner store's fenced writes.
+func (s laggingListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// Kills a detector that clears on its lagging list alone (Y04): the list
+// still shows a claim stamped for gc-1 and taken by julian, while the live
+// row carries a later close's fresh stamp for julian's own closed seat.
+func TestDetectorKeepsAFreshStampALaggingListCallsStale(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStore()
+	cfg := &config.City{Workspace: config.Workspace{Name: "probe-town"}, Agents: []config.Agent{persistentWorker()}}
+	claim := createWork(t, store, "in_progress", "julian", map[string]string{
+		beadmeta.RoutedToMetadataKey: "nowhere/lane",
+		beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: "gc-1", beadmeta.StrandedAssigneeMetadataKey: "gc-1",
+	})
+	stale, _ := store.Get(claim.ID)
+	if err := store.SetMetadataBatch(claim.ID, map[string]string{beadmeta.StrandedSessionMetadataKey: "gc-9", beadmeta.StrandedAssigneeMetadataKey: "julian"}); err != nil {
+		t.Fatal(err)
+	}
+	lagging := laggingListStore{Store: store, rows: []beads.Bead{stale}}
+	detectStrandedClaims(testWorkLegs("", cfg, lagging, nil), store, nil, &strandedClaimAlerts{rec: events.NewFake(), scanned: now.Add(-strandedRealertEvery)}, now)
+	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedSessionMetadataKey] != "gc-9" {
+		t.Fatalf("stamp %v, want the fresh stamp for gc-9 kept", got.Metadata)
 	}
 }
