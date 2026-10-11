@@ -70,32 +70,3 @@ func writeReachableProviderManagedDoltState(t *testing.T, cityPath string) int {
 	}
 	return port
 }
-
-//nolint:unused // exercised by native_dolt_rebind_integration_test.go
-func occupyManagedDoltPort(t *testing.T, port int) {
-	t.Helper()
-
-	deadline := time.Now().Add(10 * time.Second)
-	var ln net.Listener
-	var err error
-	for time.Now().Before(deadline) {
-		ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("managed port blocker on %d did not become ready: %v", port, err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
-}

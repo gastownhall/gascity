@@ -3,6 +3,8 @@
 package main
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -71,4 +73,32 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 	if !after.Running || after.Port <= 0 || after.Port == before.Port || after.PID <= 0 || !pidAlive(after.PID) {
 		t.Fatalf("managed Dolt did not rebind for provider store; before=%+v after=%+v", before, after)
 	}
+}
+
+func occupyManagedDoltPort(t *testing.T, port int) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	var ln net.Listener
+	var err error
+	for time.Now().Before(deadline) {
+		ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("managed port blocker on %d did not become ready: %v", port, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
 }
