@@ -151,6 +151,13 @@ type fakeClaudePane struct {
 	// prompt instead of the input box.
 	promptKeys []string
 
+	// captureErr fails one capture-pane: the captureErrOnCapture'th
+	// (1-based), or the first after the first literal text when
+	// captureErrAfterPaste is set, the way a capture can fail under load.
+	captureErr           error
+	captureErrOnCapture  int
+	captureErrAfterPaste bool
+
 	captures    int
 	keys        []string // every non-literal send-keys key, in order
 	submitted   []string // every message Enter sent
@@ -336,6 +343,9 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		return "", errors.New("unknown variable")
 	case "capture-pane":
 		f.captures++
+		if f.captureErr != nil && f.captures == f.captureErrOnCapture {
+			return "", f.captureErr
+		}
 		if f.attachOnCapture > 0 && f.captures >= f.attachOnCapture {
 			f.attached = true
 		}
@@ -382,6 +392,10 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 	if literal {
 		if f.prompt != "" && f.promptAfterPaste {
 			defer func() { f.promptShown = true }()
+		}
+		if f.captureErr != nil && f.captureErrAfterPaste {
+			f.captureErrAfterPaste = false
+			f.captureErrOnCapture = f.captures + 1
 		}
 		text := strings.Join(keys, " ")
 		c := f.cur()
@@ -508,6 +522,29 @@ func TestNudgeSessionLeavesAttachedClaudeDraftAlone(t *testing.T) {
 
 	if n := pane.keyCount("C-u"); n != 0 {
 		t.Fatalf("sent %d Ctrl-U to an attached session, want none (keys %q)", n, pane.keys)
+	}
+}
+
+// A client that attaches while the submit clears a stale draft stops the clear
+// at the next key, and the message is not pasted onto what is left of the
+// draft: the human now at the pane may be typing (#5192).
+func TestNudgeSessionStopsClearingWhenClientAttachesMidClear(t *testing.T) {
+	pane := newFakeClaudePane(claudeRestoredDraft)
+	// Capture 4 is the redraw read after the first Ctrl-U Ctrl-K: the nudge
+	// looks for a permission prompt (1) and a dialog (2), then the clear reads
+	// the input box (3) and presses.
+	pane.attachOnCapture = 4
+	tm := newFakeClaudeTmux(pane)
+
+	err := tm.NudgeSession(pane.sessionName, "nudge")
+	if !errors.Is(err, runtime.ErrInputClearSkipped) {
+		t.Fatalf("NudgeSession = %v, want runtime.ErrInputClearSkipped", err)
+	}
+	if n := pane.keyCount("C-u"); n != 1 {
+		t.Fatalf("sent %d Ctrl-U, want 1: none once the client attached (keys %q)", n, pane.keys)
+	}
+	if len(pane.submitted) != 0 || strings.Contains(pane.draft, "nudge") {
+		t.Fatalf("submitted %q, input box %q; want the message neither pasted nor sent", pane.submitted, pane.draft)
 	}
 }
 

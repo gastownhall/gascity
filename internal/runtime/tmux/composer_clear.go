@@ -199,8 +199,12 @@ func (t *Tmux) readInput(target string) (claudeInput, bool, error) {
 	return in, ok, nil
 }
 
-// captureInputLines captures target like CapturePaneLines, but with dim text
-// removed, for callers that read the input box.
+// captureInputLines captures the last promptObservationLines rows of target
+// for callers that read the input box. It differs from CapturePaneLines in
+// three ways: -e keeps the escape sequences, so dim text can be told apart; -J
+// joins a row tmux wrapped with the row it continues on, so a long draft reads
+// as one line rather than one per pane row; and stripDimText then removes the
+// escape sequences along with the dim text.
 func (t *Tmux) captureInputLines(target string) ([]string, error) {
 	out, err := t.run("capture-pane", "-p", "-e", "-J", "-t", paneTarget(target), "-S", fmt.Sprintf("-%d", promptObservationLines))
 	if err != nil {
@@ -267,16 +271,19 @@ func (t *Tmux) isClaudeTarget(target string) bool {
 	return t.targetLooksLikeProvider(target, "claude")
 }
 
-// clearInputBeforePaste empties the input box before a nudge pastes into it.
-// The caller holds the nudge lock and has checked that no client is attached.
-// For Claude it clears the whole draft and verifies it; when the input box
-// cannot be read, and for other providers, it sends the single Ctrl-U it
-// always has.
-func (t *Tmux) clearInputBeforePaste(target string) error {
+// clearInputBeforePaste empties the input box of session's pane target before
+// a nudge pastes into it. The caller holds the nudge lock and has checked that
+// no client is attached. For Claude it clears the whole draft and verifies it,
+// checking before every key that no client has attached since: a human who
+// attaches mid-clear stops it with an error wrapping
+// runtime.ErrInputClearSkipped, and the nudge must not paste onto what is left
+// of the draft (#5192). When the input box cannot be read, and for other
+// providers, it sends the single Ctrl-U it always has.
+func (t *Tmux) clearInputBeforePaste(session, target string) error {
 	if t.isClaudeTarget(target) {
 		in, ok, err := t.readInput(target)
 		if err == nil && ok {
-			return t.emptyInput(target, in, nil)
+			return t.emptyInput(target, in, func() error { return t.noClientAttached(session) })
 		}
 	}
 	if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {

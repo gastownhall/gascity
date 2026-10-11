@@ -356,13 +356,16 @@ func TestDismissFeedbackSurveyModalLeavesHumanSessionsAlone(t *testing.T) {
 type failingRecaptureExecutor struct {
 	scriptedTargetExecutor
 	captureFails bool
+	// visibleOnly fails only captures of the visible pane (no -S), the
+	// survey peek's, so the nudge's looks for a permission prompt still read.
+	visibleOnly bool
 }
 
 func (f *failingRecaptureExecutor) execute(args []string) (string, error) {
 	if slices.Contains(args, "send-keys") && slices.Contains(args, "0") {
 		f.captureFails = true
 	}
-	if f.captureFails && slices.Contains(args, "capture-pane") {
+	if f.captureFails && slices.Contains(args, "capture-pane") && (!f.visibleOnly || !slices.Contains(args, "-S")) {
 		f.calls = append(f.calls, slices.Clone(args))
 		return "", errors.New("capture-pane failed")
 	}
@@ -441,7 +444,7 @@ func TestNudgeSessionDoesNotPasteOntoUnresolvedSurveyDigit(t *testing.T) {
 }
 
 func TestNudgeSessionDeliversWhenSurveyPeekFails(t *testing.T) {
-	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{display: "agent-pane|0"}, captureFails: true}
+	executor := &failingRecaptureExecutor{scriptedTargetExecutor: scriptedTargetExecutor{display: "agent-pane|0"}, captureFails: true, visibleOnly: true}
 	cfg := DefaultConfig()
 	cfg.NudgeReadyTimeout = 10 * time.Millisecond
 	tm := &Tmux{cfg: cfg, exec: executor}

@@ -6644,6 +6644,40 @@ func TestDeliverSessionNudgeImmediateRefusesPendingPermissionPrompt(t *testing.T
 	}
 }
 
+// TestDeliverSessionNudgeGoesOnWaitIdleWhenThePromptLookFails pins that a
+// look for a permission prompt that cannot reach the runtime does not fail a
+// wait-idle nudge: it goes on to its normal delivery, which looks again before
+// it types, and the failed look is reported. An immediate nudge cannot wait
+// for an answer, so it still refuses what it could not check (#2892).
+func TestDeliverSessionNudgeGoesOnWaitIdleWhenThePromptLookFails(t *testing.T) {
+	for _, tc := range []struct {
+		mode      nudgeDeliveryMode
+		wantCode  int
+		wantNudge bool
+	}{
+		{mode: nudgeDeliveryWaitIdle, wantCode: 0, wantNudge: true},
+		{mode: nudgeDeliveryImmediate, wantCode: 1},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			fake, target := approvalPendingFake(t)
+			fake.SetPendingInteraction(target.sessionName, nil)
+			fake.PendingErrors[target.sessionName] = fmt.Errorf("capturing pane: tmux server unreachable: %w", runtime.ErrRuntimeUnavailable)
+
+			var stdout, stderr bytes.Buffer
+			code := deliverSessionNudgeWithProvider(target, fake, tc.mode, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("deliverSessionNudgeWithProvider = %d, want %d; stdout: %s; stderr: %s", code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "tmux server unreachable") {
+				t.Fatalf("stderr = %q, want the failed look reported", stderr.String())
+			}
+			if nudged := fake.CountCalls("Nudge", target.sessionName)+fake.CountCalls("NudgeNow", target.sessionName) > 0; nudged != tc.wantNudge {
+				t.Fatalf("nudged = %v, want %v; stdout: %s", nudged, tc.wantNudge, stdout.String())
+			}
+		})
+	}
+}
+
 // TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt
 // pins that the queue drain does not spend a delivery attempt (and so cannot
 // dead-letter the nudge) when the runtime refuses to type into a pending
@@ -6693,5 +6727,10 @@ func TestTryDeliverQueuedNudgesByPollerKeepsNudgeQueuedBehindPermissionPrompt(t 
 	}
 	if pending[0].Attempts != 0 {
 		t.Fatalf("attempts = %d, want 0: a pending permission prompt is not a delivery failure", pending[0].Attempts)
+	}
+	// The prompt stays up until someone answers it, so the next pass must not
+	// pick the nudge up again at once.
+	if !pending[0].DeliverAfter.After(time.Now()) {
+		t.Fatalf("deliver after = %v, want a later pass while the prompt waits for an answer", pending[0].DeliverAfter)
 	}
 }

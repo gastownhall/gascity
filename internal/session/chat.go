@@ -1218,8 +1218,8 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // turn. For providers that need post-interrupt idle settlement (e.g. Claude),
 // it waits for the session to return to an idle prompt before returning.
 // Claude Code puts a prompt interrupted before its first response chunk back
-// into its input box, so for Claude StopTurn also clears the input box, and
-// a stop leaves it empty.
+// into its input box, so for Claude StopTurn also clears the input box when
+// the runtime can do a verified clear (see clearRestoredInputLocked).
 func (m *Manager) StopTurn(id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -1319,6 +1319,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if pending.RequestID != "" && response.RequestID != pending.RequestID {
 			return fmt.Errorf("%w: pending interaction %q does not match request %q", ErrInteractionMismatch, pending.RequestID, response.RequestID)
 		}
+		// The provider may not return until it sees the prompt clear (tmux
+		// waits up to 10 s for Claude Code to redraw), and this session's
+		// mutation lock is held all that time, so sends, stops and other
+		// mutations of the session wait behind it.
 		if err := ip.Respond(sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported

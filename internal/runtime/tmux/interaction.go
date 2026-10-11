@@ -72,8 +72,10 @@ var (
 
 	// toolHeaderRe matches the older tool call header "● ToolName(args)" or
 	// "● ToolName" (⏺ in newer builds). The greedy match to the last ")"
-	// handles nested parens in args.
-	toolHeaderRe = regexp.MustCompile(`[●⏺] (\w+)(?:\((.+)\))?`)
+	// handles nested parens in args. The header starts its row: a dialog
+	// indents everything it shows, so a command, diff or file content that
+	// contains such text cannot pose as the header.
+	toolHeaderRe = regexp.MustCompile(`^[●⏺] (\w+)(?:\((.+)\))?`)
 )
 
 // nonApprovalQuestions are dialogs that share the question-and-menu layout
@@ -96,9 +98,9 @@ type parsedApproval struct {
 	Input    string
 	Question string
 	Options  []approvalOption
-	// Command and Description are set for Bash prompts: the command exactly as
-	// it would run (newlines kept, pane wraps rejoined) and Claude's
-	// one-line description of it.
+	// Command and Description are set for Bash prompts: the command with its
+	// newlines kept and pane wraps rejoined (boxedBashSubject says where that
+	// falls short) and Claude's one-line description of it.
 	Command     string
 	Description string
 }
@@ -375,11 +377,15 @@ func dialogSubject(lines []string, _ string) string {
 //
 // From 2.1.288, every line of a box that spans several lines starts with
 // "│ ", whether the line ends at a real newline or where the pane wrapped it,
-// and the description gets the same marker when it wraps. A marked line is a
-// wrap when the next line's first word would not have fit after it; then the
-// two are rejoined with a space. Otherwise the newline is real and kept. So
-// the command reads exactly as it would run, and it doesn't depend on the
-// pane's width.
+// and the description gets the same marker when it wraps. A marked line is
+// taken as a wrap when the next line's first word would not have fit after
+// it; then the two are rejoined with a space. Otherwise the newline is taken
+// as real and kept. That guess depends on the pane's width where the layout is
+// ambiguous: a word longer than a row is broken by the pane and rejoined with
+// a space where it broke, and a real newline followed by a word that would
+// not have fit is taken for a wrap too. There the command, and the request id
+// hashed from it, change with the pane's width. Leading indentation is not
+// kept.
 func boxedBashSubject(lines []string) (string, string, bool) {
 	isSep := func(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "╌") }
 	open := -1
@@ -412,12 +418,14 @@ func boxedBashSubject(lines []string) (string, string, bool) {
 	return strings.Join(command, "\n"), strings.Join(description, " "), true
 }
 
-// unwrapMarkedLines returns the non-blank lines with their "│ " markers removed
-// and pane wraps rejoined (see boxedBashSubject). Unmarked lines are kept as
-// they are, trimmed.
+// unwrapMarkedLines returns the non-blank lines, trimmed and with their "│ "
+// markers removed, and pane wraps rejoined (see boxedBashSubject). Unmarked
+// lines are kept as they are, trimmed. Whether a row continues a wrap is
+// decided by the row above it alone, not by the whole line rejoined so far.
 func unwrapMarkedLines(lines []string, width int) []string {
 	var out []string
 	prevMarked := false
+	prevRow := 0 // the length of the row above, in runes
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -429,19 +437,20 @@ func unwrapMarkedLines(lines []string, width int) []string {
 		if marked {
 			content = strings.TrimSpace(strings.TrimPrefix(trimmed, "│"))
 		}
+		row := utf8.RuneCountInString(content)
 		if marked && prevMarked && len(out) > 0 {
-			prev := out[len(out)-1]
 			firstWord := content
 			if i := strings.IndexByte(content, ' '); i >= 0 {
 				firstWord = content[:i]
 			}
-			if utf8.RuneCountInString(prev)+1+utf8.RuneCountInString(firstWord) > width {
-				out[len(out)-1] = prev + " " + content
+			if prevRow+1+utf8.RuneCountInString(firstWord) > width {
+				out[len(out)-1] += " " + content
+				prevRow = row
 				continue
 			}
 		}
 		out = append(out, content)
-		prevMarked = marked
+		prevMarked, prevRow = marked, row
 	}
 	return out
 }

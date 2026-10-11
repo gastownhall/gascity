@@ -173,13 +173,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused the same way instead of interrupting, because its interrupt key
   would dismiss the prompt. Answer the prompt with `respond`, then send again
   (#2892).
-- **Stopping a Claude turn clears its input box.** After `POST .../stop` (and
-  `interrupt_now`) the turn is idle, gc waits up to 2 s for Claude Code to
-  put the interrupted prompt back into the input box, then deletes it with
-  Ctrl-U Ctrl-K (never Ctrl-C), so a stop can take up to 2 s longer. When a
-  client is attached to the session, or gc cannot tell, the input box is left
-  alone, since a human may be typing in it. A draft that will not clear is
-  logged; neither case fails the stop.
+- **Stopping a Claude turn clears its input box.** On the tmux runtime, once
+  `POST .../stop` (or `interrupt_now`) has left the turn idle, gc waits up to
+  2 s for Claude Code to put the interrupted prompt back into the input box,
+  then deletes it with Ctrl-U Ctrl-K (never Ctrl-C), so a stop can take up to
+  2 s longer. When a client is attached to the session, or gc cannot tell,
+  the input box is left alone, since a human may be typing in it. A draft
+  that will not clear is logged; neither case fails the stop.
+- **A Claude session waiting on a permission prompt no longer reads as
+  idle.** Idle detection scans the pane for Claude's `❯` ready prompt, and the
+  permission prompt's highlighted option (`❯ 1. Yes`) matched it. A permission
+  prompt is now never an idle boundary: the idle probe behind
+  `sleep_after_idle` does not pass while one is up, and `idle_timeout` judges
+  such a session by pane activity alone (#2892).
 
 - **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
   that relocates classes to a `sqlite-beads` binding, that ledger's ready read
@@ -233,10 +239,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   long file name) is recognized too. While a prompt is pending, `submit` and
   `messages` return 409 (see Changed), `gc session nudge
   --delivery=immediate` exits non-zero, `--delivery=wait-idle` queues behind
-  the prompt, and the runtime refuses to type into it on every other delivery
-  path. It looks again under the nudge lock, right before it pastes and right
-  before it presses Enter, so a prompt that appears mid-delivery is not
-  answered either (#2892).
+  the prompt, and the tmux runtime refuses to type into it on every other
+  delivery path. It looks again under the nudge lock, right before it pastes
+  and right before it presses Enter, so a prompt that appears mid-delivery is
+  not answered either. Sessions that the auto and hybrid providers route to
+  tmux are covered too; the exec, k8s, ssh and herdr runtimes do not look for
+  the prompt yet, so text sent to their sessions can still answer it (#2892).
 
 - **A message sent after stopping a Claude turn early is no longer merged
   into the stopped prompt.** When `POST .../stop` (or `interrupt_now`) lands
@@ -244,10 +252,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt back into its input box. gc cleared the input box with one Ctrl-U,
   which on Claude Code 2.1.288 deletes only one wrapped row, so the next
   message was pasted behind the rest of the old prompt and both went out as
-  one. gc now presses Ctrl-U Ctrl-K until the input box reads empty, wherever
-  the cursor is, and fails the delivery if it will not empty; `stop` clears
-  the restored prompt too (see Changed). A submit whose input box still holds
-  any text is no longer reported as delivered.
+  one. On the tmux runtime gc now presses Ctrl-U Ctrl-K until the input box
+  reads empty, wherever the cursor is, and fails the delivery if it will not
+  empty; `stop` clears the restored prompt too (see Changed). A submit whose
+  input box still holds any text is no longer reported as delivered.
 
 - **A new scope directory over an existing current-era managed Dolt database
   initializes instead of being refused as a legacy Dolt server workspace.**

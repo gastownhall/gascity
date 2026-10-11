@@ -729,6 +729,11 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
 	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
 	if idleTimeout := p.tm.cfg.NudgeIdleTimeout; idleTimeout > 0 {
+		// A pending permission prompt does not turn idle on its own, and
+		// NudgeNow refuses it anyway: refuse it now, not after the whole wait.
+		if err := p.tm.checkNoApprovalPrompt(name); errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.

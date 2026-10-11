@@ -39,9 +39,11 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 var ErrPendingInteraction = errors.New("session has a pending interaction")
 
 // ErrInputClearSkipped reports that a runtime left a session's input box
-// alone instead of clearing it: a client is attached (or the runtime cannot
-// tell whether one is), so a human may be typing there, and wiping their draft
-// is worse than leaving a stale one (#5192). No keys were sent.
+// alone, or stopped clearing it partway: a client is attached (or the runtime
+// cannot tell whether one is), so a human may be typing there, and wiping
+// their draft is worse than leaving a stale one (#5192). The runtime checks
+// before every key it sends, so no key follows the check that failed; keys
+// sent before it may already have deleted part of the draft.
 var ErrInputClearSkipped = errors.New("input box left alone: a client may be attached")
 
 // ErrInteractionActionUnavailable reports that the pending interaction offers
@@ -662,7 +664,7 @@ type InterruptedTurnResetProvider interface {
 // and confirms the input box reads empty. It sends no keys when the input box
 // stays empty, and returns an error when a draft is visible but cannot be
 // cleared. When a client is attached (or the runtime cannot tell) it sends no
-// keys and returns an error wrapping [ErrInputClearSkipped].
+// further keys and returns an error wrapping [ErrInputClearSkipped].
 type InputClearProvider interface {
 	ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error
 }

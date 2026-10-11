@@ -2263,6 +2263,11 @@ func (t *Tmux) sendHiddenAttachedKeys(target string, keys ...string) (bool, erro
 	return true, nil
 }
 
+// sendHiddenAttachedText types text, then Enter, through target's hidden
+// attach client, and reports whether target has one. Only Gemini sessions get
+// a hidden attach client (requiresHiddenAttachedInterrupt), so this path takes
+// no look for a permission prompt between the text and Enter; it must gain
+// NudgeSession's (#2892) before it serves a Claude session.
 func (t *Tmux) sendHiddenAttachedText(target, text string) (bool, error) {
 	client := t.hiddenAttachClient(target)
 	if client == nil {
@@ -2529,8 +2534,9 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 			sleep(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
-			if errors.Is(err, runtime.ErrPendingInteraction) {
-				// Never re-send into a permission prompt.
+			if isLookRefusal(err) {
+				// Never re-send into a permission prompt, or into a pane a
+				// look could not read.
 				return false, err
 			}
 			lastErr = err
@@ -2819,7 +2825,8 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // It never types into a pending permission prompt: under the lock it checks
 // the pane before the first key, again immediately before the paste, and
 // again immediately before every submit key, and returns an error wrapping
-// runtime.ErrPendingInteraction when a prompt is showing (#2892).
+// runtime.ErrPendingInteraction when a prompt is showing, or the capture error
+// when a check cannot read the pane (#2892).
 func (t *Tmux) NudgeSession(session, message string) error {
 	return t.nudgeSession(
 		session,
@@ -2832,17 +2839,18 @@ func (t *Tmux) NudgeSession(session, message string) error {
 }
 
 // pendingPromptRecheck returns NudgeSession's under-the-lock look for a
-// permission prompt. Only a prompt on screen stops the nudge: a capture that
-// fails here does not, because NudgeNow's first check already refused a pane it
-// could not read, and the survey and dialog steps of the nudge are best-effort
-// on a failed capture too.
+// permission prompt. A capture that fails refuses the nudge as a prompt on
+// screen does, the way NudgeNow's first check refuses a pane it cannot read:
+// what the look cannot see may be a prompt, and Enter on one approves the tool
+// call. The capture error stays wrapped, so a session that is gone is still
+// recognized as gone.
 func (t *Tmux) pendingPromptRecheck(session string) func(target string) error {
 	return func(target string) error {
 		err := t.checkNoApprovalPromptIn(session, target)
-		if errors.Is(err, runtime.ErrPendingInteraction) {
+		if err == nil || errors.Is(err, runtime.ErrPendingInteraction) {
 			return err
 		}
-		return nil
+		return fmt.Errorf("%w in session %q before sending keys: %w", errPromptLookFailed, session, err)
 	}
 }
 
@@ -2859,6 +2867,59 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
 		nil,
 	)
+}
+
+// errPromptLookFailed marks a look for a permission prompt that could not read
+// the pane.
+var errPromptLookFailed = errors.New("could not check for a pending permission prompt")
+
+// isLookRefusal reports whether err is a look's refusal of a nudge: a
+// permission prompt on screen, or a pane the look could not read.
+func isLookRefusal(err error) bool {
+	return errors.Is(err, runtime.ErrPendingInteraction) || errors.Is(err, errPromptLookFailed)
+}
+
+// nudgePromptGuard takes a nudge's looks for a permission prompt (#2892):
+// under the nudge lock before the first key, immediately before the paste, and
+// immediately before every submit key. A look that finds a prompt, or cannot
+// read the pane, aborts the nudge with no further keys sent: text typed into a
+// prompt is read as menu input, and Enter picks its highlighted option.
+type nudgePromptGuard struct {
+	session, target string
+	// look returns a refusal (see isLookRefusal) when a prompt is on screen
+	// or the pane cannot be read. Nil skips the looks.
+	look func(target string) error
+	// submitsSent counts the submits the looks let through.
+	submitsSent int
+}
+
+// check takes one look.
+func (g *nudgePromptGuard) check() error {
+	if g.look == nil {
+		return nil
+	}
+	return g.look(g.target)
+}
+
+// submit takes a look, then sends the submit keys with send.
+func (g *nudgePromptGuard) submit(send func() error) error {
+	if err := g.check(); err != nil {
+		return err
+	}
+	g.submitsSent++
+	return send()
+}
+
+// refused returns what the nudge reports for err, a look's refusal. A refusal
+// before the first submit leaves the message in the input box, unsent, and
+// stands. One only before a re-send stops the re-sends, and the submit is
+// reported unconfirmed instead: the first submit may already have delivered
+// the message.
+func (g *nudgePromptGuard) refused(err error) error {
+	if g.submitsSent == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: session %q: not re-sent: %s", ErrNudgeSubmitUnconfirmed, g.session, err.Error())
 }
 
 // noPendingPrompt, when set, is checked under the nudge lock before the first
@@ -2912,13 +2973,8 @@ func (t *Tmux) nudgeSession(
 
 	// A permission prompt may have appeared since the caller last looked
 	// (the lock wait alone can take seconds): nothing may be typed into it.
-	checkPrompt := func() error {
-		if noPendingPrompt == nil {
-			return nil
-		}
-		return noPendingPrompt(target)
-	}
-	if err := checkPrompt(); err != nil {
+	prompt := &nudgePromptGuard{session: session, target: target, look: noPendingPrompt}
+	if err := prompt.check(); err != nil {
 		return err
 	}
 
@@ -2951,7 +3007,7 @@ func (t *Tmux) nudgeSession(
 	// in-progress input is worse than the concatenation this clear otherwise
 	// prevents (#5192).
 	if attached, err := t.SessionAttachedWithError(session); err == nil && !attached {
-		if err := t.clearInputBeforePaste(target); err != nil {
+		if err := t.clearInputBeforePaste(session, target); err != nil {
 			return err
 		}
 	}
@@ -2968,7 +3024,7 @@ func (t *Tmux) nudgeSession(
 	// 2. Send text in literal mode with retry on transient errors, after a
 	// last look for a permission prompt: the clear and the survey check above
 	// take time, and a paste into a prompt is read as menu input.
-	if err := checkPrompt(); err != nil {
+	if err := prompt.check(); err != nil {
 		return err
 	}
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -3018,32 +3074,16 @@ func (t *Tmux) nudgeSession(
 	// not submit-verify eligible would need that gap closed first.
 	//
 	// Every submit is preceded by a look for a permission prompt: Enter on
-	// one picks its highlighted option. A prompt that appears after the paste
-	// leaves the message in the input box, unsent; the caller gets
-	// runtime.ErrPendingInteraction. One that appears only before a re-send
-	// stops the re-sends, and the submit is reported unconfirmed.
-	submitsSent := 0
+	// one picks its highlighted option (see nudgePromptGuard.refused).
 	sendSubmit := func() error {
-		if err := checkPrompt(); err != nil {
-			return err
-		}
-		submitsSent++
-		return t.sendNudgeSubmitSequence(target, submitKeys)
-	}
-	promptRefused := func(err error) error {
-		if submitsSent == 0 {
-			return err
-		}
-		// Report it unconfirmed, not as a pending interaction: the first
-		// submit may already have delivered the message.
-		return fmt.Errorf("%w: session %q: not re-sent: %s", ErrNudgeSubmitUnconfirmed, session, err.Error())
+		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(target, submitKeys) })
 	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
 		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
-		if errors.Is(err, runtime.ErrPendingInteraction) {
-			delivered = submitsSent > 0
-			return promptRefused(err)
+		if isLookRefusal(err) {
+			delivered = prompt.submitsSent > 0
+			return prompt.refused(err)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
@@ -3108,8 +3148,8 @@ func (t *Tmux) nudgeSession(
 			time.Sleep(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
-			if errors.Is(err, runtime.ErrPendingInteraction) {
-				return promptRefused(err)
+			if isLookRefusal(err) {
+				return prompt.refused(err)
 			}
 			lastErr = err
 			continue

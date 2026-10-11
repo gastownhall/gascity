@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -649,7 +650,9 @@ func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store
 // refusal would surface only as a request.failed event -- or, where the
 // provider could not see the prompt, the text's Enter would answer it. A
 // configured named session that has not been materialized yet has nothing
-// pending.
+// pending, and neither has a session that is not running: the worker handle
+// does not look at its runtime. A look that cannot reach the runtime refuses
+// nothing; the delivery looks again under the session lock.
 func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store, identifier string) error {
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{})
 	if err != nil {
@@ -658,12 +661,21 @@ func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store
 		}
 		return humaResolveError(err)
 	}
-	pending, _, err := s.sessionManager(store).Pending(id)
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		return humaSessionManagerError(err)
+	}
+	pending, _, err := handle.PendingStatus(ctx)
+	if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		log.Printf("gc api: accepting text for %s without a look for a pending interaction: %v", id, err)
+		return nil
+	}
 	if err != nil {
 		return humaSessionManagerError(err)
 	}
 	if pending != nil {
-		return humaSessionManagerError(session.PendingInteractionError(pending))
+		interaction := runtimePendingInteraction(pending)
+		return humaSessionManagerError(session.PendingInteractionError(&interaction))
 	}
 	return nil
 }
