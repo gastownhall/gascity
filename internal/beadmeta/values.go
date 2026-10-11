@@ -1,5 +1,10 @@
 package beadmeta
 
+import (
+	"strings"
+	"time"
+)
+
 // Value vocabulary for engine-minted structural metadata keys. These are DATA
 // declarations only: which kinds a dispatcher accepts, which kinds trigger the
 // graph contract, and what an outcome means remain decisions owned by the
@@ -173,3 +178,34 @@ const (
 	ScopeKindCity = "city"
 	ScopeKindRig  = "rig"
 )
+
+// RoutedAtLayout is the timestamp layout of RoutedAtMetadataKey. It lives here,
+// beside the key, because the value is a cross-package contract with more than
+// one writer (the CLI and API sling routers) and a reader in another package
+// (the sr-wz8.3 route-away settle window). A writer drifting to a different
+// layout would not fail loudly: the reader would simply stop parsing the stamp,
+// treat every route as settled, and silently lose the liveness preserve.
+const RoutedAtLayout = time.RFC3339
+
+// FormatRoutedAt renders t as a RoutedAtMetadataKey value. Callers should pass a
+// UTC instant; the layout keeps the offset, so a local-zone stamp still parses
+// back to the same instant, but UTC keeps stored values comparable by eye.
+func FormatRoutedAt(t time.Time) string {
+	return t.UTC().Format(RoutedAtLayout)
+}
+
+// ParseRoutedAt parses a RoutedAtMetadataKey value, reporting whether it was
+// usable. An empty or malformed stamp reports ok=false; callers decide what that
+// means for them (the settle window treats it as "already elapsed", never as a
+// reason to hold a bead).
+func ParseRoutedAt(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(RoutedAtLayout, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
