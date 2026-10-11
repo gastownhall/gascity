@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -286,5 +287,87 @@ func TestPatrolTickTrigger(t *testing.T) {
 				t.Fatal("patrolTickTrigger left a fire pending")
 			}
 		})
+	}
+}
+
+// The run loop's patrol case itself (mc-03yxh). With a 1h
+// tick_debounce a poke stays pending (debouncing) when the 50ms patrol fires,
+// so only a patrol that runs the poke's tick reads sessions live and sees the
+// session another process wrote. Real time, no fake clock: the debounce dwarfs
+// the patrol, so the interleaving is forced.
+func TestRunLoopPatrolOverDebouncingPokeSeesOutOfProcessCreate(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	appendToFile(t, tomlPath, "\n[daemon]\npatrol_interval = \"50ms\"\ntick_debounce = \"1h\"\n")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	backing := beads.NewMemStore()
+	sp := runtime.NewFake()
+	var (
+		mu    sync.Mutex
+		want  string
+		seen  bool
+		ticks int
+	)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	pokeCh := make(chan struct{}, 1)
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath, CityName: "test-city", TomlPath: tomlPath, Cfg: cfg, SP: sp, PokeCh: pokeCh,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		BuildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, snap *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+			mu.Lock()
+			defer mu.Unlock()
+			ticks++
+			if want != "" && snapshotHasSession(snap, want) {
+				seen = true
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:      newDrainOps(sp),
+		Rec:       events.Discard,
+		OnStarted: func() { readyOnce.Do(func() { close(ready) }) },
+		Stdout:    io.Discard,
+		Stderr:    io.Discard,
+	})
+	cr.od = &recordingOrderDispatcher{}
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = primeTestCache(t, backing)
+	cr.setControllerState(cs)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	awaitClose(t, ready, "readiness")
+
+	id := createSessionBeadOutOfProcess(t, backing) // gc session new, in its own process
+	mu.Lock()
+	want = id
+	mu.Unlock()
+	pokeCh <- struct{}{} // then its poke
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		s, n := seen, ticks
+		mu.Unlock()
+		if s {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("after 5s (%d builds, patrol every 50ms) no tick saw session %s: the patrol dropped the debouncing poke", n, id)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
