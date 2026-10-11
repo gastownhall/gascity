@@ -20,8 +20,10 @@ import (
 // skipped mail stays unread and the next hook delivers it again. An injecting
 // nudge drain is gated the same way: its ack of the nudges it wrote is the
 // destructive step, so with too little time left it releases its claims
-// instead, and the next drain delivers them again. Either way a hook cut
-// short delivers twice rather than never.
+// instead, and the next drain delivers them again. The margin is a heuristic:
+// it makes a lost delivery unlikely, not impossible — a destructive step that
+// starts with the margin left and then runs past the deadline still loses the
+// output it was retiring.
 
 // hookDeadlineEnv names the absolute time (RFC 3339, UTC) by which a child of
 // gc hook run must have exited for its output to be kept.
@@ -59,10 +61,13 @@ func inheritedHookDeadline() (time.Time, bool, error) {
 // one this process inherited when that is earlier. A gc hook run nested in
 // another cannot keep its child's output past the outer run's deadline, so its
 // own longer timeout must not tell the child it has more time. An inherited
-// value that does not parse is ignored; ctx's deadline still holds.
+// value that does not parse, or that has already passed, is ignored; ctx's
+// deadline still holds. A passed one is stale — a live outer run would already
+// have discarded this run's output — and honoring it would skip every archive
+// and release every nudge on every prompt.
 func childHookDeadline(ctx context.Context) time.Time {
 	deadline, ok := ctx.Deadline()
-	if inherited, has, err := inheritedHookDeadline(); err == nil && has && (!ok || inherited.Before(deadline)) {
+	if inherited, has, err := inheritedHookDeadline(); err == nil && has && inherited.After(time.Now()) && (!ok || inherited.Before(deadline)) {
 		return inherited
 	}
 	return deadline
@@ -132,7 +137,7 @@ func hookDeadlineAllowsNudgeAck(what string, stderr io.Writer) bool {
 		return false
 	}
 	if !ok {
-		fmt.Fprintf(stderr, "gc nudge drain: hook deadline too close to ack %s; releasing it for redelivery by the next drain\n", what) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc nudge drain: hook deadline too close to ack %s; releasing them for redelivery by the next drain\n", what) //nolint:errcheck // best-effort stderr
 		return false
 	}
 	return true

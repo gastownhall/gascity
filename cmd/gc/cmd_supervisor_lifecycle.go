@@ -822,7 +822,8 @@ func supervisorLogTail(path string, n int) string {
 // supervisorForkEnv derives the environment for a forked `gc supervisor run`
 // child from the parent's own environment (typically an agent's tmux pane).
 //
-// The child must not inherit GC_SESSION_ID: once the launcher exits, the
+// The child must not inherit GC_SESSION_ID, nor a hook's GC_HOOK_DEADLINE,
+// which would be stale for every hook it later runs. GC_SESSION_ID: once the launcher exits, the
 // forked supervisor is reparented and proctable's orphan scan classifies any
 // reparented process carrying an agent's GC_SESSION_ID as that agent's own
 // runtime (ga-s434i0) — a bare `gc supervisor run` with no session of its own
@@ -847,7 +848,7 @@ func supervisorForkEnv(parent []string) []string {
 		}
 	}
 	for _, kv := range parent {
-		if strings.HasPrefix(kv, "GC_SESSION_ID=") {
+		if strings.HasPrefix(kv, "GC_SESSION_ID=") || strings.HasPrefix(kv, hookDeadlineEnv+"=") {
 			continue
 		}
 		if key, _, ok := strings.Cut(kv, "="); ok && omitProviderCreds && isProviderCredentialEnv(key) {

@@ -60,6 +60,10 @@ func TestNestedHookRunKeepsTheEarlierDeadline(t *testing.T) {
 	}{
 		{name: "inherited earlier", inheritedIn: 2 * time.Second, timeout: 10 * time.Second, wantInherited: true},
 		{name: "own earlier", inheritedIn: time.Minute, timeout: 10 * time.Second, wantInherited: false},
+		// An inherited deadline already past cannot be the outer run's live
+		// one; it is stale, and honoring it would skip every archive and
+		// release every nudge.
+		{name: "inherited already passed", inheritedIn: -time.Second, timeout: 10 * time.Second, wantInherited: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inherited := hookDeadlineEnvValue(time.Now().Add(tc.inheritedIn))

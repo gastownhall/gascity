@@ -861,7 +861,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			fmt.Fprintf(stderr, "gc nudge drain: recording injection ack: %v\n", err) //nolint:errcheck
 			return 0
 		}
-		stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		// The delivery stamp is best-effort bookkeeping after the destructive
+		// ack; it is skipped rather than run into the deadline.
+		if hookDeadlineStillLeavesTime() {
+			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		}
 		return 0
 	}
 	if err := ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)); err != nil {
