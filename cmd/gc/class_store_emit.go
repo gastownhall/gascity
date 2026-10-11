@@ -130,34 +130,63 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 // the bd event hooks — so a cache-served session census (the legacy patrol
 // tick, v2's census) missed a `gc session new` until a poke's live read ran.
 //
-// It wraps only the engines the wrapper is pinned against
-// (TestEmittingClassStoreKeepsEveryEngineCapability): they run no bd hooks, so
-// nothing else emits for them, and the wrapper forwards every capability they
-// declare. Any other store is returned untouched — a bd subprocess store may
-// run hooks that already emit, and carries capabilities the wrapper does not
-// forward — as is a CachingStore, whose own notifyChange already emits, and a
-// relocated class store the funnel already wrapped. The only caller is
-// cliSessionStore.
+// The city store reaches here inside the bead-policy layer, which every store
+// open applies outermost (openStoreResultAtForCityScoped). The emitter goes
+// directly on the engine beneath it and the policy layer is rebuilt over the
+// emitter, so the policy stays outermost and a row is appended only after the
+// engine write lands.
+//
+// Only the engines the wrapper is pinned against are wrapped
+// (TestEmittingClassStoreKeepsEveryEngineCapability; see mainStoreEmissionEngine).
+// Any other store is returned untouched: a bd subprocess store may run hooks
+// that already emit and carries capabilities the wrapper does not forward, a
+// CachingStore emits through its own notifyChange, and a relocated class store
+// the funnel wrapped already emits.
 func withMainStoreEmission(store beads.Store, cityPath string) beads.Store {
 	cityPath = strings.TrimSpace(cityPath)
 	if cityPath == "" {
 		return store
 	}
+	engine, policy, underPolicy := unwrapBeadPolicyStore(store)
+	if !mainStoreEmissionEngine(engine) {
+		return store
+	}
+	emitting := &emittingClassStore{Store: engine, cityPath: cityPath}
+	if !underPolicy {
+		return emitting
+	}
+	return wrapStoreWithBeadPolicies(emitting, policy.cfg)
+}
+
+// mainStoreEmissionEngine reports whether store is an engine the one-shot
+// emitter may wrap on the main store: the SQLite and native Dolt engines. They
+// run no bd hooks (the store factory refuses the native store while executable
+// bd hooks exist), so nothing else announces their writes, and the wrapper
+// forwards every capability they declare.
+func mainStoreEmissionEngine(store beads.Store) bool {
 	switch store.(type) {
 	case *beads.SQLiteStore, *beads.NativeDoltStore:
-		return &emittingClassStore{Store: store, cityPath: cityPath}
+		return true
 	default:
-		return store
+		return false
 	}
 }
 
-// withoutEmission returns the store an emitting wrapper adds emission to, and
-// any other store as is, for a caller that compares store identity.
-func withoutEmission(store beads.Store) beads.Store {
-	if emitting, ok := store.(*emittingClassStore); ok {
-		return emitting.Store
+// storeEngine strips the layers a one-shot store open puts over a bead engine —
+// the bead-policy layer and the emitting wrapper — and returns the engine, for
+// callers that compare stores by what serves them.
+func storeEngine(store beads.Store) beads.Store {
+	for {
+		if inner, _, ok := unwrapBeadPolicyStore(store); ok {
+			store = inner
+			continue
+		}
+		emitting, ok := store.(*emittingClassStore)
+		if !ok {
+			return store
+		}
+		store = emitting.Store
 	}
-	return store
 }
 
 // emittingClassStore is a relocated class store that appends a bead.* event

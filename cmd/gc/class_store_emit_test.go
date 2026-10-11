@@ -1561,10 +1561,15 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 // announces the create the way a split city's already does, and the
 // controller's event watcher puts the row in the cache, so the patrol's cached
 // snapshot lists it with no poke and no store read.
+//
+// The store is built the way production builds it: every store open returns
+// the engine inside the bead-policy layer (openStoreResultAtForCityScoped), so
+// that is what cliSessionStore is handed.
 func TestOneShotSessionCreateOnASingleStoreCityReachesTheControllerCache(t *testing.T) {
 	cityPath := t.TempDir()
 	writeOneShotCityTOML(t, cityPath, "")
 	captureCLIStorageStderr(t)
+	cfg := &config.City{}
 	engine, err := beads.OpenSQLiteStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("opening the city engine: %v", err)
@@ -1574,8 +1579,12 @@ func TestOneShotSessionCreateOnASingleStoreCityReachesTheControllerCache(t *test
 	cache := cr.standaloneCityStore.(*beads.CachingStore)
 	cs := &controllerState{cityBeadStore: cache}
 
-	// gc session new, in its own process: the CLI opened the engine itself.
-	created, err := cliSessionStore(engine, nil, cityPath).Create(beads.Bead{
+	// gc session new, in its own process: the CLI opened the city store itself.
+	sess := cliSessionStore(wrapStoreWithBeadPolicies(engine, cfg), cfg, cityPath)
+	if _, _, underPolicy := unwrapBeadPolicyStore(sess); !underPolicy {
+		t.Fatalf("cliSessionStore returned %T, want the bead-policy layer outermost", sess)
+	}
+	created, err := sess.Create(beads.Bead{
 		Title:    "adhoc",
 		Type:     sessionBeadType,
 		Labels:   []string{sessionBeadLabel},
@@ -1605,69 +1614,59 @@ func TestOneShotSessionCreateOnASingleStoreCityReachesTheControllerCache(t *test
 	}
 }
 
-// withMainStoreEmission wraps only the engines the wrapper is pinned against.
-// A bd subprocess store may run hooks that already emit and carries
-// capabilities the wrapper does not forward, a CachingStore emits through its
-// own notifyChange, a relocated class store the funnel wrapped already emits,
-// and a city path that names no city has no journal.
+// withMainStoreEmission puts the emitter directly on a pinned engine and keeps
+// the bead-policy layer outermost. Everything else passes through untouched: a
+// bd subprocess store may run hooks that already emit and carries capabilities
+// the wrapper does not forward, a CachingStore emits through its own
+// notifyChange, a relocated class store the funnel wrapped already emits, and a
+// city path that names no city has no journal. The native Dolt engine is the
+// only main-store engine production can open (the SQLite main-store provider is
+// gone), and it needs a server, so its row is a typed nil: the decision reads
+// only the type.
 func TestMainStoreEmissionWrapsOnlyPinnedEngines(t *testing.T) {
 	cityPath := t.TempDir()
-	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	cfg := &config.City{}
+	sqliteEngine, err := beads.OpenSQLiteStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("opening the engine: %v", err)
 	}
-	wrapped, ok := withMainStoreEmission(engine, cityPath).(*emittingClassStore)
-	if !ok || wrapped.Store != engine || wrapped.cityPath != cityPath {
-		t.Fatalf("withMainStoreEmission(sqlite engine) = %T, want the emitting wrapper over that engine and city", withMainStoreEmission(engine, cityPath))
-	}
-	if got := withoutEmission(wrapped); got != engine {
-		t.Fatalf("withoutEmission(wrapper) = %v, want the engine it wraps", got)
-	}
-	if got := withMainStoreEmission(engine, " "); got != engine {
-		t.Fatalf("withMainStoreEmission with no city path = %T, want the engine untouched", got)
-	}
-	mem := beads.NewMemStore()
-	for name, store := range map[string]beads.Store{
-		"bd subprocess store": beads.NewBdStore(t.TempDir(), nil),
-		"mem store":           mem,
-		"caching store":       beads.NewCachingStoreForTest(engine, nil),
-		"already emitting":    wrapped,
+	for name, engine := range map[string]beads.Store{
+		"native dolt engine": (*beads.NativeDoltStore)(nil),
+		"sqlite engine":      sqliteEngine,
 	} {
-		if got := withMainStoreEmission(store, cityPath); got != store {
-			t.Errorf("withMainStoreEmission(%s) = %T, want the store untouched", name, got)
-		}
-	}
-}
-
-// The main-store injection has one caller, the CLI session-class resolver, for
-// the same reason withCLIEmission has one: a second injector reachable from a
-// controller path is a double row in the city's log.
-func TestMainStoreEmissionHasExactlyOneInjectionSite(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("reading cmd/gc: %v", err)
-	}
-	fset := token.NewFileSet()
-	sites := map[string]int{}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "withMainStoreEmission" {
-					sites[name]++
-				}
+		t.Run(name, func(t *testing.T) {
+			got := withMainStoreEmission(wrapStoreWithBeadPolicies(engine, cfg), cityPath)
+			inner, policy, underPolicy := unwrapBeadPolicyStore(got)
+			if !underPolicy || policy.cfg != cfg {
+				t.Fatalf("withMainStoreEmission(policy over %s) = %T, want the policy layer outermost with the same config", name, got)
 			}
-			return true
+			emitting, ok := inner.(*emittingClassStore)
+			if !ok || emitting.Store != engine || emitting.cityPath != cityPath {
+				t.Fatalf("under the policy layer: %T, want the emitting wrapper directly over the engine, for %s", inner, cityPath)
+			}
+			if bare, ok := withMainStoreEmission(engine, cityPath).(*emittingClassStore); !ok || bare.Store != engine {
+				t.Fatalf("withMainStoreEmission(bare %s) did not wrap it in the emitter", name)
+			}
+			if storeEngine(got) != engine {
+				t.Fatalf("storeEngine did not look through the policy and emitting layers to the %s", name)
+			}
 		})
 	}
-	if len(sites) != 1 || sites["cli_session_store.go"] != 1 {
-		t.Fatalf("withMainStoreEmission is called from %v, want exactly one call in cli_session_store.go", sites)
+
+	policyOverSQLite := wrapStoreWithBeadPolicies(sqliteEngine, cfg)
+	for name, store := range map[string]beads.Store{
+		"no city path":        nil, // the policy store over a pinned engine, with a blank path
+		"bd subprocess store": wrapStoreWithBeadPolicies(beads.NewBdStore(t.TempDir(), nil), cfg),
+		"mem store":           wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg),
+		"caching store":       beads.NewCachingStoreForTest(sqliteEngine, nil),
+		"already emitting":    &emittingClassStore{Store: sqliteEngine, cityPath: cityPath},
+	} {
+		path := cityPath
+		if store == nil {
+			store, path = policyOverSQLite, " "
+		}
+		if got := withMainStoreEmission(store, path); got != store {
+			t.Errorf("withMainStoreEmission(%s) = %T, want the store untouched", name, got)
+		}
 	}
 }
