@@ -184,11 +184,7 @@ func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 		"state_reason":              reason,
 		"pending_create_claim":      "true",
 		"pending_create_started_at": pendingCreateStartedAt(now),
-		"held_until":                "",
-		"quarantined_until":         "",
 		"sleep_reason":              "",
-		"wait_hold":                 "",
-		"sleep_intent":              "",
 		"wake_attempts":             "0",
 		"churn_count":               "0",
 	}
@@ -241,7 +237,6 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		"pending_create_started_at":  startedAt,
 		"last_woke_at":               input.Now.UTC().Format(time.RFC3339),
 		"sleep_reason":               input.SleepReason,
-		"sleep_intent":               "",
 		"generation":                 fmt.Sprintf("%d", input.Generation),
 		"wake_request":               "",
 		"wake_requested_at":          "",
@@ -264,14 +259,11 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 	return patch
 }
 
-// ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
-// selected by the normal wake path.
+// ClearWakeBlockersPatch is the lifecycle of clearing a dormant session's
+// blockers so the normal wake path may select it; the holds themselves are
+// the Wake (or Retire) cell's.
 func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
-		"held_until":            "",
-		"quarantined_until":     "",
-		"wait_hold":             "",
-		"sleep_intent":          "",
 		"wake_attempts":         "0",
 		"wake_refused_event_at": "",
 		"churn_count":           "0",
@@ -279,7 +271,6 @@ func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) Meta
 	switch state {
 	case StateSuspended, StateDrained:
 		patch["state"] = string(StateAsleep)
-		patch["suspended_at"] = ""
 		patch["slept_at"] = now.UTC().Format(time.RFC3339)
 	}
 	switch SleepReason(sleepReason) {
@@ -290,25 +281,24 @@ func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) Meta
 	return patch
 }
 
-// ClearExpiredHoldPatch clears an expired user hold and drops the displayed
-// hold reason only when that reason came from the expired timer.
+// ClearExpiredHoldPatch is the lifecycle of an expired hold's clear: it drops
+// the displayed hold reason only when that reason came from the expired
+// timer. The timer itself is the TimerTick cell's.
 func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
-	patch := MetadataPatch{
-		"held_until": "",
-	}
+	patch := MetadataPatch{}
 	if SleepReason(sleepReason) == SleepReasonUserHold {
 		patch["sleep_reason"] = ""
 	}
 	return patch
 }
 
-// ClearExpiredQuarantinePatch clears an expired quarantine-like timer and
-// resets retry counters associated with that blocker.
+// ClearExpiredQuarantinePatch is the lifecycle of an expired quarantine-like
+// timer's clear: it resets the retry counters associated with that blocker.
+// The timer itself is the TimerTick cell's.
 func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
-		"quarantined_until": "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
+		"wake_attempts": "0",
+		"churn_count":   "0",
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonQuarantine, SleepReasonContextChurn, SleepReasonRateLimit:
@@ -452,7 +442,8 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 	return patch
 }
 
-// SleepPatch records a non-terminal sleep/drain result.
+// SleepPatch records a non-terminal sleep/drain result. The holds are the
+// Sleep cell's (Store.ApplySleep).
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
 		"state":                     string(StateAsleep),
@@ -461,9 +452,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
-		"sleep_intent":              "",
 		"slept_at":                  now.UTC().Format(time.RFC3339),
-		"suspended_at":              "",
 	}
 }
 
@@ -640,10 +629,6 @@ func RetireNamedSessionPatch(now time.Time, reason, identity string) MetadataPat
 	// matching this patch's contract that canonical identifiers are freed.
 	freeCanonicalIdentityMetadata(patch)
 	patch["synced_at"] = now.UTC().Format(time.RFC3339)
-	patch["held_until"] = ""
-	patch["quarantined_until"] = ""
-	patch["wait_hold"] = ""
-	patch["sleep_intent"] = ""
 	patch["sleep_reason"] = ""
 	if identity != "" {
 		patch["retired_named_identity"] = identity
@@ -651,14 +636,14 @@ func RetireNamedSessionPatch(now time.Time, reason, identity string) MetadataPat
 	return patch
 }
 
-// QuarantinePatch records a crash-loop quarantine.
-func QuarantinePatch(until time.Time, cycle int) MetadataPatch {
+// QuarantinePatch is the lifecycle of a crash-loop quarantine; its
+// quarantined_until is the Quarantine cell's.
+func QuarantinePatch(cycle int) MetadataPatch {
 	return MetadataPatch{
-		"state":             string(StateQuarantined),
-		"state_reason":      "crash-loop",
-		"quarantined_until": until.UTC().Format(time.RFC3339),
-		"quarantine_cycle":  fmt.Sprintf("%d", cycle),
-		"last_woke_at":      "",
+		"state":            string(StateQuarantined),
+		"state_reason":     "crash-loop",
+		"quarantine_cycle": fmt.Sprintf("%d", cycle),
+		"last_woke_at":     "",
 	}
 }
 
@@ -676,7 +661,6 @@ func ReactivatePatch(continuityEligible bool) MetadataPatch {
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
 		"continuity_eligible":       continuity,
-		"quarantined_until":         "",
 		"crash_count":               "0",
 		"archived_at":               "",
 	}

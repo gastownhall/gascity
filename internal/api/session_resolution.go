@@ -163,7 +163,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 				_ = handle.Kill(context.Background(), s.actor(session.ActorOperator))
 			}
 		}
-		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
+		patch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity))
 		patch["alias_history"] = ""
 		if err := store.SetMetadataBatch(info.ID, patch); err != nil {
 			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", info.ID, err)

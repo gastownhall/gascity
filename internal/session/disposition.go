@@ -138,12 +138,16 @@ func DecodeDisposition(meta map[string]string) Disposition {
 }
 
 // DispositionOfInfo is DecodeDisposition over a typed row.
-func DispositionOfInfo(info Info) Disposition {
-	return DecodeDisposition(map[string]string{
+func DispositionOfInfo(info Info) Disposition { return DecodeDisposition(dispositionMeta(info)) }
+
+// dispositionMeta is info's disposition keys and the lifecycle keys the
+// decoder reads.
+func dispositionMeta(info Info) map[string]string {
+	return map[string]string{
 		"state": info.MetadataState, "held_until": info.HeldUntil, "quarantined_until": info.QuarantinedUntil,
 		"sleep_intent": info.SleepIntent, "wait_hold": info.WaitHold, "suspended_at": info.SuspendedAt,
 		"sleep_reason": info.SleepReason,
-	})
+	}
 }
 
 func formatDispositionTime(t time.Time) string {

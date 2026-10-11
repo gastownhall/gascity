@@ -1242,6 +1242,26 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 	}
 }
 
+// TestHealExpiredTimers_ReleasesAnExpiredFiniteSuspend is D-J 2 (mc-92clf):
+// an operator's finite suspend whose held_until has passed goes whole, its
+// user-hold intent and stamp with its timer (the TimerTick cell), not just
+// the timer.
+func TestHealExpiredTimers_ReleasesAnExpiredFiniteSuspend(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"held_until":   now.Add(-time.Hour).Format(time.RFC3339),
+		"sleep_intent": "user-hold",
+		"suspended_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+		"sleep_reason": "user-hold",
+	})
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})
+	if got.HeldUntil != "" || got.SleepIntent != "" || got.SuspendedAt != "" || got.SleepReason != "" {
+		t.Errorf("after the heal held_until=%q sleep_intent=%q suspended_at=%q sleep_reason=%q, want the suspend released whole",
+			got.HeldUntil, got.SleepIntent, got.SuspendedAt, got.SleepReason)
+	}
+}
+
 func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

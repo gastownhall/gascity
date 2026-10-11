@@ -134,7 +134,8 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 		}
 	}
 	base := foldInfo(v.Row, v.It.Patch) // a dead committed row's heal and accrual (A6 item 4)
-	_, _, patch := preWakePatch(base, v.Now, f.token)
+	_, _, patch, class := preWakePatch(base, v.Now, f.token)
+	maps.Copy(patch, class.Fold())
 	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
@@ -195,8 +196,8 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	if patch == nil {
 		patch = session.MetadataPatch{}
 	}
-	_, _, wake := preWakePatch(base, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{wake, f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
+	_, _, wake, class := preWakePatch(base, v.Now, f.token)
+	for _, more := range []session.MetadataPatch{wake, class.Fold(), f.bind, stopVoidResiduePatch(), f.repair, f.reset} {
 		maps.Copy(patch, more)
 	}
 	if len(f.reset) > 0 {

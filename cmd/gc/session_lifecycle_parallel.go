@@ -2967,7 +2967,7 @@ func commitCapacityRefusal(result startResult, sessFront *sessionpkg.Store, wave
 // attempt does not invalidate queued nudges. The incarnation identity
 // (instance_token, generation) stays bumped: the token fences the restore.
 var preWakeRestoredKeys = []string{
-	"state", "sleep_reason", "sleep_intent", "detached_at", "continuation_reset_pending",
+	"state", "sleep_reason", "detached_at", "continuation_reset_pending",
 	"continuation_epoch", "wake_request", "wake_requested_at",
 }
 
@@ -2984,6 +2984,9 @@ type preWakeUndo struct {
 	// written is PreWake's value for each restorable key, restore the value
 	// before it.
 	written, restore sessionpkg.MetadataPatch
+	// before is the row PreWake read and class the disposition keys it
+	// wrote: their undo is the cell's (UndoDisposition).
+	before, class map[string]string
 }
 
 // newPreWakeUndo captures, from the row PreWake read and the batch it wrote,
@@ -2998,6 +3001,8 @@ func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, writte
 	undo := preWakeUndo{
 		written: make(sessionpkg.MetadataPatch, len(keys)),
 		restore: make(sessionpkg.MetadataPatch, len(keys)),
+		before:  persisted,
+		class:   written,
 	}
 	for _, key := range keys {
 		value, ok := written[key]
@@ -3038,7 +3043,7 @@ func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, st
 					patch[key] = value
 				}
 			}
-			return patch
+			return sessionpkg.UndoDisposition(undo.before, undo.class, persisted.Metadata).Into(id, patch)
 		})
 		return err
 	})
@@ -3654,7 +3659,7 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 	for k, v := range preCloseClears {
 		closePatch[k] = v
 	}
-	for k, v := range failedCreateClosePatch(now) {
+	for k, v := range failedCreateClosePatch(info, now) {
 		closePatch[k] = v
 	}
 	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(info, closePatch, postCloseClears)
@@ -3669,7 +3674,7 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 				if err := tx.SetMetadataBatch(info.ID, preCloseClears); err != nil {
 					return err
 				}
-				if err := closeFailedCreateBeadInTx(tx, info.ID, now); err != nil {
+				if err := closeFailedCreateBeadInTx(tx, info, now); err != nil {
 					return err
 				}
 				if len(postCloseClears) == 0 {

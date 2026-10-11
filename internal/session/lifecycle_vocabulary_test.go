@@ -89,13 +89,26 @@ func TestAsleepWithoutSleptAtIsUnprunable(t *testing.T) {
 	}
 }
 
-// TestSleepPatchClearsSuspendedAt covers the other arrival at asleep: a session
-// that was suspended and later slept normally keeps the stale suspended_at too.
-func TestSleepPatchClearsSuspendedAt(t *testing.T) {
-	patch := SleepPatch(waitStoreNow, string(SleepReasonIdle))
-	if v, ok := patch["suspended_at"]; !ok || v != "" {
-		t.Errorf("SleepPatch does not clear suspended_at (got %q, present=%v): "+
-			"a session that is asleep is not suspended", v, ok)
+// TestSleepClearsSuspendedAt covers the other arrival at asleep: a session
+// that was suspended without a hold and later slept normally keeps no stale
+// suspended_at. The clear is the Sleep cell's; an operator's suspend keeps
+// its stamp through a sleep (NEW2-5).
+func TestSleepClearsSuspendedAt(t *testing.T) {
+	stamp := waitStoreNow.Format(time.RFC3339)
+	for name, tc := range map[string]struct {
+		meta map[string]string
+		want string
+	}{
+		"soft suspend": {map[string]string{"state": "suspended", "suspended_at": stamp}, ""},
+		"operator":     {map[string]string{"sleep_intent": "user-hold", "suspended_at": stamp}, stamp},
+	} {
+		slept, err := DecodeDisposition(tc.meta).Apply(ActorController, DispEvent{Kind: EvSleep}, StateAsleep, waitStoreNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := slept.Encode().Get("suspended_at"); got != tc.want {
+			t.Errorf("%s: suspended_at after a sleep = %q, want %q", name, got, tc.want)
+		}
 	}
 }
 

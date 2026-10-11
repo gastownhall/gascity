@@ -106,37 +106,19 @@ func TestGuardDispositionWrites(t *testing.T) {
 		class  map[string]string
 		admit  bool
 	}{
-		{"cmd/gc.healExpiredTimersInfo", map[string]string{"held_until": "", "quarantined_until": ""}, true},
-		{"cmd/gc.healExpiredTimersInfo", map[string]string{"held_until": stamp}, false},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"quarantined_until": stamp, "sleep_intent": ""}, true},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"sleep_intent": "user-hold"}, false},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"held_until": stamp}, false},
 		{"cmd/gc.fencedWriter.casRow", map[string]string{"suspended_at": stamp}, false},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": stamp}, true},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": "soon"}, false},
-		{"cmd/gc.recordChurn", map[string]string{"quarantined_until": stamp, "wait_hold": ""}, false},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"held_until": stamp, "sleep_intent": "user-hold", "suspended_at": stamp}, true},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"sleep_intent": "someday", "held_until": "soon"}, true},
-		{"cmd/gc.(*sessionKillFence).rollback", map[string]string{"wait_hold": "true"}, false},
-		{"cmd/gc.preWakeCommitWith", map[string]string{"sleep_intent": ""}, true},
-		{"cmd/gc.preWakeCommitWith", map[string]string{"held_until": ""}, false},
-		{"internal/session.(*Manager).stampSoftSuspend", map[string]string{"suspended_at": stamp}, true},
-		{"internal/session.(*Manager).stampSoftSuspend", map[string]string{"sleep_intent": "user-hold"}, false},
-		{"internal/session.(*Manager).stampSoftSuspend", map[string]string{"held_until": stamp}, false},
-		{"internal/session.(*Manager).rollbackSuspend", map[string]string{"held_until": "", "sleep_intent": "", "suspended_at": ""}, true},
-		{"cmd/gc.restorePreWakeState", map[string]string{"sleep_intent": "idle-stop"}, true},
-		{"cmd/gc.restorePreWakeState", map[string]string{"held_until": stamp}, false},
 	} {
 		on := func() (string, []string, bool) { return "cmd/gc.inner", []string{tc.writer}, false }
 		if msg := checkDispositionWrite("r3", tc.class, on); (msg == "") != tc.admit {
 			t.Errorf("%s writing %v: admitted %v, want %v", tc.writer, tc.class, msg == "", tc.admit)
 		}
 	}
-	both := func() (string, []string, bool) {
-		return "x", []string{"cmd/gc.preWakeCommitWith", "cmd/gc.recordChurn"}, false
-	}
-	if msg := checkDispositionWrite("r3", map[string]string{"quarantined_until": stamp}, both); msg != "" {
-		t.Errorf("a write one of two bypass writers on the stack admits failed: %s", msg)
+	unlisted := func() (string, []string, bool) { return "x", []string{"cmd/gc.healExpiredTimersInfo"}, false }
+	if msg := checkDispositionWrite("r3", map[string]string{"held_until": ""}, unlisted); msg == "" {
+		t.Error("a writer moved onto its cell (no longer listed) passed a hand-built clear")
 	}
 }
 

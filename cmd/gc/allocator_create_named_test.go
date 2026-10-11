@@ -1567,7 +1567,7 @@ func TestCreateEffect_NamedConditionalReopenWritesOnceAndOpensTheRow(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := reopenNamedSessionBatch("stopped", "idle", namedEffectNow)
+	want := reopenNamedSessionBatch(beads.Bead{Metadata: map[string]string{"sleep_reason": "idle"}}, "stopped", namedEffectNow)
 	maps.Copy(want, startupKickoffReopenMetadata("gc-step", namedEffectNow))
 	for k, v := range want {
 		if row.Metadata[k] != v {

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -461,34 +462,40 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 }
 
 // healExpiredTimersInfo is the fold form of the Phase-0 timer heal: it clears expired
-// held_until / quarantined_until through the front door and returns the input
-// Info advanced by each successful clear (write-returns-Info), with NO raw
-// session.Metadata mirror. The reconciler's fold-then-build order (§2.3) applies
-// this before the infoByID snapshot is built, so the returned Info is what the
-// build projects — the mirror the raw form kept for the later re-projection is
-// therefore unnecessary here.
+// held_until / quarantined_until through the front door, in one write, and returns the
+// input Info advanced by it (write-returns-Info), with NO raw session.Metadata mirror.
+// The reconciler's fold-then-build order (§2.3) applies this before the infoByID
+// snapshot is built, so the returned Info is what the build projects.
 //
-// The hold-clear fold BEFORE the quarantine check is preserved from the raw body:
-// ClearExpiredHoldPatch can blank sleep_reason, and ClearExpiredQuarantinePatch
-// reads the post-hold sleep_reason (info.SleepReason), so the ordering is
-// load-bearing. On a persist error the segment is returned unchanged, matching the
-// raw `err == nil` mirror gate.
+// The timers are the disposition's TimerTick cell: an expired heartbeat or quarantine
+// goes, and an expired finite operator suspend goes whole (D-J 2). The lifecycle is
+// the expired-timer builders': ClearExpiredHoldPatch can blank sleep_reason, and
+// ClearExpiredQuarantinePatch reads the post-hold sleep_reason. On a persist error the
+// Info is returned unchanged, matching the raw `err == nil` mirror gate.
 func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
-	if h := info.HeldUntil; h != "" {
-		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
-			}
+	now := clk.Now()
+	expired := func(raw string) bool {
+		t, _ := time.Parse(time.RFC3339, raw)
+		return !t.IsZero() && now.After(t)
+	}
+	hold, quarantine := expired(info.HeldUntil), expired(info.QuarantinedUntil)
+	if !hold && !quarantine {
+		return info
+	}
+	batch := sessionpkg.MetadataPatch{}
+	reason := info.SleepReason
+	if hold {
+		maps.Copy(batch, sessionpkg.ClearExpiredHoldPatch(reason))
+		if r, ok := batch["sleep_reason"]; ok {
+			reason = r
 		}
 	}
-	if q := info.QuarantinedUntil; q != "" {
-		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
-			}
-		}
+	if quarantine {
+		maps.Copy(batch, sessionpkg.ClearExpiredQuarantinePatch(reason))
+	}
+	batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvTimerTick}, now, batch)
+	if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
+		info = info.ApplyPatch(batch)
 	}
 	return info
 }
@@ -613,7 +620,8 @@ func clearLastWokeAt(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionp
 // Step 6d, write-returns-Info); returns (info unchanged, err) on persist failure
 // (ApplyPatchInfo leaves the snapshot pinned to the rejected write).
 func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, error) {
-	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
+	now := clk.Now()
+	batch := sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now, sessionpkg.RateLimitQuarantinePatch())
 	next, err := sessFront.ApplyPatchInfo(info, batch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
@@ -738,7 +746,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.PatchFor(info, clk.Now())); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 			info = next
 		}
@@ -755,14 +763,15 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 // migration Step 6d), or the input Info unchanged when there is nothing to clear
 // (both fields already absent/zero) or the persist failed.
 func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
-	batch := make(map[string]string, 2)
+	batch := make(sessionpkg.MetadataPatch, 2)
 	// WakeAttemptsMetadata (the raw string mirror), not the parsed WakeAttempts int:
 	// the != "0" distinction distinguishes an absent counter from a persisted "0".
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		batch["wake_attempts"] = "0"
 	}
 	if info.QuarantinedUntil != "" {
-		batch["quarantined_until"] = ""
+		// The Quarantine cell with no deadline: the quarantine ends.
+		batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine}, time.Time{}, batch)
 	}
 	if len(batch) == 0 {
 		return info
@@ -849,7 +858,7 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 
 	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.PatchFor(info, clk.Now())); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 			info = next
 		}

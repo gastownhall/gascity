@@ -1261,7 +1261,7 @@ func (m *Manager) Attach(ctx context.Context, by Actor, id string, resumeCommand
 // rollbackSuspend writes suspendRollback on a fresh read, fenced.
 func (m *Manager) rollbackSuspend(id string, suspended DispositionWrite) error {
 	_, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
-		return suspendRollback(suspended, p.Metadata)
+		return suspendRollback(id, suspended, p.Metadata)
 	})
 	return err
 }
@@ -1275,17 +1275,18 @@ func (m *Manager) stampSoftSuspend(id string, patch MetadataPatch) error {
 	return nil
 }
 
-func suspendRollback(w DispositionWrite, meta map[string]string) MetadataPatch {
+func suspendRollback(id string, w DispositionWrite, meta map[string]string) MetadataPatch {
 	if w.Wrote == nil || meta["suspended_at"] != w.Wrote["suspended_at"] {
 		return nil
 	}
 	restore := MetadataPatch{}
-	for k, v := range w.Wrote {
+	for k, v := range LifecycleOnly(w.Wrote) {
 		if meta[k] == v && w.Was[k] != v {
 			restore[k] = w.Was[k]
 		}
 	}
-	return restore
+	// The class keys' undo is the Suspend cell's.
+	return UndoDisposition(w.Was, w.Wrote, meta).Into(id, restore)
 }
 
 // suspendIntent distinguishes an operator's explicit, targeted suspend from the
@@ -1463,7 +1464,6 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// the shutdown sweep leaves the wake for the next start.
 		patch := MetadataPatch{
 			"state":        string(StateSuspended),
-			"suspended_at": m.now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
 		}
@@ -1472,6 +1472,8 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				patch[k] = v
 			}
 		}
+		// The stamp is the disposition's SuspendSoft cell (no hold).
+		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
 		return m.stampSoftSuspend(id, patch)
 	})
 }
@@ -1593,7 +1595,7 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 			log.Printf("session %s: closing after capped wait cancellation lookup", id)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id); err != nil {
+		if err := m.clearWakeAndHoldOverrides(id, b.Metadata); err != nil {
 			return err
 		}
 		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
@@ -1609,12 +1611,9 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 	return result, err
 }
 
-func (m *Manager) clearWakeAndHoldOverrides(id string) error {
-	update := map[string]string{
-		"pin_awake":    "",
-		"held_until":   "",
-		"sleep_intent": "",
-	}
+func (m *Manager) clearWakeAndHoldOverrides(id string, meta map[string]string) error {
+	// The holds go as a retired row's (the disposition's Retire cell).
+	update := CellInto(id, meta, ActorController, DispEvent{Kind: EvRetire}, m.now(), MetadataPatch{"pin_awake": ""})
 	if err := m.store.SetMetadataBatch(id, update); err != nil {
 		return fmt.Errorf("clearing wake and hold overrides: %w", err)
 	}

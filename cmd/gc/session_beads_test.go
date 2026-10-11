@@ -10413,3 +10413,44 @@ func TestSweepProcessTableOrphansConfirmsClosedLive(t *testing.T) {
 		t.Fatalf("swept %d (terminated %v) on a cached closed row the store has reopened; stderr=%q", got, sp.terminated, stderr.String())
 	}
 }
+
+// TestRetireRemovedConfiguredNamedSessionBeadClearsItsHolds: a removed named
+// session's retire frees its holds with its identifiers (the disposition's
+// Retire cell).
+func TestRetireRemovedConfiguredNamedSessionBeadClearsItsHolds(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title: "retired reviewer", Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "removed-reviewer", "template": "worker", "state": "asleep",
+			namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "reviewer", namedSessionModeMetadata: "on_demand",
+			"sleep_intent": "user-hold", "held_until": "2126-01-01T00:00:00Z", "wait_hold": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	city := t.TempDir()
+	if !retireRemovedConfiguredNamedSessionBead(city, store, testSeatWork(city, nil, store, nil), runtime.NewFake(), b, time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC), &stderr) {
+		t.Fatalf("retire refused: %s", stderr.String())
+	}
+	got, _ := store.Get(b.ID)
+	for _, k := range []string{"sleep_intent", "held_until", "wait_hold"} {
+		if got.Metadata[k] != "" {
+			t.Errorf("%s = %q after the retire, want cleared", k, got.Metadata[k])
+		}
+	}
+}
+
+// TestFailedCreateCloseClearsTheHolds: a failed create's close writes the
+// Retire cell's clears of whatever holds the row carried.
+func TestFailedCreateCloseClearsTheHolds(t *testing.T) {
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	patch := failedCreateClosePatch(session.Info{ID: "want", SleepIntent: "idle-stop-pending", WaitHold: "true", QuarantinedUntil: "2126-01-01T00:00:00Z"}, now)
+	for _, k := range []string{"sleep_intent", "wait_hold", "quarantined_until"} {
+		if v, ok := patch[k]; !ok || v != "" {
+			t.Errorf("%s = %q (written %v), want cleared", k, v, ok)
+		}
+	}
+}

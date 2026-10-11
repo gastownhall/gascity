@@ -23,10 +23,13 @@ const (
 // timerHealPatch clears an expired hold, then an expired quarantine judged
 // against the post-hold sleep_reason (SESS-009/010: the order is
 // load-bearing), and clears unknown-state markers on a known-state row
-// (SESS-047). requeue is the time until the earliest timer still running.
+// (SESS-047). The timers are the disposition's TimerTick cell, the lifecycle
+// the expired-timer builders'. requeue is the time until the earliest timer
+// still running.
 func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, time.Duration) {
 	patch := session.MetadataPatch{}
 	var requeue time.Duration
+	expired := false
 	sleepReason := row.SleepReason
 	for _, timer := range []struct {
 		at    string
@@ -39,6 +42,7 @@ func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, tim
 		switch {
 		case t.IsZero():
 		case now.After(t):
+			expired = true
 			for k, v := range timer.clear(sleepReason) {
 				patch[k] = v
 			}
@@ -49,6 +53,9 @@ func timerHealPatch(row session.Info, now time.Time) (session.MetadataPatch, tim
 			// RFC3339 has whole seconds; a second past the timer it has expired.
 			requeue = earlierRequeue(requeue, t.Sub(now)+time.Second)
 		}
+	}
+	if expired {
+		maps.Copy(patch, session.CellInfo(row, session.ActorController, session.DispEvent{Kind: session.EvTimerTick}, now).Fold())
 	}
 	for key, value := range map[string]string{
 		unknownStateFirstSeenKey: row.UnknownStateFirstSeen,
