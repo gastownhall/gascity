@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -42,6 +43,20 @@ func pingNudgeWakeSocket(cityPath string) {
 	defer conn.Close() //nolint:errcheck // best-effort signaling
 	_ = conn.SetWriteDeadline(time.Now().Add(pingNudgeWakeSocketDialTimeout))
 	_, _ = conn.Write([]byte{1})
+}
+
+func nudgeWakeListenerIsLive(cityPath string) bool {
+	if cityPath == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(cityPath), pingNudgeWakeSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(pingNudgeWakeSocketDialTimeout))
+	_, err = conn.Write([]byte{1})
+	_ = conn.Close()
+	return err == nil
 }
 
 // startNudgeWakeListener opens the supervisor wake socket and spawns an
@@ -119,10 +134,82 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
-	if cfg == nil || sessionBeads == nil || cityPath == "" {
+	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+	})
+}
+
+func duePendingNudgeAgents(state nudgequeue.State, now time.Time) map[string]bool {
+	agents := make(map[string]bool, len(state.Pending))
+	for _, item := range state.Pending {
+		if item.Agent == "" || (!item.DeliverAfter.IsZero() && item.DeliverAfter.After(now)) {
+			continue
+		}
+		agents[item.Agent] = true
+	}
+	for _, item := range state.InFlight {
+		if item.Agent == "" || item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
+			continue
+		}
+		agents[item.Agent] = true
+	}
+	return agents
+}
+
+func outstandingNudgeAgents(state nudgequeue.State, _ time.Time) map[string]bool {
+	agents := make(map[string]bool, len(state.Pending)+len(state.InFlight))
+	for _, item := range state.Pending {
+		if item.Agent != "" {
+			agents[item.Agent] = true
+		}
+	}
+	for _, item := range state.InFlight {
+		if item.Agent != "" {
+			agents[item.Agent] = true
+		}
+	}
+	return agents
+}
+
+func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot, selectAgents func(nudgequeue.State, time.Time) map[string]bool) ([]nudgeTarget, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
+		return nil, nil
+	}
+	now := time.Now()
+	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+		return nil, fmt.Errorf("nudge queue maintenance sweep: %w", err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading nudge queue: %w", err)
+	}
+	pendingAgents := selectAgents(state, now)
+	if len(pendingAgents) == 0 {
+		return nil, nil
+	}
+	targets := make([]nudgeTarget, 0, len(pendingAgents))
+	seen := make(map[string]bool, len(pendingAgents))
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		if target.sessionName == "" || seen[target.sessionName] {
+			continue
+		}
+		for _, key := range target.queueKeys() {
+			if pendingAgents[key] {
+				seen[target.sessionName] = true
+				targets = append(targets, target)
+				break
+			}
+		}
+	}
+	return targets, nil
+}
+
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	now := time.Now()
@@ -143,28 +230,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
 		return 0, nil
 	}
-	pendingAgents := make(map[string]bool, len(state.Pending))
-	for _, item := range state.Pending {
-		if item.Agent == "" {
-			continue
-		}
-		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
-	}
-	// In-flight items with expired leases are recoverable on the next
-	// claim attempt. Including their agents lets us retry without waiting
-	// for the patrol tick to discover them.
-	for _, item := range state.InFlight {
-		if item.Agent == "" {
-			continue
-		}
-		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
-	}
+	pendingAgents := duePendingNudgeAgents(state, now)
 	if len(pendingAgents) == 0 {
 		return 0, nil
 	}
@@ -191,6 +257,9 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
+			continue
+		}
+		if sessionFilter != "" && target.sessionName != sessionFilter {
 			continue
 		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
@@ -237,7 +306,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := deliver(target, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

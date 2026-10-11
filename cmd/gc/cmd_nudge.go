@@ -1496,7 +1496,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	// The observe is a session-class read; route through the session store
 	// (identity today). The enqueue above stays on its own nudge store.
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
@@ -1635,7 +1635,7 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 		return err
 	}
 	if obs.Running {
-		maybeStartNudgePoller(target)
+		maybeStartNudgePoller(target, sp)
 	}
 	return nil
 }
@@ -1974,7 +1974,7 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget) {
+func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
@@ -1990,6 +1990,9 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
 	if nudgeDispatcherIsSupervisor(target.cfg) {
+		return
+	}
+	if providerRetiresNudgePollers(target, sp) && nudgePollerDispatcherIsLive(target.cityPath) {
 		return
 	}
 	// ACP session/prompt delivery requires the process that owns the
@@ -2036,6 +2039,8 @@ func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
 }
 
 var startNudgePoller = ensureNudgePoller
+
+var nudgePollerDispatcherIsLive = nudgeWakeListenerIsLive
 
 // nudgeDispatcherIsSupervisor reports whether the city is configured to use
 // the supervisor-hosted nudge dispatcher rather than per-session pollers.
