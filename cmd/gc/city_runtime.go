@@ -4993,9 +4993,9 @@ func (cr *CityRuntime) shutdown() {
 		store := cr.sessionsBeadStore()
 		// A runtime that cannot enumerate its fleet (an exec pack whose list-running
 		// is unsupported answers an empty inventory) would otherwise leave every
-		// session this city started running past the stop. Also stop the sessions
-		// the store records as awake and the runtime confirms are running.
-		running = appendStoreAwakeRunning(running, sessionFrontDoor(store.Store), cr.sp, cr.stderr)
+		// session this city started running past the stop. Also stop the city's
+		// open sessions that the runtime confirms are running.
+		running = appendStoreRecordedRunning(running, sessionFrontDoor(store.Store), cr.sp, cr.stderr)
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
 		gracefulStopAllWithForceSignal(running, cr.sp, gracefulTimeout, cr.rec, cr.cfg, store, cr.stdout, cr.stderr, cr.forceStopRequested)
 		if !asyncStartsDrained && cr.forceStopRequested() {
@@ -5033,18 +5033,23 @@ func (cr *CityRuntime) shutdown() {
 	})
 }
 
-// appendStoreAwakeRunning returns running plus the session names the store records
-// as awake ("active") that the provider reports running and running does not
+// appendStoreRecordedRunning returns running plus the names of the city's open
+// (not closed) sessions that the provider reports running and running does not
 // already hold. Shutdown stops only what it lists; for a provider whose
 // ListRunning cannot see the fleet this is the city's own record of what it
-// started. A store read error leaves running unchanged.
-func appendStoreAwakeRunning(running []string, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
+// started. The recorded state is not trusted to say what is up: a session
+// caught draining, or one recorded asleep whose sandbox survived, is as running
+// as an awake one, so the provider's IsRunning decides. (A session still
+// creating is its async start's to finish: shutdown waits for those first, and
+// the worker boundary does not stop a start in flight.) A store read error
+// leaves running unchanged.
+func appendStoreRecordedRunning(running []string, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
 	if !sessFront.Backed() || sp == nil {
 		return running
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "shutdown: listing awake sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "shutdown: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return running
 	}
 	seen := make(map[string]bool, len(running))
@@ -5053,7 +5058,7 @@ func appendStoreAwakeRunning(running []string, sessFront *sessionpkg.Store, sp r
 	}
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionName)
-		if name == "" || seen[name] || sessionMetadataStateInfo(info) != "active" {
+		if name == "" || seen[name] {
 			continue
 		}
 		seen[name] = true

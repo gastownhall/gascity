@@ -426,6 +426,18 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			}
 		}
 	}
+	// Sessions outside the configuration (manual `gc session new`, adhoc pool
+	// instances the config no longer names) are found below by the orphan sweep,
+	// but only if the runtime can list them. One that cannot (an exec pack whose
+	// list-running is unsupported reads as an empty inventory) would leave them
+	// running past the stop, with no controller left to reap them. Also stop the
+	// city's own recorded sessions that the runtime confirms are running.
+	for _, sn := range appendStoreRecordedRunning(nil, sessionFrontDoor(sessStore), sp, stderr) {
+		if !desired[sn] {
+			sessionNames = append(sessionNames, sn)
+			desired[sn] = true
+		}
+	}
 	recorder := openCityRecorderAt(cityPath, stderr)
 
 	graceTimeout := cfg.Daemon.ShutdownTimeoutDuration()

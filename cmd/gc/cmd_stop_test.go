@@ -2566,3 +2566,52 @@ func TestCityStoreRetiredForStop(t *testing.T) {
 		}
 	})
 }
+
+// A standalone stop (no controller) of a city whose runtime cannot list its
+// fleet must still stop the sessions outside the configuration that the
+// city's store records, here a manual session caught draining. Seen with a
+// remote exec runtime pack that refuses list-running: the orphan sweep saw
+// nothing, and a manual session's remote sandbox outlived the city.
+func TestCmdStopBodyStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "blind-list-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+
+	store := beads.NewMemStore()
+	for _, md := range []map[string]string{
+		{"session_name": "idler-adhoc-1", "template": "idler", "state": "draining"},
+		{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+	} {
+		if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	oldOpen := openCityStoreForStop
+	t.Cleanup(func() { openCityStoreForStop = oldOpen })
+	openCityStoreForStop = func(string) (beads.Store, error) { return store, nil }
+
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "idler-adhoc-1", "not-ours")
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return blindListProvider{fake}, nil }
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody = %d, stderr = %q", code, stderr.String())
+	}
+	if fake.IsRunning("idler-adhoc-1") {
+		t.Fatal("idler-adhoc-1 survived the stop: a recorded session the runtime could not list must be stopped")
+	}
+	if !fake.IsRunning("not-ours") {
+		t.Fatal("not-ours was stopped: the stop must only add sessions the city's store records")
+	}
+}

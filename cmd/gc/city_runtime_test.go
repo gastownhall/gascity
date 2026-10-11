@@ -888,19 +888,20 @@ type blindListProvider struct{ *runtime.Fake }
 
 func (blindListProvider) ListRunning(string) ([]string, error) { return nil, nil }
 
-func TestCityRuntimeShutdownStopsStoreAwakeSessionsTheRuntimeCannotList(t *testing.T) {
+func TestCityRuntimeShutdownStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
 	store := beads.NewMemStore()
 	for _, md := range []map[string]string{
 		{"session_name": "probe-1", "template": "probe", "state": "active"},
 		{"session_name": "idler-adhoc-1", "template": "idler", "state": "awake"},
 		{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+		{"session_name": "idler-draining", "template": "idler", "state": "draining"},
 	} {
 		if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
 	fake := runtime.NewFake()
-	for _, name := range []string{"probe-1", "idler-adhoc-1", "not-ours"} {
+	for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining", "not-ours"} {
 		if err := fake.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatalf("Start %s: %v", name, err)
 		}
@@ -919,13 +920,13 @@ func TestCityRuntimeShutdownStopsStoreAwakeSessionsTheRuntimeCannotList(t *testi
 
 	cr.shutdown()
 
-	for _, name := range []string{"probe-1", "idler-adhoc-1"} {
+	for _, name := range []string{"probe-1", "idler-adhoc-1", "idler-draining"} {
 		if fake.IsRunning(name) {
-			t.Errorf("%s still running after shutdown: an awake session the runtime could not list must be stopped", name)
+			t.Errorf("%s still running after shutdown: a running session of the city the runtime could not list must be stopped", name)
 		}
 	}
 	if !fake.IsRunning("not-ours") {
-		t.Error("not-ours was stopped: shutdown must only add sessions the city's store records as awake")
+		t.Error("not-ours was stopped: shutdown must only add sessions the city's store records")
 	}
 }
 
