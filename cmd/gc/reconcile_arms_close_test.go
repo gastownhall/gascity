@@ -146,10 +146,12 @@ func TestArmCloseDecides(t *testing.T) {
 		},
 		{name: "an undesired pending create is A10's rollback", liveness: livenessGone, desired: desireDrain, drain: drainOrphaned, meta: []string{"state", "creating", "pending_create_claim", "true"}},
 		{
-			name: "a failed create", liveness: livenessGone, desired: desireNone, reason: reasonFailedCreate, meta: []string{"state", "failed-create"},
+			name: "a failed create", liveness: livenessGone, desired: desireNone, reason: reasonFailedCreate, meta: []string{"state", "failed-create", "sleep_intent", "idle-stop-pending", "wait_hold", "true"},
 			want: decideCloseFailedCreate, check: func(t *testing.T, it intent) {
-				if !maps.Equal(it.Patch, failedCreateClosePatch(gatherNow)) {
-					t.Errorf("patch %v, want failedCreateClosePatch", it.Patch)
+				want := failedCreateCloseLife(gatherNow)
+				want["sleep_intent"], want["wait_hold"] = "", "" // the Retire cell's clears
+				if !maps.Equal(it.Patch, want) {
+					t.Errorf("patch %v, want failedCreateClosePatch's lifecycle with the Retire cell (%v)", it.Patch, want)
 				}
 			},
 		},
@@ -267,6 +269,17 @@ func closeEffectCases(t *testing.T, bare bool) {
 		}
 		if b := c.row(t); b.Status != "closed" || b.Metadata["state"] != "orphaned" || b.Metadata[session.RuntimeLeaseHolderKey] != "" {
 			t.Fatalf("row %s %v, want closed orphaned with its lease cleared", b.Status, b.Metadata)
+		}
+	})
+	t.Run("a failed create closes with its holds cleared (the Retire cell)", func(t *testing.T) {
+		c := mk(t, livenessGone, desireNone, "state", "failed-create", "sleep_intent", "idle-stop-pending", "wait_hold", "true", "quarantined_until", gatherNow.Add(time.Hour).Format(time.RFC3339))
+		c.entry().Reason = reasonFailedCreate
+		if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+			t.Fatalf("settlement %+v, want the close landed", s)
+		}
+		b := c.row(t)
+		if b.Status != "closed" || b.Metadata["sleep_intent"] != "" || b.Metadata["wait_hold"] != "" || b.Metadata["quarantined_until"] != "" {
+			t.Fatalf("row %s %v, want closed with every hold cleared", b.Status, b.Metadata)
 		}
 	})
 	t.Run("work holds the close, with no lease taken", func(t *testing.T) {
