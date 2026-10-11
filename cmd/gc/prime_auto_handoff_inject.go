@@ -152,7 +152,7 @@ func primeUnreadMailMessagesFromInbox(mp mail.Provider, inbox *beadmail.Inbox) [
 	}
 	candidates := defaultMailIdentityCandidates()
 	var fromInbox []mail.Message
-	if _, reads := mp.(mailSessionInboxReader); reads && inbox != nil {
+	if _, reads := mp.(beadmail.SessionInboxReader); reads && inbox != nil {
 		routes := make(map[string]bool)
 		for _, route := range inbox.Routes() {
 			routes[route] = true

@@ -19,6 +19,18 @@ type Inbox struct {
 	rows   []beads.Bead
 }
 
+// SessionInboxReader is the mail-provider capability of reading a mailbox as
+// one [Inbox]: a session's own mailbox ([Provider.InboxForSession]), which
+// every self-read — the CLI's mail check, inbox and count, hook injection,
+// SessionStart mail — and the API's per-session queries answer from, or an
+// exact route set ([Provider.InboxForRoutes]). [Provider] implements it.
+type SessionInboxReader interface {
+	InboxForSession(info session.Info, alsoRoutes ...string) (*Inbox, error)
+	InboxForRoutes(routes []string) (*Inbox, error)
+}
+
+var _ SessionInboxReader = (*Provider)(nil)
+
 // InboxForRoutes reads the open message rows addressed to exactly routes, in
 // one listing. Unlike [Provider.Check], it does not expand the routes: the
 // caller already holds the route set it means. A session's own mailbox is read
@@ -65,10 +77,17 @@ func (p *Provider) InboxForRoutes(routes []string) (*Inbox, error) {
 // costs at most two keyed mailbox resolutions (live, then closed —
 // [session.AddressDirectory.ResolveMailboxAddress]), never a listing of every
 // session.
-func (p *Provider) InboxForSession(info session.Info) (*Inbox, error) {
+//
+// alsoRoutes join the mailbox as they are, unexpanded, in the same listing: a
+// mailbox wider than one session — a configured named session's identity and
+// its closed incarnations — is the live incarnation's inbox plus those routes.
+func (p *Provider) InboxForSession(info session.Info, alsoRoutes ...string) (*Inbox, error) {
 	routes, err := p.sessionInboxRoutes(info)
 	if err != nil {
 		return nil, err
+	}
+	for _, route := range alsoRoutes {
+		routes = appendRecipientRoute(routes, route)
 	}
 	return p.InboxForRoutes(routes)
 }

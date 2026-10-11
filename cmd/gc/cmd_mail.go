@@ -740,18 +740,12 @@ func doMailCheckTarget(mp mail.Provider, target resolvedMailTarget, inject bool,
 	return doMailCheckTargetWithFormat(mp, target, inject, "", stdout, stderr)
 }
 
-// mailSessionInboxReader is the optional mail-provider capability of reading a
-// session's own mailbox in one listing (beadmail.Provider.InboxForSession).
-type mailSessionInboxReader interface {
-	InboxForSession(info session.Info) (*beadmail.Inbox, error)
-}
-
 // sessionInboxForTarget reads the mailbox of a target resolved from its own
 // session bead in one listing, when mp can; ok is false for any other target or
 // provider. Every self-read — mail check, its injection, SessionStart mail and
 // mail inbox — answers from this one inbox definition, so they agree.
 func sessionInboxForTarget(mp any, target resolvedMailTarget) (inbox *beadmail.Inbox, ok bool, err error) {
-	reader, reads := mp.(mailSessionInboxReader)
+	reader, reads := mp.(beadmail.SessionInboxReader)
 	if !reads || target.session == nil {
 		return nil, false, nil
 	}
@@ -1066,15 +1060,6 @@ func isStorelessMailProvider() bool {
 	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
-// sessionMailboxAddresses delegates to the session-class front-door codec
-// (internal/session) so the session-bead metadata vocabulary (alias /
-// alias_history / session_name) lives in one place. Its sole remaining caller
-// holds a single bead already fetched by id; the list-scan sites now read
-// session.Info directly via session.MailboxAddress*FromInfo.
-func sessionMailboxAddresses(b beads.Bead) []string {
-	return session.MailboxAddresses(b)
-}
-
 // The mail identity/target resolver family below reads only session-class beads:
 // session-ID resolution, the gc:session enumeration behind named-target matching,
 // and mailbox-identity metadata. Its store parameter is therefore named sessStore
@@ -1361,18 +1346,7 @@ func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, sessS
 		}
 		sessionID, err := resolveSessionIDWithOptions(cityPath, cfg, sessStore, identifier, namedSessionResolveOptions{skipExactID: true})
 		if err == nil {
-			b, err := sessStore.Get(sessionID)
-			if err != nil {
-				return resolvedMailTarget{}, err
-			}
-			addresses := sessionMailboxAddresses(b)
-			if len(addresses) == 0 {
-				return resolvedMailTarget{}, errNoMailboxIdentity(identifier)
-			}
-			return resolvedMailTarget{
-				display:    addresses[0],
-				recipients: addresses,
-			}, nil
+			return mailTargetFromSessionID(sessStore, sessionID, identifier)
 		}
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return resolvedMailTarget{}, err
@@ -1399,17 +1373,19 @@ func resolveMailTargetsCached(sessStore beads.Store, identifier string, cache *m
 		}
 		return resolvedMailTarget{}, err
 	}
-	addresses, err := session.NewStore(beads.SessionStore{Store: sessStore}).MailboxAddresses(sessionID)
+	return mailTargetFromSessionID(sessStore, sessionID, identifier)
+}
+
+// mailTargetFromSessionID is the mailbox of the session a name resolved to:
+// read off its bead (mailTargetFromSessionInfo), so an inbox read of it answers
+// from its session inbox like a target resolved by id, rather than expanding
+// each of its addresses through whichever session holds that address now.
+func mailTargetFromSessionID(sessStore beads.Store, sessionID, identifier string) (resolvedMailTarget, error) {
+	info, _, err := session.ResolveSessionRecordByExactID(sessStore, sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
-	if len(addresses) == 0 {
-		return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
-	}
-	return resolvedMailTarget{
-		display:    addresses[0],
-		recipients: addresses,
-	}, nil
+	return mailTargetFromSessionInfo(info, identifier)
 }
 
 func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
@@ -2940,10 +2916,19 @@ func doMailCountTarget(mp mail.Provider, target resolvedMailTarget, stdout, stde
 	return doMailCountTargetWithJSON(mp, target, false, stdout, stderr)
 }
 
+// doMailCountTargetWithJSON counts the target's mail. A target resolved from
+// its own session bead is counted from its session inbox
+// (sessionInboxForTarget), the mailbox every other self-read and the API's
+// count answer from; any other target or provider is counted recipient by
+// recipient.
 func doMailCountTargetWithJSON(mp mail.Provider, target resolvedMailTarget, jsonOut bool, stdout, stderr io.Writer) int {
 	var total, unread int
-	var err error
-	if counter, ok := mp.(multiRecipientMailCounter); ok {
+	inbox, fromInbox, err := sessionInboxForTarget(mp, target)
+	if fromInbox {
+		if err == nil {
+			total, unread = inbox.Counts()
+		}
+	} else if counter, ok := mp.(multiRecipientMailCounter); ok {
 		total, unread, err = counter.CountRecipients(target.recipients)
 	} else {
 		total, unread, err = collectMailCounts(mp.Count, target.recipients)
