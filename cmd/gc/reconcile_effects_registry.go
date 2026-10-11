@@ -106,6 +106,10 @@ var effectSpecs = map[string]effectSpec{
 	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
 	intentStop:            {class: capProbing, bootGated: true, needs: needs{Lease: true}},
+	intentDriftRestart:    {class: capProbing, bootGated: true, needs: needs{Lease: true}},                                                                                                               // A14; C7b2's effect
+	intentDriftRelaunch:   {class: capProbing, bootGated: true, needs: needs{Lease: true}},                                                                                                               // A14; C7b2's effect
+	intentDriftRepair:     {class: capProbing},                                                                                                                                                           // A14; C7b2's effect (legacy's repair takes the provider)
+	intentLiveApply:       {class: capProbing, needs: needs{Lease: true}},                                                                                                                                // A14; C7b2's effect
 	intentClose:           {class: capProbing, bootGated: true, needs: needs{Runtime: true, Legs: legWork, Lease: true}, caps: capReadStores | capRelease, sections: closeSections, around: closeAround}, // A21 (C5c1)
 	intentRollback:        {class: capProbing, bootGated: true, needs: needs{Runtime: true, Lease: true}, caps: capProviderStart | capRetire, sections: rollbackSections, around: retireAround},          // A10 (C3)
 	intentRowMetadata:     {class: capRowWrites},

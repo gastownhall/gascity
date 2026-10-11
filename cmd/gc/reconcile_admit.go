@@ -39,6 +39,10 @@ const (
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
 	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
+	intentDriftRestart    = "drift-restart"     // A14's named restart in place (C7b2's effect)
+	intentDriftRelaunch   = "drift-relaunch"    // A14's launch-only relaunch (C7b2's effect)
+	intentDriftRepair     = "drift-repair"      // A14's asleep named repair (C7b2's effect)
+	intentLiveApply       = "live-apply"        // A14's session_live RunLive (C7b2's effect)
 )
 
 // capClass is the cap an intent counts against (P4); none is per endpoint.

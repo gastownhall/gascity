@@ -32,7 +32,8 @@ var drainClearSections = []section{{Decide: redecideDrainClear}}
 
 // drainBeginNeeds are a begin's fresh reads: the runtime with L3 and L4 for
 // the fresh kind, with the idle proof where SESS-621 asks for it; L5 for an
-// undesired row.
+// undesired row; L3 and L5 for a config-drift begin (SESS-552/559: an
+// attach or work read that fails holds it).
 func drainBeginNeeds(w *World, it intent) needs {
 	reason := strings.TrimPrefix(it.Reason, decideDrainBegin)
 	switch {
@@ -47,6 +48,8 @@ func drainBeginNeeds(w *World, it intent) needs {
 		return n
 	case reason == drainOrphaned || reason == drainSuspended:
 		return needs{Legs: legWork}
+	case reason == drainConfigDrift:
+		return needs{Runtime: true, Legs: legAttach | legWork}
 	}
 	return needs{}
 }
@@ -70,7 +73,12 @@ func redecideDrainBegin(v txView) txStep {
 			return txStep{Cause: causeNotIdle}
 		}
 	}
-	if w := v.Fence.Work; (reason == drainOrphaned || reason == drainSuspended) && (w == nil || w.Err != nil || !w.Free) {
+	if reason == drainConfigDrift {
+		if fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legAttach}); !fv.Proceed {
+			return txStep{Refuse: fv.Reason}
+		}
+	}
+	if w := v.Fence.Work; (reason == drainOrphaned || reason == drainSuspended || reason == drainConfigDrift) && (w == nil || w.Err != nil || !w.Free) {
 		return txStep{Refuse: causeHasWork}
 	}
 	step.Facts.Transition = &drainTransition{Name: v.Row.SessionNameMetadata, Reason: reason, Transition: "begin"}
