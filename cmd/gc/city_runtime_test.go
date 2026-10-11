@@ -8292,7 +8292,7 @@ func TestStopReadsUnlistedSessionsWithOneProbeEach(t *testing.T) {
 		}
 		all := map[string]int{"up-1": 1, "up-2": 1, "down": 1}
 
-		got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "test", io.Discard, nil)
+		got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "test", io.Discard)
 		slices.Sort(got)
 		if !slices.Equal(got, []string{"up-1", "up-2"}) {
 			t.Errorf("storeRecordedRunningOutside = %v, want [up-1 up-2]", got)
@@ -8429,46 +8429,219 @@ func TestCityRuntimeShutdownDoesNotProbeRecordedSessionsWhenAnUnattestedListingF
 	}
 }
 
-// A forced shutdown stops the store sweep's probing between waves: on a
-// blind runtime whose backend is unreachable every probe can take the
-// provider's whole op timeout (30 s on an exec pack), and the sweep would
-// otherwise add a timeout per wave of rows to a stop the operator forced.
-// The rows it did not reach are reported, not stopped blind.
-func TestStoreRecordedSweepStopsProbingOnceForceIsRequested(t *testing.T) {
-	var rows []map[string]string
-	for i := range 3 * defaultMaxParallelInterrupts {
-		rows = append(rows, map[string]string{"session_name": fmt.Sprintf("worker-%d", i), "template": "worker", "state": "asleep"})
+// recordedBlindShutdownRuntime returns an owned CityRuntime over a blind
+// runtime (blindListProvider) whose store records w-1 and w-2 running and
+// w-3 asleep, with force as its force-stop flag.
+func recordedBlindShutdownRuntime(t *testing.T, timeout string, force *atomic.Bool) (*CityRuntime, *runtime.Fake, *lockedBuffer, *lockedBuffer) {
+	t.Helper()
+	store := recordedStopTestStore(t,
+		map[string]string{"session_name": "w-1", "template": "w", "state": "awake"},
+		map[string]string{"session_name": "w-2", "template": "w", "state": "active"},
+		map[string]string{"session_name": "w-3", "template": "w", "state": "asleep"},
+	)
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "w-1", "w-2")
+	var stdout, stderr lockedBuffer
+	cr := &CityRuntime{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: timeout},
+		},
+		sp:                  blindListProvider{fake},
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		stdout:              &stdout,
+		stderr:              &stderr,
+		forceStopShutdown:   force,
 	}
-	store := recordedStopTestStore(t, rows...)
-	sp := newCountingExecProvider(runtime.NewFake())
-	var force atomic.Bool
-	probedBeforeForce := 0
-	abort := func() bool {
-		if force.Load() {
-			return true
-		}
-		probedBeforeForce++
-		if probedBeforeForce == defaultMaxParallelInterrupts {
+	markOwnedForTest(cr)
+	return cr, fake, &stdout, &stderr
+}
+
+// A forced shutdown still sweeps the store on a blind runtime. `gc stop
+// --force` with a controller up sets force before the shutdown begins, so a
+// sweep that stopped probing once force was set probed nothing: the recorded
+// sessions outlived the city while gc stop printed "City stopped.".
+func TestCityRuntimeForcedShutdownStopsRecordedSessionsOnABlindRuntime(t *testing.T) {
+	for _, timeout := range []string{"0s", "5s"} {
+		t.Run("shutdown_timeout="+timeout, func(t *testing.T) {
+			var force atomic.Bool
 			force.Store(true)
-		}
-		return false
+			cr, fake, stdout, stderr := recordedBlindShutdownRuntime(t, timeout, &force)
+
+			cr.shutdown()
+
+			for _, name := range []string{"w-1", "w-2"} {
+				if fake.IsRunning(name) {
+					t.Errorf("%s survived a forced shutdown on a blind runtime; stdout = %q, stderr = %q", name, stdout.String(), stderr.String())
+				}
+			}
+			if strings.Contains(stderr.String(), "not checked") {
+				t.Errorf("a forced shutdown left recorded sessions unchecked; stderr = %q", stderr.String())
+			}
+		})
 	}
-	var stderr lockedBuffer
-	got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "shutdown", &stderr, abort)
-	if len(got) != 0 {
+}
+
+// A supervisor-hosted gc stop forces the shutdown once shutdown_timeout has
+// passed since the cancel. With an async start in flight, the shutdown is
+// still waiting for it then, so force lands before the store sweep: the sweep
+// must still stop the recorded running sessions.
+func TestCityRuntimeShutdownForcedDuringAsyncStartWaitStopsRecordedSessions(t *testing.T) {
+	var force atomic.Bool
+	cr, fake, stdout, stderr := recordedBlindShutdownRuntime(t, "1s", &force)
+	done, ok := cr.asyncStarts.start()
+	if !ok {
+		t.Fatal("could not register an async start")
+	}
+	defer done()
+	// Force before the async-start wait expires, as stopManagedCity's
+	// escalation does when its own wait (shutdown_timeout) elapses first.
+	timer := time.AfterFunc(300*time.Millisecond, func() { force.Store(true) })
+	defer timer.Stop()
+
+	cr.shutdown()
+
+	if !force.Load() {
+		t.Fatal("the shutdown finished before force was requested; the test needs force set during the async-start wait")
+	}
+	for _, name := range []string{"w-1", "w-2"} {
+		if fake.IsRunning(name) {
+			t.Errorf("%s survived a shutdown forced during the async-start wait; stdout = %q, stderr = %q", name, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// concurrencyGaugeProvider is a blind, unattested runtime whose liveness
+// probes (IsRunning; it has no error-bearing observation) wait until want of
+// them are in flight at once, and record the most seen in flight together. If
+// that never happens, the first probe to reach a short deadline releases
+// every probe, so a serial caller fails the test without waiting per probe. It models a backend whose probes each take a long
+// op timeout: only probes sent together finish together.
+type concurrencyGaugeProvider struct {
+	blindListProvider
+	want     int64
+	inFlight atomic.Int64
+	maxSeen  atomic.Int64
+	probes   atomic.Int64
+
+	once    sync.Once
+	release chan struct{} // closed once want probes are in flight, or one gave up
+}
+
+func newConcurrencyGaugeProvider(fake *runtime.Fake, want int) *concurrencyGaugeProvider {
+	return &concurrencyGaugeProvider{blindListProvider: blindListProvider{fake}, want: int64(want), release: make(chan struct{})}
+}
+
+func (p *concurrencyGaugeProvider) releaseAll() {
+	p.once.Do(func() { close(p.release) })
+}
+
+func (p *concurrencyGaugeProvider) IsRunning(name string) bool {
+	p.probes.Add(1)
+	n := p.inFlight.Add(1)
+	defer p.inFlight.Add(-1)
+	for {
+		seen := p.maxSeen.Load()
+		if n <= seen || p.maxSeen.CompareAndSwap(seen, n) {
+			break
+		}
+	}
+	if n >= p.want {
+		p.releaseAll()
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-p.release:
+	case <-timer.C:
+		p.releaseAll() // a serial caller would wait out every timeout
+	}
+	return p.Fake.IsRunning(name)
+}
+
+// The store sweep probes the recorded rows wider than the interrupt wave:
+// on a blind runtime whose backend hangs, each probe waits out the op
+// timeout (30 s on an exec pack), so probing in waves of the interrupt width
+// added one op timeout per wave to every stop, forced or not.
+func TestStoreRecordedSweepProbesRowsTogether(t *testing.T) {
+	rows := defaultMaxParallelInterrupts + 8
+	if rows > storeSweepMaxParallelProbes {
+		t.Fatalf("test needs %d rows to fit in one sweep wave of %d", rows, storeSweepMaxParallelProbes)
+	}
+	var recorded []map[string]string
+	for i := range rows {
+		recorded = append(recorded, map[string]string{"session_name": fmt.Sprintf("worker-%d", i), "template": "worker", "state": "asleep"})
+	}
+	store := recordedStopTestStore(t, recorded...)
+	sp := newConcurrencyGaugeProvider(runtime.NewFake(), rows)
+
+	if got := storeRecordedRunningOutside(nil, sessionFrontDoor(store), sp, "shutdown", io.Discard); len(got) != 0 {
 		t.Errorf("storeRecordedRunningOutside = %v, want none (no row is running)", got)
 	}
-	probed := 0
-	for _, n := range sp.counts("IsRunning") {
-		probed += n
+	if got := sp.probes.Load(); got != int64(rows) {
+		t.Errorf("probed %d row(s), want %d", got, rows)
 	}
-	if probed != defaultMaxParallelInterrupts {
-		t.Errorf("probed %d row(s), want %d (the probes started before force)", probed, defaultMaxParallelInterrupts)
+	if got := sp.maxSeen.Load(); got != int64(rows) {
+		t.Errorf("at most %d probe(s) ran together, want all %d rows in one wave", got, rows)
 	}
-	want := fmt.Sprintf("%d recorded session(s) the runtime cannot list were not checked", 2*defaultMaxParallelInterrupts)
-	if !strings.Contains(stderr.String(), want) {
-		t.Errorf("stderr = %q, want it to report %q", stderr.String(), want)
+}
+
+// A runtime that attests its listing complete gets no store sweep, even when
+// its listing succeeds and leaves recorded rows out: a row an attested list
+// does not show is gone. The sweep itself refuses such a runtime, and neither
+// the shutdown nor the standalone stop probes a recorded row on one.
+func TestStoreRecordedSweepSkipsAnAttestedRuntimeWhoseListingOmitsRows(t *testing.T) {
+	rows := []map[string]string{
+		{"session_name": "worker-awake", "template": "worker", "state": "awake"},
+		{"session_name": "worker-draining", "template": "worker", "state": "draining"},
+		{"session_name": "worker-asleep", "template": "worker", "state": "asleep"},
 	}
+	newProvider := func(t *testing.T) *probeCountingFake {
+		t.Helper()
+		sp := &probeCountingFake{Fake: runtime.NewFake()}
+		if !runtime.ListRunningAttested(sp) {
+			t.Fatal("the test provider must attest its listing")
+		}
+		return sp
+	}
+
+	t.Run("sweep", func(t *testing.T) {
+		sp := newProvider(t)
+		if got := storeRecordedRunningOutside(nil, sessionFrontDoor(recordedStopTestStore(t, rows...)), sp, "shutdown", io.Discard); got != nil {
+			t.Errorf("storeRecordedRunningOutside = %v, want nil on an attested runtime", got)
+		}
+		if got := sp.probes.Load(); got != 0 {
+			t.Errorf("the sweep made %d probe(s) on an attested runtime, want 0", got)
+		}
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		for _, timeout := range []string{"0s", "1s"} {
+			t.Run("shutdown_timeout="+timeout, func(t *testing.T) {
+				sp := newProvider(t)
+				var stdout, stderr lockedBuffer
+				cr := &CityRuntime{
+					cfg: &config.City{
+						Workspace: config.Workspace{Name: "test-city"},
+						Daemon:    config.DaemonConfig{ShutdownTimeout: timeout},
+					},
+					sp:                  sp,
+					rec:                 events.Discard,
+					standaloneCityStore: recordedStopTestStore(t, rows...),
+					stdout:              &stdout,
+					stderr:              &stderr,
+				}
+				markOwnedForTest(cr)
+
+				cr.shutdown()
+
+				if got := sp.probes.Load(); got != 0 {
+					t.Errorf("shutdown made %d probe(s) on an attested runtime whose listing succeeded, want 0; stdout = %q, stderr = %q", got, stdout.String(), stderr.String())
+				}
+			})
+		}
+	})
 }
 
 // A name an attested runtime's successful listing does not show is gone:

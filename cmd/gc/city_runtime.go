@@ -5000,11 +5000,13 @@ func (cr *CityRuntime) shutdown() {
 		// unreachable, and probing every row would only time out per row
 		// (recordedSweepAllowed). Only a runtime that reached run() owns the
 		// city's sessions: one discarded on an init failure leaves them for the
-		// runtime that will adopt them. A forced shutdown stops probing between
-		// waves.
+		// runtime that will adopt them. A forced shutdown still probes every
+		// row (an unprobed row is a session left running past a stop that
+		// reports success); the probes run wide, so a hung backend costs about
+		// one op timeout.
 		var recorded []string
 		if cr.ownedCity.Load() && recordedSweepAllowed(cr.sp, listErr) {
-			recorded = storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, "shutdown", cr.stderr, cr.forceStopRequested)
+			recorded = storeRecordedRunningOutside(setOf(running), sessionFrontDoor(store.Store), cr.sp, "shutdown", cr.stderr)
 			running = append(running, recorded...)
 		}
 		markCityStopSessionSleepReason(sessionFrontDoor(store.Store), cr.stderr)
@@ -5066,9 +5068,10 @@ func (cr *CityRuntime) shutdown() {
 // controller in stopInterruptedStartsForStop). A store read error is
 // reported under prefix and returns nothing.
 //
-// abort (may be nil) is asked before each probe: a forced shutdown stops
-// probing there, and the rows it did not reach are reported and left out.
-func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer, abort func() bool) []string {
+// Every candidate is probed, storeSweepMaxParallelProbes at a time, forced
+// stop or not: a row left unprobed would be a session left running while the
+// stop reports success.
+func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Store, sp runtime.Provider, prefix string, stderr io.Writer) []string {
 	if !sessFront.Backed() || sp == nil || runtime.ListRunningAttested(sp) {
 		return nil
 	}
@@ -5087,20 +5090,12 @@ func storeRecordedRunningOutside(skip map[string]bool, sessFront *sessionpkg.Sto
 		seen[name] = true
 		candidates = append(candidates, name)
 	}
-	probed := probeNamesRunning(sp, candidates, abort)
+	probed := probeNamesRunning(sp, candidates, storeSweepMaxParallelProbes)
 	var found []string
-	unchecked := 0
 	for _, name := range candidates {
-		p, ok := probed[name]
-		switch {
-		case !ok:
-			unchecked++
-		case p.err != nil || p.running:
+		if p := probed[name]; p.err != nil || p.running {
 			found = append(found, name)
 		}
-	}
-	if unchecked > 0 {
-		fmt.Fprintf(stderr, "%s: force stop: %d recorded session(s) the runtime cannot list were not checked and may still be running\n", prefix, unchecked) //nolint:errcheck // best-effort stderr
 	}
 	return found
 }

@@ -438,9 +438,14 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// timeout, and the stop already reports the incomplete inventory
 	// (recordedSweepAllowed). That costs an attested runtime nothing and an
 	// unattested one a listing call.
+	// unreachable records that listing call failing; the check of rows left
+	// creating below then does not probe them either.
+	unreachable := false
 	if !runtime.ListRunningAttested(sp) {
-		if _, listErr := sp.ListRunning(""); recordedSweepAllowed(sp, listErr) {
-			for _, sn := range storeRecordedRunningOutside(desired, sessionFrontDoor(sessStore), sp, "gc stop", stderr, nil) {
+		_, listErr := sp.ListRunning("")
+		unreachable = listErr != nil
+		if recordedSweepAllowed(sp, listErr) {
+			for _, sn := range storeRecordedRunningOutside(desired, sessionFrontDoor(sessStore), sp, "gc stop", stderr) {
 				sessionNames = append(sessionNames, sn)
 				desired[sn] = true
 			}
@@ -460,7 +465,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// A start in flight is left to that start: keep it out of the sweep (whose
 	// stop would kill it under its starter) and in desired (so the orphan sweep
 	// does not stop it either).
-	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, stdout, stderr)
+	inFlight, creatingLeft := stopInterruptedStartsForStop(cityPath, sessionFrontDoor(sessStore), sp, unreachable, stdout, stderr)
 	if len(inFlight) > 0 {
 		sessionNames = slices.DeleteFunc(sessionNames, func(sn string) bool { return inFlight[strings.TrimSpace(sn)] })
 		for sn := range inFlight {
@@ -520,10 +525,17 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 // A name whose flock is held is a start in flight, whether or not its runtime
 // is up yet: it is reported and returned in inFlight, for the caller to keep
 // out of the rest of the stop.
+//
+// The rows with a free flock are probed together (storeSweepMaxParallelProbes
+// at a time), so a runtime whose probes hang costs about one probe, not one
+// per row. When unreachable is set (the stop's listing of a runtime that does
+// not attest it failed) they are not probed at all: every probe would wait out
+// the same failure. They are reported as not checked.
+//
 // left is true when any creating runtime is not known stopped (a start in
-// flight, a failed liveness probe, a failed stop), so the stop is not
-// confirmed.
-func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp runtime.Provider, stdout, stderr io.Writer) (inFlight map[string]bool, left bool) {
+// flight, a row not checked, a failed liveness probe, a failed stop), so the
+// stop is not confirmed.
+func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp runtime.Provider, unreachable bool, stdout, stderr io.Writer) (inFlight map[string]bool, left bool) {
 	if !filepath.IsAbs(cityPath) || !sessFront.Backed() || sp == nil {
 		return nil, false
 	}
@@ -532,9 +544,18 @@ func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp 
 		fmt.Fprintf(stderr, "gc stop: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil, false
 	}
+	// free holds the rows whose flock this stop took; each lease is held
+	// until its row is done, so no start can begin under the stop.
+	var free []string
+	releases := make(map[string]func())
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
 	for _, info := range infos {
 		name := strings.TrimSpace(info.SessionName)
-		if name == "" || sessionMetadataStateInfo(info) != "creating" {
+		if name == "" || sessionMetadataStateInfo(info) != "creating" || releases[name] != nil || inFlight[name] {
 			continue
 		}
 		// The flock first: a held one is a start in flight whether or not its
@@ -558,23 +579,32 @@ func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp 
 			left = true
 			continue
 		}
-		running, err := stopProbeRunning(sp, name)
-		if err != nil {
-			release()
-			fmt.Fprintf(stderr, "gc stop: observing session %s left creating: %v\n", name, err) //nolint:errcheck // best-effort stderr
+		releases[name] = release
+		free = append(free, name)
+	}
+	if len(free) == 0 {
+		return inFlight, left
+	}
+	slices.Sort(free)
+	if unreachable {
+		fmt.Fprintf(stderr, "gc stop: session(s) %s recorded creating were not checked: the runtime could not be listed, so they may still be running\n", strings.Join(free, ", ")) //nolint:errcheck // best-effort stderr
+		return inFlight, true
+	}
+	probed := probeNamesRunning(sp, free, storeSweepMaxParallelProbes)
+	for _, name := range free {
+		p := probed[name]
+		if p.err != nil {
+			fmt.Fprintf(stderr, "gc stop: observing session %s left creating: %v\n", name, p.err) //nolint:errcheck // best-effort stderr
 			left = true
 			continue
 		}
-		if !running {
-			release()
+		if !p.running {
 			continue
 		}
 		// StopForCleanup already absorbs a real "session gone" answer; any
 		// error it returns is a failed stop, even one whose text reads like
 		// "not found" (an exec script's "sh: kubectl: not found").
-		err = runtime.StopForCleanup(sp, name)
-		release()
-		if err != nil {
+		if err := runtime.StopForCleanup(sp, name); err != nil {
 			fmt.Fprintf(stderr, "gc stop: stopping session %s left creating by an interrupted start: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			left = true
 			continue

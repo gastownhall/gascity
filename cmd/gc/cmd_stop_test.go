@@ -2841,15 +2841,75 @@ func TestCmdStopBodyDoesNotProbeRecordedSessionsWhenAnUnattestedListingFails(t *
 	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp,
 		map[string]string{"session_name": "idler-1", "template": "idler", "state": "awake"},
 		map[string]string{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+		map[string]string{"session_name": "idler-crashed-1", "template": "idler", "state": "creating"},
+		map[string]string{"session_name": "idler-crashed-2", "template": "idler", "state": "creating"},
 	)
 	var stdout, stderr lockedBuffer
 	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code == 0 {
 		t.Errorf("cmdStopBody = 0 over a runtime whose listing failed; stderr = %q", stderr.String())
+	}
+	// The rows left creating are not probed either; they are reported as
+	// not checked.
+	if !strings.Contains(stderr.String(), "idler-crashed-1, idler-crashed-2 recorded creating were not checked") {
+		t.Errorf("stderr does not report the creating rows as not checked; stderr = %q", stderr.String())
 	}
 	if got := sp.probes.Load(); got != 0 {
 		t.Errorf("gc stop made %d per-name probe(s) on an unattested runtime whose list failed, want 0; stdout = %q, stderr = %q", got, stdout.String(), stderr.String())
 	}
 	if out := stdout.String() + stderr.String(); strings.Contains(out, "state unknown") {
 		t.Errorf("gc stop stopped recorded sessions as unknown on an unreachable runtime; output = %q", out)
+	}
+}
+
+// The standalone stop probes the rows left creating by a dead starter
+// together, not one at a time: on a runtime whose probes each wait out a long
+// timeout, a serial check added one timeout per row. They are still each
+// stopped when found running.
+func TestCmdStopBodyProbesCreatingRowsTogether(t *testing.T) {
+	const rows = 6
+	fake := runtime.NewFake()
+	var recorded []map[string]string
+	var names []string
+	for i := range rows {
+		name := fmt.Sprintf("idler-crashed-%d", i)
+		names = append(names, name)
+		recorded = append(recorded, map[string]string{"session_name": name, "template": "idler", "state": "creating"})
+	}
+	startStopTestSessions(t, fake, names...)
+	sp := newConcurrencyGaugeProvider(fake, rows)
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp, recorded...)
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody = %d, stderr = %q", code, stderr.String())
+	}
+	if got := sp.maxSeen.Load(); got != rows {
+		t.Errorf("at most %d creating row probe(s) ran together, want all %d", got, rows)
+	}
+	for _, name := range names {
+		if fake.IsRunning(name) {
+			t.Errorf("%s survived the stop; stderr = %q", name, stderr.String())
+		}
+	}
+}
+
+// On a runtime that attests its listing, a recorded row its successful
+// listing leaves out is gone: the standalone stop probes none of them.
+func TestCmdStopBodyDoesNotProbeRecordedRowsAnAttestedListingOmits(t *testing.T) {
+	sp := &probeCountingFake{Fake: runtime.NewFake()}
+	if !runtime.ListRunningAttested(sp) {
+		t.Fatal("the test provider must attest its listing")
+	}
+	cityDir, cfg := stopTestCityWithRecordedSessions(t, "0s", nil, sp,
+		map[string]string{"session_name": "idler-awake", "template": "idler", "state": "awake"},
+		map[string]string{"session_name": "idler-draining", "template": "idler", "state": "draining"},
+		map[string]string{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+	)
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBody = %d, stderr = %q", code, stderr.String())
+	}
+	if got := sp.probes.Load(); got != 0 {
+		t.Errorf("gc stop made %d probe(s) of recorded rows an attested listing left out, want 0; stdout = %q, stderr = %q", got, stdout.String(), stderr.String())
 	}
 }

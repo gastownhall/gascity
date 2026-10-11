@@ -1108,7 +1108,7 @@ func gracefulStopAllWithForceSignal(
 			toProbe = append(toProbe, name)
 		}
 	}
-	probed := probeNamesRunning(sp, toProbe, nil)
+	probed := probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts)
 	for _, name := range names {
 		running := false
 		var observeErr error
@@ -1214,7 +1214,7 @@ func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bo
 			toProbe = append(toProbe, name)
 		}
 	}
-	for name, p := range probeNamesRunning(sp, toProbe, nil) {
+	for name, p := range probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts) {
 		if p.err != nil || p.running {
 			add(name)
 		}
@@ -1241,31 +1241,24 @@ type stopProbe struct {
 	err     error
 }
 
-// probeNamesRunning reads stopProbeRunning for each name in bounded parallel
-// waves (defaultMaxParallelInterrupts at a time, as the interrupts are sent):
-// on a remote runtime every probe is a round trip, and a stop that probed one
-// name at a time would outlast the caller's wait on a city of any size.
-//
-// abort, when non-nil, is asked before each probe starts; once it answers
-// true no further probe starts, and the names left unprobed are missing from
-// the result (the probes already running are waited for). A stop whose
-// runtime backend is unreachable can spend the provider's whole op timeout on
-// every probe, so a forced shutdown must not wait out the remaining waves.
-func probeNamesRunning(sp runtime.Provider, names []string, abort func() bool) map[string]stopProbe {
+// probeNamesRunning reads stopProbeRunning for each name, at most parallel
+// at a time: on a remote runtime every probe is a round trip, and a stop that
+// probed one name at a time would outlast the caller's wait on a city of any
+// size. Every name is probed; a forced stop does not cut this short, because
+// a name left unprobed is a session left running past a stop that reports
+// success. The callers bound the cost with the width instead.
+func probeNamesRunning(sp runtime.Provider, names []string, parallel int) map[string]stopProbe {
 	if len(names) == 0 {
 		return nil
 	}
+	if parallel < 1 {
+		parallel = 1
+	}
 	results := make([]stopProbe, len(names))
-	started := make([]bool, len(names))
-	sem := make(chan struct{}, defaultMaxParallelInterrupts)
+	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	for i, name := range names {
 		sem <- struct{}{}
-		if abort != nil && abort() {
-			<-sem
-			break
-		}
-		started[i] = true
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1277,12 +1270,20 @@ func probeNamesRunning(sp runtime.Provider, names []string, abort func() bool) m
 	wg.Wait()
 	out := make(map[string]stopProbe, len(names))
 	for i, name := range names {
-		if started[i] {
-			out[name] = results[i]
-		}
+		out[name] = results[i]
 	}
 	return out
 }
+
+// storeSweepMaxParallelProbes is how many of the city's recorded sessions a
+// stop probes at once (storeRecordedRunningOutside, and the standalone stop's
+// check of rows left creating). It is wider than the interrupt wave
+// (defaultMaxParallelInterrupts): these probes only read, and on a runtime
+// whose backend hangs each one waits out the provider's whole op timeout (30 s
+// on an exec pack), so a narrow wave would add one op timeout per wave to
+// every stop, forced or not. At this width a city of up to this many recorded
+// rows pays about one op timeout.
+const storeSweepMaxParallelProbes = 64
 
 // setKeys returns the members of set.
 func setKeys(set map[string]bool) []string {
