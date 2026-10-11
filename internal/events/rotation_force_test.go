@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -156,7 +157,7 @@ func TestForceRotateConcurrentWithRecord(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				rec.Record(Event{Type: BeadCreated, Actor: "human"})
-				time.Sleep(500 * time.Microsecond)
+				runtime.Gosched()
 			}
 		}()
 	}
@@ -191,7 +192,7 @@ func TestForceRotateConcurrentWithRecord(t *testing.T) {
 				<-res.Done
 			}
 		}
-		time.Sleep(5 * time.Millisecond)
+		runtime.Gosched()
 	}
 done:
 	<-writersDone
