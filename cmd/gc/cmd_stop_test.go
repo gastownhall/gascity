@@ -2569,9 +2569,10 @@ func TestCityStoreRetiredForStop(t *testing.T) {
 
 // A standalone stop (no controller) of a city whose runtime cannot list its
 // fleet must still stop the sessions outside the configuration that the
-// city's store records, here a manual session caught draining. Seen with a
-// remote exec runtime pack that refuses list-running: the orphan sweep saw
-// nothing, and a manual session's remote sandbox outlived the city.
+// city's store records: here a manual session caught draining, and one left
+// creating by a controller that died mid-start. Seen with a remote exec
+// runtime pack that refuses list-running: the orphan sweep saw nothing, and a
+// manual session's remote sandbox outlived the city.
 func TestCmdStopBodyStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -2589,6 +2590,7 @@ func TestCmdStopBodyStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
 	for _, md := range []map[string]string{
 		{"session_name": "idler-adhoc-1", "template": "idler", "state": "draining"},
 		{"session_name": "idler-asleep", "template": "idler", "state": "asleep"},
+		{"session_name": "idler-crashed-start", "template": "idler", "state": "creating"},
 	} {
 		if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -2599,7 +2601,7 @@ func TestCmdStopBodyStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
 	openCityStoreForStop = func(string) (beads.Store, error) { return store, nil }
 
 	fake := runtime.NewFake()
-	startStopTestSessions(t, fake, "idler-adhoc-1", "not-ours")
+	startStopTestSessions(t, fake, "idler-adhoc-1", "idler-crashed-start", "not-ours")
 	oldFactory := sessionProviderForStopCity
 	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
 	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return blindListProvider{fake}, nil }
@@ -2611,7 +2613,56 @@ func TestCmdStopBodyStopsRecordedSessionsTheRuntimeCannotList(t *testing.T) {
 	if fake.IsRunning("idler-adhoc-1") {
 		t.Fatal("idler-adhoc-1 survived the stop: a recorded session the runtime could not list must be stopped")
 	}
+	if fake.IsRunning("idler-crashed-start") {
+		t.Fatalf("idler-crashed-start survived the stop: a creating session with no live starter must be stopped; stderr = %q", stderr.String())
+	}
 	if !fake.IsRunning("not-ours") {
 		t.Fatal("not-ours was stopped: the stop must only add sessions the city's store records")
+	}
+}
+
+// A creating session whose start is in flight (its starter holds the runtime
+// name's flock) is the start's to finish: the standalone stop leaves it
+// running and does not confirm the stop.
+func TestCmdStopBodyLeavesCreatingSessionWithLiveStarter(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "blind-list-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+
+	store := beads.NewMemStore()
+	md := map[string]string{"session_name": "idler-starting", "template": "idler", "state": "creating"}
+	if _, err := store.Create(beads.Bead{Title: md["session_name"], Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	oldOpen := openCityStoreForStop
+	t.Cleanup(func() { openCityStoreForStop = oldOpen })
+	openCityStoreForStop = func(string) (beads.Store, error) { return store, nil }
+
+	fake := runtime.NewFake()
+	startStopTestSessions(t, fake, "idler-starting")
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return blindListProvider{fake}, nil }
+
+	starter, err := sessionpkg.TryRuntimeLease(nil, sessionpkg.RuntimeLeaseRequest{City: cityDir, Name: "idler-starting"})
+	if err != nil {
+		t.Fatalf("taking the starter's flock: %v", err)
+	}
+	defer starter.Release()
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("cmdStopBody = 0 with a start in flight; want the stop unconfirmed, stderr = %q", stderr.String())
+	}
+	if !fake.IsRunning("idler-starting") {
+		t.Fatal("idler-starting was stopped under a live start")
 	}
 }

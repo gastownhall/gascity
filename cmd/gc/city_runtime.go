@@ -5041,8 +5041,9 @@ func (cr *CityRuntime) shutdown() {
 // caught draining, or one recorded asleep whose sandbox survived, is as running
 // as an awake one, so the provider's IsRunning decides. (A session still
 // creating is its async start's to finish: shutdown waits for those first, and
-// the worker boundary does not stop a start in flight.) A store read error
-// leaves running unchanged.
+// the worker boundary does not stop a start in flight. A standalone stop reaps
+// one whose start died with its controller: stopInterruptedStartsForStop.) A
+// store read error leaves running unchanged.
 func appendStoreRecordedRunning(running []string, sessFront *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) []string {
 	if !sessFront.Backed() || sp == nil {
 		return running
