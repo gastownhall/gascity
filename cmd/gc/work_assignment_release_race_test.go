@@ -292,9 +292,11 @@ func TestWorkReleaseConditionalWritesRequireRefusesWithoutCapability(t *testing.
 	})
 }
 
-// listWithoutRevisionStore answers List the way the native store does, and so
-// a CachingStore over it: list rows publish no revision, and only Get carries
-// one. Every release snapshot comes from such a List.
+// listWithoutRevisionStore is a store with the conditional-write capability
+// whose List rows carry no revision, standing in for any release snapshot
+// without one, such as a row not rewritten since its store began recording
+// revisions. It does not model native-store list rows, which carry the
+// revision and take the guard.
 type listWithoutRevisionStore struct {
 	*beads.MemStore
 }
@@ -309,12 +311,14 @@ func (s *listWithoutRevisionStore) List(q beads.ListQuery) ([]beads.Bead, error)
 	return rows, err
 }
 
-// TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots sweeps the
-// snapshot shape production releases hold. The revision guard has nothing to
-// check on a list row, so the release takes the legacy tiers, which fence on
-// the live status and assignee. Dead claims are released, with or without a
-// continuation group, instead of being refused on every tick, and a claim
-// another worker took after the List is left alone.
+// TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots sweeps release
+// snapshots without a revision on a store whose conditional writer resolves.
+// The revision guard has nothing to check on such a snapshot, so the release
+// takes the legacy tiers, which fence on the live status and assignee. Dead
+// claims are released, with or without a continuation group, instead of being
+// refused on every tick, and a claim a different worker took after the List is
+// left alone. Telling apart a re-claim under the same assignee name needs the
+// revision: TestWorkReleaseConditionalWritesPreservesNewIncarnation covers it.
 func TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots(t *testing.T) {
 	type shape struct{ group, reclaimed bool }
 	for _, mode := range []gate.Mode{gate.Auto, gate.Require} {

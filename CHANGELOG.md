@@ -40,11 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capable store, the retired-session and orphaned-pool release paths clear the
   assignment and affinity metadata in one write guarded by the snapshot's
   revision, so a successor that re-claimed the bead after the controller's
-  `List` (even under a reused assignee name) is left alone. A revision conflict
-  is reported and the next tick decides again; `require` refuses a store
-  without the capability, `auto` degrades to the legacy release, and `off`
-  (the builtin default) is unchanged. Snapshots without a revision (native-store
-  list rows) keep the legacy status-and-assignee fence. Hand-backport of #7384.
+  `List` (even under a reused assignee name) is left alone. Native-store list
+  rows carry that revision. The guard cannot tell a newer claim from any other
+  write, so a status, assignee or metadata change since the `List` is reported
+  as a conflict, the bead is left as it is, and the next tick decides again.
+  `require` refuses a store without the capability, `auto` degrades to the
+  legacy release, and `off` (the builtin default) is unchanged. A snapshot
+  without a revision (a row not rewritten since its store began recording
+  revisions) keeps the legacy status-and-assignee fence. Hand-backport of #7384.
 
 ## [1.5.0] - 2026-10-05
 

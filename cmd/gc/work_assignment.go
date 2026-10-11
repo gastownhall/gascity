@@ -187,8 +187,9 @@ func excludeMailMessageBeads(items []beads.Bead) []beads.Bead {
 // and assignee fence cannot tell apart. That update returns nil only when the
 // release landed or the bead is gone: any write since the snapshot is a
 // conflict error, because the guard cannot tell a newer claim from an
-// unrelated write. Snapshots listed from the native store (or a CachingStore
-// over it) carry no revision and take the tiers. Under
+// unrelated write. Native-store list rows, and a CachingStore's copies of
+// them, carry that revision; a snapshot without one (such as a row not
+// rewritten since its store began recording revisions) takes the tiers. Under
 // conditional_writes=require, a store without the capability is refused
 // before either tier.
 func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback string) error {
@@ -289,10 +290,10 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 // Return the conflict: the assignee may be unchanged, so callers must not count
 // it as a completed release when deciding whether to close the owning session.
 //
-// A snapshot without a revision is left to the legacy tiers (handled=false).
-// List rows from the native store, and from a CachingStore over it, carry no
-// revision, and release snapshots come from a List, so refusing them would
-// strand every claim on that store.
+// A snapshot without a revision is left to the legacy tiers (handled=false):
+// refusing it would strand the claim, since the next List returns the same row
+// still without one. Native-store list rows, and a CachingStore's copies of
+// them, carry the revision and take this guard.
 func releaseWorkAssignmentIfRevisionMatches(store beads.Store, item beads.Bead, update beads.UpdateOpts) (released, handled bool, err error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {

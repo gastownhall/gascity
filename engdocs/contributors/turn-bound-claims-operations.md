@@ -121,14 +121,27 @@ degrades to the legacy release on an unsupported store and emits
 `beads.conditional_writes.degraded` once per store, and `off` keeps the legacy
 release.
 
+Release snapshots come from a `List`, and native-store list rows (and a
+CachingStore's copies of them) carry the row version, so on a native store
+these releases take the guard. The guard cannot tell a newer claim from any
+other write, so a status, assignee or metadata write after the `List` is a
+conflict too: the retirement sweep counts the item as a failed release, the
+orphan sweep skips it, and the work stays where it is until a later sweep
+decides again from a fresh snapshot.
+
 The legacy paths fence on the snapshot's status and assignee, not its
 revision, so they cannot tell a newer claim under a reused assignee name from
 the old one. Under `auto` and `require` they also release every snapshot that
-carries no revision. Release snapshots come from a `List`, and list rows from
-the native store (and from a CachingStore over it) carry none: only `Get`
-publishes a revision. On those stores the reused-assignee guarantee does not
-hold yet. Reassigning a retired session's work to its successor always uses
-the legacy fence.
+carries no revision, such as a row not rewritten since its store began
+recording revisions; for those the reused-assignee guarantee does not hold.
+Reassigning a retired session's work to its successor always uses the legacy
+fence. On a split city, so does releasing work held in a relocated class store,
+whether by the controller or by a one-shot CLI command such as
+`gc session close`, even under `require`, with no refusal and no
+`beads.conditional_writes.degraded` event. The binding's engine is opened
+without the configured conditional-writes mode, and the CLI's event-emitting
+wrapper around it does not pass one through either. Backporting main's fixes
+(#6917, #7194) is tracked in ga-bvvooj.
 
 This guards the write, not the decision that an owner is dead. A session absent
 from one city's local session store may still be alive in another city. Shared
