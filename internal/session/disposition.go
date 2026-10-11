@@ -305,8 +305,8 @@ func (d Disposition) HoldsConsume(running bool, life State, now time.Time) bool 
 }
 
 // KeepsSlot reports a row whose slot no free or close may take: an
-// operator's suspend (the freeable, finalize, MAINT-051 and A21 hold
-// exception, §12.2 row 27).
+// operator's suspend (the freeable, finalize and MAINT-051 hold exception,
+// §12.2 row 27). A21 reads the stricter HoldsDeliberately.
 func (d Disposition) KeepsSlot() bool { return d.Operator == OperatorSuspended }
 
 // HoldsDeliberately reports a deliberate hold: an operator's suspend (not a

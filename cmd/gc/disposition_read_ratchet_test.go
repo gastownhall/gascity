@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,8 +19,13 @@ import (
 // may not exceed, and must be lowered to when a file's count falls.
 const dispositionRawReadsBaseline = "testdata/disposition_raw_reads.golden"
 
-// dispositionReadScanDirs are the packages whose raw reads the ratchet counts.
+// dispositionReadScanDirs are the trees whose raw reads the ratchet counts,
+// each with every package under it.
 var dispositionReadScanDirs = []string{"cmd/gc", "internal/session", "internal/api"}
+
+// dispositionCodecFiles are the codec, exempt by exact name: a new file
+// beside them is counted.
+var dispositionCodecFiles = []string{"internal/session/disposition.go", "internal/session/disposition_patch.go", "internal/session/disposition_store.go"}
 
 // dispositionInfoFields and dispositionMetaKeys are the five disposition keys
 // as session.Info fields and as metadata keys.
@@ -30,8 +36,10 @@ var (
 
 // TestDispositionReadRatchet is R7's raw-read ratchet (ARCH-RESTRUCTURE-2
 // §5.1): per production file, the reads of the five disposition keys outside
-// the codec (internal/session/disposition*.go), as an Info field (x.HeldUntil)
-// or a metadata index (m["held_until"]) that is not an assignment's target.
+// the codec (dispositionCodecFiles), as an Info field (x.HeldUntil), a
+// metadata index (m["held_until"]) that is not an assignment's target, or a
+// constant or variable declared to a key's string (an alias a read could
+// index by).
 // A reader decodes the disposition (DecodeDisposition, DispositionOfInfo)
 // and reads a projection instead; the count may only fall. It matches by
 // name, so a same-named field of another type (a startup episode's
@@ -41,23 +49,30 @@ func TestDispositionReadRatchet(t *testing.T) {
 	got := map[string]int{}
 	files := 0
 	for _, dir := range dispositionReadScanDirs {
-		paths, err := filepath.Glob(filepath.Join(root, dir, "*.go"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, p := range paths {
-			base := filepath.Base(p)
-			if strings.HasSuffix(base, "_test.go") || dir == "internal/session" && strings.HasPrefix(base, "disposition") {
-				continue
+		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, _ := filepath.Rel(root, p)
+			rel = filepath.ToSlash(rel)
+			switch {
+			case d.IsDir() && d.Name() == "testdata":
+				return filepath.SkipDir
+			case d.IsDir(), !strings.HasSuffix(rel, ".go"), strings.HasSuffix(rel, "_test.go"), slices.Contains(dispositionCodecFiles, rel):
+				return nil
 			}
 			f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
 			if err != nil {
-				t.Fatalf("parse %s: %v", p, err)
+				return fmt.Errorf("parse %s: %w", p, err)
 			}
 			files++
 			if n := dispositionRawReads(f); n > 0 {
-				got[filepath.ToSlash(filepath.Join(dir, base))] = n
+				got[rel] = n
 			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 	want := readDispositionReadsBaseline(t)
@@ -87,6 +102,16 @@ func TestDispositionReadRatchet(t *testing.T) {
 	}
 }
 
+// dispositionKeyLit reports a string literal of one of the five keys.
+func dispositionKeyLit(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	key, err := strconv.Unquote(lit.Value)
+	return err == nil && slices.Contains(dispositionMetaKeys, key)
+}
+
 // dispositionRawReads counts f's raw reads of the five keys.
 func dispositionRawReads(f *ast.File) int {
 	targets := map[ast.Expr]bool{}
@@ -105,11 +130,15 @@ func dispositionRawReads(f *ast.File) int {
 			if slices.Contains(dispositionInfoFields, x.Sel.Name) && !targets[x] {
 				n++
 			}
-		case *ast.IndexExpr:
-			if lit, ok := x.Index.(*ast.BasicLit); ok && lit.Kind == token.STRING && !targets[x] {
-				if key, err := strconv.Unquote(lit.Value); err == nil && slices.Contains(dispositionMetaKeys, key) {
+		case *ast.ValueSpec:
+			for _, v := range x.Values {
+				if dispositionKeyLit(v) {
 					n++
 				}
+			}
+		case *ast.IndexExpr:
+			if dispositionKeyLit(x.Index) && !targets[x] {
+				n++
 			}
 		}
 		return true

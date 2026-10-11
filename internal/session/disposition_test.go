@@ -424,6 +424,33 @@ func TestDispositionOperatorDormant(t *testing.T) {
 	}
 }
 
+// TestDispositionKeepsSlot: over the decoder's grid, only an operator's
+// suspend (sleep_intent=user-hold) keeps a slot; a soft suspend (the chat
+// idle auto-suspend, the city stop sweep), a wait, a timer and a kill do not.
+func TestDispositionKeepsSlot(t *testing.T) {
+	future := dispT0.Add(time.Hour).Format(time.RFC3339)
+	n := 0
+	for _, state := range []string{"", string(StateSuspended), " suspended ", string(StateAsleep), string(StateActive)} {
+		for _, intent := range []string{"", string(SleepReasonUserHold), " user-hold ", string(SleepReasonWaitHold), string(sleepIntentIdleStopPending), "zzz"} {
+			for _, wait := range []string{"", "true"} {
+				for _, held := range []string{"", future, "bad"} {
+					for _, reason := range []string{"", string(SleepReasonKilled), string(SleepReasonCityStop)} {
+						meta := map[string]string{"state": state, "sleep_intent": intent, "wait_hold": wait, "held_until": held, "sleep_reason": reason}
+						want := strings.TrimSpace(intent) == string(SleepReasonUserHold)
+						if got := DecodeDisposition(meta).KeepsSlot(); got != want {
+							t.Errorf("%v: KeepsSlot = %v, want %v", meta, got, want)
+						}
+						n++
+					}
+				}
+			}
+		}
+	}
+	if n != 5*6*2*3*3 {
+		t.Fatalf("%d rows", n)
+	}
+}
+
 // TestDispositionHoldsDeliberately: A21's held pool row (§12.2 #27) is an
 // operator's suspend, a wait, or a live or unreadable timer; a soft suspend,
 // an idle stop and an expired timer are not.
