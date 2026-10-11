@@ -1552,7 +1552,9 @@ func (s *BdStore) bdShowMissError(id string, showErr error) error {
 	if !isExactIDQueryable(id) {
 		return unproven
 	}
-	out, err := s.runBDTransientRead("query", "--json", `id="`+id+`"`, "--all", "--limit", "1")
+	// isExactIDQueryable admits only printable ASCII without '"' or '\',
+	// which strconv.Quote leaves unescaped, so this is exactly id="<id>".
+	out, err := s.runBDTransientRead("query", "--json", "id="+strconv.Quote(id), "--all", "--limit", "1")
 	if err != nil {
 		return fmt.Errorf("%w (confirming absence: bd query: %w)", unproven, err)
 	}
