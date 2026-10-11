@@ -4,6 +4,7 @@ import (
 	"maps"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -83,16 +84,16 @@ func (r *rowFacts) restart() (intent, bool) {
 // (unknown health fails open). A timed hold asks for a pass at its end. The
 // endpoint breaker is admission's (the intent's Endpoint). A committed row
 // whose runtime is gone carries A6's dead-runtime patch, so a productive
-// death restarts in the same pass, as legacy's does; a death that accrues a
-// wake failure or churn is recorded first and restarts the next pass, also
-// as legacy's. A desired pending create a crash interrupted launches again on its
-// own bead (S7).
+// death restarts in the same pass, as legacy's does; one that accrues a
+// wake failure or churn is recorded first and restarts the next pass, as
+// legacy's, but for a stranded seat (asleepStranded). A desired pending
+// create a crash interrupted launches again on its own bead (S7).
 func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	e, info := r.entry, r.row.Info
 	var patch session.MetadataPatch
 	if committed(info) && r.gone() {
 		var accrued bool
-		if patch, accrued = deadRuntimePatch(r); accrued {
+		if patch, accrued = deadRuntimePatch(r); accrued && !r.asleepStranded() {
 			return intent{Reason: decideStartAccrued}, true // A6 records the death first
 		}
 		info = foldInfo(info, patch)
@@ -127,7 +128,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 // hold, a dead runtime) restarts it in the same pass, as legacy heals and
 // wakes in one tick. A dead runtime's start decides on the unhealed row,
 // whose death startIntent accrues. The start keeps heal (intent.Heal) for
-// when it cannot run.
+// when it cannot run, but for a stranded seat's death.
 func (r *rowFacts) startHealed(heal intent) intent {
 	healed := *r
 	if heal.Reason != decideDeadRuntimeHeal {
@@ -139,6 +140,22 @@ func (r *rowFacts) startHealed(heal intent) intent {
 	}
 	patch := maps.Clone(heal.Patch)
 	maps.Copy(patch, it.Patch)
-	it.Patch, it.Key, it.Heal = patch, heal.Key, &heal
+	it.Patch, it.Key = patch, heal.Key
+	if heal.Reason != decideDeadRuntimeHeal || !r.asleepStranded() {
+		it.Heal = &heal
+	}
 	return it
+}
+
+// asleepStranded reports a persistent pool seat with no work assigned, which
+// AL1 never wakes asleep (reusablePoolSessionInfo); legacy's pool-slot close
+// replaces it. Until A21 does (C5c1), its death restarts it in place, with no
+// heal fallback to leave it asleep for good (staging J23).
+func (r *rowFacts) asleepStranded() bool {
+	info := r.row.Info
+	if !info.PoolManaged || info.ConfiguredNamedSession || r.entry == nil || r.entry.AssignedWork != nil || r.w.Env == nil {
+		return false
+	}
+	agent := findAgentByTemplate(r.w.Env.Cfg, r.entry.Template)
+	return agent != nil && agent.Lifecycle != config.AgentLifecycleOneShot
 }

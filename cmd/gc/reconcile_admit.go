@@ -112,8 +112,7 @@ type intent struct {
 	Patch session.MetadataPatch
 	Event *events.Event
 	// Heal is the A6 heal a start carries into its PreWake (startHealed),
-	// written alone when the start is not admitted or refuses before its
-	// PreWake, so a start that cannot run still heals its row.
+	// written alone when the start is not admitted or refuses before it.
 	Heal *intent
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.

@@ -165,7 +165,8 @@ func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 //
 // accrued reports a wake failure or churn recorded, after which legacy skips
 // the row for the tick ("record, fold, continue"): A18 starts it on the next
-// pass, as legacy's next tick does.
+// pass, as legacy's next tick does (a stranded seat's in this one:
+// asleepStranded).
 func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 	info := r.row.Info
 	patch = asleepHealPatch(info)
@@ -179,11 +180,9 @@ func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 		Now:              r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
 	}) {
 	case session.ExitRapidCrash:
-		// Legacy resets the conversation unless a probe finds its transcript;
-		// for a provider with a keyed transcript the PreWake's stale-key
-		// clear probes it as legacy's does, and for one without, nothing can,
-		// so the reset is written here (a heal that keeps the conversation,
-		// a named mode=always row, would otherwise resume a crash loop).
+		// Legacy resets the conversation unless a probe finds its transcript:
+		// the PreWake's stale-key clear probes a keyed one; nothing can probe
+		// the others, so their reset is written here.
 		if folded := foldInfo(info, patch); (strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "") &&
 			!transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info)) {
 			maps.Copy(patch, session.ConversationResetPatch(true))
@@ -209,11 +208,9 @@ func deadRuntimePatch(r *rowFacts) (patch session.MetadataPatch, accrued bool) {
 	return patch, true
 }
 
-// heartbeatHeld reports a live hold no sleep intent explains, within the
-// horizon a heartbeat can write (maximumHeartbeatDuration, with an hour's
-// slack for skew): SESS-602's heartbeat hold. An operator hold whose intent
-// a blind write cleared is not one. The timer is trimmed, as
-// operatorDormant's.
+// heartbeatHeld reports SESS-602's heartbeat hold: a live hold no sleep
+// intent explains, within a heartbeat's horizon (maximumHeartbeatDuration
+// plus an hour's skew). The timer is trimmed, as operatorDormant's.
 func heartbeatHeld(info session.Info, now time.Time) bool {
 	until, ok := parseRFC3339Metadata(strings.TrimSpace(info.HeldUntil))
 	return ok && until.After(now) && !until.After(now.Add(maximumHeartbeatDuration+time.Hour)) && strings.TrimSpace(info.SleepIntent) == ""

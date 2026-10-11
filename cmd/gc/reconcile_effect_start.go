@@ -138,11 +138,9 @@ func verbStep(adopt bool) func(txView, *preparedStart, error) txStep {
 	}
 }
 
-// healInstead is refuse, a start's refusal before its PreWake, or, when the
-// start carries an A6 heal (intent.Heal) and its fresh read still finds the
-// runtime absent, on which every such heal rests, that heal written alone:
-// a start that cannot run still heals its row, and the next pass's start
-// meets the refusal again on the healed row.
+// healInstead is refuse, a start's refusal before its PreWake, or the A6
+// heal the start carries (intent.Heal) written alone while its fresh read
+// still finds the runtime absent, on which every such heal rests.
 func healInstead(v txView, refuse txStep) txStep {
 	heal := v.It.Heal
 	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {

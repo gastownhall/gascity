@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,5 +220,46 @@ func TestTimerHealStartsAWantedRowInTheSamePass(t *testing.T) {
 	}
 	if s := runTx(context.Background(), p, *it.Heal, effectSpecs[it.Heal.Kind], nil); s.Outcome != settledLanded || c.meta(t)["held_until"] != "" {
 		t.Fatalf("heal settled %+v with held_until %q, want it landed and cleared", s, c.meta(t)["held_until"])
+	}
+}
+
+// Kills a persistent pool seat's young death left to a next pass that never
+// comes (staging J23): AL1 never wakes such a seat asleep, so its accruing
+// death restarts it in the same pass, carrying the accrual, and keeps no
+// heal fallback that would strand it asleep; a seat with its work assigned
+// and a one-shot pool's, which AL1 wakes asleep, and a named row record the
+// death first, as legacy's.
+func TestDeadRuntimeAccrualRestartsAStrandedSeatInPlace(t *testing.T) {
+	woke := gatherNow.Add(-2 * time.Minute).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name      string
+		lifecycle string
+		named     bool
+		inPlace   bool
+	}{
+		{"a persistent pool seat", "", false, true},
+		{"a persistent pool seat with its work assigned", "", false, false},
+		{"a one-shot pool seat", config.AgentLifecycleOneShot, false, false},
+		{"a named row", "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := []string{"state", "active", "session_key", "k-1", "last_woke_at", woke, "pool_managed", "true", "pool_slot", "1"}
+			if tc.named {
+				meta = append(meta, "configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always")
+			}
+			c := newHealCase(t, livenessGone, desireWake, meta...)
+			c.w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(1), Lifecycle: tc.lifecycle}}}}
+			c.a.Snapshot.Entries[c.k].Template = "worker"
+			if strings.HasSuffix(tc.name, "assigned") {
+				c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "gw-1", Claimed: true}
+			}
+			it := c.decide()
+			if got := it.Kind == intentStart; got != tc.inPlace {
+				t.Fatalf("decideRow = (%q, %q), want a same-pass restart %v", it.Kind, it.Reason, tc.inPlace)
+			}
+			if tc.inPlace && (it.Patch["churn_count"] != "1" || it.Heal != nil) {
+				t.Fatalf("restart patch %v heal %+v, want the churn accrued and no heal fallback", it.Patch, it.Heal)
+			}
+		})
 	}
 }

@@ -152,12 +152,9 @@ func applySessionKillFencePatch(store beads.Store, sessionID string, decide func
 	return fmt.Errorf("conditional write kept losing to concurrent updates: %w", lastErr)
 }
 
-// killSleepPatch is the kill's asleep sync with no fence (its runtime already
-// inactive), decided on the row's fresh metadata: SleepPatch's lifecycle,
-// killed, with the wake request cleared, and the class keys the
-// disposition's Kill cell changes, as the fence writes them: an operator
-// suspend goes whole, its held_until with it, so no heartbeat-shaped hold is
-// left behind; a heartbeat stays.
+// killSleepPatch is the kill's asleep sync with no fence, on the row's fresh
+// metadata: SleepPatch's lifecycle, the wake request cleared, and the Kill
+// cell's class keys, as the fence writes them (no heartbeat-shaped hold left).
 func killSleepPatch(meta map[string]string, now time.Time) map[string]string {
 	patch := map[string]string(session.LifecycleOnly(session.SleepPatch(now, string(session.SleepReasonKilled))))
 	patch["synced_at"] = now.Format(time.RFC3339)

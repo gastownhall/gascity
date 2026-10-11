@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -480,4 +481,53 @@ func TestSimTxDecidesAgainInsideTheEffect(t *testing.T) {
 			s.noViolations(t)
 		})
 	}
+}
+
+// Kills a pool seat stranded by its young death (staging J23): AL1 never
+// wakes a persistent pool's asleep seat that has no work assigned (A21's
+// pool-slot close replaces it, C5c1), so a death that accrues churn
+// restarts the seat in place in the pass that records it, for a singleton
+// pool and for a pool at its max serving routed work, with no seat created
+// beside it.
+func TestSimYoungDeathRestartsAPoolSeatInPlace(t *testing.T) {
+	ids := []string{"gc-s", "gc-1", "gc-2"}
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+		s.cfg.Agents = append(s.cfg.Agents, config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)})
+		var rows []beads.Bead
+		for i, id := range ids {
+			template, slot := "worker", i
+			if id == "gc-s" {
+				template, slot = "solo", 1
+			}
+			row := poolRow(id, template, slot, "active", "instance_token", "tok-"+id, "session_key", "k-"+id, "last_woke_at", rowAt(-2*time.Minute))
+			s.sp.put(row.Metadata["session_name"], id, "1", "tok-"+id)
+			work := beads.Bead{ID: "gw-" + id, Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": template}}
+			rows = append(rows, row, work)
+		}
+		return rows, nil
+	}})
+	s.lag = false
+	s.advance(time.Second)
+	s.sp.mu.Lock()
+	for _, id := range ids {
+		s.sp.drop("s-" + id)
+	}
+	s.sp.mu.Unlock()
+	s.advance(simPatrol)
+	s.settle()
+	s.settle()
+	for _, id := range ids {
+		b, err := s.legs[0].backing.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := b.Metadata; m["state"] != "awake" || m["churn_count"] != "1" || !s.livePane(b) {
+			t.Errorf("%s: row %v, want it restarted in place with its churn recorded", id, m)
+		}
+	}
+	if rows, _ := s.legs[0].backing.List(beads.ListQuery{Label: session.LabelSession}); len(rows) != len(ids) {
+		t.Errorf("%d session rows, want the %d seats and none beside them", len(rows), len(ids))
+	}
+	s.noViolations(t)
 }
