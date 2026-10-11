@@ -7,10 +7,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// c5a1PreWakeHolds is C5a1's PreWake mask (reconcile_effect_launch.go's
-// preWakeHolds on main), until this branch restacks onto it.
-const c5a1PreWakeHolds = session.HoldTimer | session.HoldQuarantine | session.HoldUser | session.HoldSuspended
-
 // TestDispositionProjectionsMatchV2: over every combination of the class
 // keys' values with the state and sleep_reason beside them, the disposition's
 // projections answer as the v2 code they replace: OperatorDormant (with the
@@ -41,7 +37,7 @@ func TestDispositionProjectionsMatchV2(t *testing.T) {
 							if got, want := d.HeartbeatHeld(now), heartbeatHeld(info, now); got != want {
 								t.Errorf("%+v: HeartbeatHeld = %v, heartbeatHeld %v", info, got, want)
 							}
-							if got, want := d.RefusesPreWake(now), session.HoldsInfo(info, now).In&c5a1PreWakeHolds != 0; got != want {
+							if got, want := d.RefusesPreWake(now), session.HoldsInfo(info, now).In&preWakeHolds != 0; got != want {
 								t.Errorf("%+v: RefusesPreWake = %v, preWakeHolds %v", info, got, want)
 							}
 						}
