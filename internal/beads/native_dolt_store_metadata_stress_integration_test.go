@@ -62,7 +62,12 @@ func TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop(t *testing.T)
 	tables := map[string]bool{"issues": false, "wisps": true}
 	for backendName, open := range backends {
 		for tableName, ephemeral := range tables {
+			backendName := backendName
+			tableName := tableName
+			open := open
+			ephemeral := ephemeral
 			t.Run(backendName+"/"+tableName, func(t *testing.T) {
+				t.Parallel()
 				runMetadataMergeStress(t, open(t), ephemeral)
 			})
 		}

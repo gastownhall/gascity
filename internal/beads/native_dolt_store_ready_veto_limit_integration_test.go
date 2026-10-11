@@ -30,15 +30,13 @@ func TestNativeDoltStoreReadySurvivesMoreThanFiftyDistinctBlockers(t *testing.T)
 	store := openRealNativeDoltStoreForFacade(t, "veto-limit")
 	const blockerCount = 60
 	for i := 0; i < blockerCount; i++ {
-		blocker, err := store.Create(Bead{Title: fmt.Sprintf("blocker %d", i)})
+		blocker, err := store.Create(Bead{
+			Title:    fmt.Sprintf("blocker %d", i),
+			Status:   "closed",
+			Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked},
+		})
 		if err != nil {
 			t.Fatalf("Create blocker %d: %v", i, err)
-		}
-		if err := store.SetMetadata(blocker.ID, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked); err != nil {
-			t.Fatalf("SetMetadata blocker %d: %v", i, err)
-		}
-		if err := store.Close(blocker.ID); err != nil {
-			t.Fatalf("Close blocker %d: %v", i, err)
 		}
 		if _, err := store.Create(Bead{
 			Title:        fmt.Sprintf("candidate %d", i),

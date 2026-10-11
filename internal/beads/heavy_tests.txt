@@ -6,6 +6,6 @@
 # when shard_count in BUILD.bazel would put two of them in the same shard,
 # and prints the counts that do not. Add a test here when it takes more than
 # about 18 s.
-TestNativeDoltStoreReadySurvivesMoreThanFiftyDistinctBlockers 36
-TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop 35
-TestNativeDoltLabelCASRace 19
+TestNativeDoltStoreReadySurvivesMoreThanFiftyDistinctBlockers 12
+TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop 10
+TestNativeDoltLabelCASRace 9

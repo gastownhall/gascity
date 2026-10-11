@@ -36,7 +36,10 @@ func forEachNativeDoltLabelCASCase(t *testing.T, fn func(t *testing.T, store *Na
 	}
 	for _, engine := range engines {
 		for _, tier := range nativeDoltLabelCASTiers {
+			engine := engine
+			tier := tier
 			t.Run(engine.name+"/"+tier.name, func(t *testing.T) {
+				t.Parallel()
 				fn(t, engine.open(t), tier.ephemeral)
 			})
 		}
