@@ -148,7 +148,11 @@ func healInstead(v txView, refuse txStep) txStep {
 	if heal == nil || v.RT == nil || v.RT.Class != rtAbsent {
 		return refuse
 	}
-	step := txStep{Write: heal.Patch, Class: heal.Class, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
+	patch := heal.Patch
+	if heal.Kind == intentDriftRepair { // the composed repair's cleared key, rotated as its own effect does
+		patch = withRepairKey(patch, v.World, v.Row)
+	}
+	step := txStep{Write: patch, Class: heal.Class, Done: true, Cause: refuse.Refuse, Facts: refuse.Facts}
 	if heal.Event != nil {
 		step.Facts.Events = append(step.Facts.Events, *heal.Event)
 	}

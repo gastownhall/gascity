@@ -1579,6 +1579,7 @@ go_test(
         "reconcile_effect_class_fail_test.go",
         "reconcile_effect_create_test.go",
         "reconcile_effect_drain_test.go",
+        "reconcile_effect_drift_test.go",
         "reconcile_effect_guarded_close_test.go",
         "reconcile_effect_heal_test.go",
         "reconcile_effect_launch_test.go",

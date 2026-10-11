@@ -143,7 +143,8 @@ func (r *rowFacts) driftRepair(stored, core string) (intent, bool) {
 		namedSessionConfigDriftDeferredAtMetadata: "", namedSessionConfigDriftDeferredKeyMetadata: "",
 		sessionAttachedConfigDriftDeferredAtMetadata: "", sessionAttachedConfigDriftDeferredKeyMetadata: "",
 	})
-	repair, _ := r.heal(intentRowHealFresh, decideDriftRepair, patch)
+	repair, _ := r.heal(intentDriftRepair, decideDriftRepair, patch) // its own kind: a fresh read that decides another heal refuses
+
 	repair.Key = r.k
 	composed := repair
 	composed.Patch = maps.Clone(patch)

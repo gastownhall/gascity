@@ -252,8 +252,9 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	intentSignalFresh: regexp.MustCompile(`\bA20\b`),
 	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
 	// through parityArmRef.
-	intentRekey:     regexp.MustCompile(`\bS4\b`),
-	intentLiveApply: regexp.MustCompile(`\bA14 config drift\b`), // SESS-565's RunLive
+	intentRekey:       regexp.MustCompile(`\bS4\b`),
+	intentLiveApply:   regexp.MustCompile(`\bA14 config drift\b`), // SESS-565's RunLive
+	intentDriftRepair: regexp.MustCompile(`\bA14 config drift\b`), // SESS-566/568's repair
 	// S1's start (C5a1's effect, A17/A18's kind) owns its Launch and
 	// PreWake rows; S1's adopt owns no row yet.
 	intentStart: regexp.MustCompile(`\bS1 start\b|\bS1 PreWake\b`),

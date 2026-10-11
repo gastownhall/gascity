@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -69,16 +70,27 @@ func liveAppliedStep(v txView) txStep {
 
 // mintRepairKey adds to a drift repair's write the key its provider takes
 // (freshRestartSessionKeyInfo's mint), on the fresh row it writes; a mint
-// error leaves the key unwritten, as legacy's.
+// error leaves the key unwritten, as legacy's. Only the repair's own kind
+// mints: its fresh decision is the repair (redecideRow holds the kind), so
+// a runtime that came up since the pass (an operator's attach), which
+// decides A6's awake heal, refuses instead.
 func mintRepairKey(v txView, step txStep) txStep {
-	if v.It.Reason != decideDriftRepair || len(step.Write) == 0 {
+	if v.It.Kind != intentDriftRepair || len(step.Write) == 0 {
 		return step
 	}
-	res, _ := v.World.Templates.lookup(v.Row)
-	if restartKeyMints(res.TP, v.Row) {
+	step.Write = withRepairKey(step.Write, v.World, v.Row)
+	return step
+}
+
+// withRepairKey is patch with the key a drift repair mints for row, where
+// its provider takes one.
+func withRepairKey(patch session.MetadataPatch, w *World, row session.Info) session.MetadataPatch {
+	res, _ := w.Templates.lookup(row)
+	if restartKeyMints(res.TP, row) {
 		if key, err := session.GenerateSessionKey(); err == nil {
-			step.Write["session_key"] = key
+			patch = maps.Clone(patch)
+			patch["session_key"] = key
 		}
 	}
-	return step
+	return patch
 }

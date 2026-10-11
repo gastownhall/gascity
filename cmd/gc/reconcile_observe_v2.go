@@ -84,7 +84,7 @@ func (p *planner) observeSettlement(s settlement) {
 	if phase := idleRespawnPhases[s.Kind]; phase != "" && s.Outcome == settledLanded && s.Reason == idleRespawnDrainReason {
 		p.metrics.count(&p.metrics.series, phase)
 	}
-	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
+	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh || s.Kind == intentDriftRepair) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
 		p.backoff.Record(rowBackoffKey(s.Key)).Consecutive == healRefusalsBeforeAlert {
 		p.alert(alertHealRefused, s.Key.ID, fmt.Sprintf("%s effect for %s refused %d times in a row, last with cause %q", s.Kind, s.Key.ID, healRefusalsBeforeAlert, s.Cause))
 	}

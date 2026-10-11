@@ -68,7 +68,7 @@ func TestDecideRowConfigDrift(t *testing.T) {
 		{name: "a converged row", meta: []string{"started_config_hash", core, "started_live_hash", live}, alive: true},
 		{name: "a live drift runs session_live again", meta: []string{"started_config_hash", core, "started_live_hash", runtime.FingerprintVersion + ":other"}, alive: true, wantKind: intentLiveApply, wantReason: decideLiveApply},
 		{name: "another version's live hash is A8's", meta: []string{"started_config_hash", core, "started_live_hash", "v5:other"}, alive: true},
-		{name: "an asleep named drift is repaired", meta: append([]string{"state", "asleep", "started_config_hash", stale}, named...), wantKind: intentRowHealFresh, wantReason: decideDriftRepair},
+		{name: "an asleep named drift is repaired", meta: append([]string{"state", "asleep", "started_config_hash", stale}, named...), wantKind: intentDriftRepair, wantReason: decideDriftRepair},
 		{name: "an asleep named v5 hash is A8's, never repaired", meta: append([]string{"state", "asleep", "started_config_hash", "v5:core"}, named...)},
 		{name: "an in-place restart leased in creating keeps its hash", meta: append([]string{"state", "creating", "started_config_hash", stale, "session_key", "k-1", "pending_create_claim", "true", "pending_create_started_at", rowAt(-10 * time.Second)}, named...)},
 		{name: "an asleep pool row's drift is no named repair", meta: []string{"state", "asleep", "started_config_hash", stale}},
@@ -217,7 +217,7 @@ func TestDriftRepairComposesIntoTheStart(t *testing.T) {
 					t.Fatalf("decideRow = (%q, %q), heal %+v; want the start carrying the repair", it.Kind, it.Reason, it.Heal)
 				}
 				repair = *it.Heal
-			} else if it.Kind != intentRowHealFresh || it.Reason != decideDriftRepair {
+			} else if it.Kind != intentDriftRepair || it.Reason != decideDriftRepair {
 				t.Fatalf("decideRow = (%q, %q), want the repair alone", it.Kind, it.Reason)
 			}
 			for k, v := range map[string]string{"started_config_hash": "", "continuation_reset_pending": "true"} {
@@ -244,11 +244,11 @@ func TestDriftRepairComposesIntoTheStart(t *testing.T) {
 func TestMintRepairKey(t *testing.T) {
 	info := session.Info{ID: "gc-1", SessionKey: "conversation-1"}
 	w := &World{Templates: &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: TemplateParams{ResolvedProvider: &config.ResolvedProvider{SessionIDFlag: "--session-id"}}}}}}
-	step := mintRepairKey(txView{It: intent{Reason: decideDriftRepair}, World: w, Row: info}, txStep{Write: session.MetadataPatch{"state": "asleep"}})
+	step := mintRepairKey(txView{It: intent{Kind: intentDriftRepair, Reason: decideDriftRepair}, World: w, Row: info}, txStep{Write: session.MetadataPatch{"state": "asleep"}})
 	if key := step.Write["session_key"]; key == "" || key == "conversation-1" {
 		t.Fatalf("repair write %v, want a fresh key", step.Write)
 	}
-	other := mintRepairKey(txView{It: intent{Reason: decideDeadRuntimeHeal}, World: w, Row: info}, txStep{Write: session.MetadataPatch{"state": "asleep"}})
+	other := mintRepairKey(txView{It: intent{Kind: intentRowHealFresh, Reason: decideDriftRepair}, World: w, Row: info}, txStep{Write: session.MetadataPatch{"state": "asleep"}})
 	if _, ok := other.Write["session_key"]; ok {
 		t.Fatalf("another heal's write %v, want no key", other.Write)
 	}

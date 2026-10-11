@@ -27,6 +27,8 @@ type freshObserver struct {
 	err  error
 	read func()
 	env  map[string]string
+	// runLive is RunLive's error, nil to pass through to the fake.
+	runLive error
 }
 
 func (f *freshObserver) tmux() runtime.Provider {
@@ -49,6 +51,14 @@ func (r observerReads) ObserveLivenessWithError(string, []string) (runtime.Liven
 		r.o.read()
 	}
 	return r.o.l, r.o.err
+}
+
+// RunLive fails with the observer's error, else records the fake's call.
+func (r observerReads) RunLive(name string, cfg runtime.Config) error {
+	if r.o.runLive != nil {
+		return r.o.runLive
+	}
+	return r.FullFake.RunLive(name, cfg)
 }
 
 // ObserveLivenessSince is its error-bearing read, fresh for any since.
