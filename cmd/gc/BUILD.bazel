@@ -1460,6 +1460,7 @@ go_test(
         "control_dispatch_options_test.go",
         "control_dispatch_sigterm_test.go",
         "control_dispatch_unlaunchable_check_test.go",
+        "control_dispatcher_label_demand_test.go",
         "control_dispatcher_scope_gap_event_test.go",
         "control_plane_test.go",
         "control_rig_graph_federation_test.go",
