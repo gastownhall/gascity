@@ -422,6 +422,7 @@ var (
 	recordDrainTransition = telemetry.RecordDrainTransition
 	recordAgentQuarantine = telemetry.RecordAgentQuarantine
 	recordAgentStop       = telemetry.RecordAgentStop
+	recordAgentCrash      = telemetry.RecordAgentCrash // the recycle's and A12's crash metric
 )
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the

@@ -852,3 +852,22 @@ func TestReadWorkScopeByKind(t *testing.T) {
 		t.Fatalf("a drain's L5 = %+v, want work: the live seat may hold a prior alias's claim", got)
 	}
 }
+
+// Kills the close re-deciding on another row's zombie (the C5c2 delta
+// review): on the fresh read only the row's own zombie is a dead runtime
+// A21 closes over; another row's is a live pane, so no work branch runs
+// ahead of the live-pane refusal.
+func TestFreshClosableOwnZombieOnly(t *testing.T) {
+	c := newCloseCase(t, livenessDead, desireDrain, "state", "active")
+	c.entry().DrainReason = drainOrphaned
+	row := c.w.Census.Rows[c.k]
+	for name, id := range map[string]runtimeIdentity{
+		"own":     {Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"},
+		"another": {Known: true, SessionID: "gc-other", Epoch: "1", Token: "theirs"},
+	} {
+		r := &rowFacts{w: c.w, k: c.k, row: row, found: true, entry: c.entry(), fresh: &txRuntime{Class: rtZombie, Same: true, Identity: id}}
+		if got := r.freshClosable(); got != (name == "own") {
+			t.Fatalf("%s zombie: freshClosable = %v", name, got)
+		}
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // Arm A12 and the zombie effect (CONTRACT v5 S5; plan C5c2): a row the
@@ -61,7 +60,7 @@ func (c zombieCrash) found() bool { return c.agent != "" }
 // recordZombieCrash records the crash metric, as legacy's zombie capture
 // and the start's recycle do.
 func recordZombieCrash(_ context.Context, _ txCaps, c zombieCrash) (struct{}, error) {
-	telemetry.RecordAgentCrash(context.Background(), c.agent, c.output)
+	recordAgentCrash(context.Background(), c.agent, c.output)
 	return struct{}{}, nil
 }
 

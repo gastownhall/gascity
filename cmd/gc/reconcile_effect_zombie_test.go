@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -243,5 +244,54 @@ func TestPlannerForgetsARecoveredClassification(t *testing.T) {
 	p := &planner{classified: map[rowKey]string{{ID: "gone-row"}: "x/y"}}
 	if got := p.classifiedOf(k.p.World.Census, nil); len(got) != 0 {
 		t.Fatalf("classified %v, want a row out of the census forgotten", got)
+	}
+}
+
+// crashMetrics records the crash metric's calls while t runs.
+func crashMetrics(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	saved := recordAgentCrash
+	recordAgentCrash = func(_ context.Context, agent, output string) { got = append(got, agent+": "+output) }
+	t.Cleanup(func() { recordAgentCrash = saved })
+	return &got
+}
+
+// Kills the crash metric dropped from A12's crash or the recycle's (B12,
+// B28): each records it once with the crash event, and a quiet pane none.
+func TestCrashMetric(t *testing.T) {
+	got := crashMetrics(t)
+	k, _ := zombieKit(t, true, "gc-1", "tok", "panic: boom")
+	if k.runKind(); len(*got) != 1 {
+		t.Fatalf("A12: crash metrics %v, want one", *got)
+	}
+	*got = nil
+	k, _ = zombieKit(t, true, "gc-1", "tok", "")
+	if k.runKind(); len(*got) != 0 {
+		t.Fatalf("A12, a quiet pane: crash metrics %v, want none", *got)
+	}
+	*got = nil
+	k, _, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
+	if k.runKind(); len(*got) != 1 || crashes(rec) != 1 {
+		t.Fatalf("recycle: crash metrics %v crashes %d, want one of each", *got, crashes(rec))
+	}
+}
+
+// Kills A4 or A14 reading a classified dead runtime as gone (the C5c2
+// delta review): freshGone stays strict; only A6's asleep heals take a
+// classified one (freshGoneOrClassified).
+func TestClassifiedDeadIsNotGone(t *testing.T) {
+	k, _ := zombieKit(t, true, "gc-1", "tok", "")
+	id := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}
+	w := *k.p.World
+	w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: livenessDead, Identity: id}}
+	w.Classified = map[rowKey]string{k.it.Key: deadToken(id)}
+	r := &rowFacts{w: &w, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessDead, Desired: desireSleep}}
+	if r.freshGone() || !r.freshGoneOrClassified() {
+		t.Fatalf("freshGone %v freshGoneOrClassified %v, want false and true", r.freshGone(), r.freshGoneOrClassified())
+	}
+	r.fresh = &txRuntime{Class: rtZombie, Same: true, Identity: id}
+	if r.freshGone() || !r.freshGoneOrClassified() {
+		t.Fatalf("fresh read: freshGone %v freshGoneOrClassified %v, want false and true", r.freshGone(), r.freshGoneOrClassified())
 	}
 }

@@ -51,17 +51,30 @@ func (r *rowFacts) healClass(kind, reason string, patch session.MetadataPatch, c
 	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: patch, Class: class}, true
 }
 
-// freshGone is gone for a fresh kind's arm, or dead and classified by A12:
-// it rests the decision on the runtime, and on the effect's fresh read it is
-// that read's absence, or a dead object read on one session object whose
-// token A12 classified.
+// freshGone is gone for a fresh kind's arm: it rests the decision on the
+// runtime, and on the effect's fresh read it is that read's absence.
 func (r *rowFacts) freshGone() bool {
 	r.rests |= restRuntime
 	if r.fresh != nil {
-		dead := r.fresh.Class == rtCorpse || r.fresh.Class == rtZombie
-		return r.fresh.Class == rtAbsent || dead && r.fresh.Same && r.classified(r.fresh.Identity)
+		return r.fresh.Class == rtAbsent
 	}
-	return r.gone() || r.entry != nil && r.entry.Liveness == livenessDead && r.classified(r.w.Observed[r.k].Identity)
+	return r.gone()
+}
+
+// freshGoneOrClassified is freshGone for A6's asleep heals, which take a
+// dead runtime A12 classified too (CONTRACT A6, v5.9m): on the effect's
+// fresh read, a dead object read on one session object whose token A12
+// classified. A4 and A14 keep freshGone: a classified zombie is no gone
+// runtime to finalize a stop over or repair drift on.
+func (r *rowFacts) freshGoneOrClassified() bool {
+	if r.freshGone() {
+		return true
+	}
+	if r.fresh != nil {
+		dead := r.fresh.Class == rtCorpse || r.fresh.Class == rtZombie
+		return dead && r.fresh.Same && r.classified(r.fresh.Identity)
+	}
+	return r.entry != nil && r.entry.Liveness == livenessDead && r.classified(r.w.Observed[r.k].Identity)
 }
 
 // classified reports that A12 classified the row's dead runtime id.
@@ -143,7 +156,7 @@ func armClaimClear(r *rowFacts) (intent, bool) {
 // running, or one that just settled deferred with its runtime up.
 func armCreatingHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGone() {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideCreatingHeal, asleepHealPatch(info))
@@ -163,7 +176,7 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 // decideRow composes it with the row's restart (startHealed).
 func armDeadRuntimeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGone() {
+	if r.entry == nil || !committed(info) || r.entry.Desired == desireDrain || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
 	patch, class, _ := deadRuntimePatch(r, true)

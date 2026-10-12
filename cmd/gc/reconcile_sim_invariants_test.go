@@ -248,9 +248,9 @@ func (s *sim) checkWrite(w simWrite) {
 		(a["state"] != b["state"] && slices.Contains([]string{"asleep", "drained", "stopped", "closed", "orphaned", string(session.StateFailedCreate)}, a["state"]))
 	// A zombie's agent is dead: S5's screens park or quarantine it in place
 	// (a terminal provider error or a rate-limit screen, with no stop), and
-	// A6 heals a classified one asleep, as legacy does (CONTRACT v5.9m).
+	// A6 heals one A12 classified asleep, as legacy does (CONTRACT v5.9m).
 	screened := w.After.Status != "closed" && s.zombiePane(w.Before) &&
-		(a["state"] == string(session.StateAsleep) || slices.Contains([]string{string(session.SleepReasonProviderTerminalError), string(session.SleepReasonRateLimit)}, a["sleep_reason"]))
+		(a["state"] == string(session.StateAsleep) && s.classifiedZombie(w.Before) || slices.Contains([]string{string(session.SleepReasonProviderTerminalError), string(session.SleepReasonRateLimit)}, a["sleep_reason"]))
 	if terminal && s.livePane(w.Before) && !screened {
 		s.failf("I4 I-fence", "v2 wrote %s terminal (state %q) while its runtime has a live pane", id, a["state"])
 	}
@@ -314,6 +314,19 @@ func (s *sim) checkQuarantinedCommits() {
 			delete(s.quarantinedCommits, id)
 		}
 	}
+}
+
+// classifiedZombie reports b's runtime classified by the planner (A12), by
+// its dead token.
+func (s *sim) classifiedZombie(b beads.Bead) bool {
+	s.sp.mu.Lock()
+	rt := s.sp.rts[b.Metadata["session_name"]]
+	s.sp.mu.Unlock()
+	if rt == nil {
+		return false
+	}
+	tok, ok := s.p.classified[rowKey{Leg: rowLeg, ID: b.ID}]
+	return ok && tok == deadToken(runtimeIdentity{SessionID: rt.id, Token: rt.token})
 }
 
 // zombiePane reports whether b's own runtime is a zombie: its pane up, its
@@ -577,6 +590,15 @@ func TestSimChecksBite(t *testing.T) {
 		{"I4 ", func(s *sim) { // a kill of another incarnation's runtime
 			s.prev = map[string]beads.Bead{"city/x": row("x")}
 			s.sp.kills = append(s.sp.kills, simKill{Method: "Stop", Name: "s-x", Hit: &simRuntime{id: "x", epoch: "1", token: "tok-1"}})
+		}},
+		{"I4 ", func(s *sim) { // a zombie kill on another row's zombie (B33)
+			s.prev = map[string]beads.Bead{"city/x": row("x")}
+			s.sp.kills = append(s.sp.kills, simKill{Method: "KillZombieObject", Name: "s-x", Hit: &simRuntime{id: "other", epoch: "2", token: "tok-9", zombie: true}})
+		}},
+		{"I4 ", func(s *sim) { // an asleep write over an unclassified zombie (T1)
+			s.sp.put("s-x", "x", "2", "tok-2")
+			s.sp.rts["s-x"].zombie = true
+			s.checkWrite(simWrite{Leg: "city", Before: row("x", "state", "active"), After: row("x", "state", "asleep")})
 		}},
 		{"I4 ", func(s *sim) { // a terminal write over a live pane
 			s.sp.put("s-x", "x", "2", "tok-2")

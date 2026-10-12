@@ -571,6 +571,28 @@ func TestTxReadsTheRuntimeEachAttempt(t *testing.T) {
 	}
 }
 
+// factsCall is a Call result carrying facts (callFacts).
+type factsCall struct{}
+
+func (factsCall) facts() effectFacts {
+	return effectFacts{Events: []events.Event{{Type: events.SessionStopped, Subject: "kept"}}}
+}
+
+// Kills a Call's facts dropped by a later refusal (the C5c2 delta review):
+// facts a Call result carries are merged as it returns, so the next
+// section's refusal keeps them.
+func TestTxCallFactsSurviveALaterRefusal(t *testing.T) {
+	k := newTxKit(t)
+	spec := effectSpec{sections: []section{
+		called(0, section{Decide: func(txView) txStep { return txStep{Pass: struct{}{}} }}, func(context.Context, txCaps, struct{}) (factsCall, error) { return factsCall{}, nil }),
+		{Decide: func(txView) txStep { return txStep{Refuse: "later"} }},
+	}}
+	s := k.run(context.Background(), spec)
+	if s.Cause != "later" || len(s.Facts.Events) != 1 || s.Facts.Events[0].Subject != "kept" {
+		t.Fatalf("settlement %+v, want refused later with the Call's facts kept", s)
+	}
+}
+
 // Kills a premise that checks too little: a fresh row that moved its
 // incarnation, any lifecycle fact (a wake_request at the same generation),
 // its runtime name, or closed, refuses without Decide; after a section

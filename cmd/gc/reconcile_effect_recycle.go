@@ -10,7 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // The dead row of S1's table (CONTRACT v5 S5; plan C5a3): a bringUp whose
@@ -182,7 +181,7 @@ func killDead(ctx context.Context, c txCaps, k deadKill) (deadKilled, error) {
 		if c.start.rec != nil {
 			c.start.rec.Record(*k.crash)
 		}
-		telemetry.RecordAgentCrash(context.Background(), k.crash.Subject, k.crash.Message)
+		recordAgentCrash(context.Background(), k.crash.Subject, k.crash.Message)
 	}
 	return out, err
 }

@@ -141,6 +141,9 @@ var parityAccepted = map[string]parityEntry{
 		"CONTRACT v5 §12.2 #19 (S5; C5a3)", "a wanted seat whose own dead runtime shows a terminal provider error is parked (no kill, no launch); legacy's start recycles and relaunches it in the same tick, recording a crash",
 		append([]string{"sleep_reason", "provider_terminal_error", "provider_terminal_error_at", "health_state", "health_reason", "drainable", "currently_processing_bead_id"}, parityStartKeys...),
 	},
+	"§12.2#14 reset-stalled-not-emitted": {
+		"CONTRACT v5 §12.2 #14 (owner ruling 2, 2026-10-06)", "legacy evicts a reset-pending row's stalled runtime by name past its startup timeout and records session.reset_stalled; the ruling gives the eviction to the start recycle, and v2 does not emit session.reset_stalled", nil,
+	},
 	"§12.2#41 close-removes-corpse": {"CONTRACT v5 §12.2 #41 (C3 step 1, M1; C5c1)", "A21's close removes the corpse it counts as stopped, by exact session object; legacy's sweep closes the row and leaves the dead pane listed", nil},
 	"§12.2#42 orphan-claim-release-unconfigured": {
 		"CONTRACT v5 §12.2 #42 (C3 step 3, SESS-082, NEW-5; C5c1)", "an unwanted row whose agent was removed and which holds a served claim: legacy's sync close (SESS-722) refuses on the work and the reconciler's release (SESS-082) never runs for it, so seat and claim wedge; v2's A21 releases the claim (bead.dead_assignee_reopened), closes the row, and the freed demand creates a fresh seat",
@@ -205,9 +208,6 @@ var parityFindings = map[string]parityEntry{
 		[]string{"drain_at", "state_reason"},
 	},
 
-	"reset-stall-by-recycle": {
-		"IMPLEMENTATION-PLAN reset-stall row (owner ruling 2, 2026-10-06; plan §2.3)", "legacy evicts a reset-pending row's stalled runtime by name past its startup timeout and records session.reset_stalled; the ruling gives the eviction to the start recycle, which emits no reset_stalled. §12.2 does not list it", nil,
-	},
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
 	"recycle-by-object":    {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
 	"mislabelled-close":    {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
@@ -1644,7 +1644,7 @@ func parityFixtures() []parityFixture {
 			Work:     assigned,
 			Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
 			Explain: explain(map[string]string{
-				"event:session.reset_stalled s-gc-1 [elapsed_s reset_committed_at session_name template]": "reset-stall-by-recycle",
+				"event:session.reset_stalled s-gc-1 [elapsed_s reset_committed_at session_name template]": "§12.2#14 reset-stalled-not-emitted",
 				"provider:Stop s-gc-1": "recycle-by-object", "provider:KillZombieObject s-gc-1": "recycle-by-object", "provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears",
 			}),
 		},

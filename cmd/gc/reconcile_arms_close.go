@@ -107,7 +107,8 @@ func (r *rowFacts) freshClosable() bool {
 	r.rests |= restRuntime
 	claims := sessionBeadClaimsLiveRuntime(r.row.Info)
 	if r.fresh != nil {
-		dead := r.fresh.Class == rtCorpse || r.fresh.Class == rtZombie
+		ownZombie := r.fresh.Class == rtZombie && ownRuntime(compareIdentity(r.row.Info, r.fresh.Identity), r.row.Info, r.fresh.Identity)
+		dead := r.fresh.Class == rtCorpse || ownZombie // another row's zombie is a live pane (live-pane), its work never released
 		return r.fresh.Class == rtAbsent || r.fresh.Class == rtCorpse && !claims || dead && r.deadRuntimeClosable()
 	}
 	switch r.entry.Liveness {
