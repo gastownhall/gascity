@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"strings"
@@ -327,11 +328,13 @@ type idleDeferStreak struct {
 	at     time.Time // the count's last step
 }
 
-// idleIncarnation keys a content anchor by the row and its runtime token:
-// a restart in place starts a fresh idle clock.
+// idleIncarnation keys a content anchor by the row and the runtime
+// incarnation the lane observes (on tmux its session, creation and pane
+// pid; the row's token where a backend reports none): a restart or a
+// relaunch in place starts a fresh idle clock (v5.9s).
 type idleIncarnation struct {
-	k     rowKey
-	token string
+	k           rowKey
+	incarnation string
 }
 
 type idleTraced struct {
@@ -401,7 +404,8 @@ func (m *idleMemory) updateRow(w *World, a *allocDecision, row censusRow, patrol
 	p.settings[row.Key] = s
 	if idleTrackerContentClockApplies(row.Info.Provider, row.Info.Transport) {
 		want[strings.TrimSpace(row.Info.SessionName)] = true
-		ki := idleIncarnation{row.Key, strings.TrimSpace(row.Info.InstanceToken)}
+		obs, _ := r.observation()
+		ki := idleIncarnation{row.Key, cmp.Or(obs.Incarnation, "token:"+strings.TrimSpace(row.Info.InstanceToken))}
 		live[ki] = true
 		at, anchored := m.since[ki]
 		switch {

@@ -188,8 +188,8 @@ func TestIdlePendingResetsTheStreak(t *testing.T) {
 // Kills a content anchor that counts unknown as idle, fires early, or
 // outlives its runtime (ga-07mi8, v5.9s): an idle pane anchors and fires
 // strictly past the timeout (and re-anchors); a busy, indeterminate,
-// unread or erring read clears it; a new runtime token starts a fresh
-// clock; a gone row's anchor is pruned; a row off the content clock is
+// unread or erring read clears it; a new runtime token or a relaunched
+// pane (a new observed incarnation) starts a fresh clock; a gone row's anchor is pruned; a row off the content clock is
 // neither read nor anchored.
 func TestIdleMemoryContentAnchors(t *testing.T) {
 	claude := []string{"provider", "claude"}
@@ -230,6 +230,24 @@ func TestIdleMemoryContentAnchors(t *testing.T) {
 	pass(&r, 0, contentIdle)
 	if c := pass(&r, 6*time.Minute, contentIdle, "instance_token", "tok-new"); c.w.Idle.fired[c.k] || len(r.since) != 1 {
 		t.Fatalf("a new runtime token: fired %v, anchors %v; want a fresh clock", c.w.Idle.fired[c.k], r.since)
+	}
+	// A relaunch keeps the row's token and generation; its new pane is a
+	// new observed incarnation, which starts a fresh clock.
+	var rl idleMemory
+	relaunched := func(at time.Duration, incarnation string) *healCase {
+		c := idleCase(t, idleCity(), -1, contentIdle, claude...)
+		c.w.Now, c.w.ObsMaxAge = censusNow.Add(at), time.Hour
+		attrs := InventoryAttrs{Identity: runtimeIdentity{Known: true, SessionID: c.k.ID, Token: "tok-3"}, Content: contentIdle, Incarnation: incarnation}
+		c.w.Obs = newObserveCache().publish(c.w.Now, map[string]InventoryAttrs{"s-heal": attrs}, completeBackend("tmux", "s-heal"))
+		rl.update(c.w, c.a, 0, io.Discard)
+		return c
+	}
+	relaunched(0, "$1:100:41")
+	if c := relaunched(6*time.Minute, "$1:100:57"); c.w.Idle.fired[c.k] || len(rl.since) != 1 {
+		t.Fatalf("a relaunched pane: fired %v, anchors %v; want a fresh clock", c.w.Idle.fired[c.k], rl.since)
+	}
+	if c := relaunched(12*time.Minute, "$1:100:57"); !c.w.Idle.fired[c.k] {
+		t.Fatal("the relaunched pane idle past its timeout did not fire")
 	}
 	c := idleCase(t, idleCity(), -1, contentIdle, claude...)
 	c.a.Snapshot.Entries[c.k].Liveness = livenessGone
