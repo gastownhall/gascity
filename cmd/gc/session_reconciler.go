@@ -1430,21 +1430,44 @@ func operatorSuspendCause(cfg *config.City, cityPath string, info sessionpkg.Inf
 	return ""
 }
 
-// pendingCreateOwnStartLive reports whether a pending create's own start may
-// still be creating its runtime, so a live runtime with no identity is not
-// rolled back from under it: the start is inside its in-flight window, or a
-// live holder has the row's runtime lease (startHolderLive), which covers a
-// start that outlives the window. A last_woke_at wakeUndesiredGrace or more
-// in the future proves nothing (a clock stepped back), so only the lease can
-// hold the row then. What cannot be probed reads as held, as for the reaper,
-// and a failed lease read is returned for the caller to report.
-func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) (bool, error) {
+// ownStartLive is why pendingCreateOwnStartLive holds a pending create's
+// rollback, as its trace records it in the lease field.
+type ownStartLive string
+
+const (
+	ownStartNotLive           ownStartLive = ""
+	ownStartInWindow          ownStartLive = "not_read"     // inside the in-flight window; the lease is not read
+	ownStartLeaseHeld         ownStartLive = "held"         // a live holder has the row's runtime lease
+	ownStartLeaseUnverifiable ownStartLive = "unverifiable" // the lease could not be read: held, fail closed
+)
+
+// inFlightFutureSkew bounds how far in the future a last_woke_at may sit and
+// still hold a pending create's in-flight window: a later one proves nothing
+// (a clock stepped back).
+const inFlightFutureSkew = 5 * time.Minute
+
+// pendingCreateOwnStartLive reports whether, and why, a pending create's own
+// start may still be creating its runtime, so a live runtime with no identity
+// is not rolled back from under it: the start is inside its in-flight window,
+// or a live holder has the row's runtime lease (startHolderLiveErr), which
+// covers a start that outlives the window. A last_woke_at inFlightFutureSkew
+// or more in the future holds no window, so only the lease can hold the row
+// then. A lease that cannot be verified holds it (fail closed), and its error
+// is returned for the caller to report.
+func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) (ownStartLive, error) {
 	if pendingCreateStartInFlightAt(info, now, startupTimeout) {
-		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < wakeUndesiredGrace {
-			return true, nil
+		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < inFlightFutureSkew {
+			return ownStartInWindow, nil
 		}
 	}
-	return probeStartHolder(store, cityPath, info)
+	held, err := startHolderLiveErr(store, cityPath, info)
+	switch {
+	case err != nil:
+		return ownStartLeaseUnverifiable, err
+	case held:
+		return ownStartLeaseHeld, nil
+	}
+	return ownStartNotLive, nil
 }
 
 // wakeGracePreservesUndesiredRow reports whether an undesired live row was woken
@@ -2885,17 +2908,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
-				live, leaseErr := false, error(nil)
+				live, leaseErr := ownStartNotLive, error(nil)
 				if identity.unstamped() {
 					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
 				}
 				if leaseErr != nil {
-					// Fail closed: an unreadable lease may be a live start's.
-					// Warned once per row per episode.
-					logStandingCondition(dt, stderr, id, "lease_unreadable.pending_create_rollback", fmt.Sprintf(
-						"session reconciler: pending-create rollback of %s deferred: its runtime lease could not be read: %v", name, leaseErr), clk.Now())
+					// Fail closed: a lease that cannot be verified may be a
+					// live start's, so the row is held, and the hold is said
+					// once per row per episode.
+					logStandingCondition(dt, stderr, id, "lease_unverifiable.pending_create_rollback", fmt.Sprintf(
+						"session reconciler: WARNING: holding pending create %s open: its runtime lease cannot be verified (%v); the rollback waits until the lease reads free", name, leaseErr), clk.Now())
 				}
-				if live {
+				if live != ownStartNotLive {
 					// A runtime with no identity at all reads foreign, but
 					// while this row's own start is live it is most likely
 					// that start's box: a remote runtime lists the name before
@@ -2912,6 +2936,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": id,
 							"attribution":     "start_in_flight",
+							"lease":           string(live),
 						})
 					}
 					continue

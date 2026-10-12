@@ -47,16 +47,23 @@ func waitRuntimeLease(ctx context.Context, store beads.Store, cityPath, name, id
 // holder is starting. What cannot be probed (no store, a city path that is
 // not absolute, a failed read) reads as held.
 func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
-	held, _ := probeStartHolder(store, cityPath, info)
+	held, _ := startHolderLiveErr(store, cityPath, info)
 	return held
 }
 
-// probeStartHolder is startHolderLive with the failed read it counts as
-// held, for a caller that reports it.
-func probeStartHolder(store beads.Store, cityPath string, info session.Info) (bool, error) {
+// startHolderLiveErr is startHolderLive with the reason a probe could not be
+// made or read: no store, no session name, a city path that is not absolute,
+// or a failed read. Each reads as held (fail closed) and returns its error,
+// for a caller that holds on it and must say so.
+func startHolderLiveErr(store beads.Store, cityPath string, info session.Info) (bool, error) {
 	name := strings.TrimSpace(info.SessionName)
-	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
-		return true, nil
+	switch {
+	case store == nil:
+		return true, errors.New("no session store to read the runtime lease from")
+	case name == "":
+		return true, errors.New("the row has no session name to lease")
+	case !filepath.IsAbs(cityPath):
+		return true, fmt.Errorf("city path %q is not absolute", cityPath)
 	}
 	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
 	return err != nil || held, err

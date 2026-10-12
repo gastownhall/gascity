@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // runtimeFirstStartProvider is a slow remote runtime (the crucible exec
@@ -195,6 +196,7 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackInFlightFence(t *testin
 		{name: "unstamped, 120s into a 180s startup timeout", startupTimeout: "180s", wokeAgo: 120 * time.Second, wantRollback: false},
 		{name: "unstamped, 200s past a 180s startup timeout", startupTimeout: "180s", wokeAgo: 200 * time.Second, wantRollback: true},
 		{name: "unstamped, woken a minute in the future", wokeAgo: -time.Minute, wantRollback: false},
+		{name: "unstamped, woken ten minutes in the future", wokeAgo: -10 * time.Minute, wantRollback: true},
 		{name: "unstamped, woken six hours in the future", wokeAgo: -6 * time.Hour, wantRollback: true},
 		{name: "another session's ID, start in flight", wokeAgo: 2 * time.Second, meta: map[string]string{"GC_SESSION_ID": "gc-other"}, wantRollback: true},
 		{name: "another incarnation's token, start in flight", wokeAgo: 2 * time.Second, meta: map[string]string{"GC_INSTANCE_TOKEN": "other-token"}, wantRollback: true},
@@ -232,34 +234,169 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackInFlightFence(t *testin
 	}
 }
 
-// TestReconcileSessionBeads_UnreadableLeaseFailsClosedAndWarnsOnce pins the
-// fence's lease probe failing: an unreadable lease may be a live start's, so
-// the rollback defers (fail closed), and the warning prints once for the
-// episode, not every tick. Once the lease reads again and no start holds it,
-// the rollback applies.
-func TestReconcileSessionBeads_UnreadableLeaseFailsClosedAndWarnsOnce(t *testing.T) {
-	env, session := newAlivePendingCreateEnv(t) // its start's window is long over
-	locks := citylayout.SessionNameLocksDir(env.city)
+// leaseRecord is a runtime lease record another host holds, expiring at
+// expires.
+func leaseRecord(expires string) map[string]string {
+	return map[string]string{
+		sessionpkg.RuntimeLeaseHolderKey:  "host-b/7/n",
+		sessionpkg.RuntimeLeaseEpochKey:   "4",
+		sessionpkg.RuntimeLeaseTTLKey:     "240",
+		sessionpkg.RuntimeLeaseExpiresKey: expires,
+		sessionpkg.RuntimeLeaseFlockKey:   "another-boot/1/2/0123",
+	}
+}
+
+// blockLeaseLocks makes the city's runtime lease locks unreadable: the lock
+// dir is a file.
+func blockLeaseLocks(t *testing.T, city string) {
+	t.Helper()
+	locks := citylayout.SessionNameLocksDir(city)
+	if err := os.RemoveAll(locks); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Dir(locks), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(locks, nil, 0o600); err != nil { // the lock dir cannot be made
+	if err := os.WriteFile(locks, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for tick := 1; tick <= 2; tick++ {
-		env.reconcile([]beads.Bead{session})
+}
+
+const leaseWarning = "WARNING: holding pending create worker open: its runtime lease cannot be verified"
+
+// TestReconcileSessionBeads_LeaseHoldsTheFencePastTheWindow pins the lease
+// arm past the in-flight window (last_woke_at 30 minutes ago), on the record
+// another host holds: only an unexpired, well-formed record holds the row.
+func TestReconcileSessionBeads_LeaseHoldsTheFencePastTheWindow(t *testing.T) {
+	now := time.Now().UTC() // the record is compared on the wall clock
+	for _, tc := range []struct {
+		name         string
+		rec          map[string]string
+		wantRollback bool
+	}{
+		{"no record", nil, true},
+		{"another host, unexpired", leaseRecord(now.Add(time.Minute).Format(time.RFC3339)), false},
+		{"another host, expired (a dead controller)", leaseRecord(now.Add(-time.Second).Format(time.RFC3339)), true},
+		{"an expiry beyond its ttl (malformed)", leaseRecord(now.Add(10 * time.Hour).Format(time.RFC3339)), true},
+		{"an unparseable expiry", leaseRecord("garbage"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session := newAlivePendingCreateEnv(t)
+			if tc.rec != nil {
+				env.setSessionMetadata(&session, tc.rec)
+			}
+			trace := newPoolDesiredStateTestTrace("worker")
+			reconcileTraced(env, []beads.Bead{session}, trace)
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rolled := got.Status == "closed"; rolled != tc.wantRollback {
+				t.Fatalf("rolled back = %v, want %v; stderr=%s", rolled, tc.wantRollback, env.stderr.String())
+			}
+			if !tc.wantRollback {
+				for _, r := range trace.records {
+					if r.OutcomeCode == TraceOutcomeStartInFlight && r.Fields["lease"] != string(ownStartLeaseHeld) {
+						t.Fatalf("deferral lease = %v, want %q", r.Fields["lease"], ownStartLeaseHeld)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce pins a
+// lease probe that fails: an unverifiable lease may be a live start's, so the
+// row is held open (fail closed), the hold is warned once per row per
+// episode with its error, and the deferral's trace records the lease as
+// unverifiable. An episode that begins inside the window and continues past
+// it with the probe failing warns once; so does one that begins failing.
+// Once the lease reads free, the rollback applies.
+func TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce(t *testing.T) {
+	env, session := newAlivePendingCreateEnv(t)
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-2 * time.Second).UTC().Format(time.RFC3339),
+	})
+	tick := func(trace *sessionReconcilerTraceCycle) {
+		cur, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reconcileTraced(env, []beads.Bead{cur}, trace)
+	}
+	tick(newPoolDesiredStateTestTrace("worker")) // inside the window
+	if strings.Contains(env.stderr.String(), leaseWarning) {
+		t.Fatalf("warned inside the window, where the lease is not read; stderr=%s", env.stderr.String())
+	}
+	env.clk.Advance(30 * time.Minute)
+	blockLeaseLocks(t, env.city)
+	for i := 1; i <= 3; i++ {
+		trace := newPoolDesiredStateTestTrace("worker")
+		tick(trace)
 		if got, _ := env.store.Get(session.ID); got.Status == "closed" {
-			t.Fatalf("tick %d: rolled back while the lease could not be read; stderr=%s", tick, env.stderr.String())
+			t.Fatalf("tick %d: rolled back while the lease could not be verified; stderr=%s", i, env.stderr.String())
+		}
+		if n := inFlightDeferrals(trace); n != 1 {
+			t.Fatalf("tick %d: deferrals = %d, want 1", i, n)
+		}
+		for _, r := range trace.records {
+			if r.OutcomeCode == TraceOutcomeStartInFlight && r.Fields["lease"] != string(ownStartLeaseUnverifiable) {
+				t.Fatalf("tick %d: deferral lease = %v, want %q", i, r.Fields["lease"], ownStartLeaseUnverifiable)
+			}
 		}
 	}
-	if n := strings.Count(env.stderr.String(), "its runtime lease could not be read"); n != 1 {
+	if n := strings.Count(env.stderr.String(), leaseWarning); n != 1 {
 		t.Fatalf("lease warnings = %d, want 1 for the episode; stderr=%s", n, env.stderr.String())
 	}
-	if err := os.Remove(locks); err != nil {
+	if !strings.Contains(env.stderr.String(), "creating lock dir") {
+		t.Fatalf("the warning does not carry the read error; stderr=%s", env.stderr.String())
+	}
+	if err := os.Remove(citylayout.SessionNameLocksDir(env.city)); err != nil {
 		t.Fatal(err)
 	}
-	env.reconcile([]beads.Bead{session})
+	tick(newPoolDesiredStateTestTrace("worker"))
 	if got, _ := env.store.Get(session.ID); got.Status != "closed" {
 		t.Fatalf("readable, unheld lease: status=%q, want rolled back; stderr=%s", got.Status, env.stderr.String())
+	}
+
+	// An episode that begins with the probe already failing.
+	env2, session2 := newAlivePendingCreateEnv(t)
+	blockLeaseLocks(t, env2.city)
+	for range 3 {
+		cur, _ := env2.store.Get(session2.ID)
+		reconcileTraced(env2, []beads.Bead{cur}, newPoolDesiredStateTestTrace("worker"))
+	}
+	if got, _ := env2.store.Get(session2.ID); got.Status == "closed" {
+		t.Fatalf("fresh episode: rolled back while the lease could not be verified; stderr=%s", env2.stderr.String())
+	}
+	if n := strings.Count(env2.stderr.String(), leaseWarning); n != 1 {
+		t.Fatalf("fresh episode: lease warnings = %d, want 1; stderr=%s", n, env2.stderr.String())
+	}
+}
+
+// TestStartHolderLiveErrNamesWhatItCannotProbe pins startHolderLiveErr's
+// unprobeable branches: each reads held (the reaper's bool form keeps them
+// held) and names its reason.
+func TestStartHolderLiveErrNamesWhatItCannotProbe(t *testing.T) {
+	info := sessionpkg.Info{ID: "gc-1", SessionName: "worker"}
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+		city  string
+		info  sessionpkg.Info
+	}{
+		{"no store", nil, t.TempDir(), info},
+		{"a relative city path", beads.NewMemStore(), "city", info},
+		{"no session name", beads.NewMemStore(), t.TempDir(), sessionpkg.Info{ID: "gc-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			held, err := startHolderLiveErr(tc.store, tc.city, tc.info)
+			if !held || err == nil {
+				t.Fatalf("startHolderLiveErr = (%v, %v), want held with an error", held, err)
+			}
+			if !startHolderLive(tc.store, tc.city, tc.info) {
+				t.Fatal("startHolderLive reads it free; want held")
+			}
+		})
 	}
 }
