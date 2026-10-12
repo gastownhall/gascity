@@ -2405,6 +2405,11 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		return startCandidate{info: sessiontest.SeedBead(t, session), tp: tp}
 	}
 	limiter := newAsyncStartLimiter(1)
+	// released closes once the first start's goroutine has committed and
+	// released its limiter slot (the follow-up runs right after the
+	// release): the second start may wait for that, never for a state the
+	// commit writes before the release (mc-no7bn).
+	released := make(chan struct{})
 	first := makeCandidate("worker-1")
 	second := makeCandidate("worker-2")
 
@@ -2426,6 +2431,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
 		withAsyncStartTracker(starts),
+		withAsyncStartFollowUp(func() { close(released) }),
 	); got != 1 {
 		t.Fatalf("first woken = %d, want 1", got)
 	}
@@ -2460,20 +2466,13 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		t.Fatalf("deferred last_woke_at = %q, want empty until limiter slot is reserved", got)
 	}
 	sp.release("worker-1")
-	deadline := time.After(2 * time.Second)
-	for {
-		updated, err := store.Get(first.info.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if updated.Metadata["state"] == "active" {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("first async start did not commit active state; metadata=%v", updated.Metadata)
-		case <-time.After(10 * time.Millisecond):
-		}
+	select {
+	case <-released:
+	case <-time.After(hangBudget):
+		t.Fatal("the first async start never released its limiter slot")
+	}
+	if updated, err := store.Get(first.info.ID); err != nil || updated.Metadata["state"] != "active" {
+		t.Fatalf("first async start did not commit active state before its release; metadata=%v err=%v", updated.Metadata, err)
 	}
 	if got := executePlannedStartsTraced(
 		context.Background(),
