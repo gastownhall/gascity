@@ -125,7 +125,7 @@ func gcSweepSessionBeadsAt(store beads.Store, sw *SeatWork, sessionInfos []sessi
 		if info.Closed {
 			continue
 		}
-		if !closeSeat(store, sw, info, closeWhy{reason: "gc_swept", gate: closeGated}, now.UTC(), nil) {
+		if !closeSeat(store, sw, info, closeWhy{reason: "gc_swept", gate: closeFreeSlot}, now.UTC(), nil) {
 			continue
 		}
 		closed = append(closed, info.ID)

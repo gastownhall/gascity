@@ -1782,7 +1782,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		canonical, ok := bySessionName[sn]
 		if ok && canonical.ID != b.ID {
-			if closeSeat(store, sw, sessionInfoFromBead(b), closeWhy{reason: "duplicate", gate: closeDuplicate}, clk.Now().UTC(), stderr) {
+			if closeSeat(store, sw, sessionInfoFromBead(b), closeWhy{reason: "duplicate", gate: closeGated}, clk.Now().UTC(), stderr) {
 				openBeads[i].Status = "closed"
 			}
 		}
@@ -1943,7 +1943,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
 						continue
 					}
-					if closeSeat(store, sw, sessionInfoFromBead(open), closeWhy{reason: "duplicate", gate: closeDuplicate}, now, stderr) {
+					if closeSeat(store, sw, sessionInfoFromBead(open), closeWhy{reason: "duplicate", gate: closeGated}, now, stderr) {
 						openBeads[i].Status = "closed"
 					}
 				}

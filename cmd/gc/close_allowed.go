@@ -3,26 +3,28 @@ package main
 // The one close precondition (ARCH-RESTRUCTURE-2 §5.2 R8b, §5.3 R9 piece C,
 // mc-zndi7.98). Every legacy close goes through closeSeat:
 //
-//  1. the row's Disposition.KeepsSlot is false (an operator's suspend keeps
-//     its slot, §12.2 row 27);
-//  2. a work-gated close: no pending request the controller honors (an
-//     explicit wake_request, restart_requested);
-//  3. a work-gated close: the seat holds no open or in_progress work under
+//  1. a work-gated close: the seat holds no open or in_progress work under
 //     its ReleaseScope, on the tick's SeatWork read and again at the close
 //     (lateSeatWork), the scope the close cascade releases on (SS-4);
-//  4. Store.CommitClose lands (legacy.close).
+//  2. the undesired pool row's close (closeFreeSlot) alone: the
+//     row's Disposition.KeepsSlot is false (an operator's suspend keeps its
+//     slot, §12.2 row 27), the one change from legacy it declares;
+//  3. Store.CommitClose lands (legacy.close). Its premise refuses a wake or
+//     restart request that lands after the decision; a request already on
+//     the row does not refuse (nothing consumes one on an undesired row),
+//     and D7 rule 4 stays the drain finalize's.
 //
-// A failed-create row takes neither 1 nor 2: legacy closed it whatever held
-// it. A claim no lane serves never refuses a close (O5, revised): it stays
-// on the closed row and the cascade raises session.stranded_claims. v2's
-// close (A21) shares the pure part, closePermitted, and keeps its own
-// transaction close as its CommitClose. The pending-create rollback
+// A claim no lane serves never refuses a close (O5, revised): it stays on the
+// closed row and the cascade raises session.stranded_claims. v2's close (A21)
+// shares the pure part, closePermitted, and keeps its own transaction close
+// as its CommitClose. The pending-create rollback
 // (RollbackPendingCreateAtomically) keeps its own premise, the create lease.
+// A refusal is logged once per episode, with its cause.
 
 import (
 	"fmt"
 	"io"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -34,26 +36,24 @@ type closeGate uint8
 
 const (
 	// closeGated is a close a gate decided on "this seat holds nothing":
-	// all four conditions.
+	// conditions 1 and 3.
 	closeGated closeGate = iota + 1
-	// closeDuplicate is closeGated without the request condition: legacy's
-	// duplicate close never read one, and a stale wake request must not keep
-	// a duplicate seat open.
-	closeDuplicate
+	// closeFreeSlot is the undesired pool row's close (MAINT-051's sweep,
+	// gc_swept, and the reconciler's not-running undesired close of a pool
+	// row): closeGated, and an operator's suspend keeps the slot.
+	closeFreeSlot
 	// closeReleasing is a close that releases the seat's work instead of
 	// gating on it (a corpse, a stranded repair, a stale reap, a phantom, an
-	// orphan's unserved claims): conditions 1 and 4.
+	// orphan's unserved claims): condition 3.
 	closeReleasing
-	// closeRollback is the failed create of a row this pass created:
-	// condition 4 alone.
+	// closeRollback is a failed create's close: condition 3, with the
+	// failed-create terminal patch.
 	closeRollback
 )
 
-// Close refusal causes; causeHasWork is the drain's.
-const (
-	causeKeepsSlot      = "keeps-slot"      // an operator's suspend keeps the slot
-	causeRequestPending = "request-pending" // a wake or restart request the controller honors
-)
+// causeKeepsSlot refuses a free-slot close: an operator's suspend keeps the
+// slot. causeHasWork is the drain's.
+const causeKeepsSlot = "keeps-slot"
 
 // closeWhy is why a legacy close closes: its reason, its gate, a gate's own
 // work filter (the drain finalize excludes the seat's own drain step), and
@@ -69,27 +69,13 @@ type closeWhy struct {
 // shares: the cause refusing a close of info through gate, given whether a
 // work-gated close's seat holds work, or "" when nothing refuses it.
 func closePermitted(info sessionpkg.Info, gate closeGate, work bool) string {
-	failed := isFailedCreateSessionInfo(info)
 	switch {
-	case gate == closeRollback:
-		return ""
-	case !failed && sessionpkg.DispositionOfInfo(info).KeepsSlot():
+	case gate == closeFreeSlot && !isFailedCreateSessionInfo(info) && sessionpkg.DispositionOfInfo(info).KeepsSlot():
 		return causeKeepsSlot
-	case gate == closeReleasing:
-		return ""
-	case gate == closeGated && !failed && closeRequestPending(info):
-		return causeRequestPending
-	case work:
+	case (gate == closeGated || gate == closeFreeSlot) && work:
 		return causeHasWork
 	}
 	return ""
-}
-
-// closeRequestPending reports a request the controller honors: an explicit
-// wake request or a restart request.
-func closeRequestPending(info sessionpkg.Info) bool {
-	return strings.TrimSpace(info.WakeRequest) == string(sessionpkg.WakeCauseExplicit) ||
-		strings.TrimSpace(info.RestartRequested) == "true"
 }
 
 // closeAllowed is a legacy close's precondition short of its commit: the
@@ -97,7 +83,7 @@ func closeRequestPending(info sessionpkg.Info) bool {
 // sw, then the close-time re-read; a read that fails refuses (has-work, with
 // its error).
 func closeAllowed(sw *SeatWork, info sessionpkg.Info, why closeWhy) (string, error) {
-	if cause := closePermitted(info, why.gate, false); cause != "" || why.gate == closeReleasing || why.gate == closeRollback {
+	if cause := closePermitted(info, why.gate, false); cause != "" || why.gate != closeGated && why.gate != closeFreeSlot {
 		return cause, nil
 	}
 	scope := releaseScope(info, sw.Legs().cfg)
@@ -125,13 +111,42 @@ func closeSeat(store beads.Store, sw *SeatWork, info sessionpkg.Info, why closeW
 	}
 	cause, err := closeAllowed(sw, info, why)
 	switch {
-	case cause != "" && err != nil:
+	case !closeRefusals.note(info.ID, cause):
+	case err != nil:
 		fmt.Fprintf(stderr, "session beads: close of %s refused (%s): %v\n", info.ID, cause, err) //nolint:errcheck
-		return false
+	default:
+		fmt.Fprintf(stderr, "session beads: close of %s refused (%s)\n", info.ID, cause) //nolint:errcheck
+	}
+	switch {
 	case cause != "":
 		return false
 	case why.gate == closeRollback, why.gate != closeReleasing && isFailedCreateSessionInfo(info):
 		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
 	return closeBeadPreservingAssignees(store, sw, info, why.reason, why.preserve, now, stderr)
+}
+
+// closeRefusals remembers each row's last close refusal, so closeSeat logs a
+// refusal once per episode: when its cause first appears or changes.
+var closeRefusals = closeRefusalLog{last: map[string]string{}}
+
+type closeRefusalLog struct {
+	mu   sync.Mutex
+	last map[string]string
+}
+
+// note records id's refusal cause ("" for an allowed close, which ends the
+// episode) and reports whether it starts or changes one.
+func (l *closeRefusalLog) note(id, cause string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if cause == "" {
+		delete(l.last, id)
+		return false
+	}
+	if l.last[id] == cause {
+		return false
+	}
+	l.last[id] = cause
+	return true
 }

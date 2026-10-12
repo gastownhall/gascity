@@ -2713,7 +2713,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closed := closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeGated}, clk.Now().UTC(), stderr)
+					// An undesired pool row's close keeps an operator's suspend
+					// (closeFreeSlot, §12.2 #27); any other row's closes as legacy's.
+					gate := closeGated
+					if isPoolManagedSessionInfo(infoByID[id]) {
+						gate = closeFreeSlot
+					}
+					closed := closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
 					if !closed && reason == "orphaned" {
 						// The guard refused because the seat still holds work. Nothing
 						// else can resolve that: the wake path is blocked on the orphaned
@@ -2728,7 +2734,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if released := releaseConfirmedOrphanSessionWork(cfg, sw.Legs().workStore(), sw.Legs().rigs, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
 						}
-						closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeGated}, clk.Now().UTC(), stderr)
+						closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
 						// What the release kept for want of a lane does not keep the
 						// seat (O5, revised): its agent is gone, the claims stay on the
 						// closed row, and the cascade alerts. A claim a lane serves (one

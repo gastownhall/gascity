@@ -282,14 +282,13 @@ func closeEffectCases(t *testing.T, bare bool) {
 			t.Fatalf("row %s %v, want closed with every hold cleared", b.Status, b.Metadata)
 		}
 	})
-	t.Run("a pending wake request holds the close (closePermitted)", func(t *testing.T) {
-		c := mk(t, livenessGone, desireDrain, "state", "asleep", "wake_request", "explicit")
-		c.entry().DrainReason = drainOrphaned
-		if s := c.run(t, gone().tmux()); s.Outcome != settledRefused || s.Cause != causeRequestPending {
-			t.Fatalf("settlement %+v, want refused request-pending", s)
-		}
-		if b := c.row(t); b.Status == "closed" {
-			t.Fatalf("row %s, want open", b.Status)
+	t.Run("a wake or restart request on the row holds no close", func(t *testing.T) {
+		for _, req := range [][]string{{"wake_request", "explicit"}, {"restart_requested", "true"}} {
+			c := mk(t, livenessGone, desireDrain, "state", "asleep", req[0], req[1])
+			c.entry().DrainReason = drainOrphaned
+			if s := c.run(t, gone().tmux()); s.Outcome != settledLanded || !s.Closed {
+				t.Fatalf("%s: settlement %+v, want the close landed", req[0], s)
+			}
 		}
 	})
 	t.Run("work holds the close, with no lease taken", func(t *testing.T) {

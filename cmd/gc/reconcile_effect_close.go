@@ -40,8 +40,7 @@ import (
 //     session.stranded (SESS-624), unless every claim's detached probe still
 //     reports alive.
 //  3. The premise close, through the shared precondition (closePermitted):
-//     no operator suspend keeps the slot, no pending wake or restart request,
-//     and L5 must read Free, except for a SESS-080 phantom, whose work is the
+//     L5 must read Free, except for a SESS-080 phantom, whose work is the
 //     configured identity's; a repair, whose release decided; and an
 //     orphaned orphan whose remaining claims no lane serves (O5, revised).
 //     The terminal patch is the re-decided intent's.
