@@ -255,6 +255,25 @@ func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID s
 // required, holding the awake session row "worker" (generation 3, token
 // tok-a). reconciler is its [daemon] session_reconciler; admitV2 sets the
 // developer override drainAckCityMode latches with.
+// freshDrainAckRow reads row id of drainAckCity's city through a freshly
+// opened store handle.
+func freshDrainAckRow(t *testing.T, city, id string) beads.Bead {
+	t.Helper()
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(city, io.Discard)
+	if err != nil {
+		t.Fatalf("load city: %v", err)
+	}
+	store, err := openCityStoreAtWithConfig(city, cfg)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return b
+}
+
 func drainAckCity(t *testing.T, reconciler string, admitV2 bool) (string, beads.Store, string) {
 	t.Helper()
 	city := t.TempDir()
@@ -598,8 +617,8 @@ func TestRuntimeDrainAckV2RealReleaseBeforeRowCAS(t *testing.T) {
 }
 
 // TestRuntimeUndrainModeSwitch drives runtimeUndrain over temp cities: a
-// legacy city is doRuntimeUndrain and leaves the row untouched; a v2 city
-// also clears the row ack. Kills: mode mutants on undrain, and a v2 undrain
+// legacy city is doRuntimeUndrain's output and also clears the row ack (a
+// v2 run's leftover, PAR-FLOORACK round 3); a v2 city clears it too. Kills: mode mutants on undrain, and a v2 undrain
 // that leaves the row ack behind.
 func TestRuntimeUndrainModeSwitch(t *testing.T) {
 	for _, city := range []struct {
@@ -608,7 +627,7 @@ func TestRuntimeUndrainModeSwitch(t *testing.T) {
 		admitV2    bool
 		wantAck    bool
 	}{
-		{name: "legacy", wantAck: true},
+		{name: "legacy"},
 		{name: "v2", reconciler: "v2", admitV2: true},
 	} {
 		t.Run(city.name, func(t *testing.T) {
@@ -640,7 +659,7 @@ func TestRuntimeUndrainModeSwitch(t *testing.T) {
 			if code != wantCode || out != wantOut || errOut != wantErr || len(evs) != len(wantEvents) {
 				t.Errorf("undrain = (%d, %q, %q, %d events), want doRuntimeUndrain's (%d, %q, %q, %d)", code, out, errOut, len(evs), wantCode, wantOut, wantErr, len(wantEvents))
 			}
-			if got := rowAck(t, store, id) != noRowAck; got != city.wantAck {
+			if got := freshDrainAckRow(t, cityPath, id).Metadata[sessionpkg.DrainAckIncarnationKey] != ""; got != city.wantAck {
 				t.Errorf("row ack present = %v, want %v", got, city.wantAck)
 			}
 		})
@@ -675,14 +694,15 @@ func TestRuntimeDrainModeSwitch(t *testing.T) {
 			if code := runtimeDrain(dops, sp, events.NewFake(), target, false, &stdout, &stderr); code != 0 || !dops.draining["worker"] {
 				t.Fatalf("drain = %d (draining %v), want 0 with the env flag; stderr=%s", code, dops.draining["worker"], stderr.String())
 			}
-			b, _ := store.Get(id)
+			_ = store // the long-lived handle can miss the CLI's write (FileStore skips a reload on an unchanged size and mtime)
+			b := freshDrainAckRow(t, cityPath, id)
 			if got := b.Metadata[sessionpkg.OperatorDrainKey]; got != city.want || b.Metadata[sessionpkg.DrainIntentReasonKey] != "" {
 				t.Fatalf("row mark = %q (request %q), want %q and no request", got, b.Metadata[sessionpkg.DrainIntentReasonKey], city.want)
 			}
 			if code := runtimeUndrain(dops, sp, events.NewFake(), target, false, &stdout, &stderr); code != 0 {
 				t.Fatalf("undrain = %d; stderr=%s", code, stderr.String())
 			}
-			if b, _ := store.Get(id); b.Metadata[sessionpkg.OperatorDrainKey] != "" {
+			if b := freshDrainAckRow(t, cityPath, id); b.Metadata[sessionpkg.OperatorDrainKey] != "" {
 				t.Fatalf("after undrain: row mark %q, want none", b.Metadata[sessionpkg.OperatorDrainKey])
 			}
 		})

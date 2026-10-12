@@ -442,11 +442,13 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 	return runtimeUndrain(newDrainOps(sp), sp, openCityRecorder(stderr), target, jsonOutput, stdout, stderr)
 }
 
-// runtimeUndrain decides the city's mode once. A legacy city runs
-// doRuntimeUndrain exactly as before E3; a v2 city also clears the row ack.
+// runtimeUndrain clears the runtime drain keys and, in any city, the row's
+// drain-ack and operator drain mark: a v2 city fails on a row clear that
+// fails, a legacy city (which reads neither) only warns. A path that is not
+// a city runs doRuntimeUndrain.
 func runtimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
 	cfg, strict := drainAckCityMode(target.cityPath)
-	if !strict {
+	if cfg == nil {
 		return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
 	clearRow := func() error {
@@ -455,6 +457,18 @@ func runtimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder, tar
 			return err
 		}
 		return errors.Join(clearDrainAckRow(store, id), clearOperatorDrainRow(store, id))
+	}
+	if !strict {
+		// A legacy city ignores the row keys, but clears them too, so a mark
+		// left by a v2 run (a mode switch, a config that failed to load) does
+		// not outlive the undrain; a failure there only warns.
+		legacy := clearRow
+		clearRow = func() error {
+			if err := legacy(); err != nil {
+				fmt.Fprintf(stderr, "gc runtime undrain: warning: clearing the row's drain keys: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			return nil
+		}
 	}
 	return undrainRuntime(dops, clearRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
