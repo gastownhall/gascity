@@ -324,6 +324,9 @@ var registry = slices.Concat([]Field{
 	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
+	// The operator's drain (`gc runtime drain` in a v2 city, PAR-FLOORACK):
+	// it explains an agent's ack (A11) and nothing else reads it.
+	{Key: OperatorDrainKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op(srcStopKeys, "operatorDrainPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(op(srcStopKeys, "operatorUndrainPatch"), v2(srcStopKeys, "stopEndPatch"), opRestartConfirm)},
 
 	// Counters.
 	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},

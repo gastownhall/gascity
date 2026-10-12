@@ -593,6 +593,39 @@ func TestTxCallFactsSurviveALaterRefusal(t *testing.T) {
 	}
 }
 
+// Kills a Moved hook that may write on a row that moved, or that is not
+// asked (v5 S2's lost commit): a moved premise runs the hook, whose refusal
+// stands, whose write fails the effect with nothing written, and whose
+// "not mine" is the premise's refusal.
+func TestTxMovedHook(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		step  txStep
+		ok    bool
+		cause string
+	}{
+		{"refuses", txStep{Refuse: "mine"}, true, "mine"},
+		{"writes", txStep{Write: session.MetadataPatch{txKeyA: "1"}}, true, causeStep},
+		{"writes a cell", txStep{Class: session.CellInfo(session.Info{}, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: gatherNow.Add(time.Hour)}, gatherNow)}, true, causeStep},
+		{"writes a title", txStep{Title: new(string)}, true, causeStep},
+		{"writes a type", txStep{Type: new(string)}, true, causeStep},
+		{"writes a label", txStep{AddLabels: []string{"x"}}, true, causeStep},
+		{"closes", txStep{Terminal: session.MetadataPatch{"state": "closed"}}, true, causeStep},
+		{"ends the effect", txStep{Done: true}, true, causeStep},
+		{"ends after its Call", txStep{Last: true}, true, causeStep},
+		{"declines", txStep{}, false, causePremise},
+	} {
+		k := newTxKit(t)
+		k.outside("generation", "2")
+		var seen []string
+		sec := section{Decide: mark(txKeyB), Moved: func(_ txView, _ session.Info, moved []string) (txStep, bool) { seen = moved; return c.step, c.ok }}
+		s := k.run(context.Background(), effectSpec{needs: needs{NameLock: true}, sections: []section{sec}})
+		if s.Cause != c.cause || len(seen) == 0 || k.meta(txKeyA) != "" || k.meta(txKeyB) != "" {
+			t.Fatalf("%s: settlement %+v moved %v, want %s with nothing written", c.name, s, seen, c.cause)
+		}
+	}
+}
+
 // Kills a premise that checks too little: a fresh row that moved its
 // incarnation, any lifecycle fact (a wake_request at the same generation),
 // its runtime name, or closed, refuses without Decide; after a section
@@ -905,6 +938,10 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		stops = append(stops, name+"/"+identity+"/"+reason)
 	}
 	t.Cleanup(func() { recordAgentStop = savedS })
+	var idleKills []string
+	savedI := recordAgentIdleKill
+	recordAgentIdleKill = func(_ context.Context, agent string) { idleKills = append(idleKills, agent) }
+	t.Cleanup(func() { recordAgentIdleKill = savedI })
 	f := effectFacts{
 		Events:      []events.Event{{Type: "session.test"}},
 		Transition:  &drainTransition{Name: "s", Reason: "idle", Transition: "cancel"},
@@ -913,7 +950,8 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		Quarantined: "worker-1",
 		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
 		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
-		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok"},
+		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok", Crash: &events.Event{Type: events.SessionCrashed}, Recycle: true},
+		IdleKilled:  "worker",
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -924,7 +962,8 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
 		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
-		"Classified":  p.classified[rowKey{ID: "gc-1"}] == "tok",
+		"Classified":  p.classified[rowKey{ID: "gc-1"}].Token == "tok" && p.classified[rowKey{ID: "gc-1"}].Crash != nil && p.classified[rowKey{ID: "gc-1"}].Recycle,
+		"IdleKilled":  slices.Equal(idleKills, []string{"worker"}),
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

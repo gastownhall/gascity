@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -361,6 +362,7 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	lane.status = inventoryLaneStatus{at: finished, reason: reason, ran: true, seq: report.seq, result: result, duration: report.duration, v2Fields: map[string]any{
 		"process_probe_ms": report.processProbe.Milliseconds(), "process_probes": report.processProbes,
 		"activity_read_ms": report.activityRead.Milliseconds(), "activity_reads": report.activityReads,
+		"content_read_ms": report.contentRead.Milliseconds(), "content_reads": report.contentReads,
 		"env_reads": report.envReads, "env_read_backlog": report.envBacklog,
 	}}
 	lane.statusMu.Unlock()
@@ -386,8 +388,11 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 		backends[i] = classifyInventoryBackend(leaf)
 	}
 
-	// The batched inventory reads and the process probes share one bound.
-	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound)
+	// The batched inventory reads and the process probes share one bound,
+	// less the content reads' reserved share.
+	want := l.cache.contentWanted()
+	reserve := contentReserve(want)
+	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound-reserve)
 	defer cancel()
 	phase := l.clock.Now()
 	attrs, hosts, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
@@ -405,6 +410,11 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	phase = l.clock.Now()
 	report.activityReads = readActivities(enrichCtx, attrs, hosts, concurrency)
 	report.activityRead = l.clock.Now().Sub(phase)
+	phase = l.clock.Now()
+	contentCtx, cancelContent := context.WithTimeout(ctx, reserve+remaining(enrichCtx))
+	report.contentReads = readContents(contentCtx, attrs, hosts, want, concurrency)
+	cancelContent()
+	report.contentRead = l.clock.Now().Sub(phase)
 
 	pass := InventoryPass{
 		Epoch:       l.cache.epoch,
@@ -991,6 +1001,84 @@ func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 	return reads
 }
 
+// readContents reads, within ctx (the content reads' share of the pass's
+// enrichment bound, contentReserve), the pane content of each enriched name
+// the planner wants (WantContent: the rows on A15's content clock) on a
+// leaf that can snapshot it, at most concurrency at a time, and returns
+// the reads it made; a read past ctx stays unread.
+func readContents(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, want map[string]bool, concurrency int) int {
+	type answer struct {
+		name string
+		got  contentState
+	}
+	var names []string
+	for name := range want {
+		_, enriched := attrs[name]
+		if _, ok := hosts[name].(runtime.IdleSnapshotProvider); ok && enriched {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(snap runtime.IdleSnapshotProvider) {
+			defer func() { <-sem }()
+			done := make(chan contentState, 1)
+			go func() { done <- snapshotContent(snap, name) }()
+			select {
+			case got := <-done:
+				answers <- answer{name, got}
+			case <-ctx.Done():
+				answers <- answer{name, contentUnread}
+			}
+		}(hosts[name].(runtime.IdleSnapshotProvider))
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.Content = got.got
+		attrs[got.name] = a
+	}
+	return reads
+}
+
+// snapshotContent is one pane snapshot, classified as legacy's
+// checkIdleByContent reads it; a panicking read is an erring one.
+func snapshotContent(snap runtime.IdleSnapshotProvider, name string) (got contentState) {
+	got = contentError
+	defer func() { _ = recover() }()
+	idle, err := snap.SnapshotIdle(name)
+	switch {
+	case errors.Is(err, runtime.ErrIdleIndeterminate):
+		return contentIndeterminate
+	case err != nil:
+		return contentError
+	case idle:
+		return contentIdle
+	}
+	return contentBusy
+}
+
+// contentReserve is the share of the enrichment bound held back for the
+// content reads when the planner wants any (v5.9s): the reads before them
+// stop that much early.
+func contentReserve(want map[string]bool) time.Duration {
+	if len(want) == 0 {
+		return 0
+	}
+	return inventoryEnrichBound / 4
+}
+
 // probedIncarnation reports whether a probe answered for incarnation: the
 // object it observed (ObjectID, ObjectCreated) leads the incarnation, as in
 // tmux's "#{session_id}:#{session_created}:#{pane_pid}". A probe that names
@@ -1075,11 +1163,13 @@ type inventoryPassReport struct {
 	envRead       time.Duration
 	processProbe  time.Duration
 	activityRead  time.Duration
+	contentRead   time.Duration
 	enrichErrors  []string
 	envReads      int
 	envBacklog    int
 	processProbes int
 	activityReads int
+	contentReads  int
 	flips         int
 	alerts        []string
 	snapshot      *ObservationSnapshot
@@ -1228,4 +1318,13 @@ func inventoryHealthSummary(health map[string]BackendHealth) string {
 		parts = append(parts, inventoryLabelForTrace(label)+"="+health[label].State)
 	}
 	return strings.Join(parts, ",")
+}
+
+// remaining is what is left of ctx's deadline, zero when it has passed.
+func remaining(ctx context.Context) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return max(time.Until(dl), 0)
 }

@@ -1943,27 +1943,14 @@ wait_deleted_data_inodes() {
     return 1
 }
 
-# kill_imposter kills a process that isn't our dolt server.
-kill_imposter() {
-    local pid="$1"
-    [ -n "$pid" ] || return 0
-
-    echo "killing imposter dolt server (PID $pid) on port $DOLT_PORT" >&2
-    kill "$pid" 2>/dev/null || return 0
-
-    # Wait up to 5s for graceful shutdown.
-    local waited=0
-    while [ "$waited" -lt 5 ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-
-    # Force kill.
-    kill -9 "$pid" 2>/dev/null || true
-    sleep 1
+# leave_foreign_port_holder_alone handles a listener on DOLT_PORT that is not
+# this scope's dolt server. It never signals the holder: it says so on stderr
+# and moves DOLT_PORT to the next free port, so the server starts beside it.
+# Only a server verify_our_server recognizes as ours is ever stopped here.
+leave_foreign_port_holder_alone() {
+    local holder="$1"
+    echo "gc-beads-bd: port $DOLT_PORT is held by pid $holder, which is not this scope's dolt server; leaving it alone and starting on another port." >&2
+    DOLT_PORT=$(next_available_port $((DOLT_PORT + 1)))
 }
 
 # dolt_data_lock_holder prints the path of the first dolt exclusive store
@@ -3113,8 +3100,7 @@ op_start() {
                     die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
             else
                 if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
-                    sleep 1
+                    leave_foreign_port_holder_alone "$holder"
                 fi
             fi
         fi
@@ -3141,11 +3127,14 @@ op_start() {
                 echo "$holder" > "$PID_FILE"
                 save_state "$holder" true
                 exit 0
-            else
-                # Imposter or stale local server on our port — kill it.
-                if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
-                    sleep 1
+            elif [ -z "$gc_helper_bin" ]; then
+                if [ "$holder_owned" = true ]; then
+                    # Our server, still running on deleted data inodes — restart it.
+                    graceful_stop_owned_pid "$holder" || \
+                        die "could not stop stale dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
+                else
+                    # Someone else's listener on our port — never signal it.
+                    leave_foreign_port_holder_alone "$holder"
                 fi
             fi
         fi
@@ -3251,7 +3240,7 @@ op_start() {
         if [ -f "$LOG_FILE" ]; then
             startup_output=$(tail -c +$((log_offset + 1)) "$LOG_FILE" 2>/dev/null || true)
         fi
-        if printf '%s' "$startup_output" | grep -qi 'address already in use'; then
+        if printf '%s' "$startup_output" | grep -qiE 'address already in use|port [0-9]+ already in use'; then
             launch_attempt=$((launch_attempt + 1))
             DOLT_PORT=$(next_available_port $((DOLT_PORT + 1)))
             continue

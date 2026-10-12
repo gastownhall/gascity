@@ -688,6 +688,90 @@ work:gc-2:state=ready
 row:gc-1:detached_at=T+1m20s
 row:gc-1:state=awake
 row:gc-1:stranded_event_emitted_at=
+=== an idle named session holding assigned work defers until its streak is exhausted
+## 0 seed (+20s)
+@ +0s
+row:gc-c:agent_name=chat
+row:gc-c:command=true
+row:gc-c:continuation_epoch=1
+row:gc-c:currently_processing_bead_id=gw-1
+row:gc-c:effective_sleep_after_idle=off
+row:gc-c:requested_sleep_after_idle=off
+row:gc-c:session_origin=named
+row:gc-c:sleep_capability=full
+row:gc-c:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=chat
+row:gc-c:sleep_policy_source=legacy_off
+row:gc-c:synced_at=T+0s
+row:gc-c:work_dir=<city>
+work:gw-1:gc.session_name=test-city--chat
+work:gw-1:gc.work_dir=<city>
+## 1 active (+40s)
+~ op
+## 2 idle past idle_timeout (+7m40s)
+@ +6m0s
+event:session.idle_killed chat null=1
+event:session.woke chat null=1
+provider:ClearScrollback test-city--chat=1
+provider:RemoveMeta test-city--chat=5
+provider:Start test-city--chat=1
+provider:Stop test-city--chat=1
+row:gc-c:awake_started_at=T+6m0s
+row:gc-c:core_hash_breakdown.AcceptStartupDialogs=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.Command=b5bea41b6c623f7c
+row:gc-c:core_hash_breakdown.CopyFiles=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.Env=<changed>
+row:gc-c:core_hash_breakdown.FPExtra=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.Lifecycle=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.MCPServers=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.MouseOn=b1865da277ec01c2
+row:gc-c:core_hash_breakdown.OverlayDir=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.OverlayProviders=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.PreStart=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.SessionSetup=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.SessionSetupScript=e3b0c44298fc1c14
+row:gc-c:core_hash_breakdown.version=v6
+row:gc-c:creation_complete_at=T+6m0s
+row:gc-c:generation=2
+row:gc-c:last_woke_at=T+6m0s
+row:gc-c:live_hash=<changed>
+row:gc-c:primed_at=T+6m0s
+row:gc-c:prompt_hash=<changed>
+row:gc-c:slept_at=T+6m0s
+row:gc-c:started_config_hash=<changed>
+row:gc-c:started_launch_hash=<changed>
+row:gc-c:started_live_hash=<changed>
+row:gc-c:started_provision_hash=<changed>
+row:gc-c:state=active
+row:gc-c:state_reason=creation_complete
+runtime:test-city--chat=id=gc-c epoch=2 token=<set> alive attached=false
+@ +6m10s
+row:gc-c:state=awake
+=== an idle named session past its idle_timeout is stopped
+## 0 seed (+20s)
+@ +0s
+row:gc-c:agent_name=chat
+row:gc-c:command=true
+row:gc-c:continuation_epoch=1
+row:gc-c:effective_sleep_after_idle=off
+row:gc-c:requested_sleep_after_idle=off
+row:gc-c:session_origin=named
+row:gc-c:sleep_capability=full
+row:gc-c:sleep_policy_fingerprint=value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=chat
+row:gc-c:sleep_policy_source=legacy_off
+row:gc-c:synced_at=T+0s
+row:gc-c:work_dir=<city>
+## 1 active (+40s)
+~ op
+## 2 idle past idle_timeout (+7m10s)
+@ +5m30s
+event:session.idle_killed chat null=1
+provider:ClearScrollback test-city--chat=1
+provider:Stop test-city--chat=1
+row:gc-c:last_woke_at=
+row:gc-c:sleep_reason=idle-timeout
+row:gc-c:slept_at=T+5m30s
+row:gc-c:state=asleep
+runtime:test-city--chat=
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
 @ +0s

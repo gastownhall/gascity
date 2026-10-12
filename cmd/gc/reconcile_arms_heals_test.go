@@ -884,13 +884,17 @@ func TestDeadRuntimeHealTakesAClassifiedDeadRuntime(t *testing.T) {
 		{"classified under another token", false, "tok-2", false, "", ""},
 		{"classified, another runtime by the fresh read", false, "tok-3", true, "", "tok-9"},
 		{"classified, the object moving across the fresh read", false, "tok-3", true, "", "moving"},
+		{"classified by the start's recycle", false, "tok-3", false, "", "recycle"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", woke)
 			id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 			c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
 			if tc.token != "" {
-				c.w.Classified = map[rowKey]string{c.k: c.k.ID + "/" + tc.token}
+				c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/" + tc.token}}
+			}
+			if tc.fresh == "recycle" { // the start's recycle classified it: no heal takes it (CONTRACT A6)
+				c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: c.k.ID + "/" + tc.token, Recycle: true}}
 			}
 			it := c.decide()
 			if got := it.Reason == decideDeadRuntimeHeal; got != tc.heal {
@@ -932,7 +936,7 @@ func TestCreatingHealTakesAClassifiedCorpse(t *testing.T) {
 		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
 		if classified {
-			c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
 		}
 		if it := c.decide(); (it.Reason == decideCreatingHeal) != classified {
 			t.Fatalf("classified %v: decideRow = (%q, %q), want the creating heal %v", classified, it.Kind, it.Reason, classified)

@@ -378,6 +378,99 @@ work:gc-3:state legacy="" v2="queued" [§12.2#58 wait-nudge-bead]
 work:gc-3:status legacy="" v2="open" [§12.2#58 wait-nudge-bead]
 work:gc-3:title legacy="" v2="nudge:wait-gc-2-0-1" [§12.2#58 wait-nudge-bead]
 work:gc-3:type legacy="" v2="chore" [§12.2#58 wait-nudge-bead]
+=== an idle named session holding assigned work defers until its streak is exhausted
+## 0 seed (+20s)
+@ +0s
+row:gc-c:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-c:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-c:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-c:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=chat" v2="" [sleep-policy-keys]
+row:gc-c:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+row:gc-c:work_dir legacy="<city>" v2="" [§12.2#51 a7-lag]
+@ +10s
+row:gc-c:synced_at legacy="T+0s" v2="T+10s" [§12.2#51 a7-lag]
+row:gc-c:work_dir resolved
+## 1 active (+40s)
+## 2 idle past idle_timeout (+7m40s)
+@ +6m0s
+event:session.woke chat null legacy="1" v2="" [idle-rewake-lag]
+provider:RemoveMeta test-city--chat legacy="5" v2="" [§12.2#38 start-meta-clears]
+provider:Start test-city--chat legacy="1" v2="" [idle-rewake-lag]
+row:gc-c:awake_started_at legacy="T+6m0s" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.AcceptStartupDialogs legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.Command legacy="b5bea41b6c623f7c" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.CopyFiles legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.Env legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.FPExtra legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.Lifecycle legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.MCPServers legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.MouseOn legacy="b1865da277ec01c2" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.OverlayDir legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.OverlayProviders legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.PreStart legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.SessionSetup legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.SessionSetupScript legacy="e3b0c44298fc1c14" v2="" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.version legacy="v6" v2="" [idle-rewake-lag]
+row:gc-c:creation_complete_at legacy="T+6m0s" v2="" [idle-rewake-lag]
+row:gc-c:generation legacy="2" v2="1" [idle-rewake-lag]
+row:gc-c:last_woke_at legacy="T+6m0s" v2="" [idle-rewake-lag]
+row:gc-c:live_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:primed_at legacy="T+6m0s" v2="" [idle-rewake-lag]
+row:gc-c:prompt_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:sleep_reason legacy="" v2="assigned-work-exhausted" [idle-rewake-lag]
+row:gc-c:started_config_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:started_launch_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:started_live_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:started_provision_hash legacy="<changed>" v2="" [idle-rewake-lag]
+row:gc-c:state legacy="active" v2="asleep" [idle-rewake-lag]
+row:gc-c:state_reason legacy="creation_complete" v2="" [idle-rewake-lag]
+runtime:test-city--chat legacy="id=gc-c epoch=2 token=<set> alive attached=false" v2="" [idle-rewake-lag]
+@ +6m10s
+event:session.woke chat null legacy="" v2="1" [idle-rewake-lag]
+provider:RemoveMeta test-city--chat resolved
+provider:Start test-city--chat legacy="" v2="1" [idle-rewake-lag]
+row:gc-c:awake_started_at legacy="T+6m0s" v2="T+6m10s" [idle-rewake-lag]
+row:gc-c:core_hash_breakdown.AcceptStartupDialogs resolved
+row:gc-c:core_hash_breakdown.Command resolved
+row:gc-c:core_hash_breakdown.CopyFiles resolved
+row:gc-c:core_hash_breakdown.Env resolved
+row:gc-c:core_hash_breakdown.FPExtra resolved
+row:gc-c:core_hash_breakdown.Lifecycle resolved
+row:gc-c:core_hash_breakdown.MCPServers resolved
+row:gc-c:core_hash_breakdown.MouseOn resolved
+row:gc-c:core_hash_breakdown.OverlayDir resolved
+row:gc-c:core_hash_breakdown.OverlayProviders resolved
+row:gc-c:core_hash_breakdown.PreStart resolved
+row:gc-c:core_hash_breakdown.SessionSetup resolved
+row:gc-c:core_hash_breakdown.SessionSetupScript resolved
+row:gc-c:core_hash_breakdown.version resolved
+row:gc-c:creation_complete_at legacy="T+6m0s" v2="T+6m10s" [idle-rewake-lag]
+row:gc-c:generation resolved
+row:gc-c:last_woke_at legacy="T+6m0s" v2="T+6m10s" [idle-rewake-lag]
+row:gc-c:live_hash resolved
+row:gc-c:primed_at legacy="T+6m0s" v2="T+6m10s" [idle-rewake-lag]
+row:gc-c:prompt_hash legacy="<changed>" v2="<changed>" [idle-rewake-lag]
+row:gc-c:sleep_reason resolved
+row:gc-c:started_config_hash resolved
+row:gc-c:started_launch_hash resolved
+row:gc-c:started_live_hash resolved
+row:gc-c:started_provision_hash resolved
+row:gc-c:state resolved
+row:gc-c:state_reason resolved
+runtime:test-city--chat resolved
+@ +6m20s
+event:session.woke chat null resolved
+provider:Start test-city--chat resolved
+=== an idle named session past its idle_timeout is stopped
+## 0 seed (+20s)
+@ +0s
+row:gc-c:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-c:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-c:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-c:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=chat" v2="" [sleep-policy-keys]
+row:gc-c:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+## 1 active (+40s)
+## 2 idle past idle_timeout (+7m10s)
 === an idle on-demand named session sleeps
 ## 0 seed (+20s)
 @ +0s

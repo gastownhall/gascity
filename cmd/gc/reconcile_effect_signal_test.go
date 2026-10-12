@@ -544,3 +544,80 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 		t.Fatalf("row %v: want the runtime started and the request begun before the lease cleared", got.Metadata)
 	}
 }
+
+// onFloor makes the entry a member of its template's min_active_sessions
+// floor (the allocator's floor set) and a Wake entry.
+func onFloor(e *selectionEntry) { e.Desired, e.Floor = desireWake, &floorView{Rank: 0, MinActive: 1} }
+
+// floorWith is onFloor with the allocation wanting d of the row.
+func floorWith(d desire) func(*selectionEntry) {
+	return func(e *selectionEntry) { onFloor(e); e.Desired = d }
+}
+
+// TestFloorAckCancels (DRAIN-010, PAR-FLOORACK; sc-j27j0d). Kills a floor
+// member's own idle ack stopping it, only for the floor to recreate it: a
+// bare ack on a floor member cancels (its half voided, nothing signaled); an
+// ack off the floor, or one a drain the controller began explains, signals;
+// an ack older than its runtime is void first.
+func TestFloorAckCancels(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		meta   []string
+		entry  func(*selectionEntry)
+		reason string
+	}{
+		{"a bare ack on a floor member", ackMeta("3"), onFloor, decideFloorAckCancel},
+		{"a bare ack off the floor", ackMeta("3"), awakeWanted, decideDrainSignal},
+		{"an ack a controller drain explains, on the floor", append(ackMeta("3"), intentBegunAt(drainConfigDrift, time.Minute)...), onFloor, decideDrainSignal + drainConfigDrift},
+		{"an ack without a time, on the floor", []string{session.DrainAckIncarnationKey, "3"}, onFloor, decideAckVoid},
+		// Legacy cancels whatever the allocation wants of a floor member (M8).
+		{"a bare ack on a Keep floor member", ackMeta("3"), floorWith(desireKeep), decideFloorAckCancel},
+		{"a bare ack on a Sleep floor member", ackMeta("3"), floorWith(desireSleep), decideFloorAckCancel},
+		{"a bare ack on a Drain floor member", ackMeta("3"), floorWith(desireDrain), decideFloorAckCancel},
+		// An operator's `gc runtime drain` explains the ack (legacy's GC_DRAIN).
+		{"an ack an operator's drain explains, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "3"), onFloor, decideDrainSignal + drainOperator},
+		{"an ack beside an operator's drain of an older generation, on the floor", append(ackMeta("3"), session.OperatorDrainKey, "2"), onFloor, decideFloorAckCancel},
+		{"a bare ack on a floor member whose runtime is dead", ackMeta("3"), func(e *selectionEntry) { onFloor(e); e.Liveness = livenessDead }, decideDrainSignal},
+	} {
+		it, _ := decideDrain(t, c.meta, c.entry)
+		switch {
+		case it.Kind != intentSignalAck || it.Reason != c.reason:
+			t.Errorf("%s: %s %q, want the ack's %q", c.name, it.Kind, it.Reason, c.reason)
+		case c.reason == decideFloorAckCancel && (it.Patch["state"] != "" || it.Patch[session.DrainAckIncarnationKey] != "" || it.Patch[session.DrainAckAtKey] != "" || len(it.Patch) != 2):
+			t.Errorf("%s: patch %v, want the ack half voided alone", c.name, it.Patch)
+		}
+	}
+}
+
+// TestFloorAckCancelKeepsTheSeatWarm (DRAIN-010, through runTx). Kills a
+// cancel that stops or marks the seat: the effect lands the ack half's
+// void on the fresh row, which is not stop-pending, and leaves the runtime
+// running; off the floor the same ack signals.
+func TestFloorAckCancelKeepsTheSeatWarm(t *testing.T) {
+	for _, floor := range []bool{true, false} {
+		entry := awakeWanted
+		if floor {
+			entry = onFloor
+		}
+		p, it, store, leaf := admittedBeginOn(t, ackMeta("3"), entry)
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, err := store.Get(it.Key.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := censusRowOf(t, got)
+		_, active := activeStop(row)
+		switch {
+		case s.Outcome != settledLanded:
+			t.Errorf("floor %t: settlement %+v, want landed", floor, s)
+		case floor && (active || isDrainAckStopPendingInfo(row.Info) || got.Metadata[session.DrainAckIncarnationKey] != "" || !leaf.IsRunning("s-gc-1")):
+			t.Errorf("floor: row %v (request active %v), running %v; want the ack canceled, the seat warm", got.Metadata, active, leaf.IsRunning("s-gc-1"))
+		case !floor && !isDrainAckStopPendingInfo(row.Info):
+			t.Errorf("off the floor: row %v, want the signal", got.Metadata)
+		case floor && (s.Facts.Transition == nil || s.Facts.Transition.Reason != "min-floor" || s.Facts.Transition.Transition != "cancel"):
+			t.Errorf("floor: transition %+v, want legacy's min-floor cancel", s.Facts.Transition)
+		case !floor && s.Facts.Transition != nil:
+			t.Errorf("off the floor: transition %+v, want none", s.Facts.Transition)
+		}
+	}
+}

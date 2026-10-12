@@ -2953,8 +2953,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// runs with no row. The start's commit settles the row.
 					// The deferral is recorded under the wake pair, not the
 					// rollback reason, so a normal start arms no auto-trace.
-					logStandingCondition(dt, stderr, id, "start_in_flight.pending_create_rollback", fmt.Sprintf(
-						"session reconciler: pending-create rollback of %s deferred: its start is in flight and the live runtime carries no identity yet", name), clk.Now())
+					// The line names why, one standing condition per reason,
+					// so a hold that moves from the window to the lease says so.
+					kind, why := "start_in_flight.pending_create_rollback", "its start is in flight"
+					switch live {
+					case ownStartLeaseHeld:
+						kind, why = "start_lease_held.pending_create_rollback", "its start holds the runtime lease"
+					case ownStartLeaseUnverifiable:
+						kind, why = "start_lease_unverifiable.pending_create_rollback", "its runtime lease cannot be verified"
+					}
+					logStandingCondition(dt, stderr, id, kind, fmt.Sprintf(
+						"session reconciler: pending-create rollback of %s deferred: %s and the live runtime carries no identity yet", name, why), clk.Now())
 					if trace != nil {
 						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": id,

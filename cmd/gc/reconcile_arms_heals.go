@@ -77,10 +77,11 @@ func (r *rowFacts) freshGoneOrClassified() bool {
 	return r.entry != nil && r.entry.Liveness == livenessDead && r.classified(r.w.Observed[r.k].Identity)
 }
 
-// classified reports that A12 classified the row's dead runtime id.
+// classified reports that A12 classified the row's dead runtime id (the
+// start's recycle records its own, which no heal takes: CONTRACT A6).
 func (r *rowFacts) classified(id runtimeIdentity) bool {
 	c, ok := r.w.Classified[r.k]
-	return ok && c == deadToken(id)
+	return ok && !c.Recycle && c.classifies(id)
 }
 
 // freshIdentity is the row's runtime identity for a fresh kind's arm (A3's

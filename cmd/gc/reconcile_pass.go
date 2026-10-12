@@ -35,6 +35,7 @@ type passTrace struct {
 	Err                string
 	Admitted, Deferred []intent
 	Rows               []rowTrace
+	IdleDefers         []rowTrace // A15's ladder deferrals, legacy's idle-timeout trace
 	Alerts             []string
 }
 
@@ -43,6 +44,7 @@ type passTrace struct {
 // name, which the trace sink files it under.
 type rowTrace struct {
 	Key                   rowKey
+	Site                  TraceSiteCode // the trace site; zero is the v2 session decision
 	Template, SessionName string
 	Reason, Outcome       string
 }
@@ -98,6 +100,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		return passResult{}
 	}
 	rec.Alerts = a.Alerts
+	rec.IdleDefers = p.idleWants(&w, &a)
 
 	running := make(map[rowKey]bool)
 	for _, f := range w.InFlight.Entries {
@@ -290,6 +293,17 @@ func (p *planner) paceIdleProbes(w *World, intents []intent, now time.Time) (kep
 		kept = append(kept, it)
 	}
 	return kept, paced
+}
+
+// idleWants advances A15's memory on the pass (setting its view on w),
+// asks the lane for the content clock's panes, and returns the ladder's
+// deferral traces.
+func (p *planner) idleWants(w *World, a *allocDecision) []rowTrace {
+	want, traces := p.idle.update(w, a, p.patrol(), p.stderr)
+	if p.observations != nil {
+		p.observations().WantContent(want)
+	}
+	return traces
 }
 
 // createInflightEntry is an admitted create's in-flight entry: its token, identity

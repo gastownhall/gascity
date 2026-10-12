@@ -226,6 +226,13 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackInFlightFence(t *testin
 				if shouldAutoArmForTrace(r.ReasonCode, r.OutcomeCode) && !tc.wantRollback {
 					t.Fatalf("a deferral armed auto-trace: %+v", r)
 				}
+				// Every deferral here is inside the window: the lease is not read.
+				if r.OutcomeCode == TraceOutcomeStartInFlight && r.Fields["lease"] != string(ownStartInWindow) {
+					t.Fatalf("deferral lease = %v, want %q", r.Fields["lease"], ownStartInWindow)
+				}
+			}
+			if !tc.wantRollback && !strings.Contains(env.stderr.String(), "deferred: its start is in flight") {
+				t.Fatalf("the deferral line does not name the in-flight start; stderr=%s", env.stderr.String())
 			}
 			if !env.sp.IsRunning("worker") {
 				t.Fatal("the rollback stopped the runtime; a foreign or deferred runtime is never stopped here")
@@ -300,6 +307,9 @@ func TestReconcileSessionBeads_LeaseHoldsTheFencePastTheWindow(t *testing.T) {
 						t.Fatalf("deferral lease = %v, want %q", r.Fields["lease"], ownStartLeaseHeld)
 					}
 				}
+				if !strings.Contains(env.stderr.String(), "deferred: its start holds the runtime lease") {
+					t.Fatalf("the deferral line does not name the held lease; stderr=%s", env.stderr.String())
+				}
 			}
 		})
 	}
@@ -328,6 +338,7 @@ func TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce(t *testi
 	if strings.Contains(env.stderr.String(), leaseWarning) {
 		t.Fatalf("warned inside the window, where the lease is not read; stderr=%s", env.stderr.String())
 	}
+	inWindow := env.stderr.Len()
 	env.clk.Advance(30 * time.Minute)
 	blockLeaseLocks(t, env.city)
 	for i := 1; i <= 3; i++ {
@@ -347,6 +358,9 @@ func TestReconcileSessionBeads_UnverifiableLeaseFailsClosedAndWarnsOnce(t *testi
 	}
 	if n := strings.Count(env.stderr.String(), leaseWarning); n != 1 {
 		t.Fatalf("lease warnings = %d, want 1 for the episode; stderr=%s", n, env.stderr.String())
+	}
+	if out := env.stderr.String()[inWindow:]; strings.Contains(out, "deferred: its start is in flight") || !strings.Contains(out, "deferred: its runtime lease cannot be verified") {
+		t.Fatalf("the deferral line must name the unverifiable lease, not an in-flight start; stderr=%s", out)
 	}
 	if !strings.Contains(env.stderr.String(), "creating lock dir") {
 		t.Fatalf("the warning does not carry the read error; stderr=%s", env.stderr.String())

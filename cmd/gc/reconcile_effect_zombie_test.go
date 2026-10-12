@@ -187,7 +187,7 @@ func TestArmZombie(t *testing.T) {
 		liveness   rowLiveness
 		desired    desire
 		info       func(*session.Info)
-		classified map[rowKey]string
+		classified map[rowKey]classifiedRuntime
 		want       bool
 	}{
 		{"dead, drained: A21 closes it unclassified", livenessDead, desireDrain, nil, nil, false},
@@ -199,8 +199,8 @@ func TestArmZombie(t *testing.T) {
 		{"dead, wanted awake", livenessDead, desireWake, nil, nil, false},
 		{"alive", livenessAlive, desireSleep, nil, nil, false},
 		{"gone", livenessGone, desireSleep, nil, nil, false},
-		{"classified", livenessDead, desireSleep, nil, map[rowKey]string{k.it.Key: "gc-1/tok"}, false},
-		{"classified, another token", livenessDead, desireSleep, nil, map[rowKey]string{k.it.Key: "gc-1/old"}, true},
+		{"classified", livenessDead, desireSleep, nil, map[rowKey]classifiedRuntime{k.it.Key: {Token: "gc-1/tok"}}, false},
+		{"classified, another token", livenessDead, desireSleep, nil, map[rowKey]classifiedRuntime{k.it.Key: {Token: "gc-1/old"}}, true},
 	} {
 		w := *k.p.World
 		w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: c.liveness, Identity: id}}
@@ -235,13 +235,13 @@ func TestPlannerForgetsARecoveredClassification(t *testing.T) {
 		liveness rowLiveness
 		kept     bool
 	}{{livenessDead, true}, {livenessAlive, false}, {livenessGone, false}} {
-		p := &planner{classified: map[rowKey]string{key: "gc-1/tok"}}
+		p := &planner{classified: map[rowKey]classifiedRuntime{key: {Token: "gc-1/tok"}}}
 		got := p.classifiedOf(k.p.World.Census, map[rowKey]rowObservation{key: {Liveness: c.liveness}})
 		if _, ok := got[key]; ok != c.kept {
 			t.Fatalf("%v: classified %v, want kept %v", c.liveness, got, c.kept)
 		}
 	}
-	p := &planner{classified: map[rowKey]string{{ID: "gone-row"}: "x/y"}}
+	p := &planner{classified: map[rowKey]classifiedRuntime{{ID: "gone-row"}: {Token: "x/y"}}}
 	if got := p.classifiedOf(k.p.World.Census, nil); len(got) != 0 {
 		t.Fatalf("classified %v, want a row out of the census forgotten", got)
 	}
@@ -285,7 +285,7 @@ func TestClassifiedDeadIsNotGone(t *testing.T) {
 	id := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}
 	w := *k.p.World
 	w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: livenessDead, Identity: id}}
-	w.Classified = map[rowKey]string{k.it.Key: deadToken(id)}
+	w.Classified = map[rowKey]classifiedRuntime{k.it.Key: {Token: deadToken(id)}}
 	r := &rowFacts{w: &w, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessDead, Desired: desireSleep}}
 	if r.freshGone() || !r.freshGoneOrClassified() {
 		t.Fatalf("freshGone %v freshGoneOrClassified %v, want false and true", r.freshGone(), r.freshGoneOrClassified())
@@ -303,8 +303,39 @@ func TestStopOnAClassifiedZombieIsNoFinalize(t *testing.T) {
 	c := newHealCase(t, livenessDead, desireSleep, "state", string(session.StateDraining), "state_reason", session.DrainAckStopPendingReason)
 	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
-	c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
 	if it := c.decide(); it.Kind != intentStop || it.Finalize {
 		t.Fatalf("decideRow = (%q, %q, finalize %v), want the stop with no finalize", it.Kind, it.Reason, it.Finalize)
+	}
+}
+
+// Kills a dead runtime the start's recycle classified that is never healed
+// once its row turns Sleep (the #7650 review's regression; CONTRACT A6,
+// v5.9m): the active Sleep row goes to A12, which adopts the recycle's
+// classification without a peek, records its remembered crash once and the
+// pair as its own; A6 then heals it.
+func TestA12AdoptsTheRecyclesClassification(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireSleep, "state", "active", "last_woke_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
+	crash := &events.Event{Type: events.SessionCrashed, Subject: "worker", Message: "panic: boom"}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Key: c.k, Token: deadToken(id), Crash: crash, Recycle: true}}
+	if it := c.decide(); it.Kind != intentZombie {
+		t.Fatalf("recycle-classified: decideRow = (%q, %q), want A12's", it.Kind, it.Reason)
+	}
+	got := crashMetrics(t)
+	rt := &txRuntime{Class: rtZombie, Same: true, Identity: id}
+	known := c.w.Classified[c.k]
+	step := zombieStep(txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: rt, Now: gatherNow}, deadPeek{read: true, known: &known}, nil)
+	adopted := step.Facts.Classified
+	if len(step.Facts.Events) != 1 || adopted == nil || adopted.Recycle || adopted.Crash != nil || !adopted.classifies(id) || len(step.Write) != 0 {
+		t.Fatalf("step %+v, want the remembered crash once and the pair re-recorded as A12's", step)
+	}
+	if _, err := recordZombieCrash(context.Background(), txCaps{}, step.Pass.(zombieCrash)); err != nil || len(*got) != 1 {
+		t.Fatalf("crash metrics %v (%v), want one", *got, err)
+	}
+	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *adopted}
+	if it := c.decide(); it.Reason != decideDeadRuntimeHeal {
+		t.Fatalf("A12's: decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
 	}
 }

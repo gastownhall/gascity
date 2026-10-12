@@ -257,7 +257,9 @@ func newRuntimeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
 its current task before exiting. Pass a session alias or ID. Use
-"gc runtime undrain" to cancel.`,
+"gc runtime undrain" to cancel. Under session_reconciler = "v2" it also
+marks the session row, so the agent's drain-ack stops the session even on a
+min_active_sessions floor.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrain(args, jsonOutput, stdout, stderr) != 0 {
@@ -285,13 +287,69 @@ func cmdRuntimeDrain(args []string, jsonOutput bool, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	dops := newDrainOps(sp)
-	rec := openCityRecorder(stderr)
-	return doRuntimeDrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	return runtimeDrain(newDrainOps(sp), sp, openCityRecorder(stderr), target, jsonOutput, stdout, stderr)
 }
 
-// doRuntimeDrain sets the drain signal on a session.
+// runtimeDrain decides the city's mode once. A legacy city runs
+// doRuntimeDrain exactly as before; a v2 city also writes the row's
+// operator drain mark.
+func runtimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
+	cfg, strict := drainAckCityMode(target.cityPath)
+	if !strict {
+		return doRuntimeDrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	}
+	// A v2 city reads no GC_DRAIN: the row carries the operator's mark
+	// (session.OperatorDrainKey), which explains the agent's ack (A11). The
+	// env flag stays, for drain-check, legacy and a rollback.
+	writeRow := func() error {
+		store, id, err := drainAckOpenSessionRow(target.cityPath, cfg, target.sessionName, target.sessionID)
+		if err != nil {
+			return err
+		}
+		return writeOperatorDrainRow(store, id)
+	}
+	return drainRuntime(dops, writeRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+}
+
+// writeOperatorDrainRow writes the operator's drain mark on the row by CAS
+// at the revision each attempt reads (operatorDrainPatch); no name lock: a
+// controller's write in between loses the fence or re-decides. A store with
+// no conditional writer is left untouched, as the row ack is (v2 refuses to
+// boot on one, C0.7).
+func writeOperatorDrainRow(store beads.Store, sessionID string) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil || writer == nil {
+		return err
+	}
+	return casDrainAckRow(store, writer, sessionID, func(b beads.Bead) (map[string]string, error) {
+		return operatorDrainPatch(b.Metadata), nil
+	})
+}
+
+// clearOperatorDrainRow clears the operator's drain mark by CAS
+// (operatorUndrainPatch); a controller's request stands.
+func clearOperatorDrainRow(store beads.Store, sessionID string) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil || writer == nil {
+		return err
+	}
+	return casDrainAckRow(store, writer, sessionID, func(b beads.Bead) (map[string]string, error) {
+		return operatorUndrainPatch(b.Metadata), nil
+	})
+}
+
+// doRuntimeDrain sets the drain signal on a session. It is the whole drain
+// in a legacy city.
 func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+) int {
+	return drainRuntime(dops, nil, sp, rec, targetName, sn, jsonOutput, stdout, stderr)
+}
+
+// drainRuntime writes, in a v2 city (writeRow set), the row's operator
+// drain mark, then sets the runtime drain flag. A failed row write sets
+// nothing and exits non-zero.
+func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
@@ -302,6 +360,14 @@ func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	if !running {
 		fmt.Fprintf(stderr, "gc runtime drain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// The row first: an ack landing between the two writes would find no
+	// mark and be canceled on a floor seat.
+	if writeRow != nil {
+		if err := writeRow(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime drain: writing the row's drain mark: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if err := dops.setDrain(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -344,7 +410,8 @@ func newRuntimeUndrainCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
 session to continue normal operation. Pass a session alias or ID. Under
-session_reconciler = "v2" it also clears the session row's drain-ack.`,
+session_reconciler = "v2" it also clears the session row's drain-ack and
+its operator drain mark.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeUndrain(args, jsonOutput, stdout, stderr) != 0 {
@@ -375,11 +442,13 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 	return runtimeUndrain(newDrainOps(sp), sp, openCityRecorder(stderr), target, jsonOutput, stdout, stderr)
 }
 
-// runtimeUndrain decides the city's mode once. A legacy city runs
-// doRuntimeUndrain exactly as before E3; a v2 city also clears the row ack.
+// runtimeUndrain clears the runtime drain keys and, in any city, the row's
+// drain-ack and operator drain mark: a v2 city fails on a row clear that
+// fails, a legacy city (which reads neither) only warns. A path that is not
+// a city runs doRuntimeUndrain.
 func runtimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder, target sessionRuntimeTarget, jsonOutput bool, stdout, stderr io.Writer) int {
 	cfg, strict := drainAckCityMode(target.cityPath)
-	if !strict {
+	if cfg == nil {
 		return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 	}
 	clearRow := func() error {
@@ -387,7 +456,19 @@ func runtimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder, tar
 		if err != nil {
 			return err
 		}
-		return clearDrainAckRow(store, id)
+		return errors.Join(clearDrainAckRow(store, id), clearOperatorDrainRow(store, id))
+	}
+	if !strict {
+		// A legacy city ignores the row keys, but clears them too, so a mark
+		// left by a v2 run (a mode switch, a config that failed to load) does
+		// not outlive the undrain; a failure there only warns.
+		legacy := clearRow
+		clearRow = func() error {
+			if err := legacy(); err != nil {
+				fmt.Fprintf(stderr, "gc runtime undrain: warning: clearing the row's drain keys: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
+			return nil
+		}
 	}
 	return undrainRuntime(dops, clearRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }

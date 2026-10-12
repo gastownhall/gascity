@@ -710,6 +710,10 @@ func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 		sessionRow("gc-00", "template", "worker", "state", "active", "session_name", "manual-0", "manual_session", "true"),
 		poolRow("gc-000", "worker", 6, "active", "session_name", "shared"),
 		poolRow("gc-9", "worker", 7, "active", "session_name", "shared"),
+		// Named rows sort below gc-2 and never take a rank (PAR-FLOORACK
+		// reads the floor: a ranked named row would drop a pool seat out).
+		poolRow("gc-11", "worker", 8, "active", "configured_named_session", "true"),
+		poolRow("gc-12", "worker", 9, "active", "configured_named_identity", "worker"),
 	).alive("shared", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-9"}).decide()
 	got := d.Snapshot.Floors["worker"]
 	if fmt.Sprint(got) != fmt.Sprint([]rowKey{{allocSessionsLeg, "gc-2"}, {allocSessionsLeg, "gc-3"}}) {
@@ -718,7 +722,7 @@ func TestAllocator_FloorsLowestBeadIDWarmOnly(t *testing.T) {
 	if e := entryOf(t, d, "gc-2"); e.Floor == nil || e.Floor.Rank != 0 || e.Floor.MinActive != 2 {
 		t.Fatalf("gc-2 floor view = %+v", e.Floor)
 	}
-	for _, id := range []string{"gc-4", "gc-1", "gc-0", "gc-00", "gc-000"} {
+	for _, id := range []string{"gc-4", "gc-1", "gc-0", "gc-00", "gc-000", "gc-11", "gc-12"} {
 		if entryOf(t, d, id).Floor != nil {
 			t.Errorf("%s holds a floor rank", id)
 		}

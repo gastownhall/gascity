@@ -3,9 +3,13 @@
 package ssh
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -124,4 +128,54 @@ func TestSSHConformance(t *testing.T) {
 			WorkDir: t.TempDir(),
 		}, fmt.Sprintf("gc-test-conform-%d", atomic.AddInt64(&counter, 1))
 	})
+}
+
+// A bare -t name is a unique-prefix match in tmux: with worker-1 gone and
+// worker-10 live on the same box, "-t worker-1" names worker-10. Through the
+// production connection (fake ssh, real tmux), every verb on the absent
+// worker-1 must miss worker-10 rather than observe, read, type into, respawn
+// or kill it (mc-k609w).
+func TestSSHProviderTargetsSessionsExactlyOnRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewProvider(sshConformanceEndpoint(t))
+	p.postStartSettle = 0
+	ctx := context.Background()
+	if err := p.Start(ctx, "worker-10", runtime.Config{Command: "cat", WorkDir: t.TempDir()}); err != nil {
+		t.Fatalf("Start worker-10: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop("worker-10") })
+	if err := p.SetMeta("worker-10", "GC_SESSION_ID", "ten"); err != nil {
+		t.Fatalf("SetMeta worker-10: %v", err)
+	}
+	pidBefore, _, err := p.tmux(ctx, "worker-10", "display-message", "-p", "-t", "=worker-10:", "#{pane_pid}")
+	if err != nil || pidBefore == "" {
+		t.Fatalf("worker-10 pane pid = (%q, %v)", pidBefore, err)
+	}
+
+	if p.IsRunning("worker-1") {
+		t.Error("IsRunning(worker-1) = true: has-session prefix-matched worker-10")
+	}
+	if got, _ := p.GetMeta("worker-1", "GC_SESSION_ID"); got != "" {
+		t.Errorf("GetMeta(worker-1) = %q: show-environment read worker-10's environment", got)
+	}
+	_ = p.SendKeys("worker-1", "Enter")
+	_ = p.Nudge("worker-1", runtime.TextContent("STRAY-NUDGE"))
+	if err := p.Relaunch(ctx, "worker-1", runtime.Config{Command: "sleep 300"}); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Relaunch(worker-1) = %v, want ErrSessionNotFound", err)
+	}
+	if err := p.Stop("worker-1"); err != nil {
+		t.Errorf("Stop(worker-1) = %v, want idempotent nil", err)
+	}
+
+	if !p.IsRunning("worker-10") {
+		t.Fatal("worker-10 is gone: kill-session -t worker-1 prefix-matched it")
+	}
+	if pid, _, _ := p.tmux(ctx, "worker-10", "display-message", "-p", "-t", "=worker-10:", "#{pane_pid}"); pid != pidBefore {
+		t.Errorf("worker-10 pane pid %q -> %q: respawn-pane -t worker-1 replaced it", pidBefore, pid)
+	}
+	if peek, _ := p.Peek("worker-10", 20); strings.Contains(peek, "STRAY-NUDGE") {
+		t.Errorf("worker-10 received worker-1's nudge: %q", peek)
+	}
 }

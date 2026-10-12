@@ -19,6 +19,7 @@ import (
 const (
 	decideAdopt             = "adopt"
 	decideRollback          = "rollback"
+	decideStaleCreate       = "stale-create-exit" // v5 S7: a pending create's StaleSelf runtime
 	decideStart             = "start"
 	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
@@ -48,21 +49,41 @@ func armAdopt(r *rowFacts) (intent, bool) {
 // (its rollback candidate), undesired (a Drain row, C5b-2) with its runtime
 // gone or dead, or under a name another row's runtime holds. The effect reads
 // the runtime fresh and attributes it (C3, O2, C8.2(a)).
+//
+// Its StaleSelf exit (v5 S7): a pending create, which S4 never re-keys,
+// whose live runtime reads StaleSelf. At the row's generation it is the
+// row's own runtime: the effect stops it, then a configured named row the
+// allocation wants awake is kept for A18 to relaunch on the same bead
+// (Relaunch) and any other is rolled back. An older epoch is another
+// incarnation's, Foreign: rolled back without a stop.
 func armRollback(r *rowFacts) (intent, bool) {
-	e := r.entry
-	if !r.row.Info.PendingCreateClaim || e == nil {
+	e, info := r.entry, r.row.Info
+	if !info.PendingCreateClaim || e == nil {
 		return intent{}, false
 	}
+	reason, relaunch := decideRollback, false
 	switch {
 	case e.Desired == desireNone && e.Reason == reasonRollbackCandidate:
 	case e.Desired == desireDrain && e.Liveness.startCandidate():
 	case e.Liveness == livenessOccupied:
+	case e.Liveness == livenessAlive && compareIdentity(info, r.w.Observed[r.k].Identity) == identityStaleSelf:
+		reason = decideStaleCreate
+		relaunch = ownRuntime(identityStaleSelf, info, r.w.Observed[r.k].Identity) && e.Desired == desireWake && r.configuredNamed()
 	default:
 		return intent{}, false
 	}
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRollback, Reason: decideRollback, Basis: basis}, true
+	return intent{Kind: intentRollback, Reason: reason, Basis: basis, Relaunch: relaunch}, true
+}
+
+// configuredNamed reports a configured named row with its spec, which a
+// failed pending create keeps (S3, S7).
+func (r *rowFacts) configuredNamed() bool {
+	if r.w.Env == nil || r.w.Env.Cfg == nil {
+		return false
+	}
+	return configuredNamedSessionBeadHasSpecInfo(r.row.Info, r.w.Env.Cfg, config.EffectiveCityName(r.w.Env.Cfg, ""))
 }
 
 // armHeartbeatRespawn is A17 (SESS-602; v5.9i): a row the allocation does

@@ -261,15 +261,14 @@ func TestV2AlertsOncePerEpisode(t *testing.T) {
 	})
 }
 
-// TestDoctorWarnsFloorOutsideControlDispatcher pins ruling 2's doctor
-// warning: a floor on any template but the control dispatcher is a v2
-// warning (a note under legacy) and never changes the status; and under v2
-// the check prints the last pass's age when the controller answers.
+// TestDoctorReportsNoFloorAndThePassAge: a floor is no longer a v2
+// difference (PAR-FLOORACK: a floor member's own ack keeps it warm), so
+// doctor lists none and the status is as without it; and under v2 the check
+// prints the last pass's age when the controller answers.
 //
-// Kills: a silent floor-ack difference on a new template; a warning on
-// core.control-dispatcher; a warning that changes the exit status; a pass
-// age read from a legacy city's socket.
-func TestDoctorWarnsFloorOutsideControlDispatcher(t *testing.T) {
+// Kills: a floor warning left behind; a floor that changes the exit status;
+// a pass age read from a legacy city's socket.
+func TestDoctorReportsNoFloorAndThePassAge(t *testing.T) {
 	one, two := 1, 2
 	agents := []config.Agent{
 		{Name: "core.control-dispatcher", Dir: "gascity", MinActiveSessions: &one},
@@ -277,7 +276,7 @@ func TestDoctorWarnsFloorOutsideControlDispatcher(t *testing.T) {
 		{Name: "idle"},
 	}
 	override := func(k string) (string, bool) { return "1", k == v2SkeletonEnv }
-	for _, tc := range []struct{ raw, prefix string }{{"", "v2 note: "}, {"v2", "v2 warning: "}} {
+	for _, tc := range []struct{ raw string }{{""}, {"v2"}} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}, Agents: agents}
 		c := newSessionReconcilerDoctorCheck(cfg, override)
 		queried := false
@@ -292,8 +291,8 @@ func TestDoctorWarnsFloorOutsideControlDispatcher(t *testing.T) {
 				floors = append(floors, d)
 			}
 		}
-		if len(floors) != 1 || !strings.HasPrefix(floors[0], tc.prefix+"agent worker sets min_active_sessions = 2") || !strings.Contains(floors[0], "stopped and restarted, not kept warm") {
-			t.Errorf("%q: floor details = %q, want one %q line for worker", tc.raw, floors, tc.prefix)
+		if len(floors) != 0 {
+			t.Errorf("%q: floor details = %q, want none", tc.raw, floors)
 		}
 		bare := newSessionReconcilerDoctorCheck(&config.City{Daemon: cfg.Daemon}, override)
 		bare.queryPass = c.queryPass

@@ -433,6 +433,7 @@ go_library(
         "reconcile_arms_drift.go",
         "reconcile_arms_heals.go",
         "reconcile_arms_identity.go",
+        "reconcile_arms_idle.go",
         "reconcile_arms_metadata.go",
         "reconcile_arms_start.go",
         "reconcile_arms_stop.go",
@@ -1597,6 +1598,7 @@ go_test(
         "reconcile_arms_drain_test.go",
         "reconcile_arms_drift_test.go",
         "reconcile_arms_heals_test.go",
+        "reconcile_arms_idle_test.go",
         "reconcile_arms_metadata_test.go",
         "reconcile_arms_start_test.go",
         "reconcile_dirty_test.go",
@@ -1626,6 +1628,7 @@ go_test(
         "reconcile_effects_test.go",
         "reconcile_effects_wiring_test.go",
         "reconcile_enqueue_test.go",
+        "reconcile_execution_stalled_oneshot_test.go",
         "reconcile_fenced_store_test.go",
         "reconcile_finalize_test.go",
         "reconcile_gather_demand_test.go",
@@ -1639,6 +1642,7 @@ go_test(
         "reconcile_mode_test.go",
         "reconcile_observe_identity_test.go",
         "reconcile_observe_v2_test.go",
+        "reconcile_operator_lease_reread_test.go",
         "reconcile_pass_test.go",
         "reconcile_planner_test.go",
         "reconcile_ready_fanout_test.go",
@@ -2175,6 +2179,22 @@ go_variant_test(
     gotags = ["productmetrics_testhook"],
     test = ":gc_test",
 )
+
+# The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
+# runs the first simCISeeds; these run all 1024 in eight ranges of 128, each
+# a target of its own (the same binary, no extra compile), so they run in
+# parallel beside gc_test's shards. A range ran in 19-29 s on RBE
+# (2026-10-12); medium's timeout fails a hang fast.
+[go_variant_test(
+    name = "gc_sim_corpus_%d_test" % i,
+    size = "medium",
+    args = ["-test.run=^TestSimCorpus$$"],
+    env = {
+        "GC_V2_SIM_SEEDS": "128",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 128 * i),
+    },
+    test = ":gc_test",
+) for i in range(8)]
 
 # INTEGRATION_SOLO_TESTS, each alone, and INTEGRATION_SOLO_SPLIT_TESTS, by
 # subtest, in gc_test's integration build.

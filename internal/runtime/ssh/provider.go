@@ -24,6 +24,29 @@ var validTmuxName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // ErrInvalidSessionName reports a session name that is not a safe tmux target.
 var ErrInvalidSessionName = errors.New("invalid session name")
 
+// sessionTarget returns the exact target-session form of a session name, as
+// the local tmux provider does. tmux resolves a bare -t name by unique prefix,
+// so once "worker-1" has exited "-t worker-1" names a live "worker-10" on the
+// same box: has-session reports a dead session alive and kill-session kills
+// the wrong one. The "=" prefix disables that. A name that is not a safe tmux
+// target passes through unchanged (it cannot have been created by Start).
+func sessionTarget(name string) string {
+	if !validTmuxName.MatchString(name) {
+		return name
+	}
+	return "=" + name
+}
+
+// paneTarget is [sessionTarget] for commands whose -t is a target-window or
+// target-pane. The trailing ":" is required: tmux still prefix-matches
+// "=name" in that position, and only "=name:" is exact.
+func paneTarget(name string) string {
+	if !validTmuxName.MatchString(name) {
+		return name
+	}
+	return "=" + name + ":"
+}
+
 // Provider is a [runtime.Provider] that runs each session as a tmux session on
 // an existing remote host reached over SSH. It does NOT provision the box (the
 // host pre-exists); it connects, starts a tmux session, and drives it through
@@ -64,9 +87,10 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 }
 
 // carrier drives the named session's tmux over the connection. The in-box tmux
-// target is the session name itself (one host, many named sessions).
+// target is the session, exactly (one host, many named sessions; see
+// [paneTarget]).
 func (p *Provider) carrier(name string) runtime.Carrier {
-	return runtime.NewTmuxCarrier(p.conn, name)
+	return runtime.NewTmuxCarrier(p.conn, paneTarget(name))
 }
 
 // tmux runs a tmux subcommand over the connection and returns trimmed stdout,
@@ -286,7 +310,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	prelude := setupPrelude(cfg, name, staged.envPath)
 
-	args := []string{"respawn-pane", "-k", "-t", name}
+	args := []string{"respawn-pane", "-k", "-t", paneTarget(name)}
 	if cfg.WorkDir != "" {
 		args = append(args, "-c", cfg.WorkDir)
 	}
@@ -331,7 +355,7 @@ func (p *Provider) requiresPostStartLiveness(cfg runtime.Config) bool {
 // error would let the seam adapter drop tracking while the remote tmux session
 // and the agent inside it keep running untracked, leaking the remote box.
 func (p *Provider) Stop(name string) error {
-	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", name); err != nil {
+	if _, _, err := p.tmux(context.Background(), name, "kill-session", "-t", sessionTarget(name)); err != nil {
 		return fmt.Errorf("ssh stop %q: %w", name, err)
 	}
 	return nil
@@ -339,7 +363,7 @@ func (p *Provider) Stop(name string) error {
 
 // hasSession reports whether the tmux session exists, using the given context.
 func (p *Provider) hasSession(ctx context.Context, name string) bool {
-	_, code, err := p.tmux(ctx, name, "has-session", "-t", name)
+	_, code, err := p.tmux(ctx, name, "has-session", "-t", sessionTarget(name))
 	return err == nil && code == 0
 }
 
@@ -350,7 +374,7 @@ func (p *Provider) IsRunning(name string) bool {
 
 // IsAttached reports whether a terminal is attached to the tmux session.
 func (p *Provider) IsAttached(name string) bool {
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", name, "-p", "#{session_attached}")
+	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_attached}")
 	if err != nil || code != 0 {
 		return false
 	}
@@ -430,7 +454,7 @@ func (p *Provider) ClearScrollback(name string) error {
 // argv — that fallback is the leak.
 func (p *Provider) SetMeta(name, key, value string) error {
 	ctx := context.Background()
-	args := []string{"set-environment", "-t", name, key, value}
+	args := []string{"set-environment", "-t", sessionTarget(name), key, value}
 	if !runtime.ArgvSecretEnvValue(key, value) {
 		_, _, _ = p.tmux(ctx, name, args...)
 		return nil
@@ -446,7 +470,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 
 // GetMeta retrieves a value from the tmux session environment ("" if unset).
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", name, key)
+	out, code, err := p.tmux(context.Background(), name, "show-environment", "-t", sessionTarget(name), key)
 	if err != nil || code != 0 {
 		return "", nil
 	}
@@ -462,7 +486,7 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 
 // RemoveMeta removes a key from the tmux session environment.
 func (p *Provider) RemoveMeta(name, key string) error {
-	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", name, "-u", key)
+	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", sessionTarget(name), "-u", key)
 	return nil
 }
 
@@ -487,7 +511,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 
 // GetLastActivity returns the session's last-activity time (zero if unknown).
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", name, "-p", "#{session_activity}")
+	out, code, err := p.tmux(context.Background(), name, "display-message", "-t", paneTarget(name), "-p", "#{session_activity}")
 	if err != nil || code != 0 {
 		return time.Time{}, nil
 	}
@@ -540,7 +564,7 @@ func attachArgs(ep Endpoint, name string) []string {
 	if ep.Port != 0 {
 		args = append(args, "-p", strconv.Itoa(ep.Port))
 	}
-	return append(args, "--", ep.target(), shellQuote([]string{"tmux", "attach", "-t", name}))
+	return append(args, "--", ep.target(), shellQuote([]string{"tmux", "attach", "-t", sessionTarget(name)}))
 }
 
 // setupPrelude builds a sh prefix that cd's into the session WorkDir and

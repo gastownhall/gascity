@@ -478,7 +478,8 @@ func (p *decidePass) openAssignedWork(info session.Info) *assignedWorkView {
 // attempt windows. A suspended agent ends it at once; a suspended rig does
 // not, as in legacy, whose lease reads only the agent. A lease anchor
 // (last_woke_at, pending_create_started_at) pendingCreateFutureSkew or more
-// in the future holds nothing, so a clock stepped back cannot pin the row.
+// in the future holds nothing, in a running or a suspended city, so a clock
+// stepped back cannot pin the row.
 // Legacy's other leased shape, a claimless start-pending row, has no
 // deadline, so it is not kept. Past its lease, A10 rolls the row back.
 func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
@@ -495,7 +496,7 @@ func (p *decidePass) keepReason(e *selectionEntry, info session.Info) string {
 			return reasonPendingCreate
 		}
 		return ""
-	case pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
+	case !pendingCreateAnchorAhead(info, p.in.Now) && pendingCreateSessionStillLeasedAt(info, p.cfg, p.in.Now):
 		return reasonPendingCreate
 	case e.AssignedWork != nil:
 		return reasonAssignedWork

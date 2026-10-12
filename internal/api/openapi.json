@@ -30369,6 +30369,7 @@
         "summary": "Get v0 city by city name bead by ID"
       },
       "patch": {
+        "description": "Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].",
         "operationId": "patch-v0-city-by-city-name-bead-by-id",
         "parameters": [
           {
@@ -31145,6 +31146,7 @@
     },
     "/v0/city/{cityName}/bead/{id}/update": {
       "post": {
+        "description": "Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].",
         "operationId": "post-v0-city-by-city-name-bead-by-id-update",
         "parameters": [
           {
@@ -31548,6 +31550,7 @@
         "summary": "Get v0 city by city name beads"
       },
       "post": {
+        "description": "Refused with 422, nothing written: a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); any change of whether the row is a session (its type, the gc:session label); and, on a session row, a key its disposition decodes (held_until, sleep_intent, wait_hold, quarantined_until, suspended_at, state, sleep_reason), which only the session verbs set. Each refusal names the offending field in errors[].",
         "operationId": "create-bead",
         "parameters": [
           {

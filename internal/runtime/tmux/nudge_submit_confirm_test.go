@@ -631,6 +631,9 @@ type agentPaneExecutor struct {
 
 func (e *agentPaneExecutor) execute(args []string) (string, error) {
 	e.calls = append(e.calls, slices.Clone(args))
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
 	switch {
 	case slices.Contains(args, "#{session_name}|#{session_attached}"):
 		if e.attached == "" {
