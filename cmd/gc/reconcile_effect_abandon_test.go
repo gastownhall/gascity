@@ -435,6 +435,16 @@ func TestRollbackEffect(t *testing.T) {
 	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 {
 		t.Fatalf("a relaunch over another incarnation: settlement %+v kills %+v, want refused redecided, nothing stopped", s, k.sp.kills)
 	}
+	// A Current runtime that is a zombie by the effect is no adopt's (A10
+	// adopts only a live one): the exit stops it as the row's own and rolls
+	// the row back (Z08).
+	k = rollback(t, "generation", "3")
+	k.it.Reason = decideStaleCreate
+	k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.zombie = true })
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause == causeRedecided || len(k.sp.kills) != 1 || !closed(k) {
+		t.Fatalf("a Current zombie: settlement %+v kills %+v, want it stopped and the row rolled back", s, k.sp.kills)
+	}
 	// A relaunch whose runtime is gone by the effect is a no-op, so no
 	// backoff delays A18's relaunch.
 	k = rollback(t, "generation", "3")
