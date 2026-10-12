@@ -631,3 +631,35 @@ func TestOrphanedNamedZombieDrains(t *testing.T) {
 		t.Fatalf("unnamed: decideRow = (%q, %q), want A21's close", it.Kind, it.Reason)
 	}
 }
+
+// Kills the dead-runtime drain reaching past named rows or Drain rows (the
+// #7693 review): a held pool orphan's classified dead runtime (a
+// quarantine, an agent heartbeat, a wait hold) is left alone, its slot kept
+// (§12.2 #27); a named pending create AL1 wants asleep with a suspended
+// reason (Q1) gets no drain begin.
+func TestDeadRuntimeDrainOnlyNamedDrainRows(t *testing.T) {
+	future := gatherNow.Add(30 * time.Minute).Format(time.RFC3339)
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", ""}
+	for _, c := range []struct {
+		name    string
+		desired desire
+		reason  string
+		meta    []string
+	}{
+		{"a quarantined pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "quarantined_until", future, "sleep_reason", "quarantine"}},
+		{"a heartbeat-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "held_until", future}},
+		{"a wait-held pool orphan", desireDrain, drainOrphaned, []string{"state", "active", "last_woke_at", woke, "wait_hold", "true"}},
+		{"a named pending create AL1 wants asleep (Q1)", desireSleep, drainSuspended, append([]string{"state", "creating", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}, named...)},
+	} {
+		cc := newCloseCase(t, livenessDead, c.desired, c.meta...)
+		cc.entry().DrainReason = c.reason
+		cc.w.Env = &reconcileEnv{Cfg: cc.cfg}
+		id := runtimeIdentity{Known: true, SessionID: cc.k.ID, Epoch: "3", Token: "tok-3"}
+		cc.w.Observed = map[rowKey]rowObservation{cc.k: {Liveness: livenessDead, Identity: id}}
+		cc.w.Classified = map[rowKey]classifiedRuntime{cc.k: {Token: deadToken(id)}}
+		if it := cc.decide(); it.Kind != "" || it.Reason != decideNoAction {
+			t.Fatalf("%s: decideRow = (%q, %q), want no-action", c.name, it.Kind, it.Reason)
+		}
+	}
+}

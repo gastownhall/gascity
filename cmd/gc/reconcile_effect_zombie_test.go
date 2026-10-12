@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -337,5 +338,26 @@ func TestA12AdoptsTheRecyclesClassification(t *testing.T) {
 	c.w.Classified = map[rowKey]classifiedRuntime{c.k: *adopted}
 	if it := c.decide(); it.Reason != decideDeadRuntimeHeal {
 		t.Fatalf("A12's: decideRow = (%q, %q), want A6's dead-runtime heal", it.Kind, it.Reason)
+	}
+}
+
+// Kills the crash-name fallback naming the identity, or nothing, for a row
+// whose template the pass no longer resolves (mc-q64l4): the crash names
+// the row's own template, as legacy's preserved-template read does.
+func TestZombieCrashNamesAnUnresolvedRowsTemplate(t *testing.T) {
+	c := newHealCase(t, livenessDead, desireDrain, "state", "active", "template", "chat", "configured_named_session", "true", "configured_named_identity", "other-chat")
+	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+	v := txView{It: intent{Key: c.k}, World: c.w, Row: c.w.Census.Rows[c.k].Info, RT: &txRuntime{Class: rtZombie, Same: true, Identity: id}, Now: gatherNow}
+	step := zombieStep(v, deadPeek{read: true, content: "panic: boom"}, nil)
+	if len(step.Facts.Events) != 1 {
+		t.Fatalf("step %+v, want one crash", step)
+	}
+	e := step.Facts.Events[0]
+	var payload map[string]any
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if e.Subject != "chat" || payload["template"] != "chat" {
+		t.Fatalf("crash subject %q template %v, want the row's template chat", e.Subject, payload["template"])
 	}
 }
