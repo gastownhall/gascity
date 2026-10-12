@@ -93,6 +93,16 @@ func authorizedByRank(r *rowFacts, reason string) bool {
 // suspended (a configured named row of a suspended city), else
 // no-wake-reason. A heartbeat hold (held_until with no intent, SESS-617)
 // has none. Legacy's live-claim veto is not ported (PAR-LIVECLAIM).
+// drainableLiveness reports a runtime A20 may begin a drain over: alive, or
+// for a Drain row a dead runtime A21 does not close (a named row's:
+// mc-q64l4), which A12, ahead of A20, has classified by then. Its orphan
+// drain then runs as legacy's, whose stop A4 runs on any liveness but gone
+// (D2, A4); a closable one is A21's.
+func (r *rowFacts) drainableLiveness() bool {
+	e := r.entry
+	return e.Liveness == livenessAlive || e.Liveness == livenessDead && e.Desired == desireDrain && !r.deadRuntimeCloses()
+}
+
 func drainReasonOf(r *rowFacts) string {
 	e, info := r.entry, r.row.Info
 	intent := strings.TrimSpace(info.SleepIntent)
@@ -369,7 +379,7 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 	// too, and its fence writes the row asleep, which claims no live runtime.
 	// No other hold (a wait, a timer: OperatorDormant) stops a live runtime
 	// here.
-	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
+	if !r.drainableLiveness() || !sessionBeadClaimsLiveRuntime(info) || session.DispositionOfInfo(info).KeepsSlot() {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
