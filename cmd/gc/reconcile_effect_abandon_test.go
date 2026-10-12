@@ -370,6 +370,35 @@ func TestRollbackEffect(t *testing.T) {
 		t.Fatalf("foreign: settlement %+v kills %+v, want rolled back without a stop", s, k.sp.kills)
 	}
 
+	// S7: a StaleSelf runtime at the row's generation is its own, stopped;
+	// the relaunch keeps the row, the rollback closes it. An older epoch is
+	// Foreign: rolled back without a stop.
+	for _, c := range []struct {
+		name          string
+		epoch         string
+		relaunch      bool
+		kills         int
+		closed, claim bool
+	}{
+		{"own, relaunched", "3", true, 1, false, true},
+		{"own, rolled back", "3", false, 1, true, false},
+		{"older epoch, under a name not bead-scoped (C8.2(a) stops one whoever runs it)", "2", false, 0, true, false},
+	} {
+		name := "s-gc-1"
+		k = rollback(t, "generation", "3")
+		if c.epoch == "2" {
+			name = "chat"
+			k = rollback(t, "generation", "3", "session_name", "chat", "configured_named_session", "true", "configured_named_identity", "chat", "pool_managed", "")
+		}
+		k.it.Reason, k.it.Relaunch = decideStaleCreate, c.relaunch
+		k.sp.put(name, "gc-1", c.epoch, "old")
+		k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+		s := k.runKind()
+		if len(k.sp.kills) != c.kills || s.Closed != c.closed || closed(k) != c.closed || (k.meta("pending_create_claim") == "true") != c.claim {
+			t.Fatalf("stale create %s: settlement %+v kills %+v claim %q, want kills %d closed %v", c.name, s, k.sp.kills, k.meta("pending_create_claim"), c.kills, c.closed)
+		}
+	}
+
 	k = rollback(t, "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))
 	k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.zombie = true })
 	k.sp.SetPeekOutput("s-gc-1", "Usage limit reached")
@@ -413,6 +442,7 @@ func TestArmRollback(t *testing.T) {
 		{"another row's runtime", true, desireNone, reasonNameOccupied, livenessOccupied, true},
 		{"wanted within its deadline", true, desireWake, "", livenessGone, false},
 		{"undesired and alive", true, desireDrain, "undesired", livenessAlive, false},
+		{"alive and Current", true, desireWake, "", livenessAlive, false},
 		{"not a pending create", false, desireDrain, "undesired", livenessGone, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -422,10 +452,52 @@ func TestArmRollback(t *testing.T) {
 			}
 			row := poolRow("gc-1", "worker", 1, "creating", meta...)
 			k := rowKeyOf(row.ID)
-			r := &rowFacts{row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
+			w := &World{Observed: map[rowKey]rowObservation{k: {Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "1", Token: "tok"}}}}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
 			it, ok := armRollback(r)
 			if ok != c.want || ok && (it.Kind != intentRollback || r.rests&restRuntime == 0) {
 				t.Fatalf("armRollback = (%+v, %v), want %v resting on the runtime", it, ok, c.want)
+			}
+		})
+	}
+}
+
+// Kills the S7 exit missed or mis-shaped (v5 S7): a pending create whose
+// live runtime reads StaleSelf is rolled back, and kept for A18's relaunch
+// only when it is the row's own runtime (its epoch the row's generation),
+// configured named and wanted awake. A Current one is A10's adopt.
+func TestArmRollbackStaleCreate(t *testing.T) {
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "session_name", "chat", "pool_managed", ""}
+	for _, c := range []struct {
+		name     string
+		epoch    string
+		token    string
+		named    bool
+		desired  desire
+		propose  bool
+		relaunch bool
+	}{
+		{"own, configured named, wanted: relaunched", "3", "old", true, desireWake, true, true},
+		{"own, configured named, unwanted: rolled back", "3", "old", true, desireNone, true, false},
+		{"own, pool: rolled back", "3", "old", false, desireWake, true, false},
+		{"older epoch, configured named: rolled back", "2", "old", true, desireWake, true, false},
+		{"Current: the adopt's", "3", "tok", true, desireWake, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			meta := []string{"generation", "3", "instance_token", "tok", "pending_create_claim", "true"}
+			if c.named {
+				meta = append(meta, named...)
+			}
+			row := poolRow("gc-1", "worker", 1, "creating", meta...)
+			k := rowKeyOf(row.ID)
+			cfg := workerCity(1)
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+			cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
+			w := &World{Env: &reconcileEnv{Cfg: cfg}, Observed: map[rowKey]rowObservation{k: {Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: c.epoch, Token: c.token}}}}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Liveness: livenessAlive}}
+			it, ok := armRollback(r)
+			if ok != c.propose || ok && (it.Kind != intentRollback || it.Reason != decideStaleCreate || it.Relaunch != c.relaunch) {
+				t.Fatalf("armRollback = (%+v, %v), want proposed %v relaunch %v", it, ok, c.propose, c.relaunch)
 			}
 		})
 	}

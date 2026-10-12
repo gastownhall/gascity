@@ -106,9 +106,10 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
-	// Classified are the rows whose dead runtime a zombie classification
-	// completed, by its runtime token (A12): the planner's memory.
-	Classified map[rowKey]string
+	// Classified are the rows whose dead runtime a classification completed
+	// (A12, the start's recycle), by its runtime token: the planner's
+	// memory.
+	Classified map[rowKey]classifiedRuntime
 	// LegStores holds the sessions leg's store by its ref, which effects
 	// reach only as a fenced writer (newEffectPass). No other leg's store is
 	// here: a census-only row has no writer (AL1, armCensusOnly).

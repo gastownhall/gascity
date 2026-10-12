@@ -36,6 +36,7 @@ const (
 	causeCapacity          = "capacity"
 	causeDiedDuringStartup = "died-during-startup"
 	causeHeldDead          = "held-dead" // ErrSessionExists over a dead runtime; C5a3 recycles
+	causeCommitLost        = "commit-lost"
 )
 
 // errEndpointGate is the admit-ticket Call's refusal: the endpoint admits
@@ -46,8 +47,8 @@ var errEndpointGate = errors.New("v2 start: the endpoint admits no start now")
 var startSections = append(slices.Clone(recycleSections),
 	called(0, probed(prepareAdoption, verbStep(false)), verbCall),
 	called(callStart, probed(foldPreWake, preWakeStep), startLaunch),
-	called(0, section{Premise: premiseOwnToken, Decide: commitStep}, afterStart),
-	called(0, section{Premise: premiseOwnToken, Decide: abandonStep}, stopOwnRuntime),
+	called(0, section{Premise: premiseOwnToken, Decide: commitStep, Moved: lostCommit}, afterStart),
+	called(0, section{Premise: premiseOwnToken, Decide: abandonStep, Moved: lostCommitEnd}, stopOwnRuntime),
 	section{Premise: premiseClose, Decide: rollbackClose},
 )
 
@@ -453,6 +454,45 @@ func commitStep(v txView) txStep {
 	return txStep{Write: patch, Last: true, Facts: effectFacts{Noted: noted}, Pass: startEnd{landed: &landedCommit{out: out, name: noted.Name, display: out.tp.DisplayName()}}}
 }
 
+// lostCommit is S2's refused commit (the premise moved: a kill, a close, a
+// token another writer set): it writes nothing and is never retried, and
+// when the fresh read finds the runtime alive and Current under the token
+// PreWake set, the after-commit Call stops it as the start's own runtime
+// (the own-runtime exception, F2: L1 alone) and confirms it (C8.8). A moved
+// name or lease is another start's, and refuses.
+func lostCommit(v txView, expect session.Info, moved []string) (txStep, bool) {
+	if slices.Contains(moved, "session_name") || slices.Contains(moved, "runtime lease") ||
+		!v.RT.Alive() || compareIdentity(expect, v.RT.Identity) != identityCurrent {
+		return txStep{}, false
+	}
+	stop := ownRuntimeFence(v.RT, expect)
+	return txStep{Pass: startEnd{lost: &teardown{stop: &stop, names: processNamesFor(v.World, expect), fail: causeCommitLost}}}, true
+}
+
+// lostCommitEnd settles the lost commit failed, its runtime stopped: the
+// abandon section's, whose premise moved with the commit's.
+func lostCommitEnd(v txView, _ session.Info, _ []string) (txStep, bool) {
+	f, _ := callResult[startFailureRead](v)
+	if f.lost == nil {
+		return txStep{}, false
+	}
+	return lostCommitStep(f), true
+}
+
+// lostCommitStep is the lost commit's settlement: failed, with no accrual,
+// and an error when its stop was not confirmed.
+func lostCommitStep(f startFailureRead) txStep {
+	var err error
+	if !f.lost.confirmed {
+		err = errLostCommitUnconfirmed
+	}
+	return txStep{Fail: causeCommitLost, Err: err}
+}
+
+// errLostCommitUnconfirmed: the lost commit's stop was not confirmed; the
+// row's next pass reads what stayed.
+var errLostCommitUnconfirmed = errors.New("v2 start: the lost commit's runtime stop was not confirmed")
+
 // landedCommit is what a landed commit hands the after-commit Call.
 type landedCommit struct {
 	out           startOutcome
@@ -462,8 +502,13 @@ type landedCommit struct {
 // afterStart is the commit section's Call: after a landed commit it clears
 // the #46 episode (a lost clear only delays, v5 §13) and records legacy's
 // start telemetry, and never fails the effect; after a start that did not
-// commit, the failure's reads and #46 accrual (readStartFailure).
+// commit, the failure's reads and #46 accrual (readStartFailure); after a
+// lost commit, its own runtime's stop.
 func afterStart(ctx context.Context, c txCaps, in startEnd) (startFailureRead, error) {
+	if in.lost != nil {
+		_, confirmed := stopFenced(ctx, c.start.sp, *in.lost.stop, in.lost.names, c.start.clock.Now)
+		return startFailureRead{lost: &lostStop{confirmed: confirmed}}, nil
+	}
 	if in.failed != nil {
 		telemetry.RecordAgentStart(context.Background(), in.failed.name, in.failed.display, in.failed.err)
 		return readStartFailure(ctx, c, *in.failed), nil

@@ -565,7 +565,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		} {
 			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
 			c.entry().DrainReason = drainOrphaned
-			c.w.Classified = map[rowKey]string{c.k: deadToken(c.w.Observed[c.k].Identity)} // A12 is done with it
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(c.w.Observed[c.k].Identity)}} // A12 is done with it
 			if it := c.decide(); it.Kind == intentClose {
 				t.Fatalf("%s: decide proposed %q, want no close", name, it.Reason)
 			}
@@ -576,7 +576,7 @@ func TestCloseEffectEdges(t *testing.T) {
 		} {
 			c := newCloseCase(t, livenessDead, desireDrain, append([]string{"state", "active"}, meta...)...)
 			c.entry().DrainReason = drainOrphaned
-			c.w.Classified = map[rowKey]string{c.k: deadToken(c.w.Observed[c.k].Identity)}
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(c.w.Observed[c.k].Identity)}}
 			if it := c.decide(); it.Kind != intentClose {
 				t.Fatalf("%s: decide = (%q, %q), want the close", name, it.Kind, it.Reason)
 			}

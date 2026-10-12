@@ -593,6 +593,32 @@ func TestTxCallFactsSurviveALaterRefusal(t *testing.T) {
 	}
 }
 
+// Kills a Moved hook that may write on a row that moved, or that is not
+// asked (v5 S2's lost commit): a moved premise runs the hook, whose refusal
+// stands, whose write fails the effect with nothing written, and whose
+// "not mine" is the premise's refusal.
+func TestTxMovedHook(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		step  txStep
+		ok    bool
+		cause string
+	}{
+		{"refuses", txStep{Refuse: "mine"}, true, "mine"},
+		{"writes", txStep{Write: session.MetadataPatch{txKeyA: "1"}}, true, causeStep},
+		{"declines", txStep{}, false, causePremise},
+	} {
+		k := newTxKit(t)
+		k.outside("generation", "2")
+		var seen []string
+		sec := section{Decide: mark(txKeyB), Moved: func(_ txView, _ session.Info, moved []string) (txStep, bool) { seen = moved; return c.step, c.ok }}
+		s := k.run(context.Background(), effectSpec{needs: needs{NameLock: true}, sections: []section{sec}})
+		if s.Cause != c.cause || len(seen) == 0 || k.meta(txKeyA) != "" || k.meta(txKeyB) != "" {
+			t.Fatalf("%s: settlement %+v moved %v, want %s with nothing written", c.name, s, seen, c.cause)
+		}
+	}
+}
+
 // Kills a premise that checks too little: a fresh row that moved its
 // incarnation, any lifecycle fact (a wake_request at the same generation),
 // its runtime name, or closed, refuses without Decide; after a section
@@ -924,7 +950,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
 		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
-		"Classified":  p.classified[rowKey{ID: "gc-1"}] == "tok",
+		"Classified":  p.classified[rowKey{ID: "gc-1"}].Token == "tok",
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

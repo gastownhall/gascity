@@ -335,8 +335,15 @@ type section struct {
 	//
 	//gc:pure
 	Decide func(v txView) txStep
-	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
-	call   func(ctx context.Context, c txCaps, in any) (any, error)
+	// Moved, when set, decides an attempt whose premise moved, which
+	// otherwise refuses: v5 S2's lost commit. It sees the expected row and
+	// what moved; ok false is the premise's refusal. It never writes: a step
+	// that does fails the effect.
+	//
+	//gc:pure
+	Moved func(v txView, expect session.Info, moved []string) (_ txStep, ok bool)
+	probe func(ctx context.Context, r effectReads, v txView) (any, error)
+	call  func(ctx context.Context, c txCaps, in any) (any, error)
 	// callKind is the Call's kind (called), when it has one.
 	callKind callKind
 	// The kind's own Probe, Decide and Call as given to probed and called,
@@ -522,16 +529,22 @@ type effectFacts struct {
 	AliasOwed *rowKey
 	// Stopped is a stop the stop verb performed, for legacy's stop metric.
 	Stopped *agentStop
-	// Classified is the (row, runtime token) a zombie classification
-	// completed, which the planner remembers so A12 fires once per pair
-	// (v5 S5, X10).
+	// Classified is the (row, runtime token) a classification completed,
+	// which the planner remembers so neither A12 nor the start's recycle
+	// classifies a pair twice (v5 S5, X10).
 	Classified *classifiedRuntime
 }
 
-// classifiedRuntime is a row's dead runtime, by its runtime token.
+// classifiedRuntime is a row's dead runtime, by its runtime token, and the
+// crash its classification found, which the recycle records once its kill
+// lands (a refused kill keeps it for the next attempt, which peeks no more).
 type classifiedRuntime struct {
 	Key   rowKey
-	Token string
+	Token string // deadToken
+	Crash *events.Event
+	// Recycle marks the start's recycle's classification, which A6's
+	// heals do not take (A12's alone, CONTRACT A6).
+	Recycle bool
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -960,12 +973,24 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s := injected(err)
 		return txStep{}, &s
 	}
+	var step txStep
 	if moved := t.premise(sec.Premise, row, meta); len(moved) > 0 {
-		s := refused(causePremise)
-		s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
-		return txStep{}, &s
+		var ok bool
+		if sec.Moved != nil {
+			step, ok = sec.Moved(v, t.expect, moved)
+		}
+		if !ok {
+			s := refused(causePremise)
+			s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
+			return txStep{}, &s
+		}
+		if len(step.Write) > 0 || len(step.Terminal) > 0 { // no write lands on a row that moved
+			s := settlement{Outcome: settledFailed, Cause: causeStep}
+			return txStep{}, &s
+		}
+	} else {
+		step = sec.Decide(v)
 	}
-	step := sec.Decide(v)
 	var s settlement
 	switch {
 	case step.Refuse != "":

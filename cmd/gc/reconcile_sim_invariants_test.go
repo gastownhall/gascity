@@ -326,7 +326,7 @@ func (s *sim) classifiedZombie(b beads.Bead) bool {
 		return false
 	}
 	tok, ok := s.p.classified[rowKey{Leg: rowLeg, ID: b.ID}]
-	return ok && tok == deadToken(runtimeIdentity{SessionID: rt.id, Token: rt.token})
+	return ok && !tok.Recycle && tok.classifies(runtimeIdentity{SessionID: rt.id, Token: rt.token})
 }
 
 // zombiePane reports whether b's own runtime is a zombie: its pane up, its

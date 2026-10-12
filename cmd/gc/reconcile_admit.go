@@ -159,6 +159,10 @@ type intent struct {
 	Kept session.MetadataPatch
 	// Closing is a close's kind and kept assignees (A21).
 	Closing closeSpec
+	// Relaunch marks A10's StaleSelf exit for a configured named row (v5
+	// S7): the rollback stops its own runtime and keeps the row, which A18
+	// relaunches on the same bead.
+	Relaunch bool
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests

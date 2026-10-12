@@ -506,25 +506,43 @@ func TestLaunchCommitCarriesMCPAndClearsStartupHealth(t *testing.T) {
 	}
 }
 
-// Kills S2's premise read as the default rule after the Start: a row the CLI
-// confirmed active with the same token still commits, and `gc session
-// kill`'s fence (asleep, the same token) landed during the Start refuses
-// with the premise, committing nothing.
+// Kills S2's premise read as the default rule after the Start, and a lost
+// commit that leaves its runtime up or is retried: a row the CLI confirmed
+// active with the same token still commits; `gc session kill`'s fence
+// (asleep, the same token), or another writer's token, landed during the
+// Start commits nothing, and the start's own runtime, alive under the token
+// PreWake set, is stopped and confirmed, settling failed commit-lost with
+// nothing accrued. A runtime that is not the start's own stays, and the
+// premise refuses.
 func TestLaunchCommitPremise(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		write  []string
-		landed bool
+		name    string
+		write   []string
+		swap    bool // the name holds another row's runtime by the commit
+		landed  bool
+		cause   string
+		stopped bool
 	}{
-		{"CLI confirmed active", []string{"state", "active", "state_reason", "creation_complete"}, true},
-		{"kill fence", []string{"state", "asleep", "sleep_reason", "killed"}, false},
+		{"CLI confirmed active", []string{"state", "active", "state_reason", "creation_complete"}, false, true, "", false},
+		{"kill fence", []string{"state", "asleep", "sleep_reason", "killed"}, false, false, causeCommitLost, true},
+		{"retokened", []string{"instance_token", "other"}, false, false, causeCommitLost, true},
+		{"kill fence, another row's runtime", []string{"state", "asleep", "sleep_reason", "killed"}, true, false, causePremise, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			k, leaf := launchKit(t, "asleep")
+			k, leaf := launchKit(t, "asleep", "wake_attempts", "1")
 			leaf.onStart = func(context.Context) { k.outside(c.write...) }
+			if c.swap {
+				leaf.onStart = func(context.Context) { k.outside(c.write...); k.runtimeAs("gc-2", "theirs", nil) }
+			}
 			s := k.runKind()
-			if got := k.meta("started_config_hash") != ""; got != c.landed || (!got && s.Cause != causePremise) {
-				t.Fatalf("settlement %+v: committed=%v, want %v (else the premise)", s, got, c.landed)
+			if got := k.meta("started_config_hash") != ""; got != c.landed || (!got && s.Cause != c.cause) {
+				t.Fatalf("settlement %+v: committed=%v, want %v (else %s)", s, got, c.landed, c.cause)
+			}
+			k.sp.mu.Lock()
+			_, up := k.sp.rts["s-gc-1"]
+			k.sp.mu.Unlock()
+			if up == c.stopped || c.stopped && (s.Outcome != settledFailed || s.Err != nil || k.meta("wake_attempts") != "1") {
+				t.Fatalf("settlement %+v: runtime up %v attempts %q, want stopped %v, confirmed, nothing accrued", s, up, k.meta("wake_attempts"), c.stopped)
 			}
 		})
 	}
@@ -1445,4 +1463,33 @@ func TestOutlivingStartStillEndsAtTheEffectsDeadline(t *testing.T) {
 			t.Fatalf("ended after %v with %v, want the effect's deadline at 1m", waited, detached.Err())
 		}
 	})
+}
+
+// Kills a lost commit that stops a runtime another start holds, or that
+// reports an unconfirmed stop as clean: a moved runtime name or lease is
+// the premise's refusal; an unconfirmed stop settles commit-lost with its
+// error.
+func TestLostCommitGuards(t *testing.T) {
+	k, _ := launchKit(t, "creating")
+	row := k.p.World.Census.Rows[k.it.Key].Info
+	rt := &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}}
+	v := txView{It: k.it, World: k.p.World, Row: row, RT: rt, Now: gatherNow}
+	for _, moved := range [][]string{{"session_name"}, {"runtime lease"}} {
+		if _, ok := lostCommit(v, row, moved); ok {
+			t.Fatalf("moved %v: lostCommit took it, want the premise's refusal", moved)
+		}
+	}
+	if step, ok := lostCommit(v, row, []string{"state"}); !ok || step.Pass == nil {
+		t.Fatalf("control: lostCommit = (%+v, %v), want the stop", step, ok)
+	}
+	for _, confirmed := range []bool{true, false} {
+		step := lostCommitStep(startFailureRead{lost: &lostStop{confirmed: confirmed}})
+		if step.Fail != causeCommitLost || (step.Err == nil) == !confirmed {
+			t.Fatalf("confirmed %v: step %+v, want commit-lost with an error only when unconfirmed", confirmed, step)
+		}
+	}
+	// The row moved back between the sections: still lost, never abandoned.
+	if step := abandonStep(txView{prev: startFailureRead{lost: &lostStop{confirmed: true}}}); step.Fail != causeCommitLost || len(step.Write) != 0 {
+		t.Fatalf("abandonStep = %+v, want commit-lost with no write", step)
+	}
 }

@@ -34,17 +34,12 @@ func armZombie(r *rowFacts) (intent, bool) {
 	if e == nil || e.Liveness != livenessDead || e.Desired == desireWake || r.deadRuntimeCloses() {
 		return intent{}, false // A21 closes it, unclassified, as legacy does
 	}
-	if token, ok := r.w.Classified[r.k]; ok && token == deadToken(r.w.Observed[r.k].Identity) {
+	if c, ok := r.w.Classified[r.k]; ok && c.classifies(r.w.Observed[r.k].Identity) {
 		return intent{}, false
 	}
 	r.rests |= restRuntime
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	return intent{Kind: intentZombie, Reason: decideZombie, Basis: basis}, true
-}
-
-// deadToken is a dead runtime's identity key for the classified set.
-func deadToken(id runtimeIdentity) string {
-	return strings.TrimSpace(id.SessionID) + "/" + strings.TrimSpace(id.Token)
 }
 
 // zombieSections are the zombie effect's one section, with the crash

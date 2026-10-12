@@ -127,8 +127,9 @@ type planner struct {
 	rec         events.Recorder          // settlements' events; nil records none
 	stranded    *strandedClaimAlerts     // the controller's session.stranded_claims alerter
 	// classified is each row's last classified dead runtime, by its token
-	// (A12; v5 S5, X10): in memory, so a restart classifies once more.
-	classified map[rowKey]string
+	// (A12, the start's recycle; v5 S5, X10): in memory, so a restart
+	// classifies once more.
+	classified map[rowKey]classifiedRuntime
 	stderr     io.Writer
 	metrics    *passMetrics
 	emitRecord func(fields map[string]any) // the reconcile.pass record; nil emits none
@@ -401,9 +402,9 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 	}
 	if c := f.Classified; c != nil {
 		if p.classified == nil {
-			p.classified = make(map[rowKey]string)
+			p.classified = make(map[rowKey]classifiedRuntime)
 		}
-		p.classified[c.Key] = c.Token
+		p.classified[c.Key] = *c
 	}
 	if n := f.Noted; n != nil && p.observations != nil {
 		if cache := p.observations(); cache != nil {
@@ -552,7 +553,7 @@ func (r realPlannerTimer) Stop()                 { r.t.Stop() }
 // forgetting a row that left the census or whose runtime the pass reads
 // alive or gone (SESS-090: a runtime that recovers and dies again is
 // classified again).
-func (p *planner) classifiedOf(c *sessionCensus, observed map[rowKey]rowObservation) map[rowKey]string {
+func (p *planner) classifiedOf(c *sessionCensus, observed map[rowKey]rowObservation) map[rowKey]classifiedRuntime {
 	for k := range p.classified {
 		_, ok := c.Rows[k]
 		if l := observed[k].Liveness; !ok || l == livenessAlive || l == livenessGone {

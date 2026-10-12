@@ -207,7 +207,7 @@ func identityCause(row session.Info, ident runtimeIdentity) string {
 	switch compareIdentity(row, ident) {
 	case identityCurrent:
 		return ""
-	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's S7 exit is C5a3's
+	case identityStaleSelf: // arm A3 re-keys it (X1); a pending create's is A10's S7 exit
 		return causeTokenDrift
 	case identityNewerSelf:
 		return causeNewerSelf

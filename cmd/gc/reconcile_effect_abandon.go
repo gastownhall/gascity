@@ -54,15 +54,20 @@ type startFailure struct {
 // startFailureRead is what the failure Call read, past what it accrued.
 type startFailureRead struct {
 	startFailure
-	rateLimit bool // the pane shows a provider rate-limit screen
-	keeps     bool // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	rateLimit bool      // the pane shows a provider rate-limit screen
+	keeps     bool      // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	lost      *lostStop // a lost commit's stop (lostCommit)
 }
 
-// startEnd is what the commit hands its Call: the landed commit, or the
-// start that failed.
+// lostStop is how a lost commit's stop ended.
+type lostStop struct{ confirmed bool }
+
+// startEnd is what the commit hands its Call: the landed commit, the start
+// that failed, or the lost commit's own-runtime stop.
 type startEnd struct {
 	landed *landedCommit
 	failed *startFailure
+	lost   *teardown
 }
 
 // failStart is the start that did not commit with cause, handed to the
@@ -132,8 +137,11 @@ func peekPane(ctx context.Context, sp runtime.Provider, name string) string {
 // pending create's rollback goes on to its teardown and close.
 func abandonStep(v txView) txStep {
 	f, err := callResult[startFailureRead](v)
-	if err != nil {
+	switch {
+	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
+	case f.lost != nil: // the row moved back between the sections: still lost
+		return lostCommitStep(f)
 	}
 	abandon := func(patch session.MetadataPatch, class session.DispositionPatch, facts effectFacts) txStep {
 		return txStep{Write: patch, Class: class, Fail: f.cause, Err: f.err, Facts: facts}
@@ -278,7 +286,7 @@ func stopOwnRuntime(ctx context.Context, c txCaps, in teardown) (teardown, error
 
 // rollbackClose is C3's rollback, the failed-create close, while the fresh
 // row may still roll back (CanRollback) and its fresh read finds no runtime
-// of its own.
+// of its own; S7's relaunch keeps the row once its runtime is stopped.
 func rollbackClose(v txView) txStep {
 	td, err := callResult[teardown](v)
 	stop, cause := rollbackRuntime(v.Row, v.RT)
@@ -291,6 +299,8 @@ func rollbackClose(v txView) txStep {
 		return txStep{Refuse: cause}
 	case stop:
 		return txStep{Refuse: causeRuntimePresent}
+	case v.It.Relaunch: // S7: the configured named row stays for A18's relaunch
+		return txStep{Done: true, Cause: decideStaleCreate}
 	}
 	patch, class := rollbackPatch(v.Row, v.Now, td.more)
 	return txStep{Terminal: patch, Class: class, Fail: td.fail, Err: td.err}

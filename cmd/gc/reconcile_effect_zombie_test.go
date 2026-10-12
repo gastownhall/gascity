@@ -187,7 +187,7 @@ func TestArmZombie(t *testing.T) {
 		liveness   rowLiveness
 		desired    desire
 		info       func(*session.Info)
-		classified map[rowKey]string
+		classified map[rowKey]classifiedRuntime
 		want       bool
 	}{
 		{"dead, drained: A21 closes it unclassified", livenessDead, desireDrain, nil, nil, false},
@@ -199,8 +199,8 @@ func TestArmZombie(t *testing.T) {
 		{"dead, wanted awake", livenessDead, desireWake, nil, nil, false},
 		{"alive", livenessAlive, desireSleep, nil, nil, false},
 		{"gone", livenessGone, desireSleep, nil, nil, false},
-		{"classified", livenessDead, desireSleep, nil, map[rowKey]string{k.it.Key: "gc-1/tok"}, false},
-		{"classified, another token", livenessDead, desireSleep, nil, map[rowKey]string{k.it.Key: "gc-1/old"}, true},
+		{"classified", livenessDead, desireSleep, nil, map[rowKey]classifiedRuntime{k.it.Key: {Token: "gc-1/tok"}}, false},
+		{"classified, another token", livenessDead, desireSleep, nil, map[rowKey]classifiedRuntime{k.it.Key: {Token: "gc-1/old"}}, true},
 	} {
 		w := *k.p.World
 		w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: c.liveness, Identity: id}}
@@ -235,13 +235,13 @@ func TestPlannerForgetsARecoveredClassification(t *testing.T) {
 		liveness rowLiveness
 		kept     bool
 	}{{livenessDead, true}, {livenessAlive, false}, {livenessGone, false}} {
-		p := &planner{classified: map[rowKey]string{key: "gc-1/tok"}}
+		p := &planner{classified: map[rowKey]classifiedRuntime{key: {Token: "gc-1/tok"}}}
 		got := p.classifiedOf(k.p.World.Census, map[rowKey]rowObservation{key: {Liveness: c.liveness}})
 		if _, ok := got[key]; ok != c.kept {
 			t.Fatalf("%v: classified %v, want kept %v", c.liveness, got, c.kept)
 		}
 	}
-	p := &planner{classified: map[rowKey]string{{ID: "gone-row"}: "x/y"}}
+	p := &planner{classified: map[rowKey]classifiedRuntime{{ID: "gone-row"}: {Token: "x/y"}}}
 	if got := p.classifiedOf(k.p.World.Census, nil); len(got) != 0 {
 		t.Fatalf("classified %v, want a row out of the census forgotten", got)
 	}
@@ -285,7 +285,7 @@ func TestClassifiedDeadIsNotGone(t *testing.T) {
 	id := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}
 	w := *k.p.World
 	w.Observed = map[rowKey]rowObservation{k.it.Key: {Liveness: livenessDead, Identity: id}}
-	w.Classified = map[rowKey]string{k.it.Key: deadToken(id)}
+	w.Classified = map[rowKey]classifiedRuntime{k.it.Key: {Token: deadToken(id)}}
 	r := &rowFacts{w: &w, k: k.it.Key, row: k.p.World.Census.Rows[k.it.Key], found: true, entry: &selectionEntry{Key: k.it.Key, Liveness: livenessDead, Desired: desireSleep}}
 	if r.freshGone() || !r.freshGoneOrClassified() {
 		t.Fatalf("freshGone %v freshGoneOrClassified %v, want false and true", r.freshGone(), r.freshGoneOrClassified())
