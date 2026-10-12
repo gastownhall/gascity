@@ -365,6 +365,9 @@ type sim struct {
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
+	// respawnBegun are the (row, bead) pairs with an idle-respawn begin
+	// (I25).
+	respawnBegun map[string]bool
 	// killsChecked is how many of the provider's kills I4 and I5 judged.
 	killsChecked int
 	// closedInStep is, by session name, each row an outside writer closed

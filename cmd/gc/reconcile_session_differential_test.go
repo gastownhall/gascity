@@ -191,10 +191,6 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5 O3, BEHAVIORS DRAIN-042", "legacy skips a drain whose running probe errors; v2's inventory still classifies the row, so A19's wake lens cancels the drain. No completion either way, but §12.2 does not list the cancel",
 		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
-	"idle-respawn-void": {
-		"C6d, BEHAVIORS DRAIN-044", "legacy cancels an idle-respawn drain no longer eligible; A19 holds it until C6d completes its policy row",
-		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
-	},
 	"suspended-row-heal":   {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-531", "once an operator's suspend (the hold, #7417) has stopped a row's runtime, legacy's state heal turns the suspended row asleep under its hold; v2 keeps it suspended until R7 matches legacy, so its later restart replaces the suspend stamp", []string{"state", "suspended_at", "slept_at"}},
 	"suspended-named-heal": {"mc-92clf (ruled: v2 matches legacy; R7 Disposition owns the v2 side), BEHAVIORS SESS-009, SESS-531", "in a suspended city, legacy heals a suspended named row's expired hold from a fresh snapshot (SESS-009), then its state heal (SESS-531) turns the row asleep; v2 heals the hold and keeps it suspended until R7 matches legacy", []string{"state"}},
 	"episode-mirror":       {"C5b follow-up PR (owner; SESS-607 mirror, the gate is A18's)", "legacy mirrors a quarantined startup-health episode's count and kind onto the row every pass; v2's A18 holds the row on the episode but does not mirror it yet (the keys are not on session.Info)", []string{startupHealthActiveCountMetadataKey, startupHealthActiveKindMetadataKey}},
@@ -224,7 +220,7 @@ var parityFindings = map[string]parityEntry{
 	},
 	"recycle-by-object":  {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
 	"mislabelled-close":  {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
-	"idle-respawn-drain": {"C6d (D2's idle-respawn row: its begin and the claim-revalidating signal, signal-fresh), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, and retires its slot so a fresh seat takes the work; v2's A20 begins a plain idle drain there (its stop request), and registers no idle-respawn begin or signal yet", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
+	"idle-respawn-drain": {"C6d (D2's idle-respawn row; v5 D2: the finalize sleeps, never closes; §12.2 #63), BEHAVIORS SESS-614", "legacy drains a pool row awake only for ready, unclaimed assigned work, idle past its sleep time, stops it in the tick, retires its slot and starts a fresh seat for the work; v2's A20 begins the idle-respawn drain with its attempt, signals it a patrol later after revalidating claim and activity, and its stop verb finalizes the row asleep, never closed, so resume-on-ready restarts the same row", []string{"sleep_intent", "drain_at", "state", "state_reason", "status", "close_reason", "closed_at", "synced_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}},
 	"drain-stop-lag":     {"C6b1, C6b2 (A20, A4; D1-D4; owner to add a §12.2 row)", "legacy signals a drain through the runtime's drain env the tick after its begin, then stops and finalizes it; v2's begin (A20), its signal a patrol later (C6b1) and the stop verb (A4) each take a pass, so the stop, its events and the finalize land a pass or more after legacy's, with legacy's outcome", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"idle-sleep-lag":     {"C6b1, C6b2 (A20, A4 with D4's idle builder; owner to add a §12.2 row)", "legacy idle-sleeps a row in the tick its probe answers idle (begin, signal, stop and SleepPatch(idle) with the latch); v2's begin (A20), signal (C6b1) and stop verb (A4, finalizing with SleepPatch(idle)) reach the same sleep a pass or more later. An always-named session's idle sleep waits for C6a2b's activity fact (#7586), so v2 leaves its runtime up", append([]string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at", session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey}, parityStartKeys...)},
 
@@ -1389,7 +1385,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "an idle-respawn drain no longer eligible", Behaviors: []string{"DRAIN-044"},
 			Rows: []parityRow{awake()}, Work: assigned, Runtimes: []simRuntime{live}, Drains: map[string]string{"gc-1": "idle-respawn"},
-			Explain: explain(map[string]string{"row:gc-1:*drain": "idle-respawn-void"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "a resume voids a suspended drain (R16)",

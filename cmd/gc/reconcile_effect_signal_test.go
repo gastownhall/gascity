@@ -65,7 +65,7 @@ func TestSignalPerReasonAuthorization(t *testing.T) {
 		{"idle, still asleep", intentBegunAt(drainIdle, time.Minute), sleep, intentSignalFresh},
 		{"idle under Keep", intentBegunAt(drainIdle, time.Minute), keep, ""},
 		{"orphaned under Keep", intentBegunAt(drainOrphaned, time.Minute), keep, ""},
-		{"idle-respawn, C6d's row", intentBegunAt(idleRespawnDrainReason, time.Minute), sleep, ""},
+		{"idle-respawn, no longer eligible (C6d)", intentBegunAt(idleRespawnDrainReason, time.Minute), sleep, intentDrainVoid},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		if it.Kind != c.signal || (c.signal == "" && it.Reason != decideStopActive) {

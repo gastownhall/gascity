@@ -333,7 +333,7 @@ var registry = slices.Concat([]Field{
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
-	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
+	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin"))},
 
 	// Markers.
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
@@ -416,7 +416,7 @@ var registry = slices.Concat([]Field{
 	same(ClassMarker, false, sites(legacy(srcReconcile, "providerTerminalErrorPatch")), "provider_terminal_error",
 		"provider_terminal_error_at", "session_health", "session_health_reason", "session_drainable"),
 	same(ClassMarker, false, sites(legacy(srcReconciler, "emitSessionWakeRefused")), "wake_refused_event_at"),
-	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle")), "idle_respawn_bead_id"),
+	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin")), "idle_respawn_bead_id"),
 
 	// Advisory: diagnostics, pacing and usage stamps. The execution backstop's
 	// are written every pass, under either controller.
