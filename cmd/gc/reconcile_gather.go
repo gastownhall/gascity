@@ -106,6 +106,9 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
+	// Classified are the rows whose dead runtime a zombie classification
+	// completed, by its runtime token (A12): the planner's memory.
+	Classified map[rowKey]string
 	// LegStores holds the sessions leg's store by its ref, which effects
 	// reach only as a fenced writer (newEffectPass). No other leg's store is
 	// here: a census-only row has no writer (AL1, armCensusOnly).
@@ -212,6 +215,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	w.Patrol = env.patrol()
 	w.ObsMaxAge = 2 * w.Patrol
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
+	w.Classified = p.classifiedOf(w.Census, w.Observed)
 	var guard *endpointCapacityGuard
 	if e.Capacity != nil {
 		guard = e.Capacity()

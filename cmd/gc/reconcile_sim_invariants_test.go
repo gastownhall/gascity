@@ -127,11 +127,12 @@ func (s *sim) checkStarts() {
 }
 
 // checkDestructive is I4 (I-fence) and I5 (I-attached) over v2's provider
-// kills, each checked at its step: each hits its row's own runtime (O2 Current, or the own-runtime
-// exception's StaleSelf with epoch = generation) or the dead object the
-// corpse and start-recycle exceptions name, or a pending create's
-// bead-scoped name (C8.2(a)), and never an attached one. The
-// own-runtime exception to I5 is D1b's to model with the effects it covers.
+// kills, each checked at its step: each hits its row's own runtime (O2
+// Current, or the own-runtime exception's StaleSelf with epoch =
+// generation), any corpse (the corpse exception) or the row's own zombie
+// (the start recycle's and the close's), or a pending create's bead-scoped
+// name (C8.2(a)), and never an attached one. The own-runtime exception to
+// I5 is D1b's to model with the effects it covers.
 func (s *sim) checkDestructive() {
 	kills := s.sp.kills[min(s.killsChecked, len(s.sp.kills)):] // each judged once, on the rows before its step
 	s.killsChecked = len(s.sp.kills)
@@ -144,7 +145,10 @@ func (s *sim) checkDestructive() {
 		}
 		row := s.rowNamed(k.Name)
 		switch {
-		case k.Method == "KillCorpseObject" && k.Hit.corpse, k.Method == "KillZombieObject" && k.Hit.zombie:
+		case k.Method == "KillCorpseObject" && k.Hit.corpse: // the corpse exception, whoever it was
+		case k.Method == "KillZombieObject" && k.Hit.zombie && k.Hit.id != "" && k.Hit.id == s.rowNamedEver(k.Name).ID:
+			// The row's own zombie: the start recycle's and the close's, the
+			// row closed meanwhile included (its zombie stays its own).
 		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name):
 			// C8.2(a): a pending create's rollback stops its bead-scoped name
 			// whoever runs under it (C3, S1's Foreign row), as legacy does.
@@ -154,6 +158,20 @@ func (s *sim) checkDestructive() {
 			s.failf("I4 I-fence", "v2 %s on %s hit token %s, not row %s's", k.Method, k.Name, k.Hit.token, row.ID)
 		}
 	}
+}
+
+// rowNamedEver is the row that carried name before this step, open or
+// closed, preferring an open one.
+func (s *sim) rowNamedEver(name string) beads.Bead {
+	if b := s.rowNamed(name); b.ID != "" {
+		return b
+	}
+	for _, k := range slices.Sorted(maps.Keys(s.prev)) {
+		if b := s.prev[k]; b.Metadata["session_name"] == name {
+			return b
+		}
+	}
+	return beads.Bead{}
 }
 
 // rowNamed is the open row that carried name before this step.
@@ -228,10 +246,11 @@ func (s *sim) checkWrite(w simWrite) {
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
 		(a["state"] != b["state"] && slices.Contains([]string{"asleep", "drained", "stopped", "closed", "orphaned", string(session.StateFailedCreate)}, a["state"]))
-	// S5's screens park or quarantine a zombie in place (its agent is dead):
-	// a terminal provider error or a rate-limit screen, with no stop.
+	// A zombie's agent is dead: S5's screens park or quarantine it in place
+	// (a terminal provider error or a rate-limit screen, with no stop), and
+	// A6 heals a classified one asleep, as legacy does (CONTRACT v5.9m).
 	screened := w.After.Status != "closed" && s.zombiePane(w.Before) &&
-		slices.Contains([]string{string(session.SleepReasonProviderTerminalError), string(session.SleepReasonRateLimit)}, a["sleep_reason"])
+		(a["state"] == string(session.StateAsleep) || slices.Contains([]string{string(session.SleepReasonProviderTerminalError), string(session.SleepReasonRateLimit)}, a["sleep_reason"]))
 	if terminal && s.livePane(w.Before) && !screened {
 		s.failf("I4 I-fence", "v2 wrote %s terminal (state %q) while its runtime has a live pane", id, a["state"])
 	}

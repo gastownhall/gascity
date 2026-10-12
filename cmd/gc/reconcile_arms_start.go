@@ -23,7 +23,7 @@ const (
 	decideHeartbeatRespawn  = "heartbeat-respawn"                  // A17, SESS-602
 	decideStartAccrued      = "start-held:death-accrual"           // SESS-537/538: legacy restarts the next tick
 	decideStartFailedCreate = "start-held:failed-create"           // SESS-605
-	decideStartParked       = "start-held:provider-terminal-error" // §12.2 #19: parked until an operator wakes it
+	decideStartParked       = "start-held:provider-terminal-error" // §12.2 #19: parked until a wake request releases it
 	decideStartQuarantine   = "start-held:quarantine"              // SESS-606
 	decideStartEpisode      = "start-held:startup-health"          // SESS-607, #46
 	decideStartProviderRed  = "start-held:provider-red"            // SESS-610, GUAR-034
@@ -132,7 +132,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 		return intent{Reason: decideStartFailedCreate}, true
 	}
 	if parkedTerminal(info) && strings.TrimSpace(info.WakeRequest) != string(session.WakeCauseExplicit) {
-		return intent{Reason: decideStartParked}, true // an operator's wake starts it
+		return intent{Reason: decideStartParked}, true // any explicit wake request releases it for one launch (§12.2 #19)
 	}
 	if until := session.DispositionOfInfo(info).Quarantine; until.After(now) {
 		r.after(requeueUntil(now, until))

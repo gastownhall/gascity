@@ -116,7 +116,7 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 	if screen, ok := deadScreen(v, peek.content); ok {
 		if parkedTerminal(v.Row) && screen.patch["sleep_reason"] == string(session.SleepReasonProviderTerminalError) {
 			if strings.TrimSpace(v.Row.WakeRequest) == string(session.WakeCauseExplicit) {
-				return txStep{Pass: k} // an operator's wake: the screen it was parked on is recycled
+				return txStep{Pass: k} // a wake request: the screen it was parked on is recycled for its one launch
 			}
 			return txStep{Done: true, Cause: causeDead} // already parked
 		}
@@ -124,6 +124,9 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 	}
 	if !k.zombie || runtime.ContainsProviderRateLimitScreen(peek.content) {
 		return txStep{Pass: k} // legacy records a crash for a zombie alone, and never a rate-limit screen's
+	}
+	if v.World.Classified[v.It.Key] == deadToken(v.RT.Identity) {
+		return txStep{Pass: k} // A12 recorded this death's crash (SESS-089: once per episode)
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	k.crash = &events.Event{

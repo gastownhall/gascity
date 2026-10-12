@@ -420,6 +420,11 @@ func calledWhen[In, Out any](kind callKind, sec section, when func(In) bool, cal
 	return sec
 }
 
+// callFacts is a Call result that carries facts of what the Call did (a
+// stop's session.stopped), merged as the Call returns, so a later section's
+// refusal does not drop them.
+type callFacts interface{ facts() effectFacts }
+
 // callResult is the previous section's Call result and error.
 func callResult[Out any](v txView) (Out, error) {
 	out, _ := v.prev.(Out)
@@ -517,6 +522,16 @@ type effectFacts struct {
 	AliasOwed *rowKey
 	// Stopped is a stop the stop verb performed, for legacy's stop metric.
 	Stopped *agentStop
+	// Classified is the (row, runtime token) a zombie classification
+	// completed, which the planner remembers so A12 fires once per pair
+	// (v5 S5, X10).
+	Classified *classifiedRuntime
+}
+
+// classifiedRuntime is a row's dead runtime, by its runtime token.
+type classifiedRuntime struct {
+	Key   rowKey
+	Token string
 }
 
 // notedRuntime is a runtime name a fresh read issued at At found alive.
@@ -526,7 +541,7 @@ type notedRuntime struct {
 }
 
 func (f effectFacts) empty() bool {
-	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil
+	return len(f.Events) == 0 && f.Transition == nil && f.Work == nil && f.Noted == nil && f.Quarantined == "" && f.AliasOwed == nil && f.Stopped == nil && f.Classified == nil
 }
 
 func (f *effectFacts) merge(g effectFacts) {
@@ -537,6 +552,7 @@ func (f *effectFacts) merge(g effectFacts) {
 	f.Quarantined = cmp.Or(g.Quarantined, f.Quarantined)
 	f.AliasOwed = cmp.Or(g.AliasOwed, f.AliasOwed)
 	f.Stopped = cmp.Or(g.Stopped, f.Stopped)
+	f.Classified = cmp.Or(g.Classified, f.Classified)
 }
 
 // Transaction causes. A refusal backs the row off (P4).
@@ -741,6 +757,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 			break
 		}
 		t.view.prev, t.view.prevErr = t.callWatched(ctx, sec)
+		if f, ok := t.view.prev.(callFacts); ok { // what the Call did, kept whatever the later sections decide
+			t.facts.merge(f.facts())
+		}
 		switch sec.callKind {
 		case callStart:
 			t.started = true

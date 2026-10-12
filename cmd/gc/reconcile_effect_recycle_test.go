@@ -390,3 +390,19 @@ func TestStartRecycleDrainedDeathCountsNothing(t *testing.T) {
 		}
 	}
 }
+
+// Kills a death's crash recorded twice (SESS-089; the C5c2 review): a
+// zombie A12 classified, then recycled by a wake (a heartbeat respawn, an
+// operator's wake), records no second session.crashed; another token's does.
+func TestStartRecycleSkipsACrashA12Recorded(t *testing.T) {
+	for _, c := range []struct {
+		token   string
+		crashed int
+	}{{"gc-1/tok", 0}, {"gc-1/old", 1}} {
+		k, _, rec := deadKit(t, true, "gc-1", "tok", "panic: boom")
+		k.p.World.Classified = map[rowKey]string{k.it.Key: c.token}
+		if s := k.runKind(); s.Outcome != settledLanded || crashes(rec) != c.crashed || k.killsBy("KillZombieObject") != 1 {
+			t.Fatalf("classified %s: settlement %+v crashes %d, want recycled with %d crash", c.token, s, crashes(rec), c.crashed)
+		}
+	}
+}

@@ -200,9 +200,13 @@ var parityFindings = map[string]parityEntry{
 		"v5.9b §12.5 (runtime lease); BEHAVIORS START-033", "legacy's failed start rolls its pending create back while it still holds the row's runtime lease record, which stays on the closed row; v2's effect releases its lease record with the close. §12.2 does not list it",
 		[]string{session.RuntimeLeaseExpiresKey, session.RuntimeLeaseFlockKey, session.RuntimeLeaseHolderKey, session.RuntimeLeaseTTLKey},
 	},
-	"dead-corpse-close": {
-		"C5c2 (MAINT-031; CONTRACT v5 A21, C3)", "legacy closes an unwanted row that claims a live runtime once its runtime is a corpse (here MAINT-051's sweep reaches it first); A21 never closes a row that claims a live runtime, and C5c2's dead-runtime close is not built",
-		[]string{"status", "state", "close_reason", "closed_at", "synced_at"},
+	"undesired-dead-drain": {
+		"CONTRACT v5 A20, A21 (C5c2 ruling 1)", "legacy reaches an unwanted row's zombie through its drain: its stop by name with the drain's runtime metadata (drain_at, state_reason drain-ack-stop-pending); v2's A20 never begins a drain on a dead runtime, and A21 removes it by exact object, records the same session.stopped, and closes the row. §12.2 does not list it",
+		[]string{"drain_at", "state_reason"},
+	},
+
+	"reset-stall-by-recycle": {
+		"IMPLEMENTATION-PLAN reset-stall row (owner ruling 2, 2026-10-06; plan §2.3)", "legacy evicts a reset-pending row's stalled runtime by name past its startup timeout and records session.reset_stalled; the ruling gives the eviction to the start recycle, which emits no reset_stalled. §12.2 does not list it", nil,
 	},
 	"drift-deferral-skips": {"C7b1 (A14 runs after A6's heals and the allocation's writes, CONTRACT v5 §4)", "legacy's config-drift deferral (SESS-553/558/559) continues past the row, so that tick it skips the row's later writes, its current-bead stamp (SESS-613) and sleep-policy keys among them; v2's A6 and the allocation write them before A14 decides", []string{"currently_processing_bead_id"}},
 	"recycle-by-object":    {"CONTRACT v5 S5, F2 (C5a3)", "v2's start recycle removes the row's own dead runtime by exact session object (KillZombieObject, KillCorpseObject) after re-checking it; legacy's start recycle stops it by name, and a death that accrues legacy leaves listed until its next start. §12.2 does not list it", nil},
@@ -280,6 +284,8 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	intentRuntimeAlias: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`), // SESS-716's runtime alias sync
 	// A8's baseline (C7c) owns the M2 builder's rows.
 	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
+	// A12's zombie effect (C5c2) owns the classification rows.
+	intentZombie: regexp.MustCompile(`\bA12 / S5 classification\b`),
 	// A10's rollback (C5a2) owns its C3 rows.
 	intentRollback: regexp.MustCompile(`\bA10 \+ C3 rollback\b`),
 	// A21's closes own their C3 rows: the failed-create, pool-slot and
@@ -997,6 +1003,14 @@ func parityFixtures() []parityFixture {
 		cfg.Agents[1].SleepAfterIdle = "5m"
 		return cfg
 	}
+	// chatDemand is chat's city with its named session on demand and no
+	// idle sleep: AL1 keeps it asleep without demand.
+	chatDemand := func() *config.City {
+		cfg := workerCity(3)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", StartCommand: "true"})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
+		return cfg
+	}
 	// onDemand is chat's on-demand named row, awake, with meta; chatLive its
 	// runtime; chatStanding its standing findings.
 	onDemand := func(meta ...string) parityRow {
@@ -1217,7 +1231,7 @@ func parityFixtures() []parityFixture {
 			// runtime (C3), so the corpse stays and the row with it.
 			Name: "a corpse on an unwanted row that claims a live runtime", Behaviors: []string{"MAINT-031"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", corpse: true}},
-			Explain: map[string]string{"row:gc-1:*close": "dead-corpse-close"},
+			Explain: map[string]string{"provider:KillCorpseObject s-gc-1": "§12.2#41 close-removes-corpse", "row:gc-1:*reason": "§12.2#17 orphan-close-reason"},
 		},
 		{
 			Name: "a corpse on an unwanted row is removed, and the row closes", Behaviors: []string{"GUAR-022", "INC-025"},
@@ -1620,6 +1634,72 @@ func parityFixtures() []parityFixture {
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second), "started_config_hash", "h-1", "wake_attempts", "4")},
 			Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}}, Panes: map[string]string{"gc-1": "panic: boom"},
 			Explain: explain(map[string]string{"provider:KillZombieObject s-gc-1": "recycle-by-object"}),
+		},
+		// The reset stall (SESS-086/087) is the start recycle's (plan
+		// ruling 2): a reset-pending row whose agent died past the startup
+		// timeout reads dead, so the recycle replaces it.
+		{
+			Name: "a reset-pending seat whose agent stalled past its startup timeout is replaced", Behaviors: []string{"SESS-086", "SESS-087"},
+			Rows:     []parityRow{awake("last_woke_at", at(-time.Hour), "continuation_reset_pending", "true", session.ResetCommittedAtKey, at(-time.Hour))},
+			Work:     assigned,
+			Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Explain: explain(map[string]string{
+				"event:session.reset_stalled s-gc-1 [elapsed_s reset_committed_at session_name template]": "reset-stall-by-recycle",
+				"provider:Stop s-gc-1": "recycle-by-object", "provider:KillZombieObject s-gc-1": "recycle-by-object", "provider:RemoveMeta s-gc-1": "§12.2#38 start-meta-clears",
+			}),
+		},
+		// SESS-056: a preserved named row whose liveness probe errors is
+		// left alone.
+		{
+			Name: "a preserved named row whose liveness is uncertain is left alone", Behaviors: []string{"SESS-056"}, City: chat(false),
+			Rows:     []parityRow{chatRow("gc-c", "1", "state", "awake", "session_name", "chat", "configured_named_mode", "always", "instance_token", "tok-gc-c")},
+			Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", probeErr: true}},
+			Explain:  nil,
+		},
+		// A12 on a row it classifies (a Sleep named on_demand row, which A21
+		// never closes): a crash, a terminal error, a rate-limit screen.
+		{
+			Name: "a Sleep named row's crashed zombie is classified, then healed", Behaviors: []string{"SESS-085", "SESS-089"}, City: chatDemand,
+			Rows: []parityRow{onDemand("last_woke_at", at(-10*time.Second))}, Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:   map[string]string{"gc-c": "panic: boom"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a Sleep named row's zombie on a terminal error is parked", Behaviors: []string{"SESS-057", "SESS-088"}, City: chatDemand,
+			Rows: []parityRow{onDemand("last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:   map[string]string{"gc-c": "Error: model_not_found"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		{
+			Name: "a Sleep named row's zombie on a rate-limit screen is quarantined", Behaviors: []string{"SESS-530"}, City: chatDemand,
+			Rows: []parityRow{onDemand("last_woke_at", at(-10*time.Second))}, Runtimes: []simRuntime{{id: "gc-c", epoch: "1", token: "tok-gc-c", zombie: true}},
+			Panes:   map[string]string{"gc-c": "Usage limit reached"},
+			Explain: map[string]string{"row:gc-c:*policy": "sleep-policy-keys"},
+		},
+		// C5c2 ruling 1: an unwanted row's dead runtime is A21's, closed
+		// unclassified as legacy closes it, once INC-003's grace ends.
+		{
+			Name: "an unwanted row's crashed zombie is closed unclassified", Behaviors: []string{"SESS-085", "SESS-090"},
+			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes: map[string]string{"gc-1": "panic: boom"},
+			Explain: map[string]string{
+				"row:gc-1:*drain": "undesired-dead-drain", "row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillZombieObject s-gc-1": "undesired-dead-drain", "provider:Stop s-gc-1": "undesired-dead-drain",
+				"provider:SetMeta s-gc-1": "undesired-dead-drain", "provider:RemoveMeta s-gc-1": "undesired-dead-drain",
+			},
+		},
+		{
+			Name: "an unwanted row's zombie on a terminal error is closed unparked", Behaviors: []string{"SESS-057"},
+			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-time.Hour))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes: map[string]string{"gc-1": "Error: model_not_found"},
+			Explain: map[string]string{
+				"row:gc-1:*drain": "undesired-dead-drain", "row:gc-1:*reason": "§12.2#17 orphan-close-reason", "provider:KillZombieObject s-gc-1": "undesired-dead-drain", "provider:Stop s-gc-1": "undesired-dead-drain",
+				"provider:SetMeta s-gc-1": "undesired-dead-drain", "provider:RemoveMeta s-gc-1": "undesired-dead-drain",
+			},
+		},
+		{
+			Name: "an unwanted row's zombie woken inside its grace is left alone", Behaviors: []string{"SESS-530"},
+			Rows: []parityRow{poolRow("gc-1", "gone", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", at(-10*time.Second))}, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", zombie: true}},
+			Panes: map[string]string{"gc-1": "Usage limit reached"},
 		},
 		{
 			Name: "a wanted seat whose zombie shows a terminal provider error is parked", Behaviors: []string{"SESS-088"},
