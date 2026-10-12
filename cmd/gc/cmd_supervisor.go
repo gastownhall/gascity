@@ -1105,6 +1105,12 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 	if pid > 0 {
 		ownership = supervisorDetermineUnitOwnership(pid)
 	}
+	// A live process is not proof of supervision: on macOS the stop path
+	// leaves a persistent launchd override behind, so the supervisor can
+	// answer every liveness probe while nothing restarts it after logout.
+	// pid is the socket answer start's already-running check reads, so it
+	// decides whether the remedy has to stop the supervisor first.
+	supervisionWarning := supervisorLaunchdSupervisionWarning(pid > 0)
 	if asJSON {
 		payload := map[string]any{
 			"schema_version": "1",
@@ -1130,11 +1136,13 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 				payload["supervisor_unit"] = ownership.Unit
 			}
 		}
+		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
 		}
 		return 0
 	}
+	printSupervisorSupervisionWarning(stderr, supervisionWarning)
 	switch {
 	case pid > 0:
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
@@ -1156,6 +1164,28 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
 		return 1
 	}
+}
+
+// addSupervisorSupervisionJSON adds a launchd supervision problem to the
+// status payload. The keys are present only when status found one, so
+// supervised is never true: its absence means launchd is supervising, the
+// host is not macOS, the agent is not installed or its plist cannot be read,
+// or launchd could not answer.
+func addSupervisorSupervisionJSON(payload map[string]any, warning string) {
+	if warning == "" {
+		return
+	}
+	payload["supervised"] = false
+	payload["supervision_warning"] = warning
+}
+
+// printSupervisorSupervisionWarning reports a launchd supervision problem on
+// stderr, leaving the liveness report on stdout and the exit code unchanged.
+func printSupervisorSupervisionWarning(stderr io.Writer, warning string) {
+	if warning == "" {
+		return
+	}
+	fmt.Fprintf(stderr, "gc supervisor status: warning: %s\n", warning) //nolint:errcheck
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {

@@ -2706,8 +2706,8 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
-  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\n'
+  *"FROM workflow_issue_root_candidates_page root"*)
+    printf 'id,verdict\n'
     ;;
   *"issue_type NOT IN"*)
     printf 'COUNT(*)\n0\n'
@@ -2778,8 +2778,8 @@ case "$*" in
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
     ;;
-  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\n'
+  *"FROM workflow_issue_root_candidates_page root"*)
+    printf 'id,verdict\n'
     ;;
   *"issue_type NOT IN"*"created_at < DATE_SUB"*)
     printf 'COUNT(*)\n0\n'
@@ -2852,6 +2852,10 @@ case "$*" in
     ;;
   *"SHOW DATABASES"*)
     printf 'Database\nbeads\n'
+    ;;
+  *"SELECT COUNT(*) FROM workflow_wisp_root_candidates"[!_]*|*"SELECT COUNT(*) FROM workflow_issue_root_candidates"[!_]*)
+    # No workflow roots: each candidate costs the root census a page query.
+    printf 'COUNT(*)\n0\n'
     ;;
   *"issue_type NOT IN"*"created_at < DATE_SUB"*)
     printf 'COUNT(*)\n600\n'
@@ -3246,8 +3250,11 @@ exit 0
 		"GC_DOLT_USER":     "root",
 		"GC_DOLT_PASSWORD": "",
 		"DOLT_PURGE_COUNT": "1",
-		"BD_CALL_LOG":      bdLog,
-		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		// One candidate root of each kind, so the census sends the
+		// descendant walk this test inspects.
+		"DOLT_WORKFLOW_ROOT_CANDIDATES": "1",
+		"BD_CALL_LOG":                   bdLog,
+		"PATH":                          binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		// No GC_REAPER_DRY_RUN — the purge runs for real.
 	}
 
@@ -3321,7 +3328,10 @@ exit 0
 		"GC_DOLT_USER":                "root",
 		"GC_DOLT_PASSWORD":            "",
 		"DOLT_PURGE_COUNT":            "1",
-		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		// One candidate root of each kind, so the census sends the
+		// descendant walk this test inspects.
+		"DOLT_WORKFLOW_ROOT_CANDIDATES": "1",
+		"PATH":                          binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 
 	runScript(t, coreScriptPath("reaper.sh"), env)
@@ -4144,11 +4154,20 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\nwisp-root-close\n'
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
     ;;
-  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\nissue-close\n'
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"FROM workflow_wisp_root_candidates_page root"*)
+    printf 'id,verdict\nwisp-root-close,close\n'
+    ;;
+  *"FROM workflow_issue_root_candidates_page root"*)
+    printf 'id,verdict\nissue-close,close\n'
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n0\n'
@@ -4200,6 +4219,12 @@ exit 0
 	for _, want := range []string{
 		"WITH RECURSIVE workflow_wisp_root_candidates",
 		"WITH RECURSIVE workflow_issue_root_candidates",
+		"WITH workflow_wisp_root_candidates_base",
+		"WITH workflow_issue_root_candidates_base",
+		// By default the census checks one candidate root per query, from
+		// the first root in id order.
+		"WHERE id > ''\n",
+		"LIMIT 1\n",
 		"workflow_descendants(root_id, id)",
 		"roots_with_live_descendants",
 		"JSON_UNQUOTE(JSON_EXTRACT(w.metadata, '$.\"gc.kind\"')) = 'workflow'",
@@ -4232,6 +4257,9 @@ exit 0
 	if strings.Contains(log, "parent_id") {
 		t.Fatalf("reaper workflow-root cleanup used removed parent_id column:\n%s", log)
 	}
+	if strings.Contains(log, "OFFSET") {
+		t.Fatalf("reaper paged the workflow-root census by offset, which closing a page shifts:\n%s", log)
+	}
 	if strings.Contains(log, "UPDATE `beads`.issues SET status='closed'") {
 		t.Fatalf("reaper closed city workflow issue roots with raw SQL instead of bd close:\n%s", log)
 	}
@@ -4256,8 +4284,636 @@ exit 0
 		t.Fatalf("ReadFile(gc log): %v", err)
 	}
 	if !strings.Contains(string(gcData), "workflow_roots:2") ||
+		!strings.Contains(string(gcData), "workflow_root_census:2/2,") ||
 		!strings.Contains(string(gcData), "skipped_cross_store_workflow_roots:0") {
 		t.Fatalf("reaper summary did not report closed workflow roots:\n%s", gcData)
+	}
+}
+
+// workflowRootCensusStore is a dolt stub that plays the store for the Step 2
+// workflow-root census. CENSUS_ROOTS ("<id>:<close|keep> ...") are the
+// CENSUS_KIND (wisp or issue) candidate roots of CENSUS_SCOPE (default city),
+// each with the verdict its descendants give. A root bd has closed (read back
+// from BD_CALL_LOG) is no longer a candidate, so consecutive runs see each
+// other's closes. Census pages are served in id order after the query's keyset
+// cursor (and up to its upper bound after a wrap) and logged into BD_CALL_LOG,
+// with the census start lookups, so a test reads pages and bd verbs on one
+// timeline. CENSUS_COUNT_EXTRA adds that many roots to the candidate count
+// that are gone by the time the pages are read, CENSUS_COUNT_FAIL fails the
+// candidate count, CENSUS_START_FAIL fails the start lookup and
+// CENSUS_FAIL_AFTER fails the page after that cursor. Every other query gets
+// the scope fixture's empty answers.
+const workflowRootCensusStore = `#!/bin/sh
+if [ -z "${GC_FAKE_SCOPE:-}" ]; then
+  printf 'DIRECT DOLT CALL: %s\n' "$*" >> "$DOLT_ARGS_LOG"
+  exit 97
+fi
+printf '%s|%s\n' "$GC_FAKE_SCOPE" "$*" >> "$DOLT_ARGS_LOG"
+census_open() {
+  closed=$(sed -n 's/.* args=close \(.*\) --reason .*/\1/p' "$BD_CALL_LOG" 2>/dev/null | tr '\n' ' ')
+  printf '%s\n' $CENSUS_ROOTS | LC_ALL=C sort -t: -k1,1 | LC_ALL=C awk -F: -v closed="$closed" '
+    BEGIN { n = split(closed, c, " "); for (i = 1; i <= n; i++) gone[c[i]] = 1 }
+    NF && !($1 in gone) { print $1 "," $2 }'
+}
+for query; do :; done
+kind="workflow_${CENSUS_KIND}_root_candidates"
+case "$GC_FAKE_SCOPE|$query" in
+  "${CENSUS_SCOPE:-city}|"*"LEFT JOIN $kind candidate"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  "${CENSUS_SCOPE:-city}|"*"SELECT COUNT(*) FROM $kind"*)
+    if [ -n "${CENSUS_COUNT_FAIL:-}" ]; then
+      printf 'injected census count timeout\n' >&2
+      exit 42
+    fi
+    printf 'COUNT(*)\n%s\n' "$(( $(census_open | wc -l) + ${CENSUS_COUNT_EXTRA:-0} ))"
+    ;;
+  "${CENSUS_SCOPE:-city}|"*"FROM ${kind}_page root"*)
+    after=$(printf '%s\n' "$query" | sed -n "s/.*WHERE id > '\([^']*\)'.*/\1/p" | head -n 1)
+    until=$(printf '%s\n' "$query" | sed -n "s/.*AND id <= '\([^']*\)'.*/\1/p" | head -n 1)
+    limit=$(printf '%s\n' "$query" | sed -n 's/.*LIMIT \([0-9][0-9]*\).*/\1/p' | head -n 1)
+    if [ -n "$until" ]; then
+      printf 'dolt census page after=%s until=%s limit=%s\n' "$after" "$until" "$limit" >> "$BD_CALL_LOG"
+    else
+      printf 'dolt census page after=%s limit=%s\n' "$after" "$limit" >> "$BD_CALL_LOG"
+    fi
+    if [ -n "${CENSUS_FAIL_AFTER:-}" ] && [ "$after" = "$CENSUS_FAIL_AFTER" ]; then
+      printf 'injected census page timeout\n' >&2
+      exit 42
+    fi
+    printf 'id,verdict\n'
+    census_open | LC_ALL=C awk -F, -v after="$after" -v until="$until" -v limit="$limit" \
+      '$1 > after && (until == "" || $1 <= until) && n < limit { print; n++ }'
+    ;;
+  "${CENSUS_SCOPE:-city}|"*"SELECT id FROM $kind"*"OFFSET "*)
+    offset=$(printf '%s\n' "$query" | sed -n 's/.*OFFSET \([0-9][0-9]*\).*/\1/p' | head -n 1)
+    printf 'dolt census start offset=%s\n' "$offset" >> "$BD_CALL_LOG"
+    if [ -n "${CENSUS_START_FAIL:-}" ]; then
+      printf 'injected census start timeout\n' >&2
+      exit 42
+    fi
+    printf 'id\n'
+    census_open | sed -n "$((offset + 1))p" | cut -d, -f1
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT * FROM "[!\(]*".issues"*)
+    printf '{}\n'
+    ;;
+  *"SELECT DISTINCT w.id"*)
+    printf 'id,owner_id,depth,state,mode\n'
+    ;;
+  *"SELECT"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`
+
+// workflowRootReasonFlag is the close reason bd is given for a stale workflow
+// root.
+const workflowRootReasonFlag = "--reason stale inactive workflow root auto-closed by reaper"
+
+// newWorkflowRootCensusFixture is a scope fixture whose store serves the given
+// workflow roots of one kind (see workflowRootCensusStore). Its censuses start
+// at the first root unless a test overrides or deletes
+// GC_REAPER_WORKFLOW_ROOT_CENSUS_START. A failing test logs the bd calls and
+// census pages in the order they happened.
+func newWorkflowRootCensusFixture(t *testing.T, kind, roots string) scopeFixture {
+	t.Helper()
+	f := newScopeFixture(t, "")
+	writeExecutable(t, filepath.Join(f.binDir, "dolt"), workflowRootCensusStore)
+	f.env["CENSUS_KIND"] = kind
+	f.env["CENSUS_ROOTS"] = roots
+	f.env["GC_REAPER_WORKFLOW_ROOT_CENSUS_START"] = "0"
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("bd calls and census pages:\n%s", f.read(t, f.bdLog))
+		}
+	})
+	return f
+}
+
+// jumpRunClockAfterFirstRootClose makes the run clock (date +%s) jump past
+// every budget once bd has closed a workflow root, while CENSUS_CLOCK_JUMP is
+// set.
+func jumpRunClockAfterFirstRootClose(t *testing.T, binDir string) {
+	t.Helper()
+	realDate, err := exec.LookPath("date")
+	if err != nil {
+		t.Fatalf("LookPath(date): %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "date"), `#!/bin/sh
+if [ "$1" = "+%s" ] && [ -n "${CENSUS_CLOCK_JUMP:-}" ] && grep -q ' args=close root-' "$BD_CALL_LOG" 2>/dev/null; then
+  echo 4102444800
+  exit 0
+fi
+exec '`+realDate+`' "$@"
+`)
+}
+
+// freezeRunClock stops the run clock (date +%s) at a time every candidate
+// count from 2 to 6 divides, so a census start derived from the clock would
+// land on the first root every run.
+func freezeRunClock(t *testing.T, binDir string) {
+	t.Helper()
+	realDate, err := exec.LookPath("date")
+	if err != nil {
+		t.Fatalf("LookPath(date): %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "date"), `#!/bin/sh
+if [ "$1" = "+%s" ]; then
+  echo 4102444800
+  exit 0
+fi
+exec '`+realDate+`' "$@"
+`)
+}
+
+// workflowRootVerbIDs lists, space-separated in call order, the ids of every
+// bd <verb> call in a bd call log.
+func workflowRootVerbIDs(log, verb string) string {
+	var ids []string
+	for _, line := range strings.Split(log, "\n") {
+		_, args, ok := strings.Cut(line, " args="+verb+" ")
+		if !ok {
+			continue
+		}
+		args, _, _ = strings.Cut(args, " --")
+		ids = append(ids, strings.Fields(args)...)
+	}
+	return strings.Join(ids, " ")
+}
+
+func TestReaperWorkflowRootCensusClosesEachPageBeforeReadingTheNext(t *testing.T) {
+	for _, kind := range []string{"wisp", "issue"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newWorkflowRootCensusFixture(t, kind, "root-a:close root-b:keep root-c:close root-d:close")
+			f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = "2"
+
+			f.runReaper(t)
+
+			bdText := f.read(t, f.bdLog)
+			// A wisp root is stamped skipped before it is closed.
+			stamp := func(ids string) []string {
+				if kind != "wisp" {
+					return nil
+				}
+				return []string{" args=update " + ids + " --set-metadata gc.outcome=skipped"}
+			}
+			steps := []string{"dolt census page after= limit=2\n"}
+			steps = append(steps, stamp("root-a")...)
+			steps = append(steps, " args=close root-a "+workflowRootReasonFlag, "dolt census page after=root-b limit=2\n")
+			steps = append(steps, stamp("root-c root-d")...)
+			steps = append(steps, " args=close root-c root-d "+workflowRootReasonFlag)
+			assertContainsInOrder(t, bdText, steps...)
+			if got := strings.Count(bdText, "dolt census page "); got != 2 {
+				t.Fatalf("census read %d pages, want 2", got)
+			}
+			if got := workflowRootVerbIDs(bdText, "close"); got != "root-a root-c root-d" {
+				t.Fatalf("closed %q, want each stale root once", got)
+			}
+			if got := workflowRootVerbIDs(bdText, "update"); kind == "wisp" && got != "root-a root-c root-d" {
+				t.Fatalf("stamped %q, want each stale wisp root once", got)
+			}
+			if strings.Contains(f.read(t, f.doltLog), "OFFSET") {
+				t.Fatalf("census paged by offset, which closing a page shifts")
+			}
+			gcText := f.read(t, f.gcLog)
+			for _, want := range []string{"workflow_roots:3,", "workflow_root_census:4/4,"} {
+				if !strings.Contains(gcText, want) {
+					t.Fatalf("summary missing %q:\n%s", want, gcText)
+				}
+			}
+			if strings.Contains(gcText, "ESCALATION") {
+				t.Fatalf("a complete census is not an anomaly:\n%s", gcText)
+			}
+			if _, declared := f.outcome(t); declared {
+				t.Fatalf("a complete census must not declare a skip:\n%s", f.read(t, f.outcomeFile))
+			}
+		})
+	}
+}
+
+func TestReaperWorkflowRootCensusChecksTheCandidatesItFinds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		roots  string
+		extra  string
+		closed string
+		census string
+	}{
+		{
+			// Roots that leave the candidates after the count (their workflow
+			// closed them, say) end the census at its first short page
+			// instead of sending it around again.
+			name:   "roots left after the count",
+			roots:  "root-a:close root-b:keep",
+			extra:  "3",
+			closed: "root-a",
+			census: "workflow_root_census:2/2,",
+		},
+		{
+			// Roots that join the candidates after the count are checked
+			// and counted when their page is read (root-d shares the last
+			// page here); otherwise the next run's count picks them up.
+			name:   "roots joined after the count",
+			roots:  "root-a:close root-b:keep root-c:close root-d:close",
+			extra:  "-1",
+			closed: "root-a root-c root-d",
+			census: "workflow_root_census:4/4,",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWorkflowRootCensusFixture(t, "wisp", tc.roots)
+			f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = "2"
+			f.env["CENSUS_COUNT_EXTRA"] = tc.extra
+
+			f.runReaper(t)
+
+			bdText := f.read(t, f.bdLog)
+			assertContainsInOrder(t, bdText,
+				"dolt census page after= limit=2\n",
+				" args=close root-a "+workflowRootReasonFlag,
+				"dolt census page after=root-b limit=2\n",
+			)
+			if got := strings.Count(bdText, "dolt census page "); got != 2 {
+				t.Fatalf("census read %d pages, want 2", got)
+			}
+			if got := workflowRootVerbIDs(bdText, "close"); got != tc.closed {
+				t.Fatalf("closed %q, want %q", got, tc.closed)
+			}
+			gcText := f.read(t, f.gcLog)
+			if !strings.Contains(gcText, tc.census) {
+				t.Fatalf("summary missing %q:\n%s", tc.census, gcText)
+			}
+			if _, declared := f.outcome(t); declared {
+				t.Fatalf("a complete census must not declare a skip:\n%s", f.read(t, f.outcomeFile))
+			}
+		})
+	}
+}
+
+func TestReaperWorkflowRootCensusKeepsItsClosesWhenTheRunBudgetRunsOut(t *testing.T) {
+	for _, kind := range []string{"wisp", "issue"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newWorkflowRootCensusFixture(t, kind, "root-a:close root-b:close root-c:close")
+			f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = "2"
+			jumpRunClockAfterFirstRootClose(t, f.binDir)
+			f.env["CENSUS_CLOCK_JUMP"] = "1"
+
+			f.runReaper(t)
+
+			first := f.read(t, f.bdLog)
+			if got := workflowRootVerbIDs(first, "close"); got != "root-a root-b" {
+				t.Fatalf("first run closed %q, want the page it checked before the run budget ran out", got)
+			}
+			if strings.Contains(first, "dolt census page after=root-b") {
+				t.Fatalf("census read another page after the run budget ran out")
+			}
+			if strings.Contains(first, " args=purge") {
+				t.Fatalf("the scope kept going after the run budget ran out")
+			}
+			if kind == "wisp" && strings.Contains(f.read(t, f.doltLog), "workflow_issue_root_candidates") {
+				t.Fatalf("the issue-root census started after the run budget ran out")
+			}
+			out, ok := f.outcome(t)
+			if !ok || !out.hasScope("city", "run budget exhausted; remaining work carries to the next run") {
+				t.Fatalf("outcome = %+v (declared %v), want the city's remaining work carried to the next run", out, ok)
+			}
+			gcText := f.read(t, f.gcLog)
+			if strings.Contains(gcText, "ESCALATION") {
+				t.Fatalf("a spent run budget is not an anomaly:\n%s", gcText)
+			}
+			for _, want := range []string{"workflow_roots:2,", "workflow_root_census:2/3,"} {
+				if !strings.Contains(gcText, want) {
+					t.Fatalf("first run summary missing %q:\n%s", want, gcText)
+				}
+			}
+
+			// The next run, on time, closes the root the first could not
+			// reach.
+			delete(f.env, "CENSUS_CLOCK_JUMP")
+			f.gcLog = filepath.Join(t.TempDir(), "gc-second.log")
+			f.outcomeFile = filepath.Join(t.TempDir(), "outcome-second.json")
+			f.env["GC_CALL_LOG"] = f.gcLog
+			f.env["GC_ORDER_OUTCOME_FILE"] = f.outcomeFile
+
+			f.runReaper(t)
+
+			second := strings.TrimPrefix(f.read(t, f.bdLog), first)
+			if got := workflowRootVerbIDs(second, "close"); got != "root-c" {
+				t.Fatalf("second run closed %q, want the root the first run did not reach", got)
+			}
+			gcText = f.read(t, f.gcLog)
+			for _, want := range []string{"workflow_roots:1,", "workflow_root_census:1/1,"} {
+				if !strings.Contains(gcText, want) {
+					t.Fatalf("second run summary missing %q:\n%s", want, gcText)
+				}
+			}
+			if _, declared := f.outcome(t); declared {
+				t.Fatalf("the second run finished the census and must not declare a skip:\n%s", f.read(t, f.outcomeFile))
+			}
+		})
+	}
+}
+
+func TestReaperWorkflowRootCensusFailureClosesOnlyTheCheckedPages(t *testing.T) {
+	for _, kind := range []string{"wisp", "issue"} {
+		for _, tc := range []struct {
+			name    string
+			roots   string
+			batch   string
+			env     map[string]string
+			closed  string
+			pages   int
+			anomaly string
+		}{
+			{
+				name:    "failed page",
+				roots:   "root-a:close root-b:close root-c:close",
+				batch:   "2",
+				env:     map[string]string{"CENSUS_FAIL_AFTER": "root-b"},
+				closed:  "root-a root-b",
+				pages:   2,
+				anomaly: "workflow " + kind + " root census incomplete: page after root-b failed",
+			},
+			{
+				name:    "failed count",
+				roots:   "root-a:close root-b:close root-c:close",
+				batch:   "2",
+				env:     map[string]string{"CENSUS_COUNT_FAIL": "1"},
+				anomaly: "workflow " + kind + " root census incomplete: candidate count failed",
+			},
+			{
+				// A page row that is not "<id>,<close|keep>" with a plain id
+				// is never closed or used as the next page's cursor.
+				name:    "unreadable row",
+				roots:   "root'a:close root-b:close",
+				batch:   "1",
+				pages:   1,
+				anomaly: "workflow " + kind + " root census stopped at an unreadable page row",
+			},
+			{
+				name:    "failed start lookup",
+				roots:   "root-a:close root-b:close root-c:close",
+				batch:   "2",
+				env:     map[string]string{"CENSUS_START_FAIL": "1", "GC_REAPER_WORKFLOW_ROOT_CENSUS_START": "1"},
+				anomaly: "workflow " + kind + " root census incomplete: start lookup failed",
+			},
+			{
+				// The start is a page cursor and the wrap's upper bound, so
+				// it must be a plain id too.
+				name:    "unreadable start",
+				roots:   "root'a:close root-b:close",
+				batch:   "1",
+				env:     map[string]string{"GC_REAPER_WORKFLOW_ROOT_CENSUS_START": "1"},
+				anomaly: "workflow " + kind + " root census stopped at an unreadable start row",
+			},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				f := newWorkflowRootCensusFixture(t, kind, tc.roots)
+				f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = tc.batch
+				for key, value := range tc.env {
+					f.env[key] = value
+				}
+
+				f.runReaper(t)
+
+				bdText := f.read(t, f.bdLog)
+				if got := workflowRootVerbIDs(bdText, "close"); got != tc.closed {
+					t.Fatalf("closed %q, want %q", got, tc.closed)
+				}
+				if got := strings.Count(bdText, "dolt census page "); got != tc.pages {
+					t.Fatalf("census read %d pages, want %d", got, tc.pages)
+				}
+				if !strings.Contains(bdText, " args=purge") {
+					t.Fatalf("a failed census stopped the scope's later steps")
+				}
+				gcText := f.read(t, f.gcLog)
+				if !strings.Contains(gcText, "ESCALATION") || !strings.Contains(gcText, tc.anomaly) {
+					t.Fatalf("reaper did not escalate %q:\n%s", tc.anomaly, gcText)
+				}
+			})
+		}
+	}
+}
+
+func TestReaperWorkflowRootCensusFallsBackToOneRootPerPage(t *testing.T) {
+	for _, batch := range []string{"0", "abc", "-2", "1.5"} {
+		t.Run("batch="+batch, func(t *testing.T) {
+			f := newWorkflowRootCensusFixture(t, "wisp", "root-a:close root-b:close")
+			f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = batch
+
+			f.runReaper(t)
+
+			bdText := f.read(t, f.bdLog)
+			assertContainsInOrder(t, bdText,
+				"dolt census page after= limit=1\n",
+				" args=close root-a "+workflowRootReasonFlag,
+				"dolt census page after=root-a limit=1\n",
+				" args=close root-b "+workflowRootReasonFlag,
+			)
+			if got := strings.Count(bdText, "dolt census page "); got != 2 {
+				t.Fatalf("census read %d pages, want one per root", got)
+			}
+		})
+	}
+}
+
+func TestReaperWorkflowRootCensusBudgetLeavesTimeForTheLaterSteps(t *testing.T) {
+	f := newWorkflowRootCensusFixture(t, "wisp", "root-a:close root-b:close root-c:close")
+	f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = "1"
+	f.env["GC_REAPER_WORKFLOW_ROOT_BUDGET_SECS"] = "0"
+	f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+	f.env["FAKE_SCOPE_DBS"] = "rig:api=apidb"
+
+	f.runReaper(t)
+
+	bdText := f.read(t, f.bdLog)
+	// A spent census budget still lets each census check one page.
+	if got := workflowRootVerbIDs(bdText, "close"); got != "root-a" {
+		t.Fatalf("closed %q, want the one page the spent census budget allows", got)
+	}
+	if got := strings.Count(bdText, "dolt census page "); got != 1 {
+		t.Fatalf("census read %d pages, want 1", got)
+	}
+	out, ok := f.outcome(t)
+	if !ok || !out.hasScope("city", "workflow-root census remains after this run's census budget") {
+		t.Fatalf("outcome = %+v (declared %v), want the city's remaining census carried to the next run", out, ok)
+	}
+	if !strings.Contains(bdText, "scope=city args=purge") {
+		t.Fatalf("the census budget did not leave the city's purge its turn")
+	}
+	gcText := f.read(t, f.gcLog)
+	if !strings.Contains(gcText, "--rig api purge") {
+		t.Fatalf("the census budget did not leave the rig scope its turn:\n%s", gcText)
+	}
+	if strings.Contains(gcText, "ESCALATION") {
+		t.Fatalf("a spent census budget is not an anomaly:\n%s", gcText)
+	}
+	if !strings.Contains(gcText, "workflow_root_census:1/3,") {
+		t.Fatalf("summary does not show the census was cut short:\n%s", gcText)
+	}
+}
+
+func TestReaperWorkflowRootCensusStartsAtItsStartAndWrapsAround(t *testing.T) {
+	for _, kind := range []string{"wisp", "issue"} {
+		for _, tc := range []struct {
+			name   string
+			roots  string
+			batch  string
+			start  string
+			steps  []string
+			pages  int
+			closed string
+		}{
+			{
+				name:  "start inside the candidates",
+				roots: "root-a:close root-b:keep root-c:close root-d:close",
+				batch: "2",
+				start: "2",
+				steps: []string{
+					"dolt census start offset=1\n",
+					"dolt census page after=root-b limit=2\n",
+					" args=close root-c root-d " + workflowRootReasonFlag,
+					"dolt census page after= until=root-b limit=2\n",
+					" args=close root-a " + workflowRootReasonFlag,
+				},
+				pages:  2,
+				closed: "root-c root-d root-a",
+			},
+			{
+				// The start is taken modulo the candidate count, and the
+				// census stops at the root before its start even when that
+				// root is kept.
+				name:  "start past the candidates",
+				roots: "root-a:keep root-b:close root-c:close",
+				batch: "1",
+				start: "4",
+				steps: []string{
+					"dolt census start offset=0\n",
+					"dolt census page after=root-a limit=1\n",
+					" args=close root-b " + workflowRootReasonFlag,
+					"dolt census page after=root-b limit=1\n",
+					" args=close root-c " + workflowRootReasonFlag,
+					"dolt census page after= until=root-a limit=1\n",
+				},
+				pages:  3,
+				closed: "root-b root-c",
+			},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				f := newWorkflowRootCensusFixture(t, kind, tc.roots)
+				f.env["GC_REAPER_WORKFLOW_ROOT_BATCH_SIZE"] = tc.batch
+				f.env["GC_REAPER_WORKFLOW_ROOT_CENSUS_START"] = tc.start
+
+				f.runReaper(t)
+
+				bdText := f.read(t, f.bdLog)
+				assertContainsInOrder(t, bdText, tc.steps...)
+				if got := strings.Count(bdText, "dolt census page "); got != tc.pages {
+					t.Fatalf("census read %d pages, want %d", got, tc.pages)
+				}
+				if got := workflowRootVerbIDs(bdText, "close"); got != tc.closed {
+					t.Fatalf("closed %q, want %q", got, tc.closed)
+				}
+				gcText := f.read(t, f.gcLog)
+				if strings.Contains(gcText, "ESCALATION") {
+					t.Fatalf("a complete census is not an anomaly:\n%s", gcText)
+				}
+				census := fmt.Sprintf("workflow_root_census:%d/%d,", len(strings.Fields(tc.roots)), len(strings.Fields(tc.roots)))
+				if !strings.Contains(gcText, census) {
+					t.Fatalf("summary missing %q:\n%s", census, gcText)
+				}
+				if _, declared := f.outcome(t); declared {
+					t.Fatalf("a complete census must not declare a skip:\n%s", f.read(t, f.outcomeFile))
+				}
+			})
+		}
+	}
+}
+
+// TestReaperWorkflowRootCensusReachesTheRootsBehindTheOnesItKeeps runs the
+// reaper with a spent census window, so each run's census checks one page,
+// until the roots behind a kept root have closed. A census that started at
+// the same root every run would check the kept root forever. The census
+// start is random, so each variant gets up to 30 runs: a correct reaper
+// needs about 2 or 4 and misses the bound with odds under 1e-8.
+func TestReaperWorkflowRootCensusReachesTheRootsBehindTheOnesItKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		roots string
+		close []string
+	}{
+		{name: "kept root first", roots: "root-a:keep root-b:close", close: []string{"root-b"}},
+		{name: "kept root between", roots: "root-a:close root-b:keep root-c:close", close: []string{"root-a", "root-c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWorkflowRootCensusFixture(t, "wisp", tc.roots)
+			// A rig scope with its own database: the window opens at the
+			// city's census and is spent before the rig's census starts.
+			f.env["CENSUS_SCOPE"] = "rig:api"
+			f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+			f.env["FAKE_SCOPE_DBS"] = "rig:api=apidb"
+			f.env["GC_REAPER_WORKFLOW_ROOT_BUDGET_SECS"] = "0"
+			f.env["GC_REAPER_WORKFLOW_ROOT_CENSUS_START"] = ""
+			freezeRunClock(t, f.binDir)
+
+			const maxRuns = 30
+			pages := 0
+			for run := 1; ; run++ {
+				f.gcLog = filepath.Join(t.TempDir(), "gc.log")
+				f.env["GC_CALL_LOG"] = f.gcLog
+
+				f.runReaper(t)
+
+				bdText := f.read(t, f.bdLog)
+				if got := strings.Count(bdText, "dolt census page "); got != pages+1 {
+					t.Fatalf("run %d read %d census pages, want the one page a spent census window allows", run, got-pages)
+				}
+				pages++
+				if gcText := f.read(t, f.gcLog); strings.Contains(gcText, "ESCALATION") {
+					t.Fatalf("run %d escalated:\n%s", run, gcText)
+				}
+				closed := strings.Fields(workflowRootVerbIDs(bdText, "close"))
+				for _, id := range closed {
+					if !slices.Contains(tc.close, id) {
+						t.Fatalf("run %d closed %s, which is kept", run, id)
+					}
+				}
+				if len(closed) == len(tc.close) {
+					return
+				}
+				if run == maxRuns {
+					t.Fatalf("after %d runs the census closed only %q of %q: it keeps starting at the same roots", maxRuns, closed, tc.close)
+				}
+			}
+		})
+	}
+}
+
+func TestReaperOnlyCountsWorkflowIssueRootsOutsideTheCityScope(t *testing.T) {
+	f := newWorkflowRootCensusFixture(t, "issue", "root-a:close root-b:keep root-c:close")
+	f.env["CENSUS_SCOPE"] = "rig:api"
+	f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api","hq":false}]}`
+	f.env["FAKE_SCOPE_DBS"] = "rig:api=apidb"
+
+	f.runReaper(t)
+
+	bdText := f.read(t, f.bdLog)
+	if strings.Contains(bdText, "dolt census page ") {
+		t.Fatalf("reaper walked the descendants of workflow issue roots it never closes outside the city scope")
+	}
+	if got := workflowRootVerbIDs(bdText, "close"); got != "" {
+		t.Fatalf("closed %q outside the city scope, want none", got)
+	}
+	gcText := f.read(t, f.gcLog)
+	for _, want := range []string{"skipped_non_city_workflow_issue_roots:3,", "workflow_root_census:0/0,"} {
+		if !strings.Contains(gcText, want) {
+			t.Fatalf("summary missing %q:\n%s", want, gcText)
+		}
 	}
 }
 
@@ -4298,11 +4954,20 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\n'
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
     ;;
-  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\n'
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"FROM workflow_wisp_root_candidates_page root"*)
+    printf 'id,verdict\nwisp-root-live,keep\n'
+    ;;
+  *"FROM workflow_issue_root_candidates_page root"*)
+    printf 'id,verdict\nissue-root-live,keep\n'
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n0\n'
@@ -4387,11 +5052,20 @@ case "$*" in
     printf 'depends_on_external,varchar,YES,,,\n'
     printf 'type,varchar,NO,,,\n'
     ;;
-  *"WITH RECURSIVE workflow_wisp_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\nwisp-root-close\n'
+  *"workflow_wisp_root_candidates_base"*"LEFT JOIN workflow_wisp_root_candidates"*|*"workflow_issue_root_candidates_base"*"LEFT JOIN workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n0\n'
     ;;
-  *"WITH RECURSIVE workflow_issue_root_candidates"*"SELECT DISTINCT root.id"*)
-    printf 'id\nissue-close\n'
+  *"WITH workflow_wisp_root_candidates_base"*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"WITH workflow_issue_root_candidates_base"*"SELECT COUNT(*) FROM workflow_issue_root_candidates"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"FROM workflow_wisp_root_candidates_page root"*)
+    printf 'id,verdict\nwisp-root-close,close\n'
+    ;;
+  *"FROM workflow_issue_root_candidates_page root"*)
+    printf 'id,verdict\nissue-close,close\n'
     ;;
   *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
     printf 'COUNT(*)\n0\n'
@@ -6290,6 +6964,11 @@ case "$*" in
   else
     printf 'COUNT(*)\n0\n'
   fi
+  ;;
+*"SELECT COUNT(*) FROM workflow_wisp_root_candidates"[!_]*|*"SELECT COUNT(*) FROM workflow_issue_root_candidates"[!_]*)
+  # Candidate workflow roots of each kind. The reaper walks descendants only
+  # when there is a candidate, so tests that inspect that SQL set this.
+  printf 'COUNT(*)\n%s\n' "${DOLT_WORKFLOW_ROOT_CANDIDATES:-0}"
   ;;
 *"COUNT("*)
   printf 'COUNT(*)\n0\n'

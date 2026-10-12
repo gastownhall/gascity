@@ -653,6 +653,48 @@ lifecycle path; gc never silently falls back to the default unit.
 Setting `GC_SUPERVISOR_SYSTEMD_UNIT` on a non-Linux platform is the
 same kind of hard error — delegation is a systemd contract.
 
+## Supervisor Does Not Come Back After Logout (macOS launchd Agent Disabled)
+
+Symptom: on macOS the supervisor is running, but it does not come back after
+logout or reboot, and `gc supervisor status` prints a warning on stderr:
+
+```text
+gc supervisor status: warning: launchd agent com.gascity.supervisor is disabled; it will not start after logout or reboot. Run 'gc supervisor stop --wait' then 'gc supervisor start' to put it back under launchd
+```
+
+Cause: `gc supervisor stop` disables the launchd agent so the stopped
+supervisor stays stopped, even across logins. That override is persistent: it
+survives logout and reboot, and only `launchctl enable` clears it. A
+supervisor started any other way afterwards, such as a foreground
+`gc supervisor run`, passes every liveness check while launchd would never
+restart it. An installed agent that is not loaded has the same effect, and
+status warns about it too (`... is not loaded; it will not restart if the
+supervisor exits`). To see the override yourself:
+
+```bash
+launchctl print-disabled "gui/$(id -u)" | grep com.gascity.supervisor
+```
+
+The warning leaves the liveness report on stdout and the exit code unchanged.
+With `--json`, status adds `"supervised": false` and a `supervision_warning`
+string carrying the same message. Both keys are absent when launchd is
+supervising, and also when status cannot tell: no agent is installed, its
+plist cannot be read, or launchd does not answer.
+
+Fix: run the command the warning names. It depends on what status found:
+
+| Status found | Remedy |
+|---|---|
+| The agent runs this `gc`, and no supervisor is running | `gc supervisor start`, which enables, loads, and starts the agent |
+| The agent runs this `gc`, and a supervisor is running | `gc supervisor stop --wait`, then `gc supervisor start` |
+| The agent runs a different `gc` binary | `<this gc's path> supervisor install --force`, after `gc supervisor stop --wait` if a supervisor is running |
+
+Use `stop --wait`: a plain `gc supervisor stop` returns while the supervisor
+is still shutting down, and `gc supervisor start` refuses while a supervisor
+is running. A plain `gc supervisor install` is not a substitute either: when
+the service file is already current and a supervisor is running, it reports
+success without enabling the agent.
+
 ## JSONL Archive Push Failures
 
 The core pack runs `jsonl-export` every 15 minutes to export each bead
