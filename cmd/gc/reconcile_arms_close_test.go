@@ -871,3 +871,23 @@ func TestFreshClosableOwnZombieOnly(t *testing.T) {
 		}
 	}
 }
+
+// Kills a failed create closed under its still-leased claim (SESS-058,
+// mc-mcud0): legacy keeps it open while the pending-create lease holds, a
+// start possibly holding it; once the lease expires, A21 closes it.
+func TestFailedCreateHeldWhileLeased(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		started time.Duration
+		want    string
+	}{
+		{"leased (never started, inside the deadline)", -time.Minute, decideFailedCreateLeased},
+		{"the lease expired", -11 * time.Minute, decideCloseFailedCreate},
+	} {
+		cc := newCloseCase(t, livenessGone, desireNone, "state", "failed-create", "pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(c.started).Format(time.RFC3339))
+		cc.entry().Reason = reasonFailedCreate
+		if it := cc.decide(); it.Reason != c.want || (c.want == decideFailedCreateLeased) != (it.Kind == "") {
+			t.Fatalf("%s: decideRow = (%q, %q), want %q", c.name, it.Kind, it.Reason, c.want)
+		}
+	}
+}

@@ -936,7 +936,7 @@ func TestCreatingHealTakesAClassifiedCorpse(t *testing.T) {
 		id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 		c.w.Observed = map[rowKey]rowObservation{c.k: {Liveness: livenessDead, Identity: id}}
 		if classified {
-			c.w.Classified = map[rowKey]string{c.k: deadToken(id)}
+			c.w.Classified = map[rowKey]classifiedRuntime{c.k: {Token: deadToken(id)}}
 		}
 		if it := c.decide(); (it.Reason == decideCreatingHeal) != classified {
 			t.Fatalf("classified %v: decideRow = (%q, %q), want the creating heal %v", classified, it.Kind, it.Reason, classified)

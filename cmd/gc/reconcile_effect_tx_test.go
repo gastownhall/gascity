@@ -606,6 +606,13 @@ func TestTxMovedHook(t *testing.T) {
 	}{
 		{"refuses", txStep{Refuse: "mine"}, true, "mine"},
 		{"writes", txStep{Write: session.MetadataPatch{txKeyA: "1"}}, true, causeStep},
+		{"writes a cell", txStep{Class: session.CellInfo(session.Info{}, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: gatherNow.Add(time.Hour)}, gatherNow)}, true, causeStep},
+		{"writes a title", txStep{Title: new(string)}, true, causeStep},
+		{"writes a type", txStep{Type: new(string)}, true, causeStep},
+		{"writes a label", txStep{AddLabels: []string{"x"}}, true, causeStep},
+		{"closes", txStep{Terminal: session.MetadataPatch{"state": "closed"}}, true, causeStep},
+		{"ends the effect", txStep{Done: true}, true, causeStep},
+		{"ends after its Call", txStep{Last: true}, true, causeStep},
 		{"declines", txStep{}, false, causePremise},
 	} {
 		k := newTxKit(t)
@@ -939,7 +946,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		Quarantined: "worker-1",
 		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
 		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
-		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok"},
+		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok", Crash: &events.Event{Type: events.SessionCrashed}, Recycle: true},
 	}
 	p.applyFacts(f, plannerT0)
 	consumed := map[string]bool{
@@ -950,7 +957,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		"Quarantined": slices.Equal(quarantined, []string{"worker-1"}),
 		"AliasOwed":   p.aliasOwed[rowKey{Leg: rowLeg, ID: "gc-a"}],
 		"Stopped":     slices.Equal(stops, []string{"s1/worker/drain-ack"}),
-		"Classified":  p.classified[rowKey{ID: "gc-1"}].Token == "tok",
+		"Classified":  p.classified[rowKey{ID: "gc-1"}].Token == "tok" && p.classified[rowKey{ID: "gc-1"}].Crash != nil && p.classified[rowKey{ID: "gc-1"}].Recycle,
 	}
 	ft := reflect.TypeOf(f)
 	for i := range ft.NumField() {

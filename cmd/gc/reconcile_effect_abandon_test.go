@@ -402,6 +402,28 @@ func TestRollbackEffect(t *testing.T) {
 		if len(k.sp.kills) != c.kills || s.Closed != c.closed || closed(k) != c.closed || (k.meta("pending_create_claim") == "true") != c.claim {
 			t.Fatalf("stale create %s: settlement %+v kills %+v claim %q, want kills %d closed %v", c.name, s, k.sp.kills, k.meta("pending_create_claim"), c.kills, c.closed)
 		}
+		if c.relaunch && (s.Outcome != settledNoop || s.Cause != decideStaleCreate) {
+			t.Fatalf("stale create %s: settlement %+v, want a no-op the backoff does not hold (M21)", c.name, s)
+		}
+	}
+	// The relaunch stops only what its own read still finds StaleSelf: a
+	// runtime an operator re-attached on the row's token reads Current, and
+	// the effect refuses redecided with nothing stopped. One that outlives
+	// the stop holds the row, the relaunch no-op behind it (M24).
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	k.sp.put("s-gc-1", "gc-1", "3", "tok")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	if s := k.runKind(); s.Cause != causeRedecided || len(k.sp.kills) != 0 {
+		t.Fatalf("re-attached on the row's token: settlement %+v kills %+v, want refused redecided, nothing stopped", s, k.sp.kills)
+	}
+	k = rollback(t, "generation", "3")
+	k.it.Reason, k.it.Relaunch = decideStaleCreate, true
+	k.sp.put("s-gc-1", "gc-1", "3", "old")
+	k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+	k.on(seamAfterCall, func() { k.sp.mu.Lock(); k.sp.put("s-gc-1", "gc-1", "3", "old"); k.sp.mu.Unlock() })
+	if s := k.runKind(); s.Cause != causeRuntimePresent {
+		t.Fatalf("outlives the stop: settlement %+v, want refused runtime-present", s)
 	}
 
 	k = rollback(t, "last_woke_at", gatherNow.Add(-5*time.Second).Format(time.RFC3339))

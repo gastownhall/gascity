@@ -512,6 +512,12 @@ type txStep struct {
 	Pass                    any
 }
 
+// writes reports a step that writes the row: metadata, the disposition's
+// cells, a terminal close, its title, type or labels.
+func (s txStep) writes() bool {
+	return len(s.Write) > 0 || s.Class.Len() > 0 || len(s.Terminal) > 0 || s.Title != nil || s.Type != nil || len(s.AddLabels) > 0 || len(s.RemoveLabels) > 0
+}
+
 // effectFacts are what an effect learned or did besides its outcome, merged
 // into every settlement it builds and applied on time or late (applyFacts).
 type effectFacts struct {
@@ -984,7 +990,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 			s.Err = fmt.Errorf("%w: %s", errPremiseMoved, strings.Join(moved, ", "))
 			return txStep{}, &s
 		}
-		if len(step.Write) > 0 || len(step.Terminal) > 0 { // no write lands on a row that moved
+		if step.writes() || step.Done || step.Last { // nothing lands, nor ends the effect landed, on a row that moved
 			s := settlement{Outcome: settledFailed, Cause: causeStep}
 			return txStep{}, &s
 		}

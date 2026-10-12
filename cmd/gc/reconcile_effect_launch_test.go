@@ -35,12 +35,22 @@ import (
 // record, and the ACP routes.
 type startHookLeaf struct {
 	*recordingLeaf
-	onStart func(ctx context.Context)
-	routed  []string
-	cfgs    []runtime.Config // each Start's config
+	onStart   func(ctx context.Context)
+	stopKeeps bool // Stop leaves the runtime running
+	routed    []string
+	cfgs      []runtime.Config // each Start's config
 }
 
 func (l *startHookLeaf) RouteACP(name string) { l.routed = append(l.routed, name) }
+
+// Stop stops name, unless stopKeeps holds: the stop then leaves it
+// running, which no fresh read confirms (C8.8).
+func (l *startHookLeaf) Stop(name string) error {
+	if l.stopKeeps {
+		return nil
+	}
+	return l.recordingLeaf.Stop(name)
+}
 
 func (l *startHookLeaf) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if l.onStart != nil {
@@ -527,20 +537,45 @@ func TestLaunchCommitPremise(t *testing.T) {
 		{"kill fence", []string{"state", "asleep", "sleep_reason", "killed"}, false, false, causeCommitLost, true},
 		{"retokened", []string{"instance_token", "other"}, false, false, causeCommitLost, true},
 		{"kill fence, another row's runtime", []string{"state", "asleep", "sleep_reason", "killed"}, true, false, causePremise, false},
+		{"an outside close", []string{"closed"}, false, false, causeCommitLost, true},
+		{"an outside close over a zombie", []string{"closed", "zombie"}, false, false, causeCommitLost, true},
+		{"a kill fence over a zombie", []string{"state", "asleep", "sleep_reason", "killed", "zombie", ""}, false, false, causeCommitLost, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k, leaf := launchKit(t, "asleep", "wake_attempts", "1")
-			leaf.onStart = func(context.Context) { k.outside(c.write...) }
+			write := func() {
+				switch {
+				case c.write[0] == "closed":
+					if err := k.backing.Close("gc-1"); err != nil {
+						t.Fatal(err)
+					}
+				case len(c.write)%2 == 0:
+					k.outside(c.write...)
+				}
+			}
+			if slices.Contains(c.write, "zombie") { // its agent dies once started
+				if c.write[0] != "closed" {
+					c.write = c.write[:len(c.write)-2]
+				}
+				k.on(seamAfterCall, func() {})
+				k.on(seamAfterCall, func() { k.mutate(func(r *simRuntime) { r.zombie = true }) })
+			}
+			leaf.onStart = func(context.Context) { write() }
 			if c.swap {
-				leaf.onStart = func(context.Context) { k.outside(c.write...); k.runtimeAs("gc-2", "theirs", nil) }
+				leaf.onStart = func(context.Context) { write(); k.runtimeAs("gc-2", "theirs", nil) }
 			}
 			s := k.runKind()
-			if got := k.meta("started_config_hash") != ""; got != c.landed || (!got && s.Cause != c.cause) {
+			if b, _ := k.backing.Get("gc-1"); b.Status == "closed" && s.Cause != c.cause {
+				t.Fatalf("settlement %+v, want %s", s, c.cause)
+			} else if got := b.Status != "closed" && k.meta("started_config_hash") != ""; got != c.landed || (!got && s.Cause != c.cause) {
 				t.Fatalf("settlement %+v: committed=%v, want %v (else %s)", s, got, c.landed, c.cause)
 			}
 			k.sp.mu.Lock()
 			_, up := k.sp.rts["s-gc-1"]
 			k.sp.mu.Unlock()
+			if slices.Contains(c.write, "zombie") && c.stopped && (len(k.sp.kills) == 0 || k.sp.kills[len(k.sp.kills)-1].Hit == nil || !k.sp.kills[len(k.sp.kills)-1].Hit.zombie) {
+				t.Fatalf("kills %+v, want the zombie stopped", k.sp.kills)
+			}
 			if up == c.stopped || c.stopped && (s.Outcome != settledFailed || s.Err != nil || k.meta("wake_attempts") != "1") {
 				t.Fatalf("settlement %+v: runtime up %v attempts %q, want stopped %v, confirmed, nothing accrued", s, up, k.meta("wake_attempts"), c.stopped)
 			}
@@ -1474,22 +1509,50 @@ func TestLostCommitGuards(t *testing.T) {
 	row := k.p.World.Census.Rows[k.it.Key].Info
 	rt := &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok"}}
 	v := txView{It: k.it, World: k.p.World, Row: row, RT: rt, Now: gatherNow}
-	for _, moved := range [][]string{{"session_name"}, {"runtime lease"}} {
-		if _, ok := lostCommit(v, row, moved); ok {
-			t.Fatalf("moved %v: lostCommit took it, want the premise's refusal", moved)
+	if _, ok := lostCommit(v, row, []string{"runtime lease"}); ok {
+		t.Fatal("a moved lease: lostCommit took it, want the premise's refusal")
+	}
+	// The runtime under the locked name carries the start's own token, so a
+	// moved session_name, a close, or a kill stops it; alive or a zombie,
+	// read on one object. A corpse counts stopped, and an object that moved
+	// across the read, or another token, is left.
+	for _, c := range []struct {
+		name  string
+		rt    txRuntime
+		moved string
+		stops bool
+	}{
+		{"alive, a kill", txRuntime{Class: rtAlive, Same: true, Identity: rt.Identity}, "state", true},
+		{"alive, a moved name", txRuntime{Class: rtAlive, Same: true, Identity: rt.Identity}, "session_name", true},
+		{"a zombie, a close", txRuntime{Class: rtZombie, Same: true, Identity: rt.Identity}, "closed", true},
+		{"a zombie moving across the read", txRuntime{Class: rtZombie, Identity: rt.Identity}, "closed", false},
+		{"a corpse", txRuntime{Class: rtCorpse, Same: true, Identity: rt.Identity}, "closed", false},
+		{"another token", txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "theirs"}}, "closed", false},
+	} {
+		v.RT = &c.rt
+		if step, ok := lostCommit(v, row, []string{c.moved}); ok != c.stops || ok && step.Pass == nil {
+			t.Fatalf("%s: lostCommit = (%+v, %v), want the stop %v", c.name, step, ok, c.stops)
 		}
 	}
-	if step, ok := lostCommit(v, row, []string{"state"}); !ok || step.Pass == nil {
-		t.Fatalf("control: lostCommit = (%+v, %v), want the stop", step, ok)
-	}
 	for _, confirmed := range []bool{true, false} {
-		step := lostCommitStep(startFailureRead{lost: &lostStop{confirmed: confirmed}})
+		step := lostCommitStep(startFailureRead{lost: &confirmed})
 		if step.Fail != causeCommitLost || (step.Err == nil) == !confirmed {
 			t.Fatalf("confirmed %v: step %+v, want commit-lost with an error only when unconfirmed", confirmed, step)
 		}
 	}
 	// The row moved back between the sections: still lost, never abandoned.
-	if step := abandonStep(txView{prev: startFailureRead{lost: &lostStop{confirmed: true}}}); step.Fail != causeCommitLost || len(step.Write) != 0 {
+	if step := abandonStep(txView{prev: startFailureRead{lost: new(bool)}}); step.Fail != causeCommitLost || len(step.Write) != 0 {
 		t.Fatalf("abandonStep = %+v, want commit-lost with no write", step)
+	}
+}
+
+// Kills a lost commit whose unconfirmed stop settles clean (M07): a stop
+// the fresh read does not confirm settles commit-lost with its error.
+func TestLostCommitUnconfirmedStop(t *testing.T) {
+	k, leaf := launchKit(t, "asleep")
+	leaf.stopKeeps = true
+	leaf.onStart = func(context.Context) { k.outside("state", "asleep", "sleep_reason", "killed") }
+	if s := k.runKind(); s.Cause != causeCommitLost || !errors.Is(s.Err, errLostCommitUnconfirmed) {
+		t.Fatalf("settlement %+v, want commit-lost with the unconfirmed stop's error", s)
 	}
 }

@@ -54,13 +54,10 @@ type startFailure struct {
 // startFailureRead is what the failure Call read, past what it accrued.
 type startFailureRead struct {
 	startFailure
-	rateLimit bool      // the pane shows a provider rate-limit screen
-	keeps     bool      // the conversation's transcript is on disk (wakeFailureKeepsConversation)
-	lost      *lostStop // a lost commit's stop (lostCommit)
+	rateLimit bool  // the pane shows a provider rate-limit screen
+	keeps     bool  // the conversation's transcript is on disk (wakeFailureKeepsConversation)
+	lost      *bool // a lost commit's stop (lostCommit): whether it was confirmed
 }
-
-// lostStop is how a lost commit's stop ended.
-type lostStop struct{ confirmed bool }
 
 // startEnd is what the commit hands its Call: the landed commit, the start
 // that failed, or the lost commit's own-runtime stop.
@@ -374,13 +371,21 @@ func paneScreen(ctx context.Context, _ effectReads, v txView) (screenWrite, erro
 	return screenWrite{}, nil
 }
 
+// staleSelfOwn reports the effect's own read finding the row's runtime alive
+// and StaleSelf at the row's generation (S7): not one an operator re-attached
+// on the row's token since the pass, which reads Current.
+func staleSelfOwn(v txView) bool {
+	verdict := compareIdentity(v.Row, v.RT.Identity)
+	return v.RT.Alive() && verdict == identityStaleSelf && ownRuntime(verdict, v.Row, v.RT.Identity)
+}
+
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
 // teardown of the fresh read's own runtime for the Call.
 func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 	td, cause := ownTeardown(v)
 	switch {
-	case !rollbackable(v.Row):
-		return txStep{Refuse: causeRedecided}
+	case !rollbackable(v.Row), v.It.Relaunch && !staleSelfOwn(v):
+		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}
 	case cause != "":

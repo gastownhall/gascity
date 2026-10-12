@@ -136,5 +136,5 @@ func deadToken(id runtimeIdentity) string {
 
 // classifies reports that c, a classified set's entry, is id's dead runtime.
 func (c classifiedRuntime) classifies(id runtimeIdentity) bool {
-	return c.Token != "" && c.Token == deadToken(id)
+	return c.Token == deadToken(id)
 }

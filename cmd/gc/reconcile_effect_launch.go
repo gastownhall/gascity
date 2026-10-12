@@ -456,17 +456,20 @@ func commitStep(v txView) txStep {
 
 // lostCommit is S2's refused commit (the premise moved: a kill, a close, a
 // token another writer set): it writes nothing and is never retried, and
-// when the fresh read finds the runtime alive and Current under the token
-// PreWake set, the after-commit Call stops it as the start's own runtime
-// (the own-runtime exception, F2: L1 alone) and confirms it (C8.8). A moved
-// name or lease is another start's, and refuses.
+// when the fresh read finds a runtime present under the locked name, read on
+// one session object, alive or a zombie, and Current under the token PreWake
+// set, the after-commit Call stops it as the start's own runtime (the
+// own-runtime exception, F2: L1 alone) and confirms it (C8.8), so a row
+// closed mid-start leaves no orphan. The stop targets the name the effect
+// locked, whatever the row's session_name now says; a moved lease is
+// another start's, and refuses.
 func lostCommit(v txView, expect session.Info, moved []string) (txStep, bool) {
-	if slices.Contains(moved, "session_name") || slices.Contains(moved, "runtime lease") ||
-		!v.RT.Alive() || compareIdentity(expect, v.RT.Identity) != identityCurrent {
+	present := v.RT.Same && (v.RT.Class == rtAlive || v.RT.Class == rtZombie)
+	if slices.Contains(moved, "runtime lease") || !present || compareIdentity(expect, v.RT.Identity) != identityCurrent {
 		return txStep{}, false
 	}
 	stop := ownRuntimeFence(v.RT, expect)
-	return txStep{Pass: startEnd{lost: &teardown{stop: &stop, names: processNamesFor(v.World, expect), fail: causeCommitLost}}}, true
+	return txStep{Pass: startEnd{lost: &teardown{stop: &stop, names: processNamesFor(v.World, expect)}}}, true
 }
 
 // lostCommitEnd settles the lost commit failed, its runtime stopped: the
@@ -483,7 +486,7 @@ func lostCommitEnd(v txView, _ session.Info, _ []string) (txStep, bool) {
 // and an error when its stop was not confirmed.
 func lostCommitStep(f startFailureRead) txStep {
 	var err error
-	if !f.lost.confirmed {
+	if !*f.lost {
 		err = errLostCommitUnconfirmed
 	}
 	return txStep{Fail: causeCommitLost, Err: err}
@@ -507,7 +510,7 @@ type landedCommit struct {
 func afterStart(ctx context.Context, c txCaps, in startEnd) (startFailureRead, error) {
 	if in.lost != nil {
 		_, confirmed := stopFenced(ctx, c.start.sp, *in.lost.stop, in.lost.names, c.start.clock.Now)
-		return startFailureRead{lost: &lostStop{confirmed: confirmed}}, nil
+		return startFailureRead{lost: &confirmed}, nil
 	}
 	if in.failed != nil {
 		telemetry.RecordAgentStart(context.Background(), in.failed.name, in.failed.display, in.failed.err)

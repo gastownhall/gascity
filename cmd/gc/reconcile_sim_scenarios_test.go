@@ -1108,3 +1108,102 @@ func TestSimOperatorDrainSurvivesACanceledControllerRequest(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// lostCommitRun drives seed's simulation to its first start and lands op on
+// the start's row after its launch Call (S2's lost commit): the outcome of
+// that start, and the runtime under its name once it settled.
+func lostCommitRun(t *testing.T, seed uint64, op func(s *sim, l *simLeg, b beads.Bead)) (s *sim, outcome string, up bool) {
+	t.Helper()
+	s = newSim(t, seed, simOpts{})
+	s.inventory()
+	for step := 0; step < 400 && len(s.failures) == 0; step++ {
+		idx := slices.IndexFunc(s.parked, func(e *simEffect) bool { return e.it.Kind == intentStart && !e.settled })
+		if idx < 0 {
+			s.step()
+			continue
+		}
+		e := s.parked[idx]
+		name := ""
+		if b, err := s.legOf(e.it.Key.Leg).backing.Get(e.it.Key.ID); err == nil {
+			name = b.Metadata["session_name"]
+		}
+		fire := func() {
+			l := s.legOf(e.it.Key.Leg)
+			if b, err := l.backing.Get(e.it.Key.ID); err == nil {
+				s.outside("lost commit of "+e.it.Key.ID, l, b, func(l *simLeg, b beads.Bead) { op(s, l, b) })
+			}
+		}
+		e.seam = seamAfterCall
+		e.outside = func() { e.seam, e.outside = seamAfterCall, fire } // the admit-ticket Call's seam comes first
+		s.release(idx)
+		s.audit("v2")
+		s.sp.mu.Lock()
+		_, up = s.sp.rts[name]
+		s.sp.mu.Unlock()
+		for i := len(s.schedule) - 1; i >= 0; i-- {
+			if strings.Contains(s.schedule[i], "effect start "+e.it.Key.ID) {
+				outcome = s.schedule[i]
+				break
+			}
+		}
+		return s, outcome, up
+	}
+	return s, "", false
+}
+
+// Kills a lost commit left running (v5 S2; the #7650 review): an operator
+// puts the row asleep, or closes it, after the start's launch and before its
+// commit; the start commits nothing, stops the runtime it launched under its
+// own token, and settles commit-lost, leaving no orphan.
+func TestSimLostCommit(t *testing.T) {
+	for name, op := range map[string]func(s *sim, l *simLeg, b beads.Bead){
+		"asleep": func(s *sim, l *simLeg, b beads.Bead) { s.setMeta(l, b.ID, "state", "asleep", "state_reason", "") },
+		"close":  func(_ *sim, l *simLeg, b beads.Bead) { _ = l.backing.Close(b.ID) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			for seed := uint64(1); seed <= 32; seed++ {
+				s, outcome, up := lostCommitRun(t, seed, op)
+				if !strings.Contains(outcome, "commit-lost") {
+					continue
+				}
+				if up {
+					t.Fatalf("seed %d: %q left the start's runtime running", seed, outcome)
+				}
+				if name == "asleep" {
+					s.noViolations(t)
+				}
+				// A close's stop is judged by I4's closed-row model, which
+				// #7648 rewrites ("closed within the step"); its check joins
+				// this scenario with it.
+				return
+			}
+			t.Fatal("no seed reached the lost commit")
+		})
+	}
+}
+
+// Kills the S7 exit lost in the running controller (the #7650 review's
+// reach): a pool pending create whose live runtime reads StaleSelf at its
+// generation (its own, under an older token) is rolled back, its runtime
+// stopped first (CONTRACT v5.9q), with no violation and no orphan.
+func TestSimPendingCreateStaleSelfExit(t *testing.T) {
+	started := plannerT0.Add(-time.Minute).Format(time.RFC3339)
+	row := poolRow("gc-1", "worker", 1, "creating", "generation", "3", "instance_token", "tok-new", "pending_create_claim", "true", "pending_create_started_at", started)
+	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
+		s.sp.put(row.Metadata["session_name"], "gc-1", "3", "tok-old")
+		return []beads.Bead{row}, nil
+	}})
+	s.lag = false
+	for range 3 {
+		s.advance(simPatrol)
+		s.settle()
+	}
+	s.noViolations(t)
+	b, _ := s.legs[0].backing.Get("gc-1")
+	s.sp.mu.Lock()
+	_, up := s.sp.rts[row.Metadata["session_name"]]
+	s.sp.mu.Unlock()
+	if b.Status != "closed" || up || !slices.ContainsFunc(s.schedule, func(l string) bool { return strings.Contains(l, "effect rollback gc-1") }) {
+		t.Fatalf("row %s, runtime up %v, want the StaleSelf pending create rolled back with its runtime stopped", b.Status, up)
+	}
+}
