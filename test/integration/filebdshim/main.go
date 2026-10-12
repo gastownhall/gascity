@@ -131,6 +131,9 @@ func runFileStore(cityDir string, args []string, stdout io.Writer) (int, bool, e
 		if err != nil {
 			return 0, true, err
 		}
+		if jsonOut {
+			return 0, true, writeList(stdout, []beads.Bead{b}, true)
+		}
 		return 0, true, writeBead(stdout, b, jsonOut, false)
 	case "list":
 		q, jsonOut, err := parseListArgs(args[1:])
@@ -142,6 +145,16 @@ func runFileStore(cityDir string, args []string, stdout io.Writer) (int, bool, e
 			return 0, true, err
 		}
 		return 0, true, writeList(stdout, items, jsonOut)
+	case "query":
+		q, err := parseEphemeralQueryArgs(args[1:])
+		if err != nil {
+			return 0, true, err
+		}
+		items, err := store.List(q)
+		if err != nil {
+			return 0, true, err
+		}
+		return 0, true, writeList(stdout, items, true)
 	case "ready":
 		q, jsonOut, err := parseReadyArgs(args[1:])
 		if err != nil {
@@ -259,6 +272,9 @@ func parseListArgs(args []string) (beads.ListQuery, bool, error) {
 			jsonOut = true
 		case arg == "--all":
 			q.IncludeClosed = true
+		case arg == "--include-infra" || arg == "--include-gates" || arg == "--include-templates":
+			// FileStore has no separate infrastructure/template classification;
+			// its List already includes every row matching the other selectors.
 		case arg == "--unassigned":
 			q.Assignee = ""
 		case strings.HasPrefix(arg, "--assignee="):
@@ -313,6 +329,50 @@ func parseListArgs(args []string) (beads.ListQuery, bool, error) {
 		}
 	}
 	return q, jsonOut, nil
+}
+
+// parseEphemeralQueryArgs supports the conjunctions BdStore uses to read its
+// ephemeral tier. Other query expressions fail explicitly in this test shim.
+func parseEphemeralQueryArgs(args []string) (beads.ListQuery, error) {
+	if len(args) < 2 || args[0] != "--json" {
+		return beads.ListQuery{}, fmt.Errorf("unsupported query arguments %q", args)
+	}
+	clauses := strings.Split(args[1], " AND ")
+	if clauses[0] != "ephemeral=true" {
+		return beads.ListQuery{}, fmt.Errorf("unsupported query expression %q", args[1])
+	}
+	q, _, err := parseListArgs(args[2:])
+	if err != nil {
+		return q, err
+	}
+	q.TierMode = beads.TierWisps
+	for _, clause := range clauses[1:] {
+		key, value, ok := strings.Cut(clause, "=")
+		if !ok {
+			return q, fmt.Errorf("unsupported query clause %q", clause)
+		}
+		if strings.HasPrefix(value, `"`) {
+			value, err = strconv.Unquote(value)
+			if err != nil {
+				return q, fmt.Errorf("parsing query clause %q: %w", clause, err)
+			}
+		}
+		switch key {
+		case "status":
+			q.Status = value
+		case "type":
+			q.Type = value
+		case "label":
+			q.Label = value
+		case "assignee":
+			q.Assignee = value
+		case "parent":
+			q.ParentID = value
+		default:
+			return q, fmt.Errorf("unsupported query clause %q", clause)
+		}
+	}
+	return q, nil
 }
 
 func parseReadyArgs(args []string) (beads.ListQuery, bool, error) {
@@ -466,5 +526,8 @@ func beadWireMap(b beads.Bead) map[string]any {
 		"created_at": b.CreatedAt,
 		"updated_at": b.CreatedAt,
 		"metadata":   b.Metadata,
+		"labels":     b.Labels,
+		"ephemeral":  b.Ephemeral,
+		"no_history": b.NoHistory,
 	}
 }

@@ -1702,6 +1702,7 @@ go_test(
         "hooks_test.go",
         "hosted_beads_gateway_test.go",
         "hosted_beads_provider_adoption_test.go",
+        "human_continuation_preassignment_test.go",
         "idle_nudge_test.go",
         "idle_tracker_test.go",
         "import_state_doctor_check_test.go",
