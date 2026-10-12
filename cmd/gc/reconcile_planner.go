@@ -155,7 +155,11 @@ type planner struct {
 	obs        passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
-	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	// (C7b1); C8's step posts them to stalledPosted under stalledMu. A
+	// request is one-shot: it goes once its drain begin lands, so an
+	// operator who resumes the row is not drained again from it. A
+	// re-trigger is the backstop's new request, which its latch holds to
+	// one per instance token per 30 minutes (stalledLatchHolds), as legacy's.
 	softReload    atomic.Pointer[softReloadRequest] // the open soft reload (M2)
 	stalled       map[string]executionStalledRequest
 	stalledMu     sync.Mutex
@@ -359,6 +363,9 @@ func (p *planner) drainSettlements(now time.Time) {
 			if s.Kind == intentRuntimeAlias && (s.Outcome == settledLanded || s.Outcome == settledNoop) {
 				delete(p.aliasOwed, s.Key)
 			}
+		}
+		if s.Kind == intentDrainBegin && s.Reason == decideDrainBegin+executionStalledDrainReason && s.Outcome == settledLanded {
+			delete(p.stalled, s.Key.ID) // its drain begin landed: the request is spent
 		}
 	}
 	for _, s := range items {

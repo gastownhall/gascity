@@ -620,7 +620,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	fresh, err := m.PersistedStore().freshBead(id)
 	switch {
 	case err != nil:
-		err = fmt.Errorf("%w: reading session %s under its lease: %w", ErrStateSync, id, err)
+		err = fmt.Errorf("reading session %s under its lease: %w", id, err) // nothing started: no state sync to report
 	case KillPendingMetadata(fresh.Metadata["state"], fresh.Metadata["state_reason"], fresh.Metadata["sleep_reason"], fresh.Metadata["slept_at"], m.now()):
 		err = fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	case drainAckStopPendingMetadata(fresh.Metadata):
