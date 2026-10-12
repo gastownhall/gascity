@@ -416,3 +416,34 @@ func TestOperatorResumeClearsAStaleAck(t *testing.T) {
 		}
 	}
 }
+
+// TestSignalNeverLandsInsideAnOperatorStart (#7635 review P1). Kills a
+// plain signal that takes no runtime name lock. An operator's attach (gc
+// session attach, its own process) holds the name's runtime lease from its
+// Start to its confirm, which clears the stop request; a signal landing in
+// that window would leave the restarted runtime stop-pending for the next
+// pass's A4. Under the lease the signal refuses busy and writes nothing;
+// once it is released, the signal lands.
+func TestSignalNeverLandsInsideAnOperatorStart(t *testing.T) {
+	p, it, store, _ := admittedBeginOn(t, intentBegunAt(drainOrphaned, time.Hour), undesired(drainOrphaned))
+	if it.Kind != intentSignal {
+		t.Fatalf("decided %+v, want the plain signal", it)
+	}
+	front := session.NewStore(beads.SessionStore{Store: store})
+	lease, err := session.TryRuntimeLease(front, session.RuntimeLeaseRequest{City: p.World.CityPath, Name: "s-gc-1", ID: it.Key.ID, TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("the operator's lease: %v", err)
+	}
+	inside := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+	got, err := store.Get(it.Key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inside.Outcome != settledRefused || inside.Cause != causeNameBusy || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+		t.Fatalf("the signal under the operator's lease: %+v, row %v; want refused busy and no signal", inside, got.Metadata)
+	}
+	lease.Release()
+	if after := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); after.Outcome != settledLanded {
+		t.Fatalf("the signal after the release: %+v, want landed", after)
+	}
+}

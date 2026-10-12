@@ -11,7 +11,11 @@ package main
 // or pending refuses with its cause, and the row backs off.
 
 // signalSections are a signal's one section, behind the drain basis
-// (premiseDrainBasis), so an agent's heartbeat cannot starve it.
+// (premiseDrainBasis), so an agent's heartbeat cannot starve it. Every
+// signal kind holds the runtime name's flock (v5.9h: a drain takes the
+// flock only), the plain one by NameLock: an operator's start (Manager.
+// ensureRunning, under the name's lease from its Start to its confirm,
+// which clears the request) is never signaled midway (#7635 review).
 var signalSections = []section{{Premise: premiseDrainBasis, Decide: redecideSignal}}
 
 // signalFreshNeeds are the fresh signal's reads: the runtime, with L3 and

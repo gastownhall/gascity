@@ -664,3 +664,49 @@ func staleStopRequest() []string {
 		session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Hour),
 	}
 }
+
+// TestRestartClearWritesOnlyHeldStopKeys (#7635 review S5, S4). Kills a
+// restart clear that writes the stop request's keys on every start, or one
+// that runs on an attach that starts nothing: an operator's attach that
+// starts a row holding no stop request writes none of its five keys; an
+// operator's resume of a live row it holds (the user-hold consume, no
+// start) keeps a stop request the running runtime owns.
+func TestRestartClearWritesOnlyHeldStopKeys(t *testing.T) {
+	stopKeys := []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
+	t.Run("S5 a start with no request", func(t *testing.T) {
+		m, _ := stampedMem(t, gate.Require)
+		rec := newSessionKeyRecorder(m)
+		id := fieldRow(t, rec, "state", "asleep", "provider", "claude")
+		rec.reset()
+		city := t.TempDir()
+		if err := session.NewManagerWithOptions(rec, runtime.NewFake(), session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range stopKeys {
+			if how, ok := rec.keys[k]; ok {
+				t.Errorf("the start wrote %s (%s), want no stop-request key written", k, how)
+			}
+		}
+	})
+	t.Run("S4 a held live row's resume", func(t *testing.T) {
+		m, _ := stampedMem(t, gate.Require)
+		id := fieldRow(t, m, append([]string{"state", "active", "sleep_intent", "user-hold", "held_until", rowAt(time.Hour), "provider", "claude"}, staleStopRequest()...)...)
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "s-row", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		city := t.TempDir()
+		if err := session.NewManagerWithOptions(m, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), id, "claude", runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		got := fieldBead(t, m, id).Metadata
+		if got["sleep_intent"] != "" {
+			t.Fatalf("row %v: the resume did not consume the hold, so this case proves nothing", got)
+		}
+		for _, k := range stopKeys {
+			if got[k] == "" {
+				t.Errorf("the resume of a running row cleared %s, want the running runtime's request kept", k)
+			}
+		}
+	})
+}
