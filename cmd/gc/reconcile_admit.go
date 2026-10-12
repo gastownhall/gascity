@@ -163,6 +163,10 @@ type intent struct {
 	// S7): the rollback stops its own runtime and keeps the row, which A18
 	// relaunches on the same bead.
 	Relaunch bool
+	// Occupant marks an A10 rollback that rests on another runtime under
+	// the row's name: Occupied (another row's) or S7's StaleSelf. The
+	// effect rolls back only while its fresh read still finds one (F1).
+	Occupant bool
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests

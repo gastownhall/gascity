@@ -486,6 +486,83 @@ func TestRollbackCancelsRetiredWaits(t *testing.T) {
 	}
 }
 
+// Kills an occupant rollback that lands after its occupant left (F1): A10
+// rolls back a pending create inside its lease because the pass read
+// another runtime under its name (Occupied) or its own StaleSelf one (S7).
+// When the effect's fresh read finds that runtime gone, a corpse, or the
+// row's own Current runtime, the occupant is gone and the effect refuses
+// redecided, closing nothing (legacy decides on one live read); a Foreign or
+// StaleSelf runtime still there rolls the row back as before.
+func TestRollbackEffectNeedsItsOccupant(t *testing.T) {
+	pending := []string{"pending_create_claim", "true", "pending_create_started_at", gatherNow.Add(-time.Minute).Format(time.RFC3339)}
+	for _, c := range []struct {
+		name   string
+		reason string
+		rt     func(k *txKit)
+		closed bool
+	}{
+		{"Occupied, its occupant gone", decideRollback, func(*txKit) {}, false},
+		{"Occupied, its occupant now a corpse", decideRollback, func(k *txKit) {
+			k.runtimeAs("gc-9", "theirs", func(r *simRuntime) { r.corpse = true })
+		}, false},
+		{"Occupied, the row's own Current runtime in its place", decideRollback, func(k *txKit) { k.runtimeAs("gc-1", "tok", nil) }, false},
+		{"Occupied, an unstamped runtime in its place", decideRollback, func(k *txKit) { k.runtimeAs("", "", nil) }, false},
+		{"Occupied, its Foreign occupant still there", decideRollback, func(k *txKit) { k.runtimeAs("gc-9", "theirs", nil) }, true},
+		{"S7, its StaleSelf runtime gone", decideStaleCreate, func(*txKit) {}, false},
+		{"S7, its StaleSelf runtime still there", decideStaleCreate, func(k *txKit) { k.runtimeAs("gc-1", "old", nil) }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := startKit(t, intentRollback, "creating", pending...)
+			k.it.Deadline = gatherNow.Add(time.Minute)
+			k.it.Reason, k.it.Occupant = c.reason, true
+			c.rt(k)
+			k.p.World.Census = readCensus(t, gatherNow, censusLegs(rowLeg, k.cache))
+			s := k.runKind()
+			b, _ := k.backing.Get("gc-1")
+			if closed := b.Status == "closed"; closed != c.closed || s.Closed != c.closed {
+				t.Fatalf("settlement %+v, row %s: closed %v, want %v", s, b.Status, closed, c.closed)
+			}
+			if !c.closed && (s.Cause != causeRedecided || b.Metadata["pending_create_claim"] != "true") {
+				t.Fatalf("settlement %+v claim %q: want refused redecided, the pending create kept", s, b.Metadata["pending_create_claim"])
+			}
+		})
+	}
+}
+
+// Kills A10 dropping the occupant mark: the Occupied and S7 rollbacks rest on
+// another runtime under the name (intent.Occupant); a rollback past its
+// deadline, or of an undesired row whose runtime is gone, does not.
+func TestArmRollbackMarksItsOccupant(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		desired  desire
+		reason   string
+		liveness rowLiveness
+		stale    bool
+		occupant bool
+	}{
+		{"past its deadline", desireNone, reasonRollbackCandidate, livenessGone, false, false},
+		{"past its deadline, occupied", desireNone, reasonRollbackCandidate, livenessOccupied, false, false},
+		{"undesired and gone", desireDrain, "undesired", livenessGone, false, false},
+		{"another row's runtime", desireNone, reasonNameOccupied, livenessOccupied, false, true},
+		{"its StaleSelf runtime (S7)", desireWake, "", livenessAlive, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok", "generation", "3", "pending_create_claim", "true")
+			k := rowKeyOf(row.ID)
+			w := &World{Observed: map[rowKey]rowObservation{}}
+			if c.stale {
+				w.Observed[k] = rowObservation{Liveness: livenessAlive, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "old"}}
+			}
+			r := &rowFacts{w: w, k: k, row: newCensusRow(k, sessionInfoFromBead(row)), found: true, entry: &selectionEntry{Key: k, Desired: c.desired, Reason: c.reason, Liveness: c.liveness}}
+			it, ok := armRollback(r)
+			if !ok || it.Kind != intentRollback || it.Occupant != c.occupant {
+				t.Fatalf("armRollback = (%+v, %v), want a rollback with Occupant %v", it, ok, c.occupant)
+			}
+		})
+	}
+}
+
 // Kills an A10 rollback proposed for a row that is not a pending create, a
 // wanted pending create inside its deadline, or a live one; and one missed
 // for the three shapes A10 rolls back.

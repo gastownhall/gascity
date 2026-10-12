@@ -379,6 +379,24 @@ func staleSelfOwn(v txView) bool {
 	return v.RT.Alive() && verdict == identityStaleSelf && ownRuntime(verdict, v.Row, v.RT.Identity)
 }
 
+// occupantStays reports whether the rollback's fresh read still finds
+// another runtime under the row's name, the one an occupant rollback (A10's
+// Occupied or S7 row, intent.Occupant) rested on: Foreign or StaleSelf, alive
+// or a zombie. Gone, a corpse, the row's own Current runtime, or an
+// unattributable one is no occupant: the pass read a runtime that has since
+// left, and rolling back a pending create inside its lease would orphan
+// nothing but close a create legacy keeps, deciding on one live read (F1).
+func occupantStays(v txView) bool {
+	if v.RT == nil || v.RT.Class != rtAlive && v.RT.Class != rtZombie {
+		return false
+	}
+	switch compareIdentity(v.Row, v.RT.Identity) {
+	case identityForeign, identityStaleSelf:
+		return true
+	}
+	return false
+}
+
 // rollbackStep is the rollback's first Decide: a screen's patch, or the
 // teardown of the fresh read's own runtime for the Call.
 func rollbackStep(v txView, screen screenWrite, _ error) txStep {
@@ -392,6 +410,8 @@ func rollbackStep(v txView, screen screenWrite, _ error) txStep {
 		return txStep{Done: true, Cause: decideStaleCreate} // gone already: A18 relaunches it, no backoff between
 	case v.It.Relaunch && !staleSelfOwn(v):
 		return txStep{Refuse: causeRedecided} // S7's relaunch stops only a runtime its own read still finds StaleSelf, its own
+	case v.It.Occupant && !occupantStays(v):
+		return txStep{Refuse: causeRedecided} // F1: the occupant the arm rested on is gone; the lease decides next pass
 	case len(screen.patch) > 0 || screen.class.Len() > 0:
 		return txStep{Write: screen.patch, Class: screen.class, Done: true}
 	case cause != "":
