@@ -1124,6 +1124,7 @@ go_test(
         "cmd_hook_stdin_drain_test.go",
         "cmd_hook_test.go",
         "cmd_hook_timeout_test.go",
+        "cmd_hook_unavailable_test.go",
         "cmd_hook_visibility_test.go",
         "cmd_import_credential_test.go",
         "cmd_import_hint_test.go",
