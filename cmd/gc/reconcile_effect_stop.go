@@ -58,7 +58,7 @@ func stopNeeds(_ *World, it intent) needs {
 
 // stopLegs are the fence legs the stop's origin keeps (v5 F1, F2).
 func stopLegs(it intent) fenceLegs {
-	if it.Reason == decideDormantStop {
+	if it.Reason == decideDormantStop || it.Kind == intentDriftRestart || it.Kind == intentDriftRelaunch { // A14's restart: the Full fence (D3)
 		return legsFull
 	}
 	return legToken | legAttach
@@ -100,7 +100,6 @@ type stopped struct {
 func stopDecide(v txView) txStep {
 	w := v.World.withRow(v.It.Key, v.Row, v.Meta).withRuntime(v.It.Key, v.RT)
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind { // the stop's, or A14's restart that runs it
-
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)

@@ -1604,6 +1604,7 @@ go_test(
         "reconcile_effect_lease_test.go",
         "reconcile_effect_metadata_test.go",
         "reconcile_effect_rekey_test.go",
+        "reconcile_effect_restart_e2e_test.go",
         "reconcile_effect_restart_test.go",
         "reconcile_effect_runtime_test.go",
         "reconcile_effect_signal_test.go",

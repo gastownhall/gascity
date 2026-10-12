@@ -23,15 +23,21 @@ func driftView(t *testing.T, named bool, f txFence, meta ...string) txView {
 	}
 	c, _ := baselineCase(t, livenessAlive, desireKeep, nil, append(base, meta...)...)
 	row := c.w.Census.Rows[c.k].Info
-	return txView{It: intent{Key: c.k}, World: c.w, Row: row, Fence: f, Now: gatherNow}
+	b, err := c.store.Get(c.k.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return txView{It: intent{Key: c.k}, World: c.w, Row: row, Meta: b.Metadata, Fence: f, Now: gatherNow}
 }
 
 // Kills a deferral dropped, unbounded, or unstamped (SESS-555, legacy's
 // shouldDeferNamedSessionConfigDrift and its bounds): a pending interaction
-// and an attach defer, unbounded, writing nothing; an activity the runtime
-// cannot report is stamped on first sight of the drift key, deferred inside
-// 2m, restarted past it; recent activity likewise inside 30s; an ordinary
-// row passes; an unreadable activity refuses.
+// (but under a wait hold) and an attach refuse, named or not, so backoff
+// paces them; an activity the runtime cannot report is stamped on first
+// sight of the drift key (or of an unreadable stamp), deferred inside 2m,
+// restarted past it; recent activity likewise inside 30s; an ordinary
+// row's activity is not its deferral; an unreadable or expired activity
+// read refuses.
 func TestDriftDeferStep(t *testing.T) {
 	reportable := func(last time.Duration) *activityRead {
 		return &activityRead{Reportable: true, Last: gatherNow.Add(-last)}
@@ -51,19 +57,23 @@ func TestDriftDeferStep(t *testing.T) {
 		stamps bool   // Done with the stamp
 		refuse string // a refusal
 	}{
-		{name: "a pending interaction", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, defers: true},
-		{name: "an unknown pending", named: true, fence: txFence{Pending: fencePendingUnknown, Activity: reportable(time.Hour)}, defers: true},
-		{name: "attached", named: true, fence: txFence{Attach: fenceAttached, Activity: reportable(time.Hour)}, defers: true},
+		{name: "a pending interaction", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, refuse: causeDriftDeferred + fencePending},
+		{name: "an unknown pending", named: true, fence: txFence{Pending: fencePendingUnknown, Activity: reportable(time.Hour)}, refuse: causeDriftDeferred + fencePendingUnknown},
+		{name: "a pending interaction under a wait hold", named: true, fence: txFence{Pending: fencePending, Activity: reportable(time.Hour)}, meta: []string{"wait_hold", "true"}},
+		{name: "attached", named: true, fence: txFence{Attach: fenceAttached, Activity: reportable(time.Hour)}, refuse: causeDriftDeferred + fenceAttached},
 		{name: "activity unknown, first sight", named: true, fence: txFence{Activity: unreported}, stamps: true},
 		{name: "activity unknown, inside 2m", named: true, fence: txFence{Activity: unreported}, meta: stamped(time.Minute), defers: true},
 		{name: "activity unknown, past 2m", named: true, fence: txFence{Activity: unreported}, meta: stamped(3 * time.Minute)},
+		{name: "activity unknown, an unreadable stamp", named: true, fence: txFence{Activity: unreported}, meta: []string{"config_drift_deferred_key", key, "config_drift_deferred_at", "not-a-time"}, stamps: true},
 		{name: "activity unknown, another drift's stamp", named: true, fence: txFence{Activity: unreported}, meta: []string{"config_drift_deferred_key", "old", "config_drift_deferred_at", gatherNow.Add(-time.Hour).UTC().Format(time.RFC3339)}, stamps: true},
 		{name: "recent activity, first sight", named: true, fence: txFence{Activity: reportable(time.Minute)}, stamps: true},
 		{name: "recent activity, inside 30s", named: true, fence: txFence{Activity: reportable(time.Minute)}, meta: stamped(10 * time.Second), defers: true},
 		{name: "recent activity, past 30s", named: true, fence: txFence{Activity: reportable(time.Minute)}, meta: stamped(time.Minute)},
 		{name: "idle", named: true, fence: txFence{Activity: reportable(time.Hour)}},
 		{name: "an activity read that failed", named: true, fence: txFence{Activity: &activityRead{Reportable: true, Err: runtime.ErrRuntimeUnavailable}}, refuse: fenceLivenessUnknown},
-		{name: "an ordinary row's relaunch", fence: txFence{Pending: fencePending}},
+		{name: "an activity read past its bound", named: true, fence: txFence{Activity: &activityRead{Reportable: true, Err: errProbeExpired}}, refuse: fenceLivenessUnknown},
+		{name: "an ordinary row's relaunch, pending", fence: txFence{Pending: fencePending}, refuse: causeDriftDeferred + fencePending},
+		{name: "an ordinary row's relaunch, its activity unread", fence: txFence{Activity: unreported}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			step := driftDeferStep(driftView(t, tc.named, tc.fence, tc.meta...))
@@ -152,8 +162,20 @@ func TestRelaunchResultStep(t *testing.T) {
 	}
 	ordinary := v
 	ordinary.prev = relaunched{Err: errors.New("no box")}
-	if step := relaunchResultStep(ordinary); !step.Done || step.Write[session.DrainIntentReasonKey] != drainConfigDrift || len(step.Facts.Events) != 1 {
-		t.Fatalf("ordinary failure: step %+v, want the config-drift drain begun", step)
+	ordinary.RT = &txRuntime{Class: rtAlive, Same: true, Identity: runtimeIdentity{Known: true, SessionID: v.Row.ID, Token: v.Row.InstanceToken}}
+	ordinary.Fence = txFence{Read: legAttach | legWork, Work: &txWork{Free: true}}
+	if step := relaunchResultStep(ordinary); !step.Done || step.Write[session.DrainIntentReasonKey] != drainConfigDrift || len(step.Facts.Events) != 1 || step.Facts.Transition == nil {
+		t.Fatalf("ordinary failure: step %+v, want the config-drift drain begun with its transition", step)
+	}
+	held := ordinary
+	held.prev = relaunched{Held: fenceAttached}
+	if step := relaunchResultStep(held); step.Refuse != fenceAttached || len(step.Write) != 0 {
+		t.Fatalf("an attach before the relaunch: step %+v, want refused, no fallback", step)
+	}
+	stopping := driftView(t, false, txFence{}, append([]string{"state", "active"}, intentAt(drainIdle, "3")...)...)
+	stopping.prev, stopping.RT, stopping.Fence = relaunched{Err: errors.New("no box")}, ordinary.RT, ordinary.Fence
+	if step := relaunchResultStep(stopping); step.Refuse != causeStopActive || len(step.Write) != 0 {
+		t.Fatalf("a stop request standing: step %+v, want refused %q", step, causeStopActive)
 	}
 }
 
@@ -202,7 +224,7 @@ func TestRelaunchCall(t *testing.T) {
 			}
 			c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
 			caps := txCaps{start: startCaps{sp: sp}, reads: effectReads{city: c.store}}
-			out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: p, hash: sessionCoreConfigForHashInfo(p, row), name: "s-heal"})
+			out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: p, hash: sessionCoreConfigForHashInfo(p, row), name: "s-heal", leaf: fake, now: gatherNow})
 			if err != nil || out.OK != tc.relaunch || tc.relaunch != (fake.CountCalls("Relaunch", "s-heal") > 0 && out.Err == nil) {
 				t.Fatalf("relaunch %+v (%v), Relaunch calls %d; want landed %v", out, err, fake.CountCalls("Relaunch", "s-heal"), tc.relaunch)
 			}

@@ -61,7 +61,13 @@ func redecideDrainBegin(v txView) txStep {
 	if len(step.Write) == 0 {
 		return step
 	}
-	reason := strings.TrimPrefix(v.It.Reason, decideDrainBegin)
+	return drainBeginChecks(v, strings.TrimPrefix(v.It.Reason, decideDrainBegin), step)
+}
+
+// drainBeginChecks are a begin's legs for reason on its fresh reads, then
+// its "begin" drain transition on step: the begin's, or a failed relaunch's
+// config-drift drain (C7b2-2).
+func drainBeginChecks(v txView, reason string, step txStep) txStep {
 	if v.It.Kind == intentDrainBeginFresh {
 		if fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legAttach | legPending}); !fv.Proceed {
 			return txStep{Refuse: fv.Reason}

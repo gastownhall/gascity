@@ -73,12 +73,8 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.liveApply(cfg)
 	}
 	key, now, obs := stored+":"+core, r.w.Now, r.w.Observed[r.k]
-	var sp runtime.Provider
-	if r.w.Env != nil {
-		sp = r.w.Env.SP
-	}
-	_, relaunchable := sp.(runtime.RelaunchProvider) // a conjoined runtime takes the full path
-	launchOnly := relaunchable && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" &&
+	_, active := activeStop(r.row)
+	launchOnly := r.w.Env.relaunches() && // a conjoined runtime takes the full path info.StartedProvisionHash != "" && info.StartedLaunchHash != "" &&
 		info.StartedProvisionHash == runtime.ProvisionFingerprint(cfg) && info.StartedLaunchHash != runtime.LaunchFingerprint(cfg)
 	switch {
 	case obs.Attached || obs.Uncertain:
@@ -95,12 +91,12 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return r.heal(intentRowHeal, decideDriftPinned, driftStamp(namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, key, now))
 	case isNamedSessionInfo(info):
 		return r.driftRestart(launchOnly)
-	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil:
+	case containsWakeReason(e.WakeReasons, WakePending) || e.AssignedWork != nil || active:
 		return intent{}, false
 	case launchOnly:
 		return r.driftRestart(true)
 	}
-	if _, active := activeStop(r.row); active || !r.freshOwnAlive() { // the begin reads the runtime fresh
+	if !r.freshOwnAlive() { // the begin reads the runtime fresh
 		return intent{}, false
 	}
 	res, _ := r.w.Templates.lookup(info)

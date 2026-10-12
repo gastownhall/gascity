@@ -11,17 +11,21 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// A14's restart in place and relaunch (CONTRACT v5 §4; C7b2-2), boot-gated
-// and under the runtime lease. A named row first defers on its use, read
-// fresh (SESS-555, legacy's shouldDeferNamedSessionConfigDrift): a pending
-// interaction or an attach, unbounded; an activity it cannot read for 2m,
-// recent activity for 30s, each bound stamped config_drift_deferred_{at,key}
-// on first sight of its drift key. Then a relaunch (SESS-556/560) prepares
-// the row's start config and relaunches its agent in the warm box, its core
-// baseline moved to the config it runs (baselineRelaunch); one that fails
-// falls back to the drain for an ordinary row, and to the restart for a
-// named one: the stop verb's fence and Call (stopDecide, stopCall), then the
-// restart's reset to start-pending (legacy's
+// A14's restart in place and relaunch (CONTRACT v5 §4; C7b2-2), boot-gated,
+// under the name's flock, the runtime lease's record taken only past the
+// deferral (LeaseAt), so a deferral writes nothing. A row first defers on
+// its use, read fresh: a pending interaction (but under a wait hold, a hold
+// or a quarantine, legacy's pendingInteractionHoldInfo) or an attach refuses
+// (SESS-553/558), so backoff paces it; a named row also on its activity
+// (SESS-555, legacy's shouldDeferNamedSessionConfigDrift): one it cannot
+// read for 2m, recent activity for 30s, each bound stamped
+// config_drift_deferred_{at,key} on first sight of its drift key. Then a
+// relaunch (SESS-556/560) prepares the row's start config, re-reads L3, and
+// relaunches its agent in the warm box, its core baseline moved to the
+// config it runs (baselineRelaunch); one that fails falls back to the
+// config-drift drain's begin for an ordinary row, and to the restart for a
+// named one: the stop verb's full fence and Call (stopDecide, stopCall), then
+// the restart's reset to start-pending (legacy's
 // resetConfiguredNamedSessionForConfigDriftInfo), which the next pass
 // starts.
 
@@ -31,20 +35,12 @@ const (
 	causeRelaunchSkew  = "relaunch-skew"   // the prepared config no longer reads launch-only
 )
 
-// Named drift deferral bounds (legacy's namedSessionActivityThreshold and
-// namedSessionRecentActivityConfigDriftDeferralLimit).
-const (
-	driftActivityRecent       = 2 * time.Minute
-	driftActivityUnknownBound = 2 * time.Minute
-	driftRecentActivityBound  = 30 * time.Second
-)
-
 var (
 	driftRestartSections  = append([]section{{Decide: driftDeferStep}}, driftStopSections...)
 	driftRelaunchSections = append([]section{
 		{Decide: driftDeferStep},
 		called(0, section{Decide: relaunchStep}, relaunchCall),
-		{Decide: relaunchResultStep},
+		{Premise: premiseBaseline, Decide: relaunchResultStep}, // a heartbeat or claim during the relaunch does not hold its baseline
 	}, driftStopSections...)
 	driftStopSections = []section{
 		called(callStop, section{Premise: premiseDrainBasis, Decide: stopDecide}, stopCall),
@@ -52,30 +48,42 @@ var (
 	}
 )
 
-// driftRestartNeeds are the restart's fresh reads: the runtime under its
-// lease, L3 and L4, and the agent's activity.
-var driftRestartNeeds = needs{Runtime: true, Lease: true, Legs: legAttach | legPending, Activity: true}
+// driftRestartNeeds are the restart's and the relaunch's fresh reads: the
+// runtime, L3, L4 and L5 (the fallback drain's), and the agent's activity;
+// the lease record past the deferral section.
+var driftRestartNeeds = needs{Runtime: true, Lease: true, LeaseAt: 1, Legs: legAttach | legPending | legWork, Activity: true}
 
-// driftDeferStep is a named row's use deferral; an ordinary row's relaunch
-// passes it, its guards the arm's.
+// driftDeferStep is the use deferral: a pending interaction or an attach,
+// read fresh, refuses; a named row's activity defers it, bounded.
 func driftDeferStep(v txView) txStep {
-	if !isNamedSessionInfo(v.Row) {
-		return txStep{}
-	}
 	a := v.Fence.Activity
 	switch {
-	case v.Fence.Pending != "":
-		return txStep{Done: true, Cause: causeDriftDeferred + v.Fence.Pending}
+	case v.Fence.Pending != "" && !pendingExempt(v.Row, v.Now):
+		return txStep{Refuse: causeDriftDeferred + v.Fence.Pending}
 	case v.Fence.Attach != "":
-		return txStep{Done: true, Cause: causeDriftDeferred + v.Fence.Attach}
+		return txStep{Refuse: causeDriftDeferred + v.Fence.Attach}
+	case !isNamedSessionInfo(v.Row): // an ordinary row's relaunch: its other guards are the arm's
 	case a == nil || !a.Reportable:
-		return driftBoundedDefer(v, "activity_unknown", driftActivityUnknownBound)
+		return driftBoundedDefer(v, "activity_unknown", namedSessionActivityThreshold)
 	case errors.Is(a.Err, runtime.ErrRuntimeUnavailable) || errors.Is(a.Err, errProbeExpired):
 		return txStep{Refuse: fenceLivenessUnknown, Err: a.Err}
-	case a.Err == nil && !a.Last.IsZero() && v.Now.Sub(a.Last) < driftActivityRecent:
-		return driftBoundedDefer(v, "recent_activity", driftRecentActivityBound)
+	case a.Err == nil && !a.Last.IsZero() && v.Now.Sub(a.Last) < namedSessionActivityThreshold:
+		return driftBoundedDefer(v, "recent_activity", namedSessionRecentActivityConfigDriftDeferralLimit)
 	}
 	return txStep{}
+}
+
+// pendingExempt reports legacy's pending-interaction exceptions
+// (pendingInteractionHoldInfo): a wait hold, or a hold or quarantine
+// blocking the row.
+func pendingExempt(row session.Info, now time.Time) bool {
+	if strings.TrimSpace(row.WaitHold) != "" {
+		return true
+	}
+	in := session.LifecycleInputFromInfo(row)
+	in.Runtime, in.Now = session.RuntimeFacts{Observed: true, Alive: true, Pending: true}, now
+	view := session.ProjectLifecycle(in)
+	return view.HasBlocker(session.BlockerHeld) || view.HasBlocker(session.BlockerQuarantined)
 }
 
 // driftBoundedDefer is legacy's boundedNamedSessionConfigDriftDeferral: the
@@ -107,6 +115,8 @@ type relaunchPlan struct {
 	hash  runtime.Config // the hash-form config, whose baseline a relaunch writes
 	name  string
 	named bool
+	leaf  runtime.Provider // the routed leaf, whose L3 the Call re-reads
+	now   time.Time
 }
 
 // relaunchStep hands the Call the relaunch A14 still decides on the fresh
@@ -118,7 +128,7 @@ func relaunchStep(v txView) txStep {
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	cfg, _, _ := v.World.coreHash(v.Row)
-	return txStep{Pass: relaunchPlan{w: v.World, row: v.Row, tp: res.TP, hash: cfg, name: strings.TrimSpace(v.Row.SessionName), named: isNamedSessionInfo(v.Row)}}
+	return txStep{Pass: relaunchPlan{w: v.World, row: v.Row, tp: res.TP, hash: cfg, name: strings.TrimSpace(v.Row.SessionName), named: isNamedSessionInfo(v.Row), leaf: v.RT.leaf, now: v.Now}}
 }
 
 // relaunched is the relaunch Call's outcome.
@@ -127,13 +137,15 @@ type relaunched struct {
 	Named bool
 	Hash  runtime.Config
 	Err   error
+	Held  string // L3, re-read just before Relaunch, holds it: no relaunch and no fallback
 }
 
 // relaunchCall is legacy's relaunchAgentForLaunchDrift past its guards: the
 // row's start config prepared over the read-only stores, the anti-skew gate
 // (still launch-only, its baseline the hash form's), a key the preparation
 // would mint refused (a warm relaunch must not resume a conversation never
-// created), then Relaunch. Any failure is the fallback's.
+// created), L3 read again just before it (C8.7, as stopFenced does), then
+// Relaunch. An attach holds it; any failure is the fallback's.
 func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, error) {
 	out := relaunched{Named: p.named, Hash: p.hash}
 	r, ok := c.start.sp.(runtime.RelaunchProvider)
@@ -141,18 +153,19 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 		out.Err = runtime.ErrRelaunchUnsupported
 		return out, nil
 	}
-	transcript := transcriptOf(c.reads, p.w, p.row, p.tp)
-	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(seatWorkFor(c.reads.legs, releaseScope(p.row, p.w.Env.Cfg)))}
-	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: p.row, tp: p.tp}, p.w.CityPath, p.w.Env.Cfg, c.reads.city, taskWorkDirs(p.w), sources, &transcript)
+	prepared, err := prepareRow(c.reads, p.w, p.row, p.tp, transcriptOf(c.reads, p.w, p.row, p.tp))
 	switch {
 	case err != nil:
 		out.Err = err
 	case prepared.coreHash != runtime.CoreFingerprint(p.hash) || prepared.provisionHash != p.row.StartedProvisionHash ||
-		prepared.launchHash == p.row.StartedLaunchHash || prepared.launchHash != runtime.LaunchFingerprint(p.hash):
+		prepared.launchHash == p.row.StartedLaunchHash: // the core partitions into provision and launch: a matching core is the hash form's launch too
 		out.Err = errors.New(causeRelaunchSkew)
 	case strings.TrimSpace(p.row.SessionKey) == "" && p.tp.ResolvedProvider != nil && strings.TrimSpace(p.tp.ResolvedProvider.SessionIDFlag) != "":
 		out.Err = errors.New("relaunch would mint a speculative resume key") // legacy's preparation mints one here, then falls back
 	default:
+		if out.Held, _ = attachLeg(ctx, p.leaf, p.name, false, p.now); out.Held != "" {
+			return out, nil
+		}
 		out.Err = r.Relaunch(ctx, p.name, prepared.cfg)
 	}
 	out.OK = out.Err == nil
@@ -161,13 +174,16 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 
 // relaunchResultStep writes a relaunch's core baseline and legacy's
 // session.updated; a failed one falls back: an ordinary row's config-drift
-// drain begins in this write, a named row goes on to the restart.
+// drain begins in this write, through the begin's own checks, a named row
+// goes on to the restart. An attach found just before it refuses.
 func relaunchResultStep(v txView) txStep {
 	out, err := callResult[relaunched](v)
 	res, _ := v.World.Templates.lookup(v.Row)
 	switch {
 	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
+	case out.Held != "":
+		return txStep{Refuse: out.Held}
 	case out.OK:
 		step := txStep{Write: baselinePatch(out.Hash, baselineRelaunch), Done: true}
 		step.Facts.Events = []events.Event{{Type: events.SessionUpdated, Actor: "gc", Subject: res.TP.DisplayName(), Message: "agent relaunched (launch-only config change)"}}
@@ -175,13 +191,17 @@ func relaunchResultStep(v txView) txStep {
 	case out.Named:
 		return txStep{}
 	}
-	if _, active := activeStop(newCensusRow(v.It.Key, v.Row)); active {
-		return txStep{Done: true, Cause: "stop-active"}
+	row := v.World.Census.reread(v.It.Key, v.Row, v.Meta) // the fresh row with its stop keys
+	if _, active := activeStop(row); active {
+		return txStep{Refuse: causeStopActive}
 	}
-	step := txStep{Write: stopBeginPatch(newCensusRow(v.It.Key, v.Row), drainConfigDrift, v.Now), Done: true}
+	step := txStep{Write: stopBeginPatch(row, drainConfigDrift, v.Now), Done: true}
 	step.Facts.Events = []events.Event{{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: v.Row.ID}}
-	return step
+	return drainBeginChecks(v, drainConfigDrift, step)
 }
+
+// causeStopActive: a stop request stands; the fallback drain begins none.
+const causeStopActive = "stop-active"
 
 // driftRestartStep, on a confirmed stop, resets the row to start-pending
 // for its restart, with legacy's session.draining.
@@ -194,10 +214,7 @@ func driftRestartStep(v txView) txStep {
 		return txStep{Refuse: out.Reason}
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
-	step := txStep{Write: driftRestartPatch(res.TP, v.Row, v.Now), Done: true}
-	if out.Performed {
-		step.Facts.Stopped = &agentStop{Name: strings.TrimSpace(v.Row.SessionName), Identity: sessionAgentMetricIdentityInfo(v.Row, v.World.Env.Cfg)}
-	}
+	step := txStep{Write: driftRestartPatch(res.TP, v.Row, v.Now), Done: true} // legacy's drift kill records no stop metric
 	step.Facts.Events = []events.Event{{Type: events.SessionDraining, Actor: "gc", Subject: res.TP.DisplayName(), Message: "config drift detected", SessionID: v.Row.ID}}
 	return step
 }

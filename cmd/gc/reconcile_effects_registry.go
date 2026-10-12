@@ -84,7 +84,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	stripped.SessionsStore, stripped.RigStores, stripped.WorkLegs = nil, nil, WorkLegs{}
 	if w.Env != nil {
 		env := *w.Env
-		env.SP = nil
+		env.Relaunch, env.SP = env.relaunches(), nil
 		stripped.Env = &env
 	}
 	p.World = &stripped
