@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -45,24 +46,83 @@ func TestKillFencedStopErrorWithRuntimeGoneSucceeds(t *testing.T) {
 	}
 }
 
-// A runtime already gone has no window to fence: kill runs alone, writes
-// nothing, and its result is returned as it is.
-func TestKillFencedRuntimeAlreadyGoneRunsKillAlone(t *testing.T) {
+// A runtime already gone has no window to fence: kill runs alone and its
+// result is returned as it is. An unconfigured session's row is left as it
+// was; a configured named session's row is synced asleep/killed, as `gc
+// session kill` does, so the kill supersedes its pending wake.
+func TestKillFencedRuntimeAlreadyGone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		named bool
+	}{
+		{"unconfigured session", false},
+		{"configured named session", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			mgr, store, info := newKillFencedSession(t, fake, fake)
+			meta := map[string]string{"state": string(StateAsleep), "wake_request": "explicit", "wake_requested_at": time.Now().UTC().Format(time.RFC3339)}
+			if tc.named {
+				meta["configured_named_session"], meta["configured_named_identity"] = "true", "chat"
+			}
+			if err := store.SetMetadataBatch(info.ID, meta); err != nil {
+				t.Fatal(err)
+			}
+			_ = fake.Stop(info.SessionName)
+			calls := len(fake.SnapshotCalls())
+			want := errors.New("not active")
+			got := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, func(context.Context, Actor) error { return want })
+			if !errors.Is(got, want) {
+				t.Fatalf("KillFenced = %v, want kill's own error", got)
+			}
+			for _, c := range fake.SnapshotCalls()[calls:] {
+				if c.Method == "Stop" {
+					t.Errorf("a runtime already gone was stopped again")
+				}
+			}
+			after, _ := store.Get(info.ID)
+			if after.Metadata["state_reason"] == KillPendingReason {
+				t.Errorf("a fence was written for a runtime already gone: %v", after.Metadata)
+			}
+			if !tc.named {
+				if after.Metadata["wake_request"] != "explicit" || after.Metadata["sleep_reason"] != "" {
+					t.Errorf("unconfigured row rewritten: %v", after.Metadata)
+				}
+				return
+			}
+			if after.Metadata["sleep_reason"] != string(SleepReasonKilled) || after.Metadata["wake_request"] != "" {
+				t.Errorf("named row = %v, want asleep/killed with the pending wake cleared", after.Metadata)
+			}
+		})
+	}
+}
+
+// The flock fallback after a lease failure other than busy is retryable when
+// the flock itself is busy: ErrSessionStarting, as every operator lease wait,
+// and the kill does not run. The lease failure here is a lent lease already
+// released; the flock is held by another stopper.
+func TestKillFencedBusyFlockFallbackIsRetryable(t *testing.T) {
 	fake := runtime.NewFake()
-	mgr, store, info := newKillFencedSession(t, fake, fake)
-	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+	mgr, _, info := newKillFencedSession(t, fake, fake)
+	by := testActor(mgr, ActorOperator)
+	stale, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName})
+	if err != nil {
 		t.Fatal(err)
 	}
-	_ = fake.Stop(info.SessionName)
-	before, _ := store.Get(info.ID)
-	want := errors.New("not active")
-	got := mgr.KillFenced(context.Background(), testActor(mgr, ActorOperator), info.ID, func(context.Context, Actor) error { return want })
-	if !errors.Is(got, want) {
-		t.Fatalf("KillFenced = %v, want kill's own error", got)
+	stale.Release()
+	held, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName})
+	if err != nil {
+		t.Fatalf("holding the flock: %v", err)
 	}
-	after, _ := store.Get(info.ID)
-	if after.Revision != before.Revision {
-		t.Errorf("row rewritten for a runtime already gone: %v", after.Metadata)
+	defer held.Release()
+	by.Lease = stale
+	killed := false
+	err = mgr.KillFenced(context.Background(), by, info.ID, func(context.Context, Actor) error { killed = true; return nil })
+	if !errors.Is(err, ErrSessionStarting) {
+		t.Fatalf("KillFenced = %v, want ErrSessionStarting (retryable)", err)
+	}
+	if killed || !fake.IsRunning(info.SessionName) {
+		t.Error("the kill ran without the flock")
 	}
 }
 

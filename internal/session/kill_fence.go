@@ -247,9 +247,11 @@ func (f *KillFence) Wrote() map[string]string { return maps.Clone(f.wrote) }
 // pass.
 //
 // A row whose runtime is already gone has no window to fence: kill runs
-// alone and its result is returned as it is. A fence that cannot be written
-// does not hold the kill hostage: it falls back to the stop and the
-// best-effort asleep sync after it.
+// alone (under the lease) and its result is returned as it is; a configured
+// named session's row is synced asleep/killed after it all the same, as `gc
+// session kill` does, so the kill supersedes a pending wake. A fence that
+// cannot be written does not hold the kill hostage: it falls back to the stop
+// and the best-effort asleep sync after it.
 func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func(context.Context, Actor) error) error {
 	if err := m.checkActor(by); err != nil {
 		return err
@@ -258,15 +260,13 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 	if err != nil {
 		return err
 	}
-	if !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName) {
-		return kill(ctx, by)
-	}
+	runtimeGone := !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName)
 	lease, release, err := m.leaseRuntime(ctx, by, id, sessName, operatorLeaseWait)
 	if err != nil && !errors.Is(err, ErrSessionStarting) && !errors.Is(err, ErrRuntimeLeaseBusy) && !by.City.IsZero() {
 		// As leaseForStop: a lease failure other than busy stops under the
-		// name's flock alone.
+		// name's flock alone; a busy flock is retryable (ErrSessionStarting).
 		log.Printf("runtime lease: session %q: killing %q under the name's flock alone: %v", id, sessName, err)
-		lease, err = TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: sessName})
+		lease, err = operatorRuntimeLease(TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: sessName}))
 		if err == nil {
 			release = lease.Release
 		}
@@ -277,6 +277,13 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 	defer release()
 	if lease != nil {
 		by.Lease = lease
+	}
+	if runtimeGone {
+		killErr := kill(ctx, by)
+		if NamedSessionIdentityInfo(m.infoFromBead(b)) != "" {
+			m.syncKilledAsleep(id)
+		}
+		return killErr
 	}
 
 	fence, ferr := WriteKillFence(m.store, id, m.now().UTC())
@@ -307,13 +314,19 @@ func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func
 		}
 		return nil
 	}
+	m.syncKilledAsleep(id)
+	return nil
+}
+
+// syncKilledAsleep is the kill's best-effort asleep sync without a fence
+// (KillSleepPatch on the row's fresh metadata).
+func (m *Manager) syncKilledAsleep(id string) {
 	now := m.now().UTC()
 	if err := ApplyKillFencePatch(m.store, id, func(b beads.Bead) (map[string]string, bool) {
 		return KillSleepPatch(b.ID, b.Metadata, now), true
 	}); err != nil {
 		log.Printf("session kill: syncing session %s to asleep: %v", id, err)
 	}
-	return nil
 }
 
 // killRuntimeLive reports the states Manager.Kill treats as holding a live
