@@ -227,17 +227,18 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		Now:              r.w.Now, StabilityThreshold: stabilityThreshold, ProductivityThreshold: churnProductivityThreshold,
 	}) {
 	case session.ExitRapidCrash:
-		// Legacy resets the conversation unless a probe finds its transcript:
-		// the PreWake's stale-key clear probes a keyed one; nothing can probe
-		// the others, so their reset is written here.
+		// Legacy resets the conversation unless it is a committed manual one
+		// or a probe finds its transcript: the PreWake's stale-key clear
+		// probes a keyed one; nothing can probe the others, so their reset is
+		// written here.
 		if folded := foldInfo(info, patch); (strings.TrimSpace(folded.SessionKey) != "" || strings.TrimSpace(folded.StartedConfigHash) != "") &&
-			!transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info)) {
+			!session.HasStartedManualConversation(folded) && !transcript.ProviderHasKeyedTranscript(sessionTranscriptProvider(nil, info)) {
 			maps.Copy(patch, session.ConversationResetPatch(true))
 		}
 		attempts, _ := strconv.Atoi(info.WakeAttemptsMetadata)
 		accrual = session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, until)
 	case session.ExitChurn:
-		if strings.TrimSpace(foldInfo(info, patch).SessionKey) != "" {
+		if folded := foldInfo(info, patch); strings.TrimSpace(folded.SessionKey) != "" && !session.HasStartedManualConversation(folded) {
 			maps.Copy(patch, session.ConversationResetPatch(false))
 		}
 		cycles, _ := strconv.Atoi(info.ChurnCount)
@@ -393,7 +394,8 @@ func armCurrentBead(r *rowFacts) (intent, bool) {
 // for a creating row with no claim, or a committed row, whose runtime is not
 // alive: asleep, and, when the row holds a continuation that no deliberate
 // sleep ended, the runtime-missing reason and the continuation reset, which a
-// named mode=always row skips.
+// named mode=always row and a committed manual conversation skip
+// (session.PreserveConversationOnRuntimeLoss).
 func asleepHealPatch(info session.Info) session.MetadataPatch {
 	patch := session.MetadataPatch{"state": string(session.StateAsleep)}
 	reason := strings.TrimSpace(info.SleepReason)
@@ -403,7 +405,7 @@ func asleepHealPatch(info session.Info) session.MetadataPatch {
 	if reason == "" {
 		patch["sleep_reason"] = string(session.SleepReasonRuntimeMissing)
 	}
-	if isNamedSessionInfo(info) && namedSessionModeInfo(info) == "always" {
+	if session.PreserveConversationOnRuntimeLoss(info) {
 		return patch
 	}
 	maps.Copy(patch, session.ConversationResetPatch(true))

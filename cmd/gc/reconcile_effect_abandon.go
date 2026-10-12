@@ -181,9 +181,9 @@ func abandonStep(v txView) txStep {
 // otherFailurePatch is S3's any-other class: PreWake restored, unless it
 // found the row creating (#7570), then legacy's recordWakeFailure on a row
 // still creating (an operator who killed it mid-start owns it): the
-// conversation reset unless its transcript is on disk (unprobeable
-// providers included), and one wake attempt more, quarantined at the
-// threshold.
+// conversation reset unless it is a committed manual one or its transcript
+// is on disk (unprobeable providers included), and one wake attempt more,
+// quarantined at the threshold.
 func otherFailurePatch(row session.Info, meta map[string]string, f startFailureRead, now time.Time) (_ session.MetadataPatch, _ session.DispositionPatch, quarantined bool) {
 	patch := session.MetadataPatch{}
 	var class session.DispositionPatch
@@ -193,7 +193,7 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	if !creating(row) {
 		return patch, class, false
 	}
-	if (row.SessionKey != "" || row.StartedConfigHash != "") && !f.keeps {
+	if (row.SessionKey != "" || row.StartedConfigHash != "") && !session.HasStartedManualConversation(row) && !f.keeps {
 		maps.Copy(patch, session.ConversationResetPatch(true))
 	}
 	attempts, _ := strconv.Atoi(row.WakeAttemptsMetadata)
