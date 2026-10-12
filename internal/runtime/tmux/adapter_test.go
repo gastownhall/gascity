@@ -388,8 +388,9 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 }
 
-// Relaunch replaces the agent pane (":^.0"), not whichever pane is active. A
-// human who opened and focused a second window must keep it: before the fix,
+// Relaunch replaces the agent pane (the first pane of the first window), not
+// whichever pane is active. A human who split the agent's window and then
+// opened and focused a second window must keep both: before the fix,
 // respawn-pane -t "=name:" killed the focused window's pane, ran the new agent
 // there, and left the old agent running in pane 0.0.
 func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
@@ -439,6 +440,25 @@ func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
 		t.Fatalf("set pane-base-index: %v", err)
 	}
 
+	// The human's split in the agent's window: created without -d, so it is
+	// that window's active pane. Window ^ now has two panes, so a resolver
+	// that answers for the window's active pane (display-message on ":^.0"
+	// under pane-base-index 1) or picks the wrong line names the split.
+	splitPane, err := p.tm.run("split-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(name)+"^", "sleep 300")
+	if err != nil {
+		t.Fatalf("split agent window: %v", err)
+	}
+	if !wellFormedTmuxID(splitPane, '%') {
+		t.Fatalf("split pane id = %q, want %%<digits>", splitPane)
+	}
+	if active, err := p.tm.run("display-message", "-t", paneTarget(name)+"^", "-p", "#{pane_id}"); err != nil || strings.TrimSpace(active) != splitPane {
+		t.Fatalf("agent window active pane = (%q, %v), want the split %q (precondition)", strings.TrimSpace(active), err, splitPane)
+	}
+	splitPID, err := p.tm.GetPanePID(splitPane)
+	if err != nil {
+		t.Fatalf("split pane pid: %v", err)
+	}
+
 	// The human's window: created without -d, so it becomes the active window.
 	humanPane, err := p.tm.run("new-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(name), "sleep 300")
 	if err != nil {
@@ -467,16 +487,16 @@ func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
 	}
 	waitForMarker(t, marker, "second")
 
-	// Pane 0.0 was respawned: same pane, new process, old agent gone.
+	// The agent pane was respawned: same pane, new process, old agent gone.
 	if got, err := p.tm.GetPaneID(name); err != nil || got != agentPane {
-		t.Fatalf("pane ^.0 after Relaunch = (%q, %v), want %q", got, err, agentPane)
+		t.Fatalf("first pane after Relaunch = (%q, %v), want %q", got, err, agentPane)
 	}
 	agentPIDAfter, err := p.tm.GetPanePID(agentPane)
 	if err != nil {
 		t.Fatalf("agent pane pid after Relaunch: %v", err)
 	}
 	if agentPIDAfter == agentPIDBefore {
-		t.Fatalf("agent pane pid unchanged (%s): pane 0.0 was not respawned", agentPIDAfter)
+		t.Fatalf("agent pane pid unchanged (%s): the agent pane was not respawned", agentPIDAfter)
 	}
 	if processAlive(agentPIDBefore) {
 		t.Fatalf("old agent process %s still alive after Relaunch", agentPIDBefore)
@@ -488,6 +508,12 @@ func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
 	}
 	if !processAlive(humanPID) {
 		t.Fatalf("second-window process %s killed by Relaunch", humanPID)
+	}
+	if got, err := p.tm.GetPanePID(splitPane); err != nil || got != splitPID {
+		t.Fatalf("split pane pid after Relaunch = (%q, %v), want %q (pane respawned or killed)", got, err, splitPID)
+	}
+	if !processAlive(splitPID) {
+		t.Fatalf("split process %s killed by Relaunch", splitPID)
 	}
 }
 

@@ -607,7 +607,8 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 // focused would have that pane killed and the old agent left running. The
 // session name is resolved to the first pane of the first window (list-panes
 // lists in index order, so this holds under any pane-base-index) and respawned
-// by pane id; a pane id passes through without the lookup.
+// by that pane id fenced to the session; a pane id passes through without the
+// lookup.
 func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	lookup := []string{"list-panes", "-t", "=gc-test-agent-pane:^", "-F", "#{pane_id}"}
 	cases := []struct {
@@ -617,12 +618,12 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	}{
 		{"respawnAgent", func(_ *Tmux, ops *tmuxStartOps) error {
 			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
-		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "%7", "-c", "/proj", "claude"}}},
-		{"RespawnPane", func(tm *Tmux, _ *tmuxStartOps) error {
-			return tm.RespawnPane("gc-test-agent-pane", "claude")
-		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "%7", "claude"}}},
+		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:^.%7", "-c", "/proj", "claude"}}},
+		{"no workdir", func(tm *Tmux, _ *tmuxStartOps) error {
+			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
+		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:^.%7", "claude"}}},
 		{"pane id", func(tm *Tmux, _ *tmuxStartOps) error {
-			return tm.RespawnPane("%3", "claude")
+			return tm.RespawnPaneWithWorkDir("%3", "", "claude")
 		}, [][]string{{"respawn-pane", "-k", "-t", "%3", "claude"}}},
 	}
 	for _, tc := range cases {
@@ -643,6 +644,49 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A failed agent-pane lookup fails the respawn closed. Falling back to the
+// session target would respawn the active pane, and an empty id would make
+// tmux respawn some other session's pane (respawn-pane -t "").
+func TestRespawnFailsClosedWhenAgentPaneLookupFails(t *testing.T) {
+	cases := []struct {
+		name   string
+		exec   *fakeExecutor
+		wantIs error
+	}{
+		{"session gone", &fakeExecutor{errs: []error{ErrSessionNotFound}}, ErrSessionNotFound},
+		{"no panes", &fakeExecutor{outs: []string{""}}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = tc.exec
+			err := tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "/proj", "claude")
+			if err == nil {
+				t.Fatal("RespawnPaneWithWorkDir succeeded, want the lookup failure")
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("err = %v, want errors.Is %v", err, tc.wantIs)
+			}
+			if len(tc.exec.calls) != 1 || slices.Contains(tc.exec.calls[0], "respawn-pane") {
+				t.Errorf("tmux calls = %q, want only the list-panes lookup", tc.exec.calls)
+			}
+		})
+	}
+}
+
+// GetPaneID passes a pane id through: "%3:^" is not a session tmux can list.
+func TestGetPaneIDPassesPaneIDThrough(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+	if got, err := tm.GetPaneID("%3"); err != nil || got != "%3" {
+		t.Fatalf("GetPaneID(%%3) = (%q, %v), want (%%3, nil)", got, err)
+	}
+	if len(exec.calls) != 0 {
+		t.Errorf("tmux calls = %q, want none", exec.calls)
 	}
 }
 

@@ -3723,16 +3723,25 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	return "", nil
 }
 
-// GetPaneID returns the pane identifier of a session's agent pane: the first
-// pane of its first window, where every start path puts the agent.
-// Returns a pane ID like "%0" that can be used with RespawnPane.
+// GetPaneID returns the pane identifier of a session's agent pane, taken to be
+// the first pane of its first window: every start path creates the session
+// with the agent as its only pane. A pane id passes through unchanged.
+// Returns a pane ID like "%0" that can be used with RespawnPaneWithWorkDir.
 //
 // list-panes over the first window (":^") lists panes in index order, so the
 // first line is that pane whatever pane-base-index is. ":^.0" names pane index
 // 0, which does not exist under pane-base-index 1: respawn-pane rejects it
 // ("can't find pane: 0") and display-message silently answers for the
 // window's active pane instead.
+//
+// The position is not durable identity. A human who reorders panes
+// (split-window -b, swap-pane, rotate-window, break-pane, new-window -b, or
+// killing the agent's window) moves another pane first, and this returns that
+// pane. Marking the agent pane at creation is follow-up work (mc-zndi7.100).
 func (t *Tmux) GetPaneID(session string) (string, error) {
+	if strings.HasPrefix(session, "%") {
+		return session, nil
+	}
 	target := session + ":^"
 	if validSessionNameRe.MatchString(session) {
 		target = paneTarget(session) + "^"
@@ -5373,24 +5382,12 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 	return err
 }
 
-// RespawnPane kills all processes in a pane and starts a new command.
-// This is used for "hot reload" of agent sessions - instantly restart in place.
+// RespawnPaneWithWorkDir kills all processes in a pane and starts a new command
+// in the specified working directory, instantly restarting an agent in place.
 // The pane parameter is a pane ID (e.g., "%0"), a session:window.pane target,
 // or a session name. A session name is resolved to its agent pane (GetPaneID),
 // never the active pane: "=name:" would kill whichever pane a human left
-// focused and leave the old agent running.
-func (t *Tmux) RespawnPane(pane, command string) error {
-	target, err := t.respawnTarget(pane)
-	if err != nil {
-		return err
-	}
-	_, err = t.run("respawn-pane", "-k", "-t", target, t.wrapPaneCommand(command))
-	return err
-}
-
-// RespawnPaneWithWorkDir kills all processes in a pane and starts a new command
-// in the specified working directory. Use this when the pane's current working
-// directory may have been deleted. The pane is resolved as in RespawnPane.
+// focused and leave the old agent running. GetPaneID's reorder limit applies.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 	target, err := t.respawnTarget(pane)
 	if err != nil {
@@ -5405,13 +5402,21 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 	return err
 }
 
-// respawnTarget resolves a session name to its agent pane id; pane ids and
-// explicit targets pass through unchanged.
+// respawnTarget resolves a session name to its agent pane, fenced to that
+// session ("=name:^.%N"): pane ids are server-global and restart at %0 with a
+// new server, so a bare stale id could name another session's pane, while a
+// fenced one fails "can't find pane" (ErrSessionNotFound). Pane ids and
+// explicit targets pass through unchanged. A failed lookup is returned, never
+// answered by falling back to the session's active pane.
 func (t *Tmux) respawnTarget(pane string) (string, error) {
 	if !validSessionNameRe.MatchString(pane) {
 		return pane, nil
 	}
-	return t.GetPaneID(pane)
+	id, err := t.GetPaneID(pane)
+	if err != nil {
+		return "", err
+	}
+	return paneTarget(pane) + "^." + id, nil
 }
 
 // ClearHistory clears the scrollback history buffer for a pane.
@@ -5817,41 +5822,4 @@ func (t *Tmux) SetPaneDiedHook(session, agentID string) error {
 	// Set the hook on this specific session
 	_, err := t.run("set-hook", "-t", session, "pane-died", hookCmd)
 	return err
-}
-
-// SetAutoRespawnHook configures a session to automatically respawn when the pane dies.
-// This is used for persistent agents like Deacon that should never exit.
-// PATCH-010: Fixes Deacon crash loop by respawning at tmux level.
-//
-// The hook:
-// 1. Waits 3 seconds (debounce rapid crashes)
-// 2. Respawns the pane with its original command
-// 3. Re-enables remain-on-exit (respawn-pane resets it to off!)
-//
-// Requires remain-on-exit to be set first (called automatically by this function).
-func (t *Tmux) SetAutoRespawnHook(session string) error {
-	if err := validateSessionName(session); err != nil {
-		return err
-	}
-	// First, enable remain-on-exit so the pane stays after process exit
-	if err := t.SetRemainOnExit(session, true); err != nil {
-		return fmt.Errorf("setting remain-on-exit: %w", err)
-	}
-
-	// Sanitize session name for shell safety
-	safeSession := strings.ReplaceAll(session, "'", "'\\''")
-
-	// Hook command: wait, respawn, then re-enable remain-on-exit
-	// IMPORTANT: respawn-pane automatically resets remain-on-exit to off!
-	// We must re-enable it after each respawn for continuous recovery.
-	// The sleep prevents rapid respawn loops if Claude crashes immediately.
-	hookCmd := fmt.Sprintf(`run-shell "sleep 3 && tmux respawn-pane -k -t '%s' && tmux set-option -t '%s' remain-on-exit on"`, safeSession, safeSession)
-
-	// Set the hook on this specific session
-	_, err := t.run("set-hook", "-t", session, "pane-died", hookCmd)
-	if err != nil {
-		return fmt.Errorf("setting pane-died hook: %w", err)
-	}
-
-	return nil
 }

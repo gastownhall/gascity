@@ -90,10 +90,20 @@ func requireExactTargets(t *testing.T, calls [][]string, name string, want ...st
 			if target != "="+name {
 				t.Errorf("%s -t %q, want %q; argv=%q", sub, target, "="+name, call)
 			}
+		case sub == "list-panes":
+			// ":^" lists the first window's panes; the agent pane is found
+			// among them, so it is exact here and nowhere else.
+			if !slices.Contains([]string{"=" + name + ":", "=" + name + ":^"}, target) {
+				t.Errorf("%s -t %q, want %q or %q; argv=%q", sub, target, "="+name+":", "="+name+":^", call)
+			}
+		case sub == "respawn-pane":
+			// Respawn takes the looked-up pane id, fenced to the session.
+			if !strings.HasPrefix(target, "="+name+":^.%") {
+				t.Errorf("%s -t %q, want %q; argv=%q", sub, target, "="+name+":^.%<id>", call)
+			}
 		case slices.Contains(exactPaneCommands, sub):
-			// A pane id ("%N") is exact by construction.
-			if !slices.Contains([]string{"=" + name + ":", "=" + name + ":^", "=" + name + ":^.0"}, target) && !strings.HasPrefix(target, "%") {
-				t.Errorf("%s -t %q, want %q, %q, %q or a pane id; argv=%q", sub, target, "="+name+":", "="+name+":^", "="+name+":^.0", call)
+			if target != "="+name+":" && target != "="+name+":^.0" {
+				t.Errorf("%s -t %q, want %q or %q; argv=%q", sub, target, "="+name+":", "="+name+":^.0", call)
 			}
 		default:
 			continue
@@ -363,8 +373,7 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 		{"GetSessionCreatedUnix", "1", func(tm *Tmux) { _, _ = tm.GetSessionCreatedUnix("worker-1") }, "display-message"},
 		{"FindAgentPane", "", func(tm *Tmux) { _, _ = tm.FindAgentPane("worker-1") }, "list-panes"},
 		{"CapturePane", "", func(tm *Tmux) { _, _ = tm.CapturePane("worker-1", 5) }, "capture-pane"},
-		{"RespawnPane", "%1", func(tm *Tmux) { _ = tm.RespawnPane("worker-1", "true") }, "list-panes"},
-		{"RespawnPaneWithWorkDir", "%1", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "list-panes"},
+		{"RespawnPaneWithWorkDir", "%1", func(tm *Tmux) { _ = tm.RespawnPaneWithWorkDir("worker-1", "/w", "true") }, "respawn-pane"},
 		{"ClearHistory", "", func(tm *Tmux) { _ = tm.ClearHistory("worker-1") }, "clear-history"},
 	}
 	for _, tc := range cases {
