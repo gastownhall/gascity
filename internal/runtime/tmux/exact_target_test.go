@@ -25,12 +25,14 @@ var (
 // scriptedTargetExecutor records argv and answers capture-pane from captures
 // (then capture), display-message with display, an agent-pane list-panes
 // lookup with one unmarked row (pane @1.%1 for a target lookup, else
-// display), and everything else with "".
+// display; listPanes, when set, answers every list-panes by its format), and
+// everything else with "".
 type scriptedTargetExecutor struct {
-	calls    [][]string
-	captures []string
-	capture  string
-	display  string
+	calls     [][]string
+	captures  []string
+	capture   string
+	display   string
+	listPanes func(format string) string
 }
 
 func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
@@ -47,6 +49,9 @@ func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
 		return s.display, nil
 	case slices.Contains(args, "list-panes"):
 		format := args[len(args)-1]
+		if s.listPanes != nil {
+			return s.listPanes(format), nil
+		}
 		if format == agentPaneMarkerFormat+"\t#{window_id}.#{pane_id}" {
 			return "pane\t@1.%1", nil
 		}
@@ -372,7 +377,6 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 		wantSub string
 	}{
 		{"GetPaneCommand", "claude", func(tm *Tmux) { _, _ = tm.GetPaneCommand("worker-1") }, "list-panes"},
-		{"GetPaneID", "%1", func(tm *Tmux) { _, _ = tm.GetPaneID("worker-1") }, "list-panes"},
 		{"GetPaneWorkDir", "/w", func(tm *Tmux) { _, _ = tm.GetPaneWorkDir("worker-1") }, "list-panes"},
 		{"GetPanePID", "42", func(tm *Tmux) { _, _ = tm.GetPanePID("worker-1") }, "list-panes"},
 		{"IsPaneDead", "0", func(tm *Tmux) { _, _ = tm.IsPaneDead("worker-1") }, "list-panes"},
@@ -390,6 +394,15 @@ func TestPaneReadsAndPaneOpsTargetExactSession(t *testing.T) {
 			tc.run(&Tmux{cfg: DefaultConfig(), exec: ex})
 			requireExactTargets(t, ex.calls, "worker-1", tc.wantSub)
 		})
+	}
+}
+
+// A fenced agent-pane target whose window vanished between the lookup and the
+// write is a missing session to every best-effort caller.
+func TestWrapErrorMapsMissingWindow(t *testing.T) {
+	err := wrapError(errors.New("exit status 1"), "can't find window: @4", []string{"send-keys"})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("wrapError(can't find window) = %v, want ErrSessionNotFound", err)
 	}
 }
 

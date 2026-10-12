@@ -1843,9 +1843,9 @@ func TestKillPaneProcessesExcluding(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Get the pane ID
-	paneID, err := tm.GetPaneID(sessionName)
+	paneID, err := agentPaneID(tm, sessionName)
 	if err != nil {
-		t.Fatalf("GetPaneID: %v", err)
+		t.Fatalf("agent pane id: %v", err)
 	}
 
 	// Kill pane processes with empty excludePIDs (should kill all processes)
@@ -1877,9 +1877,9 @@ func TestKillPaneProcessesExcluding_WithExcludePID(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Get the pane ID and PID
-	paneID, err := tm.GetPaneID(sessionName)
+	paneID, err := agentPaneID(tm, sessionName)
 	if err != nil {
-		t.Fatalf("GetPaneID: %v", err)
+		t.Fatalf("agent pane id: %v", err)
 	}
 
 	panePID, err := tm.GetPanePID(sessionName)

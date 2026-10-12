@@ -501,6 +501,7 @@ func wrapError(err error, stderr string, args []string) error {
 	if strings.Contains(stderr, "session not found") ||
 		strings.Contains(stderr, "no such session") ||
 		strings.Contains(stderr, "can't find session") ||
+		strings.Contains(stderr, "can't find window") ||
 		strings.Contains(stderr, "can't find pane") {
 		return ErrSessionNotFound
 	}
@@ -574,15 +575,15 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	_, err := t.run(args...)
+	pane, err := t.run(args...)
 	if err != nil {
 		return err
 	}
-	t.markAgentPane(name)
+	t.markAgentPane(name, pane)
 	_ = t.ConfigureServer()
 	// tmux 3.3+ sets window-size=manual on detached sessions, locking them
 	// at 80x24 even after a client attaches. Reset to "latest" so the window
@@ -603,17 +604,17 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
 	// Add the command as the last argument - tmux runs it as the pane's initial process
 	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
+	pane, err := t.run(args...)
 	if err != nil {
 		return err
 	}
-	t.markAgentPane(name)
+	t.markAgentPane(name, pane)
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
@@ -758,7 +759,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
@@ -786,10 +787,11 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	}
 	// Add the command as the last argument
 	args = append(args, t.wrapPaneCommand(command))
-	if err := t.runNewSession(args, env); err != nil {
+	pane, err := t.runNewSession(args, env)
+	if err != nil {
 		return err
 	}
-	t.markAgentPane(name)
+	t.markAgentPane(name, pane)
 	// Carry the CREDENTIAL withholding into the session environment, so it
 	// survives into every later process — above all respawn-pane, which the
 	// warm-box relaunch path uses and which takes no env argument at all. Fail
@@ -3729,51 +3731,87 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	return "", nil
 }
 
-// GetPaneID returns the pane identifier of a session's agent pane (see
-// readAgentPane). A pane id passes through unchanged.
-// Returns a pane ID like "%0" that can be used with RespawnPaneWithWorkDir.
-func (t *Tmux) GetPaneID(session string) (string, error) {
-	if strings.HasPrefix(session, "%") {
-		return session, nil
-	}
-	out, err := t.readAgentPane(t.run, session, "#{pane_id}")
-	if err != nil {
-		return "", err
-	}
-	result := strings.TrimSpace(out)
-	if result == "" {
-		return "", fmt.Errorf("no panes found in session %s", session)
-	}
-	return result, nil
-}
-
-// agentPaneOption is the pane user option that marks a session's agent pane.
-// Every create path sets it on the session's only pane (markAgentPane). A pane
-// option belongs to the pane, not its position: it survives respawn-pane,
-// split-window -b, swap-pane, rotate-window, break-pane and new-window -b, and
-// a pane a human adds does not inherit it.
+// agentPaneOption is the pane user option that marks a session's agent pane;
+// its value is the owning session's id ("$3"), so a gc agent pane joined into
+// another session, or an option set at window, session or global scope (which
+// format lookup would inherit onto every pane), never reads as that session's
+// agent. Every create path sets it on the session's only pane (markAgentPane),
+// then sets agentSessionOption on the session. A pane option belongs to the
+// pane, not its position: it survives respawn-pane, split-window -b,
+// swap-pane, rotate-window, break-pane and new-window -b, and a pane a human
+// adds does not inherit it.
 //
 // list-panes rows lead with agentPaneMarkerFormat, which expands to a word
-// ("agent" or "pane") rather than the raw option: the executor trims output,
-// so an empty leading field would vanish from the first row.
+// rather than the raw option (the executor trims output, so an empty leading
+// field would vanish from the first row):
+//   - "agent": the session's marked agent pane;
+//   - "orphan": any other pane of a marked session;
+//   - "pane": a pane of a session created before the marker.
 const (
 	agentPaneOption       = "@gc_agent"
-	agentPaneMarkerFormat = "#{?" + agentPaneOption + ",agent,pane}"
+	agentSessionOption    = "@gc_agent_session"
+	agentPaneMarkerFormat = "#{?#{==:#{" + agentPaneOption + "},#{session_id}},agent,#{?#{" + agentSessionOption + "},orphan,pane}}"
 	agentPaneMarked       = "agent"
+	agentPaneOrphan       = "orphan"
 )
 
-// markAgentPane marks a just-created session's only pane as the agent pane.
-// Best-effort, like the window-size reset beside it: an unmarked session falls
-// back to its first pane, exactly as one created before the marker existed.
-func (t *Tmux) markAgentPane(session string) {
-	t.run("set-option", "-p", "-t", paneTarget(session), agentPaneOption, "1") //nolint:errcheck // best-effort
+// errAgentPaneGone reports a marked session whose agent pane no longer exists
+// (a human killed it and the session lives on in their panes). Callers fail
+// closed: writes refuse, IsPaneDead reports dead, the kill plan is empty.
+var errAgentPaneGone = errors.New("agent pane is gone")
+
+// errAgentPaneAmbiguous reports more than one pane marked as a session's
+// agent pane. Callers fail closed rather than guess.
+var errAgentPaneAmbiguous = errors.New("agent pane is ambiguous")
+
+// agentPaneWarningOut receives agent-pane marking warnings (a var so tests
+// can capture it).
+var agentPaneWarningOut io.Writer = os.Stderr
+
+// markAgentPane marks pane (the id new-session printed, else the session's
+// only pane) as session's agent pane, then flags the session as marked. The
+// flag follows a successful mark only: a flagged session with no marked pane
+// fails closed. A failure is logged and otherwise tolerated: an unmarked
+// session falls back to its first pane, exactly as one created before the
+// marker existed, and respawnAgent retries the mark.
+func (t *Tmux) markAgentPane(session, pane string) {
+	target := strings.TrimSpace(pane)
+	if !wellFormedTmuxID(target, '%') {
+		target = paneTarget(session)
+	}
+	if _, err := t.run("set-option", "-p", "-F", "-t", target, agentPaneOption, "#{session_id}"); err != nil {
+		_, _ = fmt.Fprintf(agentPaneWarningOut, "warning: session %q: marking agent pane %s: %v\n", session, target, err)
+		return
+	}
+	// set-option's -t is a target-pane: only "=name:" names the session
+	// exactly ("=name" is refused).
+	if _, err := t.run("set-option", "-t", paneTarget(session), agentSessionOption, "1"); err != nil {
+		_, _ = fmt.Fprintf(agentPaneWarningOut, "warning: session %q: flagging marked session: %v\n", session, err)
+	}
+}
+
+// adoptAgentPane marks an unmarked session (one created before the marker,
+// or whose create-time mark failed) when it has exactly one pane, which can
+// only be the agent's. Best-effort; anything else is left as it is.
+func (t *Tmux) adoptAgentPane(session string) {
+	out, err := t.run("list-panes", "-s", "-t", paneTarget(session), "-F", agentPaneMarkerFormat+"\t#{pane_id}")
+	if err != nil {
+		return
+	}
+	rows := strings.Split(strings.TrimSpace(out), "\n")
+	if len(rows) != 1 {
+		return
+	}
+	if mark, pane, _ := strings.Cut(rows[0], "\t"); mark == "pane" {
+		t.markAgentPane(session, pane)
+	}
 }
 
 // readAgentPane expands format for target's agent pane. A pane id or other
 // explicit target is read directly. A session name is resolved in one
-// list-panes call over all its windows: the pane carrying the agent-pane
-// marker, else (a session created before the marker) the first pane of the
-// first window, which list-panes lists first whatever base-index and
+// list-panes call over all its windows (see pickAgentPaneRow): its marked
+// agent pane, else (a session created before the marker) the first pane of
+// the first window, which list-panes lists first whatever base-index and
 // pane-base-index are.
 //
 // Never the active pane, and never ":^.0": under pane-base-index 1 there is
@@ -3787,21 +3825,42 @@ func (t *Tmux) readAgentPane(run func(...string) (string, error), target, format
 	if err != nil {
 		return "", err
 	}
-	return pickAgentPaneRow(out), nil
+	fields, err := pickAgentPaneRow(out)
+	if err != nil {
+		return "", fmt.Errorf("session %s: %w", target, err)
+	}
+	return fields, nil
 }
 
-// pickAgentPaneRow returns the fields of the marked row of list-panes output
-// whose rows are "agent|pane\t<fields>", else the first row's. Empty output
-// yields "", which each reader reports as its own empty-answer error.
-func pickAgentPaneRow(out string) string {
+// pickAgentPaneRow returns the fields of the one "agent" row of list-panes
+// output whose rows are "<agent|orphan|pane>\t<fields>". With no agent row,
+// a marked session (any "orphan" row) has lost its agent pane
+// (errAgentPaneGone), and an unmarked one falls back to its first row. Two
+// agent rows are errAgentPaneAmbiguous. Empty output yields "", which each
+// reader reports as its own empty-answer error.
+func pickAgentPaneRow(out string) (string, error) {
 	rows := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	for _, row := range rows {
-		if mark, fields, _ := strings.Cut(row, "\t"); mark == agentPaneMarked {
-			return fields
+	agent, marked := -1, false
+	for i, row := range rows {
+		switch mark, _, _ := strings.Cut(row, "\t"); mark {
+		case agentPaneMarked:
+			if agent >= 0 {
+				return "", errAgentPaneAmbiguous
+			}
+			agent = i
+		case agentPaneOrphan:
+			marked = true
 		}
 	}
+	switch {
+	case agent >= 0:
+		_, fields, _ := strings.Cut(rows[agent], "\t")
+		return fields, nil
+	case marked:
+		return "", errAgentPaneGone
+	}
 	_, fields, _ := strings.Cut(rows[0], "\t")
-	return fields
+	return fields, nil
 }
 
 // agentPaneTarget returns a tmux target for a session's agent pane, fenced to
@@ -3855,6 +3914,11 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 
 func (t *Tmux) paneProcessState(target string) (paneProcessState, error) {
 	out, err := t.readAgentPane(t.run, target, "#{pane_pid}\t#{pane_dead}")
+	if errors.Is(err, errAgentPaneGone) {
+		// No agent pane, no agent process: an empty kill plan, never the
+		// process tree of a human pane left in the session.
+		return paneProcessState{Dead: true}, nil
+	}
 	if err != nil {
 		return paneProcessState{}, err
 	}
@@ -3909,6 +3973,9 @@ func (t *Tmux) isPaneDead(target string, noStart bool) (bool, error) {
 		run = t.runForAttach
 	}
 	out, err := t.readAgentPane(run, target, "#{pane_dead}")
+	if errors.Is(err, errAgentPaneGone) {
+		return true, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -5839,26 +5906,4 @@ func (t *Tmux) CleanupOrphanedSessions(isGTSession func(string) bool) (cleaned i
 	}
 
 	return cleaned, nil
-}
-
-// SetPaneDiedHook sets a pane-died hook on a session to detect crashes.
-// When the pane exits, tmux runs the hook command with exit status info.
-// The agentID is used to identify the agent in crash logs (e.g., "gastown/Toast").
-func (t *Tmux) SetPaneDiedHook(session, agentID string) error {
-	if err := validateSessionName(session); err != nil {
-		return err
-	}
-	// Sanitize agentID to prevent shell injection (session already validated by regex)
-	agentID = strings.ReplaceAll(agentID, "'", "'\\''")
-	session = strings.ReplaceAll(session, "'", "'\\''") // safe after validation, but keep for consistency
-
-	// Hook command logs the crash with exit status
-	// #{pane_dead_status} is the exit code of the process that died
-	// We run gt log crash which records to the town log
-	hookCmd := fmt.Sprintf(`run-shell "gt log crash --agent '%s' --session '%s' --exit-code #{pane_dead_status}"`,
-		agentID, session)
-
-	// Set the hook on this specific session
-	_, err := t.run("set-hook", "-t", session, "pane-died", hookCmd)
-	return err
 }

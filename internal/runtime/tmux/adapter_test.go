@@ -426,7 +426,7 @@ func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
 	}
 	waitForMarker(t, marker, "first")
 
-	agentPane, err := p.tm.GetPaneID(name)
+	agentPane, err := agentPaneID(p.tm, name)
 	if err != nil {
 		t.Fatalf("agent pane id: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestProvider_RelaunchRespawnsAgentPaneNotActiveWindow(t *testing.T) {
 	waitForMarker(t, marker, "second")
 
 	// The agent pane was respawned: same pane, new process, old agent gone.
-	if got, err := p.tm.GetPaneID(name); err != nil || got != agentPane {
+	if got, err := agentPaneID(p.tm, name); err != nil || got != agentPane {
 		t.Fatalf("first pane after Relaunch = (%q, %v), want %q", got, err, agentPane)
 	}
 	agentPIDAfter, err := p.tm.GetPanePID(agentPane)
@@ -580,14 +580,21 @@ func newAgentPaneFixture(t *testing.T, tag, base string) *agentPaneFixture {
 func (f *agentPaneFixture) requireAgentPaneResolved(t *testing.T) {
 	t.Helper()
 	tm := f.p.tm
-	if got, err := tm.GetPaneID(f.name); err != nil || got != f.agent {
-		t.Errorf("GetPaneID = (%q, %v), want the agent's %q", got, err, f.agent)
+	if got, err := agentPaneID(tm, f.name); err != nil || got != f.agent {
+		t.Errorf("agent pane id = (%q, %v), want the agent's %q", got, err, f.agent)
 	}
 	if got, err := tm.GetPanePID(f.name); err != nil || got != f.agentPID {
 		t.Errorf("GetPanePID = (%q, %v), want the agent's %q", got, err, f.agentPID)
 	}
 	if dead, err := tm.IsPaneDead(f.name); err != nil || dead {
 		t.Errorf("IsPaneDead = (%v, %v), want the live agent's false", dead, err)
+	}
+	want := f.mustRun(t, "display-message", "-p", "-t", f.agent, "#{pane_current_command}|#{pane_current_path}|#{pane_dead_status}|#{pane_dead_signal}")
+	cmd, cmdErr := tm.GetPaneCommand(f.name)
+	dir, dirErr := tm.GetPaneWorkDir(f.name)
+	status, signal := tm.PaneDeadInfo(f.name)
+	if got := strings.Join([]string{cmd, dir, status, signal}, "|"); cmdErr != nil || dirErr != nil || got != want {
+		t.Errorf("GetPaneCommand|GetPaneWorkDir|PaneDeadInfo = %q (%v, %v), want the agent pane's %q", got, cmdErr, dirErr, want)
 	}
 	if !tm.IsSessionRunning(f.name) {
 		t.Error("IsSessionRunning = false, want true for the live agent")
@@ -699,11 +706,63 @@ func TestProvider_AgentPaneMarkerSurvivesReorder(t *testing.T) {
 	}
 }
 
+// A human kills the marked agent pane and the session lives on in their
+// split. Nothing may be answered from, or done to, the human's pane: reads
+// see no agent, the kill plan is empty, and Relaunch refuses.
+func TestProvider_KilledAgentPaneFailsClosed(t *testing.T) {
+	f := newAgentPaneFixture(t, "apk", "1")
+	human := f.mustRun(t, "split-window", "-P", "-F", "#{pane_id}", "-t", f.agent, "sleep 300")
+	humanPID := f.mustRun(t, "display-message", "-p", "-t", human, "#{pane_pid}")
+	f.mustRun(t, "kill-pane", "-t", f.agent)
+	tm := f.p.tm
+
+	if _, err := agentPaneID(tm, f.name); !errors.Is(err, errAgentPaneGone) {
+		t.Errorf("agent pane id err = %v, want errAgentPaneGone", err)
+	}
+	if dead, err := tm.IsPaneDead(f.name); err != nil || !dead {
+		t.Errorf("IsPaneDead = (%v, %v), want dead: the agent's pane is gone", dead, err)
+	}
+	if tm.IsSessionRunning(f.name) {
+		t.Error("IsSessionRunning = true, want false with the agent's pane gone")
+	}
+	if plan, err := tm.capturePaneProcessKillPlan(f.name, nil); err != nil || plan.Leader != nil || len(plan.Descendants) != 0 {
+		t.Errorf("kill plan = (%+v, %v), want empty, never the human's tree", plan, err)
+	}
+	if err := f.p.Relaunch(context.Background(), f.name, runtime.Config{Command: f.agentCmd("second"), WorkDir: f.workDir}); err == nil {
+		t.Error("Relaunch = nil, want a refusal: it would replace the human's pane")
+	}
+	if got := f.mustRun(t, "display-message", "-p", "-t", human, "#{pane_pid} #{pane_dead}"); got != humanPID+" 0" {
+		t.Errorf("human pane %s = %q, want %q (untouched)", human, got, humanPID+" 0")
+	}
+}
+
+// Another gc session's agent pane, joined in front of this session's agent,
+// carries a marker valued with its own session's id: it reads as a foreign
+// pane, never as this session's agent.
+func TestProvider_JoinedForeignAgentPaneIsNotTheAgent(t *testing.T) {
+	f := newAgentPaneFixture(t, "apj", "1")
+	if err := f.p.Start(context.Background(), "gc-test-other", runtime.Config{Command: "sleep 300", WorkDir: f.workDir}); err != nil {
+		t.Fatalf("Start other: %v", err)
+	}
+	foreign := f.mustRun(t, "list-panes", "-t", "=gc-test-other:", "-F", "#{pane_id}")
+	f.mustRun(t, "new-session", "-d", "-s", "gc-test-keepalive", "sleep 300")
+	f.mustRun(t, "join-pane", "-b", "-s", foreign, "-t", f.agent)
+	first, _, _ := strings.Cut(f.mustRun(t, "list-panes", "-s", "-t", paneTarget(f.name), "-F", "#{pane_id}"), "\n")
+	if first != foreign {
+		t.Fatalf("first pane = %s, want the joined foreign pane %s (precondition)", first, foreign)
+	}
+
+	f.requireAgentPaneResolved(t)
+	f.relaunchAndRequireAgentRespawned(t, foreign)
+}
+
 // A session created before the marker existed has no marked pane; it falls
 // back to the first pane of the first window.
 func TestProvider_UnmarkedSessionFallsBackToFirstPane(t *testing.T) {
 	f := newAgentPaneFixture(t, "apu", "1")
+	// A pre-marker session has neither the pane marker nor the session flag.
 	f.mustRun(t, "set-option", "-p", "-u", "-t", f.agent, agentPaneOption)
+	f.mustRun(t, "set-option", "-u", "-t", paneTarget(f.name), agentSessionOption)
 	if got := f.mustRun(t, "display-message", "-p", "-t", f.agent, agentPaneMarkerFormat); got != "pane" {
 		t.Fatalf("agent pane marker after unset = %q, want unmarked (precondition)", got)
 	}

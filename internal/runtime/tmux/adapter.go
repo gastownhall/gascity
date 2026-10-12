@@ -1377,6 +1377,9 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
+	// A warm box created before the agent-pane marker (or whose mark failed)
+	// is marked here while it still has only the agent's pane.
+	o.tm.adoptAgentPane(name)
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
 }
 
