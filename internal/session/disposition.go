@@ -55,12 +55,13 @@ const unreadableTimers = UnknownHeldUntil | UnknownQuarantine
 // keeps their text.
 var dispositionKeys = [...]string{"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at"}
 
-// DispositionKeysIn is the disposition keys meta carries, in the class's
-// order: the keys a generic metadata write must not set on a session row,
-// whose disposition only its cells move (the session verbs).
-func DispositionKeysIn(meta map[string]string) []string {
+// DispositionInputKeysIn is the keys meta carries that DecodeDisposition
+// reads, in order: the class's five, then state and sleep_reason. A generic
+// metadata write must set none of them on a session row: only the session
+// verbs move a row's disposition and lifecycle.
+func DispositionInputKeysIn(meta map[string]string) []string {
 	var out []string
-	for _, k := range dispositionKeys {
+	for _, k := range append(dispositionKeys[:], "state", "sleep_reason") {
 		if _, ok := meta[k]; ok {
 			out = append(out, k)
 		}
