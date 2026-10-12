@@ -2575,15 +2575,30 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 // transcript that can be probed on disk at all (probeable). It is a package var
 // so tests can model a present or absent transcript without materializing
 // provider-specific transcript trees. Production delegates to the transcript
-// discovery layer, which knows each provider's on-disk layout and merges each
-// provider's own default roots on top of searchPaths, so claude/kimi/pi each
-// probe their real location.
-var staleResumeKeyProbe = workertranscript.HasKeyedTranscript
+// discovery layer, which knows each provider's on-disk layout, over
+// keyedProbeRoots(searchPaths, provider).
+var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
+}
+
+// keyedProbeRoots is the roots a keyed probe of provider searches. A
+// claude-family probe searches the roots exactly as given, adding no default
+// of its own, so an empty list means the defaults rather than nothing. Every
+// other family probes the defaults alone, on top of which its reader adds
+// its own default roots: [daemon] observe_paths are Claude roots, and pi
+// walks every root it is given recursively.
+func keyedProbeRoots(searchPaths []string, provider string) []string {
+	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
+		return worker.DefaultSearchPaths()
+	}
+	return searchPaths
+}
 
 // sessionTranscriptSearchPaths is the transcript roots the stale-resume probe
-// searches: the defaults plus [daemon] observe_paths, the same roots history
-// discovery reads (newWorkerFactory). Probing the defaults alone reads a
-// conversation kept under a configured root as gone and resets it.
+// searches for a claude-family provider (keyedProbeRoots): the defaults plus
+// [daemon] observe_paths, the same roots history discovery reads
+// (newWorkerFactory). Probing the defaults alone reads a conversation kept
+// under a configured root as gone and resets it.
 func sessionTranscriptSearchPaths(cfg *config.City) []string {
 	if cfg == nil {
 		return worker.DefaultSearchPaths()

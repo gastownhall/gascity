@@ -8427,6 +8427,39 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 	if _, probeable := staleResumeKeyProbe(sessionTranscriptSearchPaths(nil), "claude", workDir, ""); probeable {
 		t.Fatal("empty key probeable = true, want false")
 	}
+	// Configured observe paths add to the default root, never replace it, and
+	// no roots at all mean the defaults, not nothing (the #7699 review).
+	observed := &config.City{}
+	observed.Daemon.ObservePaths = []string{t.TempDir()}
+	for name, roots := range map[string][]string{"with observe_paths": sessionTranscriptSearchPaths(observed), "no roots": nil} {
+		if present, probeable := staleResumeKeyProbe(roots, "claude", workDir, key); !probeable || !present {
+			t.Fatalf("%s: a transcript under the default root: probeable=%v present=%v, want both", name, probeable, present)
+		}
+	}
+}
+
+// Kills observe_paths reaching a probe that is not claude-family, which pi
+// walks recursively, and an empty root list that searches nothing (the #7699
+// review, ruling 4).
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", "")
+	defaults, roots := sessionTranscriptSearchPaths(nil), []string{"/observed"}
+	for _, c := range []struct {
+		provider string
+		roots    []string
+		want     []string
+	}{
+		{"claude", roots, roots},
+		{"claude-max", roots, roots},
+		{"claude", nil, defaults},
+		{"pi", roots, defaults},
+		{"kimi", roots, defaults},
+	} {
+		if got := keyedProbeRoots(c.roots, c.provider); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("keyedProbeRoots(%v, %q) = %v, want %v", c.roots, c.provider, got, c.want)
+		}
+	}
 }
 
 // observedTranscript puts the claude transcript of key k-1 for workDir under
@@ -8488,6 +8521,32 @@ func TestBuildPreparedStartReadsObservePaths(t *testing.T) {
 		}
 		if found, _ := staleResumeKeyProbe(prepared.transcriptRoots, "claude", workDir, "k-1"); found != observed {
 			t.Fatalf("observed %v: the start's transcript roots %v find the transcript: %v", observed, prepared.transcriptRoots, found)
+		}
+	}
+	// A warm arm's fork parent k-0, its transcript under the configured root
+	// only, forks when the root is observed and fails loud when it is not.
+	if err := os.WriteFile(filepath.Join(root, sessionlog.ProjectSlug(workDir), "k-0.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, observed := range []bool{true, false} {
+		store := beads.NewMemStore()
+		row, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"session_name": "worker", "template": "worker", "state": "asleep", "provider": "claude", "work_dir": workDir,
+			beadmeta.BrainParentSIDMetadataKey: "k-0",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.City{}
+		if observed {
+			cfg.Daemon.ObservePaths = []string{root}
+		}
+		candidate := startCandidate{info: sessiontest.SeedBead(t, row), tp: TemplateParams{
+			TemplateName: "worker", SessionName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: forkClaude(),
+		}}
+		prepared, _, err := buildPreparedStart(candidate, cfg, store)
+		if forked := err == nil && strings.Contains(prepared.cfg.Command, "--resume k-0 --fork-session"); forked != observed || (err != nil) == observed {
+			t.Fatalf("fork parent, observed %v: err %v, prepared %+v; want it forked=%v", observed, err, prepared, observed)
 		}
 	}
 }

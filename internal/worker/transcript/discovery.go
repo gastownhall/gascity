@@ -145,10 +145,10 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // and calls missing a session key or work dir, are also not probeable; callers
 // should leave such sessions' resume metadata untouched rather than guess. When
 // probeable is true, exists reports whether the keyed transcript file was
-// found. The per-provider readers reached through DiscoverKeyedPath merge their
-// own default roots on top of searchPaths, so known probeable providers each
-// probe their real on-disk location even when given only a partial configured
-// search root.
+// found. The kimi, pi, copilot, kiro and antigravity readers reached through
+// DiscoverKeyedPath merge their own default roots on top of searchPaths. The
+// claude reader searches searchPaths exactly as given, so a claude caller
+// must include its default root: an empty list finds nothing.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
 	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !ProviderHasKeyedTranscript(provider) {
 		return false, false
