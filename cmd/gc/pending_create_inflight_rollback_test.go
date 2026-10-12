@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -226,5 +229,37 @@ func TestReconcileSessionBeads_AlivePendingCreateRollbackInFlightFence(t *testin
 				t.Fatal("the rollback stopped the runtime; a foreign or deferred runtime is never stopped here")
 			}
 		})
+	}
+}
+
+// TestReconcileSessionBeads_UnreadableLeaseFailsClosedAndWarnsOnce pins the
+// fence's lease probe failing: an unreadable lease may be a live start's, so
+// the rollback defers (fail closed), and the warning prints once for the
+// episode, not every tick. Once the lease reads again and no start holds it,
+// the rollback applies.
+func TestReconcileSessionBeads_UnreadableLeaseFailsClosedAndWarnsOnce(t *testing.T) {
+	env, session := newAlivePendingCreateEnv(t) // its start's window is long over
+	locks := citylayout.SessionNameLocksDir(env.city)
+	if err := os.MkdirAll(filepath.Dir(locks), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(locks, nil, 0o600); err != nil { // the lock dir cannot be made
+		t.Fatal(err)
+	}
+	for tick := 1; tick <= 2; tick++ {
+		env.reconcile([]beads.Bead{session})
+		if got, _ := env.store.Get(session.ID); got.Status == "closed" {
+			t.Fatalf("tick %d: rolled back while the lease could not be read; stderr=%s", tick, env.stderr.String())
+		}
+	}
+	if n := strings.Count(env.stderr.String(), "its runtime lease could not be read"); n != 1 {
+		t.Fatalf("lease warnings = %d, want 1 for the episode; stderr=%s", n, env.stderr.String())
+	}
+	if err := os.Remove(locks); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile([]beads.Bead{session})
+	if got, _ := env.store.Get(session.ID); got.Status != "closed" {
+		t.Fatalf("readable, unheld lease: status=%q, want rolled back; stderr=%s", got.Status, env.stderr.String())
 	}
 }

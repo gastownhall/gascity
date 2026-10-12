@@ -1436,14 +1436,15 @@ func operatorSuspendCause(cfg *config.City, cityPath string, info sessionpkg.Inf
 // live holder has the row's runtime lease (startHolderLive), which covers a
 // start that outlives the window. A last_woke_at wakeUndesiredGrace or more
 // in the future proves nothing (a clock stepped back), so only the lease can
-// hold the row then. What cannot be probed reads as held, as for the reaper.
-func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+// hold the row then. What cannot be probed reads as held, as for the reaper,
+// and a failed lease read is returned for the caller to report.
+func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) (bool, error) {
 	if pendingCreateStartInFlightAt(info, now, startupTimeout) {
 		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < wakeUndesiredGrace {
-			return true
+			return true, nil
 		}
 	}
-	return startHolderLive(store, cityPath, info)
+	return probeStartHolder(store, cityPath, info)
 }
 
 // wakeGracePreservesUndesiredRow reports whether an undesired live row was woken
@@ -2884,7 +2885,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
-				if identity.unstamped() && pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout) {
+				live, leaseErr := false, error(nil)
+				if identity.unstamped() {
+					live, leaseErr = pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout)
+				}
+				if leaseErr != nil {
+					// Fail closed: an unreadable lease may be a live start's.
+					// Warned once per row per episode.
+					logStandingCondition(dt, stderr, id, "lease_unreadable.pending_create_rollback", fmt.Sprintf(
+						"session reconciler: pending-create rollback of %s deferred: its runtime lease could not be read: %v", name, leaseErr), clk.Now())
+				}
+				if live {
 					// A runtime with no identity at all reads foreign, but
 					// while this row's own start is live it is most likely
 					// that start's box: a remote runtime lists the name before

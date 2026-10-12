@@ -47,12 +47,19 @@ func waitRuntimeLease(ctx context.Context, store beads.Store, cityPath, name, id
 // holder is starting. What cannot be probed (no store, a city path that is
 // not absolute, a failed read) reads as held.
 func startHolderLive(store beads.Store, cityPath string, info session.Info) bool {
+	held, _ := probeStartHolder(store, cityPath, info)
+	return held
+}
+
+// probeStartHolder is startHolderLive with the failed read it counts as
+// held, for a caller that reports it.
+func probeStartHolder(store beads.Store, cityPath string, info session.Info) (bool, error) {
 	name := strings.TrimSpace(info.SessionName)
 	if store == nil || name == "" || !filepath.IsAbs(cityPath) {
-		return true
+		return true, nil
 	}
 	held, err := session.RuntimeLeaseHeld(sessionFrontDoor(store), session.RuntimeLeaseRequest{City: cityPath, Name: name, ID: info.ID})
-	return err != nil || held
+	return err != nil || held, err
 }
 
 // startAbandoned reports whether the start whose in-flight marker (state
