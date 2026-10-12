@@ -36,9 +36,11 @@ func shapesOf(plan []issueops.ListRequest) []planShape {
 }
 
 func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
-	many := make([]string, nativeListAssigneeFanOutMax+1)
+	many := make([]string, 9)
+	manyPlan := make([]planShape, 0, len(many))
 	for i := range many {
 		many[i] = fmt.Sprintf("worker-%d", i)
+		manyPlan = append(manyPlan, planShape{assignee: many[i], status: "in_progress"})
 	}
 	for _, tc := range []struct {
 		name  string
@@ -66,9 +68,12 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 			want:  []planShape{{}},
 		},
 		{
-			name:  "past the fan-out cap the assignees stay client-side",
-			query: ListQuery{Assignees: many},
-			want:  []planShape{{}},
+			// A session's inbox joins its closed predecessors' routes, so a hook
+			// can ask for more than one identity's routes; one unkeyed request
+			// would walk the whole ledger instead.
+			name:  "a large assignee set still fans out one keyed request each",
+			query: ListQuery{Status: "in_progress", Assignees: many},
+			want:  manyPlan,
 		},
 		{
 			name:  "in_progress maps onto one bd status",

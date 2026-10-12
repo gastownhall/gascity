@@ -44,12 +44,16 @@ func dispSeeds() []struct {
 		{"none+quarantine-expired", map[string]string{"quarantined_until": at(-time.Minute)}},
 		{"none+unknown-timer", map[string]string{"held_until": "soon"}},
 		{"none+unknown-quarantine", map[string]string{"quarantined_until": "later"}},
+		{"none+unknown-intent", map[string]string{"sleep_intent": "someday"}},
+		{"none+unreadable-stamp", map[string]string{"suspended_at": "garbage"}},
 		{"suspended", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "suspended_at": at(0)}},
 		{"suspended+wait", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "wait_hold": "true"}},
 		{"suspended-finite-expired", map[string]string{"sleep_intent": "user-hold", "held_until": at(-time.Minute), "suspended_at": at(-time.Hour)}},
 		{"suspended-no-until", map[string]string{"sleep_intent": "user-hold"}},
 		{"suspended-unknown-until", map[string]string{"sleep_intent": "user-hold", "held_until": "soon"}},
 		{"suspended-soft", map[string]string{"state": "suspended", "suspended_at": at(0)}},
+		{"suspended+unreadable-stamp", map[string]string{"sleep_intent": "user-hold", "held_until": at(IndefiniteHoldDuration), "suspended_at": "garbage"}},
+		{"suspended-soft+unreadable", map[string]string{"state": "suspended", "suspended_at": "garbage"}},
 	}
 	out := make([]struct {
 		name string
@@ -109,7 +113,7 @@ var actorNames = map[ActorKind]string{
 // render is d as one golden token: its encoded keys, sorted, empty ones left
 // out, with times relative to dispT0.
 func (d Disposition) render() string {
-	enc := d.Encode()
+	enc := d.Encode().Fold()
 	if d.Operator == OperatorSuspendedSoft {
 		enc["state"] = string(StateSuspended)
 	}
@@ -223,7 +227,7 @@ func TestDispositionEveryEventHasACell(t *testing.T) {
 // encodedRow is the row Encode writes d onto: its five keys, and the state an
 // auto-suspended row carries.
 func encodedRow(d Disposition) map[string]string {
-	meta := map[string]string(d.Encode())
+	meta := map[string]string(d.Encode().Fold())
 	meta["state"] = string(StateAsleep)
 	if d.Operator == OperatorSuspendedSoft {
 		meta["state"] = string(StateSuspended)
@@ -265,7 +269,7 @@ func (d Disposition) sameAs(o Disposition) bool {
 // keys, so a write of it replaces the class whole.
 func TestDispositionEncodeWritesTheWholeClass(t *testing.T) {
 	for _, s := range dispSeeds() {
-		enc := s.d.Encode()
+		enc := s.d.Encode().Fold()
 		for _, k := range []string{"held_until", "sleep_intent", "wait_hold", "quarantined_until", "suspended_at"} {
 			if _, ok := enc[k]; !ok {
 				t.Errorf("%s: Encode leaves out %s", s.name, k)
@@ -314,37 +318,20 @@ func dispositionGrid(fn func(meta map[string]string)) int {
 	return n
 }
 
-// TestDispositionProjectionsMatchHolds: over the grid, SuppressesWake and
-// BlocksConsume answer as HoldSet does, KeepsSlot is HoldUser, and
-// RefusesPreWake is C5a1's PreWake mask (HoldTimer|HoldQuarantine|HoldUser|
-// HoldSuspended): a HoldSet reader switches to the projection that answers its
-// own question with no change in what it decides.
-func TestDispositionProjectionsMatchHolds(t *testing.T) {
-	const preWakeHolds = HoldTimer | HoldQuarantine | HoldUser | HoldSuspended
-	n := dispositionGrid(func(meta map[string]string) {
-		h, d := Holds(meta, dispT0), DecodeDisposition(meta)
-		if h.SuppressesWake() != d.SuppressesWake(dispT0) || h.BlocksConsume() != d.BlocksConsume(dispT0) ||
-			(h.In&HoldUser != 0) != d.KeepsSlot() || (h.In&preWakeHolds != 0) != d.RefusesPreWake(dispT0) {
-			t.Errorf("%v: HoldSet %+v, disposition suppress %v block %v keeps %v prewake %v",
-				meta, h, d.SuppressesWake(dispT0), d.BlocksConsume(dispT0), d.KeepsSlot(), d.RefusesPreWake(dispT0))
-		}
-	})
-	if n != 5*5*3*5*4*5*3 {
-		t.Fatalf("walked %d rows", n)
-	}
-}
-
 // TestDispositionHeartbeatHeldMatchesSESS602: over the grid, HeartbeatHeld is
 // legacy SESS-602's: a live held_until under an empty sleep_intent, within a
 // heartbeat's horizon (v5.9i; the grid's holds all lie inside it).
 func TestDispositionHeartbeatHeldMatchesSESS602(t *testing.T) {
-	dispositionGrid(func(meta map[string]string) {
+	n := dispositionGrid(func(meta map[string]string) {
 		at, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["held_until"]))
 		legacy := err == nil && at.After(dispT0) && strings.TrimSpace(meta["sleep_intent"]) == ""
 		if got := DecodeDisposition(meta).HeartbeatHeld(dispT0); got != legacy {
 			t.Errorf("%v: HeartbeatHeld = %v, SESS-602 %v", meta, got, legacy)
 		}
 	})
+	if n != 5*5*3*5*4*5*3 {
+		t.Fatalf("walked %d rows", n)
+	}
 }
 
 // TestDispositionEncodeIsLossless: over the grid and legacy's other shapes,
@@ -353,13 +340,13 @@ func TestDispositionHeartbeatHeldMatchesSESS602(t *testing.T) {
 func TestDispositionEncodeIsLossless(t *testing.T) {
 	check := func(meta map[string]string) {
 		d := DecodeDisposition(meta)
-		enc := d.Encode()
+		enc := d.Encode().Fold()
 		for _, k := range dispositionKeys {
 			if enc[k] != meta[k] {
 				t.Errorf("%v: Encode rewrites %s %q -> %q", meta, k, meta[k], enc[k])
 			}
 		}
-		if changed := d.Changed(); len(changed) != 0 {
+		if changed := d.Changed().Fold(); len(changed) != 0 {
 			t.Errorf("%v: an unmoved disposition changes %v", meta, changed)
 		}
 	}
@@ -385,7 +372,7 @@ func TestDispositionChangedIsTheMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := moved.Changed(); len(got) != 1 || got["held_until"] != dispT0.Add(time.Hour).Format(time.RFC3339) {
+	if got := moved.Changed().Fold(); len(got) != 1 || got["held_until"] != dispT0.Add(time.Hour).Format(time.RFC3339) {
 		t.Fatalf("a heartbeat on a bare wait changes %v, want held_until alone", got)
 	}
 }
@@ -433,6 +420,62 @@ func TestDispositionOperatorDormant(t *testing.T) {
 	} {
 		if got := DecodeDisposition(c.meta).OperatorDormant(dispT0); got != c.dormant {
 			t.Errorf("%v: OperatorDormant = %v, want %v", c.meta, got, c.dormant)
+		}
+	}
+}
+
+// TestDispositionKeepsSlot: over the decoder's grid, only an operator's
+// suspend (sleep_intent=user-hold) keeps a slot; a soft suspend (the chat
+// idle auto-suspend, the city stop sweep), a wait, a timer and a kill do not.
+func TestDispositionKeepsSlot(t *testing.T) {
+	future := dispT0.Add(time.Hour).Format(time.RFC3339)
+	n := 0
+	for _, state := range []string{"", string(StateSuspended), " suspended ", string(StateAsleep), string(StateActive)} {
+		for _, intent := range []string{"", string(SleepReasonUserHold), " user-hold ", string(SleepReasonWaitHold), string(sleepIntentIdleStopPending), "zzz"} {
+			for _, wait := range []string{"", "true"} {
+				for _, held := range []string{"", future, "bad"} {
+					for _, reason := range []string{"", string(SleepReasonKilled), string(SleepReasonCityStop)} {
+						meta := map[string]string{"state": state, "sleep_intent": intent, "wait_hold": wait, "held_until": held, "sleep_reason": reason}
+						want := strings.TrimSpace(intent) == string(SleepReasonUserHold)
+						if got := DecodeDisposition(meta).KeepsSlot(); got != want {
+							t.Errorf("%v: KeepsSlot = %v, want %v", meta, got, want)
+						}
+						n++
+					}
+				}
+			}
+		}
+	}
+	if n != 5*6*2*3*3 {
+		t.Fatalf("%d rows", n)
+	}
+}
+
+// TestDispositionHoldsDeliberately: A21's held pool row (§12.2 #27) is an
+// operator's suspend, a wait, or a live or unreadable timer; a soft suspend,
+// an idle stop and an expired timer are not.
+func TestDispositionHoldsDeliberately(t *testing.T) {
+	future, past := dispT0.Add(time.Hour).Format(time.RFC3339), dispT0.Add(-time.Hour).Format(time.RFC3339)
+	for _, c := range []struct {
+		meta map[string]string
+		held bool
+	}{
+		{map[string]string{}, false},
+		{map[string]string{"sleep_intent": string(SleepReasonUserHold)}, true},
+		{map[string]string{"state": string(StateSuspended)}, false},
+		{map[string]string{"state": string(StateSuspended), "wait_hold": "true"}, true},
+		{map[string]string{"sleep_intent": string(sleepIntentIdleStopPending)}, false},
+		{map[string]string{"sleep_reason": string(SleepReasonKilled)}, false},
+		{map[string]string{"wait_hold": "true"}, true},
+		{map[string]string{"held_until": future}, true},
+		{map[string]string{"held_until": past}, false},
+		{map[string]string{"held_until": "soon"}, true},
+		{map[string]string{"quarantined_until": future}, true},
+		{map[string]string{"quarantined_until": past}, false},
+		{map[string]string{"quarantined_until": "soon"}, true},
+	} {
+		if got := DecodeDisposition(c.meta).HoldsDeliberately(dispT0); got != c.held {
+			t.Errorf("%v: HoldsDeliberately = %v, want %v", c.meta, got, c.held)
 		}
 	}
 }

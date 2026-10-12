@@ -153,11 +153,17 @@ type firstCASRacer struct {
 }
 
 func (c *firstCASRacer) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	c.landRace(id)
+	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
+}
+
+// landRace is the fixture's write, outside the store adapter the guard
+// looks past (storeWriteMethod).
+func (c *firstCASRacer) landRace(id string) {
 	if !c.raced {
 		c.raced = true
 		_ = c.backing.SetMetadataBatch(id, c.race)
 	}
-	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
 }
 
 // TestOperatorSuspendInForceStampsAgain: a suspend over one in force writes a
@@ -183,18 +189,27 @@ func TestOperatorSuspendInForceStampsAgain(t *testing.T) {
 // TestNewerSuspendDuringResumeKeepsTheHold is the max review's P1: an
 // operator's real suspend landing while another operator's resume starts the
 // runtime refuses the consume; the hold stands.
+// The row's suspended_at may be unreadable (U2): the newer suspend still
+// stamps its own.
 func TestNewerSuspendDuringResumeKeepsTheHold(t *testing.T) {
-	store := beads.NewMemStore()
-	b := userHeldRow(t, store)
-	sp := &startHookProvider{Fake: runtime.NewFake()}
-	var suspendErr error
-	sp.hook = func() {
-		_, suspendErr = NewStore(beads.SessionStore{Store: store}).OperatorSuspend(b.ID, time.Now().Add(time.Second))
-	}
-	mgr := newTestManager(t, store, sp)
-	err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
-	if suspendErr != nil || !errors.Is(err, ErrStateSync) || heldKeys(t, store, b.ID)["sleep_intent"] != string(SleepReasonUserHold) {
-		t.Fatalf("suspend %v, attach %v, intent %q: want the newer suspend to stand", suspendErr, err, heldKeys(t, store, b.ID)["sleep_intent"])
+	for _, stamp := range []string{"", "garbage"} {
+		store := beads.NewMemStore()
+		b := userHeldRow(t, store)
+		if stamp != "" {
+			if err := store.SetMetadataBatch(b.ID, map[string]string{"suspended_at": stamp}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sp := &startHookProvider{Fake: runtime.NewFake()}
+		var suspendErr error
+		sp.hook = func() {
+			_, suspendErr = NewStore(beads.SessionStore{Store: store}).OperatorSuspend(b.ID, time.Now().Add(time.Second))
+		}
+		mgr := newTestManager(t, store, sp)
+		err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
+		if suspendErr != nil || !errors.Is(err, ErrStateSync) || heldKeys(t, store, b.ID)["sleep_intent"] != string(SleepReasonUserHold) {
+			t.Fatalf("stamp %q: suspend %v, attach %v, intent %q: want the newer suspend to stand", stamp, suspendErr, err, heldKeys(t, store, b.ID)["sleep_intent"])
+		}
 	}
 }
 
@@ -247,14 +262,109 @@ func TestSuspendRollbackOnlyWhileTheStampIsItsOwn(t *testing.T) {
 		Wrote: MetadataPatch{"suspended_at": "t1", "state": "suspended", "sleep_intent": "user-hold"},
 		Was:   MetadataPatch{"suspended_at": "", "state": "active", "sleep_intent": ""},
 	}
-	if got := suspendRollback(w, map[string]string{"suspended_at": "t2", "state": "suspended"}); got != nil {
+	if got := suspendRollback("gc-1", w, map[string]string{"suspended_at": "t2", "state": "suspended"}); got != nil {
 		t.Fatalf("rollback over a newer stamp = %v, want nothing", got)
 	}
-	got := suspendRollback(w, map[string]string{"suspended_at": "t1", "state": "draining", "sleep_intent": "user-hold"})
+	got := suspendRollback("gc-1", w, map[string]string{"suspended_at": "t1", "state": "draining", "sleep_intent": "user-hold"})
 	if _, ok := got["state"]; ok || got["suspended_at"] != "" || got["sleep_intent"] != "" || len(got) != 2 {
 		t.Fatalf("rollback = %v, want the stamp and intent restored, the state changed since left", got)
 	}
-	if got := suspendRollback(DispositionWrite{}, map[string]string{}); got != nil {
+	if got := suspendRollback("gc-1", DispositionWrite{}, map[string]string{}); got != nil {
 		t.Fatalf("rollback of an unwritten suspend = %v", got)
+	}
+}
+
+// TestClearingCellsMoveUnreadableIntentAndStamp (C15/C20): an unrecognized
+// sleep_intent and an unparseable suspended_at stand through a move that
+// leaves them, and a cell that clears or writes the key moves them, through
+// ApplyDisposition: an operator's wake, a kill, the controller's start and a
+// retire clear both; a sleep clears the stamp of a row no operator suspended
+// and keeps the intent; the suspends stamp over the unreadable stamp.
+func TestClearingCellsMoveUnreadableIntentAndStamp(t *testing.T) {
+	stamp := dispT0.Format(time.RFC3339)
+	for _, tc := range []struct {
+		name          string
+		by            ActorKind
+		ev            DispEventKind
+		intent, since string
+	}{
+		{"sleep", ActorController, EvSleep, "someday", ""},
+		{"wait begin", ActorAgent, EvWaitBegin, string(SleepReasonWaitHold), "yesterday"},
+		{"operator wake", ActorOperator, EvWake, "", ""},
+		{"kill", ActorOperator, EvKill, "", ""},
+		{"prewake", ActorController, EvPreWake, "", ""},
+		{"retire", ActorController, EvRetire, "", ""},
+		{"suspend", ActorOperator, EvSuspend, string(SleepReasonUserHold), stamp},
+		{"soft suspend", ActorController, EvSuspendSoft, "someday", stamp},
+	} {
+		store, front, id := dispositionRow(t)
+		if err := store.SetMetadataBatch(id, map[string]string{"sleep_intent": "someday", "suspended_at": "yesterday"}); err != nil {
+			t.Fatal(err)
+		}
+		w, err := front.ApplyDisposition(freshDecision(t, front, id), tc.by, DispEvent{Kind: tc.ev}, nil, dispT0)
+		if err != nil || w.Result != CommitLanded {
+			t.Fatalf("%s: ApplyDisposition = %+v, %v; want landed", tc.name, w, err)
+		}
+		if m := mustGet(t, store, id).Metadata; m["sleep_intent"] != tc.intent || m["suspended_at"] != tc.since {
+			t.Errorf("%s: sleep_intent=%q suspended_at=%q, want %q and %q", tc.name, m["sleep_intent"], m["suspended_at"], tc.intent, tc.since)
+		}
+	}
+}
+
+// TestSuspendStampsOverAnUnreadableStamp (U1): a suspend, fresh or in force,
+// on a row whose suspended_at is unreadable writes its own stamp, so a resume
+// that read the old one refuses its consume.
+func TestSuspendStampsOverAnUnreadableStamp(t *testing.T) {
+	want := dispT0.Format(time.RFC3339)
+	for name, meta := range map[string]map[string]string{
+		"fresh suspend":    {"suspended_at": "garbage"},
+		"suspend in force": {"sleep_intent": "user-hold", "held_until": dispT0.Add(IndefiniteHoldDuration).Format(time.RFC3339), "suspended_at": "garbage"},
+	} {
+		to, err := DecodeDisposition(meta).Apply(ActorOperator, DispEvent{Kind: EvSuspend}, StateAsleep, dispT0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := to.Changed().Get("suspended_at"); got != want {
+			t.Errorf("%s: the suspend wrote suspended_at %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestUnreadableIntentAndStampHoldNothing: an unrecognized sleep_intent and
+// an unparseable suspended_at are no hold and block no consume, unlike an
+// unreadable timer.
+func TestUnreadableIntentAndStampHoldNothing(t *testing.T) {
+	d := DecodeDisposition(map[string]string{"sleep_intent": "someday", "suspended_at": "yesterday"})
+	if d.Unknown != UnknownIntent|UnknownSince || d.SuppressesWake(dispT0) || d.BlocksConsume(dispT0) || d.Operator != OperatorNone {
+		t.Fatalf("disposition %+v: want the two unknown bits and no hold", d)
+	}
+	if got := d.Encode().Fold(); got["sleep_intent"] != "someday" || got["suspended_at"] != "yesterday" {
+		t.Fatalf("Encode = %v, want the row's text kept", got)
+	}
+	for _, intent := range []string{"", "user-hold", "wait-hold", "idle-stop-pending"} {
+		if d := DecodeDisposition(map[string]string{"sleep_intent": intent, "suspended_at": dispT0.Format(time.RFC3339)}); d.Unknown != 0 || !d.Since.Equal(dispT0) {
+			t.Errorf("intent %q with a valid stamp decodes %+v, want no unknown bit", intent, d)
+		}
+	}
+}
+
+// TestCellAndUndo: a cell's class keys are its move's changes over the row it
+// is decided on, none when it refuses (a suspended row never starts); an undo
+// restores only the keys the write wrote that still read as written, to the
+// row's own earlier text.
+func TestCellAndUndo(t *testing.T) {
+	held := map[string]string{"sleep_intent": "user-hold", "held_until": dispT0.Add(IndefiniteHoldDuration).Format(time.RFC3339)}
+	if got := Cell(held, ActorController, DispEvent{Kind: EvPreWake}, dispT0); got.Len() != 0 {
+		t.Errorf("PreWake on a suspended row = %v, want refused and empty", got.Fold())
+	}
+	if got := Cell(map[string]string{"sleep_intent": "idle-stop-pending"}, ActorController, DispEvent{Kind: EvPreWake}, dispT0); got.Get("sleep_intent") != "" || !got.Has("sleep_intent") {
+		t.Errorf("PreWake over an idle stop = %v, want the intent cleared", got.Fold())
+	}
+	before := map[string]string{"sleep_intent": "user-hold", "held_until": "h0", "suspended_at": "s0"}
+	written := map[string]string{"sleep_intent": "", "held_until": "", "suspended_at": "", "state": "asleep"}
+	current := map[string]string{"sleep_intent": "", "held_until": "h1", "suspended_at": "", "state": "asleep"}
+	undo := UndoDisposition(before, written, current).Fold()
+	if len(undo) != 2 || undo["sleep_intent"] != "user-hold" || undo["suspended_at"] != "s0" {
+		t.Errorf("undo = %v, want the intent and stamp restored and the rewritten held_until left", undo)
 	}
 }

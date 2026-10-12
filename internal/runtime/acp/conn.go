@@ -47,6 +47,22 @@ type sessionConn struct {
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
 
+	// permissions holds the agent's unanswered session/request_permission
+	// requests, oldest first.
+	permissions []pendingPermission
+	// permissionNonce makes permission RequestIDs unique to this
+	// connection; set when the first request is held.
+	permissionNonce string
+	// permissionSeq numbers held requests in arrival order.
+	permissionSeq uint64
+	// permissionHeld, when non-nil, is closed the next time a permission
+	// request is held, waking waitNudgeable.
+	permissionHeld chan struct{}
+
+	// unsupportedSeen records agent request methods already logged as
+	// unsupported, so each is reported once per connection.
+	unsupportedSeen map[string]struct{}
+
 	// capture records JSON-RPC traffic to the session transcript; nil when
 	// capture is disabled. Set before readLoop starts and closed by the
 	// process monitor after readLoop exits.
@@ -55,6 +71,12 @@ type sessionConn struct {
 	// events publishes this connection's session events; nil until Start
 	// commits the connection to the Provider that owns it.
 	events *sessionEventSource
+	// turnEvents publishes this connection's turns; nil until Start commits
+	// the connection to the Provider that owns it.
+	turnEvents *turnEventSource
+	// turnEventsLost counts dropped turn events not yet logged; callers log
+	// them after releasing mu.
+	turnEventsLost int64
 	// exited is set once the agent process has exited.
 	exited bool
 	// exitReported closes after the exit has been published (or found no
@@ -73,6 +95,15 @@ type sessionConn struct {
 	// pending tracks response waiters by request ID.
 	pending map[int64]chan JSONRPCMessage
 	idleCh  chan struct{}
+
+	// beforeTurnCancel, when set, runs in cancelTurn after the permission
+	// replies are written and before session/cancel is. A test seam: it lets
+	// a test end the turn inside that window.
+	beforeTurnCancel func()
+	// beforeTurnSignal, when set, runs in signalTurn before it checks
+	// whether the turn has ended. A test seam: it lets a test end the turn
+	// after a wait has given up on it and before the SIGINT.
+	beforeTurnSignal func()
 }
 
 // newSessionConn creates a sessionConn with the given buffer size.
@@ -113,12 +144,20 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 			continue
 		}
 
-		// Capture before the typed decode: a JSON-RPC line gc cannot decode
-		// (a string request id, for one) is exactly what a transcript is
-		// for. scanner.Bytes is reused by the next Scan; the capture owns a
-		// copy.
+		// Capture before anything decodes the line: a JSON-RPC line gc
+		// cannot decode (a string request id, for one) is exactly what a
+		// transcript is for, and an agent request answered below must be
+		// captured too. scanner.Bytes is reused by the next Scan; the capture
+		// owns a copy.
 		if sc.capture != nil && isJSONObjectLine(line) {
 			sc.capture.record(captureIn, bytes.Clone(line))
+		}
+
+		// Agent->client requests are answered before the typed decode,
+		// which cannot represent string ids.
+		if req, ok := parseAgentRequest(line); ok {
+			sc.handleAgentRequest(req)
+			continue
 		}
 
 		var msg JSONRPCMessage
@@ -145,6 +184,10 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		sc.handleUpdate(msg)
 		return
 	}
+	if msg.ID == nil && msg.Method == methodCancelRequest {
+		sc.cancelRequestedPermission(msg.Params)
+		return
+	}
 
 	// Response (has ID, no method): route to waiter.
 	if msg.ID != nil && msg.Method == "" {
@@ -155,7 +198,12 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		}
 		// Settle the turn if this is the active prompt response.
 		var usageErr error
+		var canceled []pendingPermission
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
+			// The turn is over once its prompt is answered, so no
+			// permission the agent asked for during it can still be
+			// granted. Cancel them as the turn reads as idle.
+			canceled = sc.takePermissionsLocked()
 			outcome := promptOutcome(msg)
 			if outcome.usageErr != nil && !sc.usageWarned {
 				sc.usageWarned = true
@@ -164,7 +212,10 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 			sc.endTurnLocked(outcome, time.Now())
 			sc.markIdleLocked()
 		}
+		lost := sc.takeLostTurnEventsLocked()
 		sc.mu.Unlock()
+		sc.replyCanceled(canceled)
+		logLostTurnEvents(lost)
 		if usageErr != nil {
 			fmt.Fprintf(os.Stderr, "acp: dropping undecodable prompt usage (logged once per session): %v\n", usageErr)
 		}
@@ -293,7 +344,7 @@ func (sc *sessionConn) sendRequestRedacted(msg JSONRPCMessage, captureParams jso
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	if err := sc.writeMessageCapturing(data, captured); err != nil {
+	if err := sc.writeMessageCapturing(nil, data, captured); err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
 		sc.mu.Unlock()
@@ -315,7 +366,15 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 // writeMessage writes one encoded JSON-RPC message to the agent's stdin and
 // captures it verbatim. See writeMessageCapturing.
 func (sc *sessionConn) writeMessage(data []byte) error {
-	return sc.writeMessageCapturing(data, nil)
+	return sc.writeMessageCapturing(nil, data, nil)
+}
+
+// writeMessageUnlessClosed is writeMessage for a message that is stale once
+// closed has closed: it then writes and captures nothing and returns nil.
+// closed is checked with stdinMu held, so no other stdin write can come
+// between that check and this write.
+func (sc *sessionConn) writeMessageUnlessClosed(closed <-chan struct{}, data []byte) error {
+	return sc.writeMessageCapturing(closed, data, nil)
 }
 
 // writeMessageCapturing writes one encoded JSON-RPC message to the agent's
@@ -323,10 +382,16 @@ func (sc *sessionConn) writeMessage(data []byte) error {
 // captured in wire order: the out record is queued under stdinMu before the
 // write, so it also precedes any reply the read loop captures. A non-nil
 // redacted replaces data in the capture (marked redacted); the agent always
-// receives data.
-func (sc *sessionConn) writeMessageCapturing(data, redacted []byte) error {
+// receives data. Once closed has closed, nothing is written or captured and
+// the call returns nil; a nil closed never closes.
+func (sc *sessionConn) writeMessageCapturing(closed <-chan struct{}, data, redacted []byte) error {
 	sc.stdinMu.Lock()
 	defer sc.stdinMu.Unlock()
+	select {
+	case <-closed:
+		return nil
+	default:
+	}
 	if redacted != nil {
 		sc.capture.recordRedacted(captureOut, redacted)
 	} else {
@@ -348,28 +413,38 @@ func isJSONObjectLine(line []byte) bool {
 // drained: no response could ever settle that turn.
 func (sc *sessionConn) setActivePrompt(id int64) bool {
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
 	if sc.drained {
+		sc.mu.Unlock()
 		return false
 	}
 	sc.markBusyLocked(id)
+	lost := sc.takeLostTurnEventsLocked()
+	sc.mu.Unlock()
+	logLostTurnEvents(lost)
 	return true
 }
 
-// drainPending fails the running turn, clears busy state, and closes all
-// pending response channels. cause is the stdout read error, or nil for EOF
-// and for the process-exit path. Safe to call multiple times — the first
-// call settles the turn and closed channels are deleted from the map.
+// drainPending cancels outstanding permission requests, fails the running
+// turn, clears busy state, and closes all pending response channels. cause is
+// the stdout read error, or nil for EOF and for the process-exit path. Safe to
+// call multiple times — the first call settles the turn and closed channels
+// are deleted from the map.
 func (sc *sessionConn) drainPending(cause error) {
 	sc.mu.Lock()
 	sc.drained = true
+	// Taken under the lock that sets drained, so a request restorePermission
+	// puts back is either canceled here or dropped there.
+	canceled := sc.takePermissionsLocked()
 	sc.endTurnLocked(turnOutcome{state: turnFailed, err: drainFailure(cause)}, time.Now())
 	sc.markIdleLocked()
 	for id, ch := range sc.pending {
 		close(ch)
 		delete(sc.pending, id)
 	}
+	lost := sc.takeLostTurnEventsLocked()
 	sc.mu.Unlock()
+	sc.replyCanceled(canceled)
+	logLostTurnEvents(lost)
 }
 
 // abandonPrompt fails the turn for prompt id, which was never delivered to
@@ -380,7 +455,9 @@ func (sc *sessionConn) abandonPrompt(id int64, cause error) {
 		sc.endTurnLocked(turnOutcome{state: turnFailed, err: fmt.Sprintf("sending prompt: %v", cause)}, time.Now())
 		sc.markIdleLocked()
 	}
+	lost := sc.takeLostTurnEventsLocked()
 	sc.mu.Unlock()
+	logLostTurnEvents(lost)
 }
 
 // isBusy reports whether a prompt response is pending.
@@ -399,6 +476,11 @@ func (sc *sessionConn) ensureIdleChannelLocked() {
 	}
 }
 
+// markBusyLocked opens the turn for prompt id. It replaces the idle channel
+// only when no turn is open, and Nudge gets here only after the previous
+// turn's channel has closed, so each turn has its own channel, closed when
+// that turn ends. interrupt relies on that to act only on the turn it was
+// called for.
 func (sc *sessionConn) markBusyLocked(id int64) {
 	sc.ensureIdleChannelLocked()
 	if sc.activePromptID == 0 {

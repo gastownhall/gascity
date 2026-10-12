@@ -224,8 +224,9 @@ type SlingResult struct {
 	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
 	Failed        int
-	Skipped       int // total skipped (idempotent + non-open)
+	Skipped       int // total skipped (idempotent + not open at dispatch turn + not open at listing)
 	IdempotentCt  int // how many were skipped due to idempotency
+	NotOpenCt     int // how many were listed open but no longer open at their dispatch turn
 	Total         int
 	NudgeAgent    *config.Agent // non-nil if caller should nudge
 
@@ -1738,6 +1739,11 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	// Status is the bead status the check read, empty when the bead could not
+	// be read. It is reported alongside the routing verdict, not folded into
+	// it: DoSlingBatch skips a child it listed as open whose status here is no
+	// longer open (#5927), and single-bead sling ignores it.
+	Status string
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

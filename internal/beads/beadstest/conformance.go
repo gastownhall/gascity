@@ -5,6 +5,7 @@ package beadstest
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -332,6 +333,34 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got.Metadata["closed_by"] != "conformance" {
 			t.Errorf("closed_by = %q on the bead the batch closed, want %q", got.Metadata["closed_by"], "conformance")
+		}
+	})
+
+	// UpdateAddsLabelToClosedBead pins that a label can be appended to a bead
+	// after it is closed, leaving it closed. Mail archiving relies on it: it
+	// closes a message first and labels it "read" second, so no write ever
+	// leaves it read but still open.
+	t.Run("UpdateAddsLabelToClosedBead", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "label after close"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(b.ID, beads.UpdateOpts{Labels: []string{"read"}}); err != nil {
+			t.Fatalf("Update(labels) on a closed bead: %v", err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("Status = %q after labeling, want %q", got.Status, "closed")
+		}
+		if !slices.Contains(got.Labels, "read") {
+			t.Errorf("Labels = %v, want %q", got.Labels, "read")
 		}
 	})
 

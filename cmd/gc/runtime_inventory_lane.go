@@ -360,6 +360,7 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	lane.statusMu.Lock()
 	lane.status = inventoryLaneStatus{at: finished, reason: reason, ran: true, seq: report.seq, result: result, duration: report.duration, v2Fields: map[string]any{
 		"process_probe_ms": report.processProbe.Milliseconds(), "process_probes": report.processProbes,
+		"activity_read_ms": report.activityRead.Milliseconds(), "activity_reads": report.activityReads,
 		"env_reads": report.envReads, "env_read_backlog": report.envBacklog,
 	}}
 	lane.statusMu.Unlock()
@@ -400,6 +401,10 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	phase = l.clock.Now()
 	report.processProbes = probeProcesses(enrichCtx, attrs, hosts, concurrency)
 	report.processProbe = l.clock.Now().Sub(phase)
+
+	phase = l.clock.Now()
+	report.activityReads = readActivities(enrichCtx, attrs, hosts, concurrency)
+	report.activityRead = l.clock.Now().Sub(phase)
 
 	pass := InventoryPass{
 		Epoch:       l.cache.epoch,
@@ -648,6 +653,8 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 				AllPanesDead:  e.AllPanesDead,
 				AttachedKnown: e.AttachedKnown,
 				Attached:      e.Attached,
+				ActivityKnown: e.ActivityKnown,
+				LastActivity:  e.LastActivity,
 			}
 			hosts[name] = leaf.provider
 		}
@@ -914,6 +921,76 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 	return len(names)
 }
 
+// readActivities reads the last activity of every enriched name on a leaf
+// without a batched inventory (whose inventory read carries activity: tmux's
+// #{window_activity}, at no extra fork) that can report it for that name
+// (sessionActivityReportable): GetLastActivity, the read legacy's idle
+// reference makes (sessionIdleReferenceInfoWithError). Such a leaf reports no
+// pane liveness, so every listed name is read. On tmux that read would
+// refresh the fleet snapshot, a full process scan, every pass, so tmux names
+// are never read here. At most concurrency run at a time, each on its own
+// goroutine within ctx (the pass's enrichment bound), so a wedged read cannot
+// hold the pass, and none starts once ctx is done. Only an error-free,
+// non-zero answer is known; anything else, a read past ctx included, leaves
+// the activity unknown, and AL1 never sleeps a live row on unknown activity
+// (configSleepSuppressed). It returns the reads made.
+func readActivities(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) int {
+	var names []string
+	for name := range attrs {
+		if _, batched := hosts[name].(runtime.InventoryProvider); batched {
+			continue // its inventory carried the activity, or proved none (tmux)
+		}
+		if sessionActivityReportable(hosts[name], name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	type answer struct {
+		name string
+		at   time.Time
+		ok   bool
+	}
+	answers := make(chan answer, len(names))
+	sem := make(chan struct{}, max(concurrency, 1))
+	reads := 0
+	for _, name := range names {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		reads++
+		go func(leaf runtime.Provider) {
+			defer func() { <-sem }()
+			done := make(chan answer, 1)
+			go func() {
+				got := answer{name: name}
+				defer func() {
+					_ = recover() // a panicking read is an unknown one
+					done <- got
+				}()
+				at, err := leaf.GetLastActivity(name)
+				got.at, got.ok = at, err == nil && !at.IsZero()
+			}()
+			select {
+			case got := <-done:
+				answers <- got
+			case <-ctx.Done():
+				answers <- answer{name: name}
+			}
+		}(hosts[name])
+	}
+	for range reads {
+		got := <-answers
+		a := attrs[got.name]
+		a.ActivityKnown, a.LastActivity = got.ok, got.at
+		attrs[got.name] = a
+	}
+	return reads
+}
+
 // probedIncarnation reports whether a probe answered for incarnation: the
 // object it observed (ObjectID, ObjectCreated) leads the incarnation, as in
 // tmux's "#{session_id}:#{session_created}:#{pane_pid}". A probe that names
@@ -997,10 +1074,12 @@ type inventoryPassReport struct {
 	enrich        time.Duration
 	envRead       time.Duration
 	processProbe  time.Duration
+	activityRead  time.Duration
 	enrichErrors  []string
 	envReads      int
 	envBacklog    int
 	processProbes int
+	activityReads int
 	flips         int
 	alerts        []string
 	snapshot      *ObservationSnapshot

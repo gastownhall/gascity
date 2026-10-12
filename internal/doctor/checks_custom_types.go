@@ -223,6 +223,15 @@ func CustomTypesNeedRegistration(row, table []string) bool {
 	return len(typesNotIn(RequiredCustomTypes, row)) != 0 || len(typesNotIn(RequiredCustomTypes, table)) != 0
 }
 
+// CustomTypesStoreEnv returns the environment this check runs bd under for the
+// store at dir in the city at cityPath. Every inherited store selector is
+// replaced, so bd resolves dir's own .beads: a server target only when dir's
+// metadata records server mode, none otherwise. Code that registers the types
+// outside doctor uses it to reach the store `gc doctor --fix` would.
+func CustomTypesStoreEnv(cityPath, dir string) ([]string, error) {
+	return customTypesStoreEnv(&CheckContext{CityPath: cityPath}, dir)
+}
+
 func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {
 	cityPath := dir
 	if ctx != nil && strings.TrimSpace(ctx.CityPath) != "" {

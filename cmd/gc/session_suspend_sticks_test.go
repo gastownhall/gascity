@@ -102,7 +102,7 @@ func TestOperatorSuspendSticksAcrossLegacyTicks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+		finalizeDrainAckStoppedSession(e.cfg, e.mem, testSeatWork(e.city, e.cfg, e.mem, nil), info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
 		assertDrainedUserHold(t, e.reload(t, e.seat.ID), string(session.SleepReasonIdle))
 		if starts := e.readyTicks(t, work, name, 3); starts != 0 || e.sp.IsRunning(name) {
 			t.Fatalf("drain-acked suspended seat started %d times (running=%v), want it held down", starts, e.sp.IsRunning(name))
@@ -175,7 +175,7 @@ func TestDrainAckFinalizeKeepsAHeldSeatOpen(t *testing.T) {
 		if err := front.ApplyPatch(b.ID, session.DrainAckStopPendingPatch(env.clk.Now())); err != nil {
 			t.Fatal(err)
 		}
-		finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, nil, env.sessionInfo(b.ID), "worker", true,
+		finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID), "worker", true,
 			newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr)
 		got, _ := env.store.Get(b.ID)
 		if closed := got.Status == "closed"; closed == held {
@@ -198,6 +198,34 @@ func TestFreeableExcludesUserHold(t *testing.T) {
 			if got := isPoolSessionSlotFreeableInfo(session.Info{MetadataState: "asleep", SleepReason: reason, SleptAt: meta["slept_at"], SleepIntent: intent}, now); got != want {
 				t.Errorf("info reason %q intent %q: freeable = %v, want %v", reason, intent, got, want)
 			}
+		}
+	}
+	// A soft-suspended row (no operator hold) is not freeable for its state,
+	// not for a hold.
+	soft := map[string]string{"state": "suspended", "slept_at": now.Add(-time.Hour).Format(time.RFC3339)}
+	if isPoolSessionSlotFreeable(beads.Bead{ID: "s-1", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: soft}, now) ||
+		isPoolSessionSlotFreeableInfo(session.Info{MetadataState: "suspended", SleptAt: soft["slept_at"]}, now) {
+		t.Error("a soft-suspended row is freeable")
+	}
+}
+
+// TestUserHoldDrainReleased: a user-hold drain is released once its row no
+// longer carries the operator's suspend, a soft suspend included; it holds
+// while the user hold stands, and a drain for another reason is never one.
+func TestUserHoldDrainReleased(t *testing.T) {
+	hold := string(session.SleepReasonUserHold)
+	for _, tc := range []struct {
+		reason string
+		info   session.Info
+		want   bool
+	}{
+		{hold, session.Info{SleepIntent: hold}, false},
+		{hold, session.Info{}, true},
+		{hold, session.Info{MetadataState: "suspended"}, true},
+		{"idle", session.Info{}, false},
+	} {
+		if got := userHoldDrainReleased(tc.reason, tc.info); got != tc.want {
+			t.Errorf("userHoldDrainReleased(%q, %+v) = %v, want %v", tc.reason, tc.info, got, tc.want)
 		}
 	}
 }
@@ -281,7 +309,7 @@ func TestBareDrainAckKeepsTheIdleStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+	res := finalizeDrainAckStoppedSession(e.cfg, e.mem, testSeatWork(e.city, e.cfg, e.mem, nil), info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
 	m := e.reload(t, e.seat.ID).Metadata
 	if m["state"] != string(session.StateDrained) || m["sleep_intent"] != "idle-stop-pending" || res.folded == nil || res.folded.SleepIntent != "idle-stop-pending" {
 		t.Fatalf("drain-ack: state=%q intent=%q, fold %+v; want drained with the idle stop's intent kept", m["state"], m["sleep_intent"], res.folded)
@@ -320,7 +348,7 @@ func TestBareDrainAckRefusesARowClosedSince(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := e.reload(t, e.seat.ID).Metadata["state"]
-	res := finalizeDrainAckStoppedSession(e.city, e.cfg, e.mem, nil, info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
+	res := finalizeDrainAckStoppedSession(e.cfg, e.mem, testSeatWork(e.city, e.cfg, e.mem, nil), info, "", false, newFakeDrainOps(), e.dt, e.clk, events.Discard, io.Discard)
 	if got := e.reload(t, e.seat.ID).Metadata["state"]; got != before || res.folded != nil {
 		t.Fatalf("drain-ack on a row closed since: state %q -> %q, fold %+v; want no write and no fold", before, got, res.folded)
 	}

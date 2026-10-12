@@ -34,7 +34,7 @@ func TestOneFailedStartDoesNotLoseTheSession(t *testing.T) {
 	}
 	env.clk.Advance(5 * time.Second)
 	var log bytes.Buffer
-	if n := reapStaleSessionBeads(env.city, env.store, env.sp, env.dt, nil, env.clk, &log); n != 0 {
+	if n := reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sp, env.dt, nil, env.clk, &log); n != 0 {
 		t.Fatalf("the next tick's reap closed %d row(s) after one failed start: %s", n, log.String())
 	}
 	delete(env.sp.StartErrors, "worker")
@@ -58,7 +58,7 @@ func TestFailedRelaunchOfAnAbandonedStartSurvivesTheReap(t *testing.T) {
 	}
 	env.clk.Advance(5 * time.Second)
 	var log bytes.Buffer
-	if n := reapStaleSessionBeads(env.city, env.store, env.sp, env.dt, nil, env.clk, &log); n != 0 {
+	if n := reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sp, env.dt, nil, env.clk, &log); n != 0 {
 		t.Fatalf("a failed relaunch of an abandoned start lost the session: %s", log.String())
 	}
 }
@@ -71,7 +71,7 @@ func TestAbandonedStartCrashLoopQuarantines(t *testing.T) {
 	var trail []string
 	for tick := 0; tick < 12; tick++ {
 		var log bytes.Buffer
-		reapStaleSessionBeads(env.city, env.store, env.sp, env.dt, nil, env.clk, &log)
+		reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sp, env.dt, nil, env.clk, &log)
 		if mustGetBead(t, env.store, row.ID).Status == "closed" {
 			t.Fatalf("reaped during the relaunch crash loop at tick %d: %v %s", tick, trail, log.String())
 		}

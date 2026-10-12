@@ -1996,7 +1996,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	routed := 0
 	failed := 0
-	idempotent := 0
+	var skips batchSkips
 	// childErrors preserves typed child errors so errors.As at the top-level
 	// (cmdSling) can recover a *sourceworkflow.ConflictError emitted by any
 	// child and map it to exit code 3 + the cleanup hint. Stringifying into
@@ -2009,10 +2009,8 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
 			})
-			if check.Idempotent {
-				childResult.Skipped = true
+			if skips.skip(check, &childResult) {
 				batchResult.Children = append(batchResult.Children, childResult)
-				idempotent++
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
@@ -2113,8 +2111,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 
 	batchResult.Routed = routed
 	batchResult.Failed = failed
-	batchResult.Skipped = idempotent + len(skipped)
-	batchResult.IdempotentCt = idempotent
+	batchResult.Skipped = skips.idempotent + skips.notOpen + len(skipped)
+	batchResult.IdempotentCt = skips.idempotent
+	batchResult.NotOpenCt = skips.notOpen
 
 	if opts.Nudge && routed > 0 {
 		batchResult.NudgeAgent = &a
@@ -2130,6 +2129,35 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return batchResult, errors.Join(joined...)
 	}
 	return batchResult, nil
+}
+
+// batchSkips counts the open children DoSlingBatch skips on their fresh
+// pre-dispatch check.
+type batchSkips struct {
+	idempotent int
+	notOpen    int
+}
+
+// skip reports whether DoSlingBatch must skip a child given check, marking
+// childResult skipped and counting why. A child the batch listed as open can
+// leave that status while the loop dispatches earlier siblings: another actor
+// closes, tombstones, or claims it (#5927). The fresh read then sees the
+// change, and the child is skipped like the non-open children of the listing,
+// with its status recorded. That test runs before the idempotency one so a
+// child that is both is reported by its status. A bead the check could not
+// read (empty Status) stays dispatchable, as the check is best-effort.
+func (s *batchSkips) skip(check BeadCheckResult, childResult *SlingChildResult) bool {
+	switch {
+	case check.Status != "" && check.Status != "open":
+		childResult.Status = check.Status
+		s.notOpen++
+	case check.Idempotent:
+		s.idempotent++
+	default:
+		return false
+	}
+	childResult.Skipped = true
+	return true
 }
 
 func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {

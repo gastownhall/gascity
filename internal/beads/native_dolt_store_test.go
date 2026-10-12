@@ -2555,7 +2555,9 @@ type nativeDoltMemStorage struct {
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
-	return &nativeDoltMemStorage{store: NewMemStore()}
+	store := NewMemStore()
+	store.storageOnly = true // the native store above it reports each write
+	return &nativeDoltMemStorage{store: store}
 }
 
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {

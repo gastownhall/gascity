@@ -175,7 +175,7 @@ func TestSessionFieldRegistryCatches(t *testing.T) {
 		{"no class", edit("state", func(f *Field) { f.Class = 0 }), "state: no class"},
 		{"no writer, no ruling", edit("slept_at", func(f *Field) { f.Writers = nil }), "slept_at: needs writers or a NoWriter ruling"},
 		{"per-tick premise key", edit("execution_claim_hold", func(f *Field) { f.Premise = true }), "per-tick key cannot be in the premise"},
-		{"pending with no bead", edit("sleep_policy_fingerprint", func(f *Field) { f.Writers[1].Pending = "" }), "names no pending bead"},
+		{"pending with no bead", edit("wake_request", func(f *Field) { f.Clears[3].Pending = "" }), "names no pending bead"},
 		{"legacy writer of a new key", edit(DrainAckAtKey, func(f *Field) { f.Writers[0].Mode = ModeLegacy }), "new key with a legacy writer"},
 		{"request with no v2 clear", edit("wake_request", func(f *Field) { f.Clears = f.Clears[:1] }), "wake_request: written under mode 2 with no consumer or clear point"},
 		{"request with no legacy consumer", edit("restart_requested", func(f *Field) { f.Readers = f.Readers[1:] }), "restart_requested: written under mode 1"},

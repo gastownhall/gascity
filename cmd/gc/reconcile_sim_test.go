@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,7 +170,8 @@ func (p *simProvider) RuntimeInventory(context.Context) (map[string]runtime.Inve
 	out := make(map[string]runtime.InventoryEntry, len(p.rts))
 	for name, rt := range p.rts {
 		inc := fmt.Sprintf("$%d:%d:%d", rt.object, rt.created, rt.object+1000)
-		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached}
+		at := p.Activity[name] // the embedded fake's, as tmux's batched read carries it
+		out[name] = runtime.InventoryEntry{Incarnation: inc, DeadKnown: true, AllPanesDead: rt.corpse, AttachedKnown: true, Attached: rt.attached, ActivityKnown: !at.IsZero(), LastActivity: at}
 	}
 	return out, nil
 }
@@ -231,6 +233,18 @@ func (p *simProvider) IsAttached(name string) bool {
 	return p.rts[name] != nil && p.rts[name].attached
 }
 
+// IsAttachedWithError is the attach fact a fence's L3 reads, the
+// simulator's own rather than runtime.Fake's; a runtime whose probes err
+// cannot answer it.
+func (p *simProvider) IsAttachedWithError(name string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rt := p.rts[name]; rt != nil && rt.probeErr {
+		return false, fmt.Errorf("sim: attach probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
+	}
+	return p.rts[name] != nil && p.rts[name].attached, nil
+}
+
 // Start creates a runtime carrying cfg's identity env, unless a scripted
 // outcome fails it or the name is held (FreshOnly's ErrSessionExists).
 func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) error {
@@ -271,6 +285,15 @@ func (p *simProvider) killLocked(method, name string) {
 type simBacking struct{ *beads.MemStore }
 
 func (simBacking) CachedReadExact() bool { return true }
+
+// simLegBacking is the simulator's leg backing: simBacking with the atomic
+// terminal close the v2 close verbs require (closeRow), as the city's
+// SQLite sessions store has.
+type simLegBacking struct{ simBacking }
+
+func (b simLegBacking) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (beads.Bead, error) {
+	return beads.AtomicCloserOver(b.MemStore).CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+}
 
 // simLeg is one census leg: its backing, the cache the controller reads and
 // writes through, and the outside writers' events, which a step delivers.
@@ -333,19 +356,27 @@ type sim struct {
 	parkCh   chan *simEffect
 	postCh   chan settlement
 	posted   []settlement // posts not yet awaited
+	notIdle  []string     // released idle probes that found the agent busy, as intentKeys
 	parked   []*simEffect
 	lastSeq  uint64
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
-	writes   []simWrite
-	admitted []time.Time // admitted starts (I9)
+	// killsChecked is how many of the provider's kills I4 and I5 judged.
+	killsChecked int
+	writes       []simWrite
+	admitted     []time.Time // admitted starts (I9)
 	// stable is, by row ID, whether the pass that last admitted an effect
 	// for the row read it committed, its own runtime alive, and 30s past its
 	// wake: I15's view of A6's stability clear.
-	stable   map[string]bool
-	failures []string
-	locks    *lockObserver // the sections holding each row's mutation lock
-	runMu    sync.Mutex
-	running  map[effectKey]*simEffect // released, by key, for their seams
+	stable map[string]bool
+	// preWakeQuarantine is each row's quarantined_until at v2's last PreWake
+	// of it; quarantinedCommits the rows whose commit kept a quarantine that
+	// landed after it (§12.2 #57), by the time the commit landed.
+	preWakeQuarantine  map[string]string
+	quarantinedCommits map[string]time.Time
+	failures           []string
+	locks              *lockObserver // the sections holding each row's mutation lock
+	runMu              sync.Mutex
+	running            map[effectKey]*simEffect // released, by key, for their seams
 }
 
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
@@ -380,7 +411,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
-		cache := beads.NewCachingStoreForTest(simBacking{m}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
+		cache := beads.NewCachingStoreForTest(simLegBacking{simBacking{m}}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("prime %s: %v", name, err)
 		}
@@ -398,6 +429,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		CityPath: t.TempDir(), CityName: "test-city",
 		Env:          func() *reconcileEnv { return env },
 		Sessions:     func() beads.Store { return s.legs[0].cache },
+		WorkStore:    func() beads.Store { return s.legs[0].cache }, // the city's work and sessions share a store
 		RigStores:    func() map[string]beads.Store { return map[string]beads.Store{simRigLeg: s.legs[1].cache} },
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return s.lane.cache },
@@ -431,12 +463,17 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
 	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
 	s.p.effects = s.x
-	withSpecs(t, func(specs map[string]effectSpec) {
-		if o.specs != nil {
-			o.specs(specs)
-		}
-		s.gate(specs)
-	})
+	if simPristineSpecs == nil {
+		simPristineSpecs = effectSpecs
+		t.Cleanup(func() { simPristineSpecs = nil })
+	}
+	saved := effectSpecs
+	effectSpecs = maps.Clone(simPristineSpecs)
+	t.Cleanup(func() { effectSpecs = saved })
+	if o.specs != nil {
+		o.specs(effectSpecs)
+	}
+	s.gate(effectSpecs)
 	s.p.seam = s.atSeam
 	s.locks = observeRowLocks(t)
 	if o.rowLock != nil {
@@ -461,7 +498,9 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 		gen := 1 + s.rng.IntN(3)
 		token := fmt.Sprintf("tok-%s-%d", id, gen)
 		state := []string{"asleep", "active", "awake", "creating", "asleep"}[s.rng.IntN(5)]
-		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token, "last_woke_at", s.rel(-time.Duration(s.rng.IntN(90)) * time.Second)}
+		// Woken up to 10m ago: some inside INC-003's 5m grace, some past it,
+		// so the corpus admits A20's begins (C6a2 review).
+		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token, "last_woke_at", s.rel(-time.Duration(s.rng.IntN(600)) * time.Second)}
 		switch at := s.rel(time.Duration(s.rng.IntN(240)-120) * time.Second); s.rng.IntN(6) {
 		case 0:
 			meta = append(meta, "held_until", at, "sleep_reason", "user-hold")
@@ -489,6 +528,11 @@ func (s *sim) rel(d time.Duration) string { return s.clk.Now().Add(d).UTC().Form
 
 // gate wraps every effect in specs (around, outside the spec's own) so it
 // parks until a step releases it.
+// simPristineSpecs are the specs before any sim in the test gated them: a
+// second sim gates these, never the first one's gated effects, whose
+// effects would park on the first sim's channel.
+var simPristineSpecs map[string]effectSpec
+
 func (s *sim) gate(specs map[string]effectSpec) {
 	for kind, spec := range specs {
 		if !spec.runs() {
@@ -564,9 +608,17 @@ func (s *sim) pass() {
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
 	census, obs := s.observed()
+	for _, d := range rec.Deferred {
+		if strings.HasPrefix(d.Cause, "rests-") {
+			s.t.Fatalf("seed %d: %s:%s deferred for its rests (%s): a fresh kind's arm must record what it rests on (ruling (c))", s.seed, d.Kind, d.Key.ID, d.Cause)
+		}
+	}
 	for _, it := range rec.Admitted {
 		if it.Kind == intentStart {
 			s.admitted = append(s.admitted, now)
+		}
+		if it.Kind == intentDrainBegin || it.Kind == intentDrainBeginFresh {
+			simDrainBegins.Add(1)
 		}
 		if census != nil {
 			info := census.Rows[it.Key].Info
@@ -613,6 +665,9 @@ func (s *sim) release(i int) {
 		s.t.Fatalf("seed %d: effect %s %v never returned", s.seed, e.it.Kind, e.it.Key)
 	}
 	s.logf("effect %s %s: outcome %d %s (late %t)", e.it.Kind, e.it.Key.ID, res.Outcome, res.Cause, e.settled)
+	if res.Outcome == settledNoop && res.Cause == causeNotIdle {
+		s.notIdle = append(s.notIdle, intentKeys([]intent{e.it})...)
+	}
 	for _, c := range after {
 		c(res)
 	}
@@ -949,7 +1004,7 @@ func (s *sim) run(steps int) {
 // executor's goroutines.
 func (s *sim) teardown() {
 	s.x.close()
-	s.x.cancel()
+	s.x.cancel(errEffectShutdown)
 	for _, e := range s.parked {
 		close(e.release)
 	}
@@ -1127,7 +1182,8 @@ func (s *sim) checkConverged() {
 }
 
 // lastTimer is the latest pending timer: a row's hold, quarantine or kill
-// fence, or a backoff's expiry.
+// fence, A6's churn clear past an open committed row's wake (SESS-540), or
+// a backoff's expiry.
 func (s *sim) lastTimer() time.Time {
 	last := s.clk.Now()
 	later := func(t time.Time) {
@@ -1142,6 +1198,14 @@ func (s *sim) lastTimer() time.Time {
 			}
 			if at, err := time.Parse(time.RFC3339, b.Metadata[k]); err == nil {
 				later(at.Add(grace))
+			}
+		}
+		// The churn clear is A6's at its threshold on an open committed row
+		// (SESS-540), which a patrol reaches.
+		up := b.Status != "closed" && slices.Contains([]string{"active", "awake"}, b.Metadata["state"])
+		if woke, err := time.Parse(time.RFC3339, b.Metadata["last_woke_at"]); err == nil && up {
+			if n := b.Metadata["churn_count"]; n != "" && n != "0" {
+				later(woke.Add(churnProductivityThreshold))
 			}
 		}
 	}
@@ -1175,7 +1239,18 @@ func simSeeds(t *testing.T) []uint64 {
 
 // Kills any merged path that breaks an invariant a run can observe: every
 // seed runs simSteps steps, then quiesces.
+// simDrainBegins counts the A20 begins the sims admitted.
+var simDrainBegins atomic.Int64
+
 func TestSimCorpus(t *testing.T) {
+	before := simDrainBegins.Load()
+	t.Cleanup(func() {
+		// Kills a corpus that never exercises A20 (C6a2 review): every
+		// undesired row inside the grace, or already requested.
+		if !t.Failed() && simDrainBegins.Load() == before {
+			t.Error("the sim corpus admitted no A20 drain begin")
+		}
+	})
 	for _, seed := range simSeeds(t) {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			s := newSim(t, seed, simOpts{})
@@ -1214,7 +1289,8 @@ var simMutants = []struct {
 				return f, err
 			}
 			s := specs[intentStart]
-			s.sections = []section{startSections[0], called(callStart, probed(reuse, preWakeStep), startLaunch), startSections[2]}
+			s.sections = slices.Clone(startSections)
+			s.sections[slices.IndexFunc(s.sections, func(sec section) bool { return sec.callKind == callStart })] = called(callStart, probed(reuse, preWakeStep), startLaunch)
 			specs[intentStart] = s
 		},
 	}},

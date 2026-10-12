@@ -1832,8 +1832,9 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
+	var cfgErr error
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
@@ -1866,6 +1867,17 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	if sessionBeadErr != nil {
 		closedSessionBead = beads.Bead{ID: sessionID}
 	}
+	// Without the config no claim's route can be judged, so the close could
+	// release none of the session's claims: refuse while it holds any, rather
+	// than strand them all. A session holding none closes.
+	if cityErr == nil && cfg == nil {
+		scope := releaseScopeOwn(closedSessionBead)
+		legs := workLegsFromCensus(cityPath, nil, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
+		if holds, err := seatWorkFor(legs, scope).has(seatWorkQuery{scope: scope, statuses: seatWorkStatuses}); holds || err != nil {
+			fmt.Fprintf(stderr, "gc session close: city config did not load (%v); refusing to close %s while it holds claims: they could not be released\n", cfgErr, sessionID) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))
 	if err != nil {
@@ -1884,13 +1896,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
 	//
-	// The scan leads with the WORK store here, unlike the reconciler's, which
-	// leads with the sessions-class store. On a split city that difference used
-	// to be the whole release tier for relocated work: claim-time class routing
-	// (claim_class_route.go) can leave an in_progress assignee in the graph
-	// binding, and a work-led scan cannot see it. The binding is now a leg of
-	// the sweep's own plan (assignedWorkSweepPlan), so this site hands in
-	// nothing and a city that relocates nothing still reads one store.
+	// The legs are the city's work legs over the work store this command
+	// opened: claim-time class routing (claim_class_route.go) can leave an
+	// in_progress assignee in the graph binding, which is a leg of the plan,
+	// and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
@@ -1898,7 +1907,14 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// The session bead lives in the sessions-class store (sessStore), which on a
 	// split city is not the work store the sweep leads with; the claim
 	// back-channel must be cleared where the session bead actually is.
-	unclaimWorkAssignedToRetiredSessionBeadVia(cityPath, cfg, store, sessStore, rigStores, closedSessionBead, "", stderr)
+	// A routeless claim takes the seat's own route, as every controller-side
+	// retirement gives it; a claim no lane serves stays on the closed row and
+	// raises session.stranded_claims, which the controller's detector repeats.
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	if cityErr == nil {
+		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
+	}
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{
@@ -2540,7 +2556,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	case infoErr == nil:
 		now := time.Now().UTC()
 		if err := applySessionKillFencePatch(sessStore, sessionID, func(b beads.Bead) (map[string]string, bool) {
-			return killSleepPatch(b.Metadata, now), true
+			return killSleepPatch(b.ID, b.Metadata, now), true
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}
