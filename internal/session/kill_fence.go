@@ -1,8 +1,15 @@
 package session
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"maps"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // SleepReasonKilled is the sleep_reason `gc session kill` records. The string
@@ -19,10 +26,10 @@ const SleepReasonKilled SleepReason = "killed"
 // kill-then-heal race the ordering exists to close.
 const KillPendingReason = "kill-pending"
 
-// KillPendingGrace bounds how long a kill fence is honored. The killing CLI
-// clears the fence as soon as the provider Stop returns, so an honored fence
-// normally lives for one Stop. The bound only matters when that CLI died
-// mid-kill: past it the row is ordinary asleep state again and the normal
+// KillPendingGrace bounds how long a kill fence is honored. The killer (`gc
+// session kill`, or the API kill through KillFenced) clears the fence as soon
+// as the provider Stop returns, so an honored fence normally lives for one
+// Stop. The bound only matters when that killer died mid-kill: past it the row is ordinary asleep state again and the normal
 // drift heal and wake rules take over.
 const KillPendingGrace = 5 * time.Minute
 
@@ -67,4 +74,254 @@ func KillPendingMetadata(state, stateReason, sleepReason, sleptAt string, now ti
 // the runtime is gone.
 func IsKillPendingInfo(info Info, now time.Time) bool {
 	return KillPendingMetadata(info.MetadataState, info.StateReason, info.SleepReason, info.SleptAt, now)
+}
+
+// KillFence is the durable kill intent an operator kill (`gc session kill`,
+// the API session kill) writes before it stops the runtime (see
+// KillPendingPatch). It remembers the values the patch replaced so a failed
+// Stop can put the row back exactly as it was, and the slept_at stamp that
+// identifies this kill's fence so the killer clears or rolls back only its
+// own write.
+type KillFence struct {
+	sessionID string
+	sleptAt   string
+	wrote     map[string]string // what the fence wrote
+	restore   map[string]string // the row's values for those keys before it
+}
+
+// KillFenceAttempts bounds the re-read/re-decide loop around a
+// revision-fenced write. A precondition failure is an observation, not a
+// verdict: the revision can move for an unrelated key, and on stores that
+// emulate the fence over a whole-row revision even a derived-column rewrite
+// moves it. Each retry re-reads and re-checks the guard before writing again.
+const KillFenceAttempts = 3
+
+// ErrKillFenceSuperseded reports that the row no longer satisfies the
+// guard of a fence write: it closed before the kill could record its intent,
+// or someone else rewrote it after the fence landed.
+var ErrKillFenceSuperseded = errors.New("session row changed underneath the kill")
+
+// WriteKillFence durably records the kill intent before the runtime is
+// torn down. Where the store resolves a conditional writer the write is fenced
+// on the revision of the row it observed, so it cannot silently overwrite a
+// transition that landed between the read and the write; otherwise it is the
+// same unconditional batch write the post-kill sync always was.
+func WriteKillFence(store beads.Store, sessionID string, now time.Time) (*KillFence, error) {
+	patch := KillPendingPatch(now)
+	patch["synced_at"] = now.UTC().Format(time.RFC3339)
+	fence := &KillFence{sessionID: sessionID, sleptAt: patch["slept_at"]}
+	err := ApplyKillFencePatch(store, sessionID, func(b beads.Bead) (map[string]string, bool) {
+		if b.Status == "closed" {
+			return nil, false
+		}
+		// The kill is the disposition's Kill cell: an operator suspend goes
+		// whole, its held_until with it, so no heartbeat-shaped hold is left
+		// behind; a wait or a heartbeat stays. The fence writes
+		// KillPendingPatch's lifecycle and only the class keys the kill
+		// changed, so a store without conditional writes reverts no
+		// concurrent write to the others.
+		killed, err := DecodeDisposition(b.Metadata).Apply(ActorOperator, DispEvent{Kind: EvKill}, State(b.Metadata["state"]), now)
+		if err != nil {
+			return nil, false
+		}
+		write := map[string]string(killed.Changed().Into(sessionID, maps.Clone(patch)))
+		// Capture the pre-image from the same observation the fenced write is
+		// conditioned on, so a rollback restores the row the kill replaced.
+		restore := make(map[string]string, len(write))
+		for key := range write {
+			restore[key] = b.Metadata[key]
+		}
+		fence.wrote, fence.restore = write, restore
+		return write, true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return fence, nil
+}
+
+// Owns reports whether b still carries this kill's fence.
+func (f *KillFence) Owns(b beads.Bead) bool {
+	return b.Status != "closed" &&
+		strings.TrimSpace(b.Metadata["state"]) == string(StateAsleep) &&
+		strings.TrimSpace(b.Metadata["state_reason"]) == KillPendingReason &&
+		strings.TrimSpace(b.Metadata["slept_at"]) == f.sleptAt
+}
+
+// Clear lifts the fence after the runtime is confirmed gone. The row keeps the
+// asleep/killed intent; only the kill-pending marker goes, handing the session
+// back to the ordinary lifecycle rules (which is what restarts it).
+func (f *KillFence) Clear(store beads.Store) error {
+	return ApplyKillFencePatch(store, f.sessionID, func(b beads.Bead) (map[string]string, bool) {
+		if !f.Owns(b) {
+			return nil, false
+		}
+		return map[string]string{"state_reason": ""}, true
+	})
+}
+
+// Rollback restores the pre-kill values after a Stop that left the runtime
+// alive, so the row does not claim a runtime is gone when it is not. It only
+// touches a row that still carries this kill's fence: if anything else has
+// rewritten the row since, that newer state is left alone.
+func (f *KillFence) Rollback(store beads.Store) error {
+	return ApplyKillFencePatch(store, f.sessionID, func(b beads.Bead) (map[string]string, bool) {
+		if !f.Owns(b) {
+			return nil, false
+		}
+		// Only the keys the fence changed that still read as it wrote them:
+		// a write since (a wait, a quarantine) stands. The class keys' undo
+		// is the Kill cell's (UndoDisposition).
+		undo := make(MetadataPatch, len(f.wrote))
+		for k, v := range LifecycleOnly(f.wrote) {
+			if b.Metadata[k] == v && f.restore[k] != v {
+				undo[k] = f.restore[k]
+			}
+		}
+		return UndoDisposition(f.restore, f.wrote, b.Metadata).Into(f.sessionID, undo), true
+	})
+}
+
+// ApplyKillFencePatch reads the row, asks decide for the patch to write
+// against that observation, and writes it: revision-fenced when the store
+// resolves a conditional writer (re-reading and re-deciding on a precondition
+// failure), unconditionally otherwise. decide returning false means the row no
+// longer qualifies and nothing is written (ErrKillFenceSuperseded).
+func ApplyKillFencePatch(store beads.Store, sessionID string, decide func(beads.Bead) (map[string]string, bool)) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for attempt := 0; attempt < KillFenceAttempts; attempt++ {
+		b, err := store.Get(sessionID)
+		if err != nil {
+			return err
+		}
+		patch, ok := decide(b)
+		if !ok {
+			return ErrKillFenceSuperseded
+		}
+		if len(patch) == 0 {
+			return nil
+		}
+		if writer == nil {
+			err := store.SetMetadataBatch(sessionID, patch)
+			if err != nil {
+				UnmintDisposition(sessionID, patch)
+			}
+			return err
+		}
+		lastErr = writer.UpdateIfMatch(sessionID, b.Revision, beads.UpdateOpts{Metadata: patch})
+		if lastErr != nil {
+			UnmintDisposition(sessionID, patch) // decide mints again on the next attempt
+		}
+		if lastErr == nil || !beads.IsPreconditionFailed(lastErr) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("conditional write kept losing to concurrent updates: %w", lastErr)
+}
+
+// KillSleepPatch is the kill's asleep sync with no fence, on the row's fresh
+// metadata: SleepPatch's lifecycle, the wake request cleared, and the Kill
+// cell's class keys, as the fence writes them (no heartbeat-shaped hold left).
+func KillSleepPatch(id string, meta map[string]string, now time.Time) map[string]string {
+	patch := SleepPatch(now, string(SleepReasonKilled))
+	patch["synced_at"] = now.Format(time.RFC3339)
+	maps.Copy(patch, ClearWakeRequestPatch())
+	return CellInto(id, meta, ActorOperator, DispEvent{Kind: EvKill}, now, patch)
+}
+
+// Wrote returns a copy of the keys the fence wrote, with their values.
+func (f *KillFence) Wrote() map[string]string { return maps.Clone(f.wrote) }
+
+// KillFenced is an operator kill under the kill fence, as `gc session kill`
+// does it: kill (Manager.Kill, or a worker handle's Kill over it) runs with
+// the runtime lease held from the fence write through the asleep sync
+// (I-LEASE), the fence durable before the runtime is stopped, and afterwards
+// the row left asleep/killed with the fence lifted (or restored, when the
+// stop left the runtime alive). Without the fence the controller reads the
+// kill as a crash: it heals the asleep row back to awake while the stop runs,
+// accrues the death as a wake failure, and restarts the session in the same
+// pass.
+//
+// A row whose runtime is already gone has no window to fence: kill runs
+// alone and its result is returned as it is. A fence that cannot be written
+// does not hold the kill hostage: it falls back to the stop and the
+// best-effort asleep sync after it.
+func (m *Manager) KillFenced(ctx context.Context, by Actor, id string, kill func(context.Context, Actor) error) error {
+	if err := m.checkActor(by); err != nil {
+		return err
+	}
+	b, sessName, err := m.sessionBead(id)
+	if err != nil {
+		return err
+	}
+	if !killRuntimeLive(State(b.Metadata["state"])) && !m.sp.IsRunning(sessName) {
+		return kill(ctx, by)
+	}
+	lease, release, err := m.leaseRuntime(ctx, by, id, sessName, operatorLeaseWait)
+	if err != nil && !errors.Is(err, ErrSessionStarting) && !errors.Is(err, ErrRuntimeLeaseBusy) && !by.City.IsZero() {
+		// As leaseForStop: a lease failure other than busy stops under the
+		// name's flock alone.
+		log.Printf("runtime lease: session %q: killing %q under the name's flock alone: %v", id, sessName, err)
+		lease, err = TryRuntimeLease(nil, RuntimeLeaseRequest{City: by.City.Path(), Name: sessName})
+		if err == nil {
+			release = lease.Release
+		}
+	}
+	if err != nil {
+		return err
+	}
+	defer release()
+	if lease != nil {
+		by.Lease = lease
+	}
+
+	fence, ferr := WriteKillFence(m.store, id, m.now().UTC())
+	if ferr != nil {
+		log.Printf("session kill: recording kill intent for session %s before stopping it: %v", id, ferr)
+		fence = nil
+	}
+	killErr := kill(ctx, by)
+	if killErr != nil && fence != nil && !m.sp.IsRunning(sessName) {
+		// The fenced row reads asleep, so Manager.Kill checks the provider
+		// and reports "not active" for a runtime already gone: the runtime
+		// is down, which is what the kill is for.
+		killErr = nil
+	}
+	if killErr != nil {
+		if fence != nil {
+			// The runtime survived the stop: the fence would claim a
+			// teardown that did not happen.
+			if err := fence.Rollback(m.store); err != nil {
+				log.Printf("session kill: restoring session %s after the failed kill: %v", id, err)
+			}
+		}
+		return killErr
+	}
+	if fence != nil {
+		if err := fence.Clear(m.store); err != nil {
+			log.Printf("session kill: releasing the kill fence on session %s: %v", id, err)
+		}
+		return nil
+	}
+	now := m.now().UTC()
+	if err := ApplyKillFencePatch(m.store, id, func(b beads.Bead) (map[string]string, bool) {
+		return KillSleepPatch(b.ID, b.Metadata, now), true
+	}); err != nil {
+		log.Printf("session kill: syncing session %s to asleep: %v", id, err)
+	}
+	return nil
+}
+
+// killRuntimeLive reports the states Manager.Kill treats as holding a live
+// runtime without asking the provider.
+func killRuntimeLive(s State) bool {
+	switch s {
+	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
+		return true
+	}
+	return false
 }
