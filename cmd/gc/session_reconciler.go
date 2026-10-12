@@ -1430,6 +1430,22 @@ func operatorSuspendCause(cfg *config.City, cityPath string, info sessionpkg.Inf
 	return ""
 }
 
+// pendingCreateOwnStartLive reports whether a pending create's own start may
+// still be creating its runtime, so a live runtime with no identity is not
+// rolled back from under it: the start is inside its in-flight window, or a
+// live holder has the row's runtime lease (startHolderLive), which covers a
+// start that outlives the window. A last_woke_at wakeUndesiredGrace or more
+// in the future proves nothing (a clock stepped back), so only the lease can
+// hold the row then. What cannot be probed reads as held, as for the reaper.
+func pendingCreateOwnStartLive(store beads.Store, cityPath string, info sessionpkg.Info, now time.Time, startupTimeout time.Duration) bool {
+	if pendingCreateStartInFlightAt(info, now, startupTimeout) {
+		if wokeAt, ok := parseRFC3339Metadata(info.LastWokeAt); ok && wokeAt.Sub(now) < wakeUndesiredGrace {
+			return true
+		}
+	}
+	return startHolderLive(store, cityPath, info)
+}
+
 // wakeGracePreservesUndesiredRow reports whether an undesired live row was woken
 // within wakeUndesiredGrace of now, so its drain begin is deferred (CONTRACT v4
 // §3.3 arm 18 / C4.9). An empty or unparseable last_woke_at is no evidence of a
@@ -2868,21 +2884,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			identity := readPendingCreateIdentity(infoPostZombie, name, sp)
 			switch identity.attribution() {
 			case pendingCreateRuntimeForeign:
-				if identity.unstamped() && pendingCreateStartInFlightInfo(infoPostZombie, clk, startupTimeout) {
+				if identity.unstamped() && pendingCreateOwnStartLive(store, cityPath, infoPostZombie, clk.Now(), startupTimeout) {
 					// A runtime with no identity at all reads foreign, but
-					// while this row's own start is in flight it is most
-					// likely that start's box: a remote runtime lists the name
-					// before Start returns, and one without a metadata store
-					// never carries identity. Rolling back here frees the name
+					// while this row's own start is live it is most likely
+					// that start's box: a remote runtime lists the name before
+					// Start returns, and one without a metadata store never
+					// carries identity. Rolling back here frees the name
 					// without a stop, and the late start then finds its row
 					// closed and cannot attribute the box either, so the box
-					// runs with no row. The start's commit settles the row; a
-					// start that never returns ends the in-flight window and
-					// the rollback applies.
+					// runs with no row. The start's commit settles the row.
+					// The deferral is recorded under the wake pair, not the
+					// rollback reason, so a normal start arms no auto-trace.
 					logStandingCondition(dt, stderr, id, "start_in_flight.pending_create_rollback", fmt.Sprintf(
 						"session reconciler: pending-create rollback of %s deferred: its start is in flight and the live runtime carries no identity yet", name), clk.Now())
 					if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollback, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
+						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonWake, TraceOutcomeStartInFlight, tp.TemplateName, name, traceRecordPayload{
 							"session_bead_id": id,
 							"attribution":     "start_in_flight",
 						})
