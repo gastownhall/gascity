@@ -71,6 +71,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&CustomTypesCheck{},
 		&DeprecatedAttachmentFieldsCheck{},
 		&DoltConfigCheck{},
+		&DoltLogSizeCheck{},
 		&DoltNomsSizeCheck{},
 		&DoltServerCheck{},
 		&DoltVersionCheck{},
@@ -1053,3 +1054,48 @@ func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
 }
 
 func (panickingFixCheck) WarmupEligible() bool { return false }
+
+// eventCheck records the order of its Run and Fix calls into a shared log.
+type eventCheck struct {
+	mockCheck
+	log *[]string
+}
+
+func (e *eventCheck) Run(ctx *CheckContext) *CheckResult {
+	*e.log = append(*e.log, "run "+e.name)
+	return e.mockCheck.Run(ctx)
+}
+
+func (e *eventCheck) Fix(ctx *CheckContext) error {
+	*e.log = append(*e.log, "fix "+e.name)
+	return e.mockCheck.Fix(ctx)
+}
+
+// BeforeFix must run before every remediation and before the re-run that
+// verifies it, and never on a run without --fix, so a caller sharing reads
+// across one run never answers a fix or its verification from pre-fix data.
+func TestDoctorBeforeFixPrecedesFixAndVerify(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		t.Run(fmt.Sprintf("timeout=%s", timeout), func(t *testing.T) {
+			var log []string
+			d := &Doctor{CheckTimeout: timeout, BeforeFix: func() { log = append(log, "before-fix") }}
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "ok", status: StatusOK, canFix: true}, log: &log})
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "broken", status: StatusError, canFix: true}, log: &log})
+
+			d.Run(&CheckContext{}, io.Discard, false)
+			if want := "run ok,run broken"; strings.Join(log, ",") != want {
+				t.Fatalf("without --fix: events = %v, want %s", log, want)
+			}
+
+			log = nil
+			report := d.Run(&CheckContext{}, io.Discard, true)
+			want := "run ok,run broken,before-fix,fix broken,before-fix,run broken"
+			if got := strings.Join(log, ","); got != want {
+				t.Fatalf("with --fix: events = %s, want %s", got, want)
+			}
+			if report.Fixed != 1 {
+				t.Fatalf("Fixed = %d, want 1", report.Fixed)
+			}
+		})
+	}
+}

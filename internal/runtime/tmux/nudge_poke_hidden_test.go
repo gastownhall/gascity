@@ -218,7 +218,7 @@ func TestSendKeysHiddenAttachedUnknownKeyFallsThroughWithoutPartialWrite(t *test
 	var sent []string
 	for _, call := range fe.calls {
 		for i, arg := range call {
-			if arg == "send-keys" && len(call) > i+3 && call[i+1] == "-t" && call[i+2] == sess {
+			if arg == "send-keys" && len(call) > i+3 && call[i+1] == "-t" && call[i+2] == "="+sess+":" {
 				sent = append(sent, call[i+3])
 			}
 		}

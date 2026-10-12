@@ -27,25 +27,31 @@ The spec is the full reference. A brief summary of the surfaces:
 - **Cities.** `GET /v0/cities`, `POST /v0/city`,
   `GET /v0/city/{cityName}`, `GET /v0/city/{cityName}/status`,
   `GET /v0/city/{cityName}/readiness`,
-  `POST /v0/city/{cityName}/stop`.
+  `PATCH /v0/city/{cityName}` (suspend or resume).
 - **Health & readiness.** `GET /health`, `GET /v0/readiness`,
   `GET /v0/provider-readiness`.
-- **Agents.** `GET/POST/DELETE` under `/v0/city/{cityName}/agents`
-  plus SSE `/v0/city/{cityName}/agents/{agent}/output/stream`.
+- **Agents.** `GET/POST` under `/v0/city/{cityName}/agents`, plus
+  `GET/PATCH/DELETE` on `/v0/city/{cityName}/agent/{base}` and SSE
+  `/v0/city/{cityName}/agent/{base}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
   query + hook operations, dependencies, labels.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
-- **Connected-client external messaging.** `POST /v0/extmsg/clients`
-  registers an external LLM client and returns a bearer token.
-  `POST /v0/extmsg/inbound` (with `provider: "llm-client"`) delivers an
-  inbound turn from the registered client to a city session.
-  `GET /v0/extmsg/{provider}/{account_id}/{conversation_id}/subscribe`
-  opens a long-lived SSE reply stream for that conversation.
-  See [Connect an external LLM client](/guides/connected-clients) for
-  the full integration guide including the SSE error catalog.
-- **Mail, convoys, orders, formulas, participants,
-  transcripts, adapters.** External messaging and orchestration
+- **External messaging.** `POST /v0/city/{cityName}/extmsg/adapters`
+  registers a client's callback URL for a provider/account,
+  `POST /v0/city/{cityName}/extmsg/inbound` delivers a turn to the
+  routed agent, and `POST /v0/city/{cityName}/extmsg/outbound`
+  publishes an agent's reply to the client's callback.
+  `POST /v0/city/{cityName}/extmsg/bind`,
+  `POST /v0/city/{cityName}/extmsg/unbind`, and
+  `GET /v0/city/{cityName}/extmsg/bindings` manage routing;
+  `/v0/city/{cityName}/extmsg/groups` and
+  `/v0/city/{cityName}/extmsg/participants` manage shared
+  conversations with several agents;
+  `GET /v0/city/{cityName}/extmsg/transcript` lists a conversation's
+  history. See [Connect an external client](/guides/connected-clients)
+  for a working end-to-end integration.
+- **Mail, convoys, orders, formulas.** Messaging and orchestration
   surfaces; see the spec for per-operation shapes.
 - **Events.** `GET /v0/events` + `GET /v0/events/stream` at
   supervisor scope, and `GET /v0/city/{cityName}/events` +
@@ -324,6 +330,43 @@ requests.
   output one `TaggedEventStreamEnvelope` JSON object per line.
 - `gc events --seq` in supervisor scope prints the current composite
   supervisor cursor, suitable for `--after-cursor`.
+
+### Pending Interactions
+
+A session that stops to ask a human something — a tool approval prompt or
+a question — has a *pending interaction*. `GET /v0/city/{cityName}/pending`
+lists them; `GET /v0/city/{cityName}/session/{id}/pending` returns one in
+full; `POST /v0/city/{cityName}/session/{id}/respond` answers it.
+
+The city event stream (and the supervisor stream, tagged with the city)
+also carries each change as an event, so a client does not have to poll:
+
+- `session.pending` — a session gained an interaction. The payload
+  (`SessionPendingPayload`) has `session_id`, `request_id`, `kind`,
+  `prompt`, `options`, `metadata`, and the session's `template` and
+  `alias`: enough to show the prompt and answer it by `request_id`
+  without another read.
+- `session.pending_cleared` — that interaction is gone. The payload
+  (`SessionPendingClearedPayload`) repeats `session_id`, `request_id`,
+  and `kind`, and gives a `reason`: `resolved` (answered or withdrawn),
+  `replaced` (a different interaction is now pending; its
+  `session.pending` follows), or `session_gone` (the session is no longer
+  active).
+
+Each fires once per transition, not once per detection pass. The city's
+controller detects them whether or not any client is watching, so orders
+and agents can react to them too. It checks every active session every 5
+seconds, re-reading a session's screen only when its output changed since
+the last read, and immediately after a successful `respond`. Its probe is
+the runtime's own pending detector, the same one `GET .../pending` uses.
+
+Resuming: a client that reconnects with `Last-Event-ID` (or `after_seq` /
+`after_cursor`) gets the transitions it missed and needs no extra call.
+Transitions are written to the city event log. When the controller
+restarts it rebuilds what it has announced from that log, so it announces
+nothing twice and clears what was answered while it was down. A client
+connecting without a cursor starts at the head of the log, so it should
+read `GET /v0/city/{cityName}/pending` once and apply events from there.
 
 ### Transport vs Semantic Type
 

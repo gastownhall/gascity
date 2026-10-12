@@ -59,6 +59,6 @@ func TestMail_BashAgent(t *testing.T) {
 
 	// Timed out — dump diagnostics.
 	inbox, _ := gc(cityDir, "mail", "inbox")
-	beadList, _ := gc(cityDir, "bead", "list")
+	beadList, _ := bd(cityDir, "list")
 	t.Fatalf("timed out waiting for agent reply\nhuman inbox:\n%s\nbead list:\n%s", inbox, beadList)
 }

@@ -1,0 +1,67 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ssh",
+    srcs = [
+        "cutover.go",
+        "provider.go",
+        "seams.go",
+        "session_env_file.go",
+        "ssh.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/ssh",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "ssh_test",
+    srcs = [
+        "conformance_integration_test.go",
+        "provider_test.go",
+        "seams_test.go",
+        "session_env_file_integration_test.go",
+        "session_env_file_test.go",
+        "ssh_localhost_integration_test.go",
+        "ssh_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":ssh"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/runtimetest",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

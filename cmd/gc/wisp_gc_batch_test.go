@@ -60,7 +60,7 @@ func TestWispGCClosureUsesBatchedDelete(t *testing.T) {
 	store := &batchGCStore{gcTestStore: base}
 
 	wg := newWispGC(5*time.Minute, time.Hour, 0)
-	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.MailStore{Store: store}, now)
+	purged, err := wg.runGC(beads.GraphStore{Store: store}, beads.SessionStore{}, beads.MailStore{Store: store}, now)
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}

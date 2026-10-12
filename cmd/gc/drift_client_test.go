@@ -31,6 +31,9 @@ func TestHTTPSupervisorClient_StatusRoundTrips(t *testing.T) {
 	if got.BuildID != "deadbeef-dirty" {
 		t.Fatalf("BuildID = %q, want %q", got.BuildID, "deadbeef-dirty")
 	}
+	if got.Version != "v0" {
+		t.Fatalf("Version = %q, want %q", got.Version, "v0")
+	}
 }
 
 // TestHTTPSupervisorClient_StatusEmptyBuildID confirms the client tolerates

@@ -64,13 +64,21 @@ func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error 
 		pruneRetiredSystemPacks(cityPath, warningWriter)
 		return nil
 	}
-	// One verifier for the whole pass: the ready fast path and the repair path
-	// both validate the shared synthetic cache directory, and within a single
-	// pass that is the same question asked repeatedly.
-	verifier := newSyntheticCacheVerifier()
-	if state.ready && requiredBuiltinSourcesUsable(cityPath, verifier) && lockedBundledImportsUsable(cityPath, verifier) {
-		return nil
+	// The ready fast path re-validates the shared synthetic cache so an
+	// in-place corruption after readiness is still detected and repaired. It
+	// uses a verifier that reuses an earlier pass's positive verdict while the
+	// cache tree's stat fingerprint is unchanged, so that guarantee no longer
+	// re-reads every cached pack file on every config load.
+	if state.ready {
+		warm := newWarmSyntheticCacheVerifier()
+		if requiredBuiltinSourcesUsable(cityPath, warm) && lockedBundledImportsUsable(cityPath, warm) {
+			return nil
+		}
 	}
+	// One verifier for the whole pass: the repair paths below validate the
+	// shared synthetic cache directory, and within a single pass that is the
+	// same question asked repeatedly.
+	verifier := newSyntheticCacheVerifier()
 	state.ready = false
 
 	var problems []error

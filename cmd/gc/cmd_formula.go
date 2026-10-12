@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -509,6 +510,34 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 		add(layers)
 	}
 	return all
+}
+
+// orderFormulaSearchPaths returns the formula search paths for dispatching
+// an order: the order's own scope (SearchPaths(a.Rig), which already
+// embeds the city layers beneath any rig-specific ones), plus the order's
+// own discovery layer appended last
+// (highest priority) so a same-named formula co-located with the order
+// still wins on a collision. a.FormulaLayer records where the ORDER FILE
+// was found (for name-collision precedence when the same order name
+// appears in multiple layers) — it is not the set of layers the order's
+// FORMULA may live in. Order dispatch used to conflate the two, searching
+// only a.FormulaLayer, so an order authored in one layer (e.g. the city's
+// own orders/) could never dispatch a formula shipped by a different
+// layer (e.g. an imported pack) even though gc formula list/show resolved
+// it fine (#4378).
+func orderFormulaSearchPaths(cfg *config.City, a orders.Order) []string {
+	var searchPaths []string
+	if cfg != nil {
+		// Clone: SearchPaths hands back the stored slice, and
+		// ComputeFormulaLayers grows those slices with append, so
+		// appending in place could write through spare capacity into
+		// cfg.FormulaLayers.
+		searchPaths = slices.Clone(cfg.FormulaLayers.SearchPaths(a.Rig))
+	}
+	if a.FormulaLayer != "" {
+		searchPaths = append(searchPaths, a.FormulaLayer)
+	}
+	return searchPaths
 }
 
 // printGraphV2Deprecations surfaces deprecated graph.v2 constructs (the legacy

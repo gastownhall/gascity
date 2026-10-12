@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 )
@@ -67,5 +68,20 @@ func TestLatestSeqWithBackoffGivesUpAfterMaxAttempts(t *testing.T) {
 	}
 	if calls != 5 {
 		t.Fatalf("LatestSeq calls = %d, want 5 (maxAttempts)", calls)
+	}
+}
+
+// TestOpenWatcherEventsIsReadOnly pins the watcher to the read-only provider:
+// it must not hold a write handle on the city's log, which would pin a
+// rotated-away file on disk, or create anything there.
+func TestOpenWatcherEventsIsReadOnly(t *testing.T) {
+	cityPath := t.TempDir()
+	recorder := openWatcherEvents(cityPath)
+	defer recorder.Close() //nolint:errcheck // test cleanup
+	if !recorder.ReadOnly() || recorder.RotationEnabled() {
+		t.Fatalf("watcher provider: read-only %t, rotation %t; want read-only without rotation", recorder.ReadOnly(), recorder.RotationEnabled())
+	}
+	if entries, err := os.ReadDir(cityPath); err != nil || len(entries) != 0 {
+		t.Fatalf("opening the watcher created %v (err %v)", entries, err)
 	}
 }

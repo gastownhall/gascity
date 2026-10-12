@@ -62,6 +62,20 @@ var specs = []Spec{
 		Justification: "Retire the v1 formula path and its process-global atomic.Bool setter " +
 			"anti-pattern; the migration whose completion deletes cmd/gc/feature_flags.go.",
 	},
+	{
+		Key:            keyBeadsAllowSchemaBehindMigrate,
+		Category:       InfraKillswitch,
+		ConfigPath:     "beads.allow_schema_behind_migrate",
+		EnvOverride:    envBeadsAllowSchemaBehindMigrate,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Bool: ptr(false)},
+		Owner:          Owner{Bead: "ga-g4sbm1", GitHub: "@gastownhall/gascity-admin"},
+		SelectsBetween: [2]string{"withhold BD_ALLOW_REMOTE_MIGRATE and FAIL the native-store preflight when the database's schema cursor trails the linked library's ceiling", "set BD_ALLOW_REMOTE_MIGRATE and mark the behind schema preflight-eligible for an operator-opted-in city"},
+		Justification: "A behind-schema city is sometimes a deliberate operator choice (a pinned " +
+			"older schema the city is not ready to migrate yet), not a mixed-fleet rollout with a " +
+			"planned end date; this is a standing per-city escape hatch, not a migration gate, so " +
+			"it carries no Expires/VersionAnchor.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers
@@ -100,3 +114,7 @@ func beadsConditionalWritesSpec() Spec { return specByKey(keyBeadsConditionalWri
 // beadsGuardedReleaseSpec returns the canonical Spec for the beads
 // guarded-release gate.
 func beadsGuardedReleaseSpec() Spec { return specByKey(keyBeadsGuardedRelease) }
+
+// beadsAllowSchemaBehindMigrateSpec returns the canonical Spec for the beads
+// allow-schema-behind-migrate gate.
+func beadsAllowSchemaBehindMigrateSpec() Spec { return specByKey(keyBeadsAllowSchemaBehindMigrate) }

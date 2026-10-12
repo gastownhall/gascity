@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -673,9 +675,9 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 	}
 	done := make(chan int, 1)
 	go func() {
-		done <- reconcileSessionBeads(
-			context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
-			cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{"db": 1, "cache": 1, "worker": 1}, false, nil, "",
+		done <- reconcileSessionBeadsAtPath(
+			context.Background(), t.TempDir(), sessions, desired, configuredSessionNames(cfg, "", store),
+			cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"db": 1, "cache": 1, "worker": 1}, false, nil, "",
 			nil, clk, rec, 5*time.Second, 0, ioDiscard{}, ioDiscard{},
 		)
 	}()
@@ -709,7 +711,7 @@ func TestReconcileSessionBeads_StartsIndependentWaveInParallelBeforeDependentWav
 }
 
 func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
@@ -740,6 +742,237 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 	if !env.sp.IsRunning("cache") {
 		t.Fatal("cache should still start despite db failure")
+	}
+}
+
+func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	templateWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       templateWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: templateWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != concreteWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want concrete alias work_dir %q", prepared.cfg.WorkDir, concreteWorkDir)
+	}
+	persisted, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.WorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, concreteWorkDir)
+	}
+	if got := persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, concreteWorkDir)
+	}
+}
+
+// TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPath
+// is the symlink twin of the repair test above: the stale template work_dir is
+// stamped on the bead through a symlinked spelling of the city path, so a
+// lexical filepath.Clean comparison would miss it and the repair would
+// silently no-op. Worktree roots reached through a symlink are exactly where
+// this fix has to hold.
+func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPath(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlinked city paths are not exercised on Windows")
+	}
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedCityPath := filepath.Join(root, "city-link")
+	if err := os.Symlink(cityPath, linkedCityPath); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	linkedTemplateWorkDir := filepath.Join(linkedCityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       linkedTemplateWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: linkedTemplateWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != concreteWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want concrete alias work_dir %q", prepared.cfg.WorkDir, concreteWorkDir)
+	}
+	persisted, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.WorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, concreteWorkDir)
+	}
+	if got := persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, concreteWorkDir)
+	}
+}
+
+func TestBuildPreparedStartRejectsConcretePoolTemplateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	templateWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       concreteWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: concreteWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	_, _, err = buildPreparedStartWithWorkDirResolver(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, cfg, store, func(startCandidate, *config.City) string {
+		return templateWorkDir
+	}, dispatchOptionSources{})
+	if err == nil {
+		t.Fatal("buildPreparedStartWithWorkDirResolver error = nil, want template work_dir rejection")
+	}
+	if !strings.Contains(err.Error(), "resolved template work_dir") {
+		t.Fatalf("error = %v, want template work_dir rejection", err)
 	}
 }
 
@@ -1137,7 +1370,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}))
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}), dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -1255,7 +1488,7 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 		t.Fatalf("Create(session): %v", err)
 	}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		[]startCandidate{{info: sessiontest.SeedBead(t, session), tp: tp, order: 0}},
 		cfg,
@@ -1263,11 +1496,13 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 		sp,
 		store,
 		"",
+		t.TempDir(),
 		clk,
 		events.Discard,
 		5*time.Second,
 		ioDiscard{},
 		ioDiscard{},
+		nil,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
@@ -1467,7 +1702,7 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 }
 
 func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
 		Agents: []config.Agent{
 			{Name: "blocked", MaxActiveSessions: intPtr(1), DependsOn: []string{"missing-dep"}},
@@ -1534,7 +1769,7 @@ func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testin
 // budget away from the 5-per-tick default. Cities with slow cold-starts
 // need this to drain the candidate queue.
 func TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	override := 8
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{MaxWakesPerTick: &override},
@@ -1641,7 +1876,7 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sCopy), tp: tp, order: i})
 	}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		candidates,
 		cfg,
@@ -1649,11 +1884,13 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 		sp,
 		store,
 		"",
+		t.TempDir(),
 		clk,
 		events.Discard,
 		5*time.Second,
 		ioDiscard{},
 		ioDiscard{},
+		nil,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
 	)
@@ -1814,9 +2051,9 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 
 	poolDesired := map[string]int{"app-1": 1, "app-2": 1, "app-3": 1, "app-4": 1}
 	var stderr bytes.Buffer
-	woken := reconcileSessionBeads(
-		context.Background(), sessions, desired, configuredSessionNames(cfg, "", store),
-		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
+	woken := reconcileSessionBeadsAtPath(
+		context.Background(), t.TempDir(), sessions, desired, configuredSessionNames(cfg, "", store),
+		cfg, sp, store, nil, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "",
 		nil, clk, events.Discard, 5*time.Second, 0, ioDiscard{}, &stderr,
 	)
 
@@ -1840,7 +2077,27 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 }
 
+// asyncStartCity is a city dir for a test whose starts run async, and the
+// option that joins those starts to a tracker. The tracker's wait is
+// registered right after the dir, so it runs after every later cleanup (a
+// gated provider's release) and before the dir's removal (cleanups run LIFO):
+// a released start still writing under <city>/.gc (its runtime lease's lock
+// file) would otherwise race RemoveAll (mc-f9s2j). The wait is bounded; a
+// start still running then is a leak the test reports.
+func asyncStartCity(t *testing.T) (string, startExecutionOption) {
+	t.Helper()
+	city := t.TempDir()
+	starts := &asyncStartTracker{}
+	t.Cleanup(func() {
+		if !starts.wait(5 * time.Second) {
+			t.Error("async starts still running 5s into cleanup")
+		}
+	})
+	return city, withAsyncStartTracker(starts)
+}
+
 func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	maxWakes := 8
 	dropAfter := 3
 	sp := &dropDependencyAfterNStartsProvider{
@@ -1897,7 +2154,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		5*time.Second,
@@ -1905,6 +2162,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	if woken != defaultStartDependencyRecheckBatchSize {
 		t.Fatalf("first async woken = %d, want dependency-recheck batch size %d", woken, defaultStartDependencyRecheckBatchSize)
@@ -1931,7 +2189,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		5*time.Second,
@@ -1939,6 +2197,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 		&secondStderr,
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	if woken != 0 {
 		t.Fatalf("second async woken = %d, want 0 after dependency loss", woken)
@@ -1953,6 +2212,7 @@ func TestExecutePlannedStartsTraced_AsyncRevalidatesDependenciesBetweenBatches(t
 }
 
 func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -1995,7 +2255,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 			sp,
 			store,
 			"test-city",
-			"",
+			testCity,
 			clk,
 			events.Discard,
 			time.Minute,
@@ -2003,6 +2263,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 			ioDiscard{},
 			nil,
 			withAsyncStartExecution(),
+			trackStarts,
 		)
 	}()
 
@@ -2046,6 +2307,7 @@ func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 0, 0, time.UTC)}
 	sp := newGatedStartProvider()
@@ -2086,7 +2348,7 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2094,6 +2356,7 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	wantWoken := maxWakes
 	if woken != wantWoken {
@@ -2107,6 +2370,10 @@ func TestExecutePlannedStartsTraced_AsyncLimitsEnqueuedStartsPerTick(t *testing.
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) {
+	testCity := t.TempDir()
+	// The async starts finish, once released, before the city is removed.
+	starts := &asyncStartTracker{}
+	t.Cleanup(func() { starts.wait(5 * time.Second) })
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 15, 0, time.UTC)}
 	sp := newGatedStartProvider()
@@ -2149,7 +2416,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2158,6 +2425,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
+		withAsyncStartTracker(starts),
 	); got != 1 {
 		t.Fatalf("first woken = %d, want 1", got)
 	}
@@ -2170,7 +2438,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2179,6 +2447,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
+		withAsyncStartTracker(starts),
 	); got != 0 {
 		t.Fatalf("second woken = %d, want 0 while shared limiter is full", got)
 	}
@@ -2214,7 +2483,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2223,6 +2492,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 		nil,
 		withAsyncStartExecution(),
 		withAsyncStartLimiter(limiter),
+		withAsyncStartTracker(starts),
 	); got != 1 {
 		t.Fatalf("second woken after release = %d, want 1", got)
 	}
@@ -2233,6 +2503,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterSharedAcrossTicks(t *testing.T) 
 }
 
 func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCancel(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 20, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2271,7 +2542,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2279,6 +2550,7 @@ func TestExecutePlannedStartsTraced_AsyncLimiterDeferredStartDoesNotRunAfterCanc
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 		withAsyncStartLimiter(limiter),
 	); got != 0 {
 		t.Fatalf("woken = %d, want 0 while async limiter is full", got)
@@ -2309,6 +2581,7 @@ func TestAsyncStartLimiterNilReceiverMethodsAreNoops(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2344,7 +2617,7 @@ func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		5*time.Second,
@@ -2365,6 +2638,7 @@ func TestExecutePlannedStartsTracedCanceledContextDoesNotStart(t *testing.T) {
 }
 
 func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 12, 1, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2390,7 +2664,7 @@ func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testi
 
 	woken := reconcileSessionBeadsTraced(
 		ctx,
-		"",
+		testCity,
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		map[string]bool{"worker": true},
@@ -2415,6 +2689,7 @@ func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testi
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	)
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0 after cancellation", woken)
@@ -2425,6 +2700,7 @@ func TestReconcileSessionBeadsTracedCanceledContextDoesNotTouchProvider(t *testi
 }
 
 func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 25, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2469,7 +2745,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2514,6 +2790,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 }
 
 func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2560,7 +2837,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2586,6 +2863,7 @@ func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
 }
 
 func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	store := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 27, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2622,7 +2900,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2630,6 +2908,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 	); got != 0 {
 		t.Fatalf("woken = %d, want 0 when async preparation fails after preWake", got)
 	}
@@ -2644,6 +2923,7 @@ func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *tes
 }
 
 func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 28, 0, time.UTC)}
 	const identity = "test-city/worker"
@@ -2679,7 +2959,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 		MaxRestarts: 1,
 		ResetAfter:  20 * time.Minute,
 	})
-	defer setSessionCircuitBreakerForTest(cb)()
+	setSessionCircuitBreakerForTest(t, cb)
 	cb.RecordRestart(identity, clk.Now().Add(-time.Minute))
 	sp := newGatedStartProvider()
 	t.Cleanup(func() { sp.release("worker") })
@@ -2703,7 +2983,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2757,6 +3037,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 }
 
 func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.T) {
+	testCity, trackStarts := asyncStartCity(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -2790,7 +3071,7 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -2798,6 +3079,7 @@ func TestExecutePlannedStartsTraced_AsyncRequestsFollowUpAfterCommit(t *testing.
 		ioDiscard{},
 		nil,
 		withAsyncStartExecution(),
+		trackStarts,
 		withAsyncStartFollowUp(func() {
 			select {
 			case followUp <- struct{}{}:
@@ -2979,14 +3261,16 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
 
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		t.TempDir(),
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		configuredSessionNames(cfg, "test-city", store),
 		cfg,
 		sp,
 		store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -3015,47 +3299,6 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(
 	}
 }
 
-func TestRunningSessionMatchesPendingCreateAcceptsTokenOnlyRuntime(t *testing.T) {
-	session := sessionpkg.Info{
-		ID:                  "gc-worker",
-		SessionName:         "worker",
-		SessionNameMetadata: "worker",
-		Generation:          "2",
-		InstanceToken:       "tok-worker",
-	}
-	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "tok-worker"); err != nil {
-		t.Fatal(err)
-	}
-
-	if !runningSessionMatchesPendingCreateInfo(session, "worker", sp) {
-		t.Fatal("runtime with matching token and no session id should match pending create")
-	}
-}
-
-func TestRunningSessionMatchesPendingCreateAcceptsIDOnlyRuntime(t *testing.T) {
-	session := sessionpkg.Info{
-		ID:                  "gc-worker",
-		SessionName:         "worker",
-		SessionNameMetadata: "worker",
-		Generation:          "2",
-	}
-	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	if !runningSessionMatchesPendingCreateInfo(session, "worker", sp) {
-		t.Fatal("runtime with matching session id and no token should match pending create")
-	}
-}
-
 func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 30, 0, time.UTC)}
@@ -3077,6 +3320,15 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The start in flight holds the row's runtime lease, as every start does
+	// from before its PreWake through its commit (mc-5a1ma).
+	city := t.TempDir()
+	inFlight, err := sessionpkg.TryRuntimeLease(sessionFrontDoor(store), sessionpkg.RuntimeLeaseRequest{City: city, Name: "worker", ID: session.ID, TTL: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Release()
+	session = mustGetBead(t, store, session.ID)
 	sp := newGatedStartProvider()
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
@@ -3086,14 +3338,16 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 		SessionName:  "worker",
 		TemplateName: "worker",
 	}
-	woken := reconcileSessionBeads(
+	woken := reconcileSessionBeadsAtPath(
 		context.Background(),
+		city,
 		[]beads.Bead{session},
 		map[string]TemplateParams{"worker": tp},
 		configuredSessionNames(cfg, "", store),
 		cfg,
 		sp,
 		store,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -4730,7 +4984,8 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 }
 
 func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
-	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
+	// Batch 1 is the runtime lease record, 2 PreWake, 3 the post-start commit.
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 3}
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
 	tp := TemplateParams{
@@ -4761,7 +5016,7 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
 	}
 
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(),
 		[]startCandidate{{info: sessiontest.SeedBead(t, bead), tp: tp, order: 0}},
 		&config.City{Agents: []config.Agent{{Name: "helper"}}},
@@ -4769,11 +5024,12 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 		sp,
 		store,
 		"",
+		t.TempDir(),
 		clk,
 		events.Discard,
 		5*time.Second,
 		ioDiscard{},
-		ioDiscard{},
+		ioDiscard{}, nil,
 	)
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0 after metadata batch retry", woken)
@@ -4797,6 +5053,7 @@ func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadat
 // closed on the next tick if the runtime briefly dies — re-opening the
 // spin loop this PR is meant to close.
 func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
@@ -4818,7 +5075,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	if ok, _ := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+	if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
 
@@ -4843,6 +5100,7 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 // verifiedStop would skip the incarnation check, and a re-woken runtime the old
 // raw-bead read spared would be killed. The returned batch MUST carry the mint.
 func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
@@ -4863,7 +5121,7 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
-	ok, batch := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
+	ok, batch := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil)
 	if !ok {
 		t.Fatal("recoverRunningPendingCreate returned false, want true")
 	}
@@ -4889,6 +5147,7 @@ func TestRecoverRunningPendingCreate_ReturnsMintedInstanceTokenForSnapshotFold(t
 // promptDelivered mirrors the original launch), and stamps NOTHING for an empty
 // prompt (the P5 gate). Nothing reads the pair in Stage 2 — this pins the write.
 func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T) {
+	testCity := t.TempDir()
 	const prompt = "do the work"
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
@@ -4917,7 +5176,7 @@ func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T
 		store := beads.NewMemStore()
 		bead := newRecoveryBead(store)
 		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: prompt}
-		if ok, _ := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 			t.Fatal("recoverRunningPendingCreate returned false, want true")
 		}
 		got, err := store.Get(bead.ID)
@@ -4936,7 +5195,7 @@ func TestRecoverRunningPendingCreate_StampsPrimingPairWhenDelivered(t *testing.T
 		store := beads.NewMemStore()
 		bead := newRecoveryBead(store)
 		tp := TemplateParams{SessionName: "sky", TemplateName: "helper", Command: "claude", Prompt: ""}
-		if ok, _ := recoverRunningPendingCreate(sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
+		if ok, _ := recoverRunningPendingCreate(testCity, sessiontest.SeedBead(t, bead), tp, cfg, store, &clock.Fake{Time: clkTime}, nil); !ok {
 			t.Fatal("recoverRunningPendingCreate returned false, want true")
 		}
 		got, err := store.Get(bead.ID)
@@ -5042,6 +5301,104 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 	}
 }
 
+// TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation pins the
+// Tier C first-run race: the async start is enqueued while the bead is
+// "creating", the reconciler's heal pass sees the live runtime and projects
+// "awake" onto the bead, and only then does the start commit land. The commit
+// must still stamp state_reason=creation_complete — that marker is what
+// poolSessionWithinPostCreateProtection keys the post-create demand floor on,
+// and without it the fresh pool worker was drained as "orphaned" seconds after
+// claiming its first step. The in-flight awake interval the heal opened must
+// not be reset (mirrors recoverRunningPendingCreate).
+func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testing.T) {
+	store := beads.NewMemStore()
+	healedAwakeAt := "2026-03-18T11:59:58Z"
+	bead, err := store.Create(beads.Bead{
+		Title:  "claude",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "claude-w1",
+			"template":             "claude",
+			"pool_managed":         "true",
+			"pending_create_claim": "true",
+			// The heal pass already rewrote creating -> awake.
+			"state":            "awake",
+			"awake_started_at": healedAwakeAt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				info: sessiontest.SeedBead(t, bead),
+				tp: TemplateParams{
+					SessionName:  "claude-w1",
+					TemplateName: "claude",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 11, 59, 57, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+	}
+	commitAt := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+	if !commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: commitAt}, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("commitStartResult returned false for a successful start onto a healed-awake bead")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Errorf("state = %q, want active", got.Metadata["state"])
+	}
+	if got.Metadata["state_reason"] != "creation_complete" {
+		t.Errorf("state_reason = %q, want creation_complete: a start committed after the heal pass wrote awake lost its post-create protection", got.Metadata["state_reason"])
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["awake_started_at"] != healedAwakeAt {
+		t.Errorf("awake_started_at = %q, want the in-flight interval %q kept (StartsAwakeInterval must stay keyed on a genuine pending start)", got.Metadata["awake_started_at"], healedAwakeAt)
+	}
+	if info := sessiontest.SeedBead(t, got); !poolSessionWithinPostCreateProtection(info, commitAt.Add(30*time.Second)) {
+		t.Error("fresh pool worker is not within post-create protection after its start committed onto a healed-awake bead")
+	}
+}
+
+// TestConfirmStartCommitState pins the shared start-commit confirm predicate
+// used by both commitStartResultTraced and recoverRunningPendingCreate.
+func TestConfirmStartCommitState(t *testing.T) {
+	for state, want := range map[string]bool{
+		"":              true,
+		"start-pending": true,
+		"creating":      true,
+		"asleep":        true,
+		"drained":       true,
+		"awake":         true,
+		"active":        false,
+		"draining":      false,
+		"archived":      false,
+		"quarantined":   false,
+	} {
+		if got := confirmStartCommitState(state); got != want {
+			t.Errorf("confirmStartCommitState(%q) = %v, want %v", state, got, want)
+		}
+		if confirmPendingStart(state) && !confirmStartCommitState(state) {
+			t.Errorf("confirmStartCommitState(%q) must be a superset of confirmPendingStart", state)
+		}
+	}
+	if confirmPendingStart("awake") {
+		t.Error("confirmPendingStart(awake) = true; StartsAwakeInterval would reset an in-flight awake interval")
+	}
+}
+
 func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testing.T) {
 	maxWakes := 8
 	dropAfter := 3
@@ -5096,9 +5453,10 @@ func TestExecutePlannedStarts_UsesLogicalTemplateForDependencyRechecks(t *testin
 	}
 
 	var stderr bytes.Buffer
-	woken := executePlannedStarts(
+	woken := executePlannedStartsTraced(
 		context.Background(), candidates, cfg, desired, sp, store, "",
-		clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr,
+		t.TempDir(),
+		clk, events.Discard, 5*time.Second, ioDiscard{}, &stderr, nil,
 	)
 
 	if woken != dropAfter {
@@ -5715,7 +6073,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 }
 
 func TestCommitStartResult_LogsSuccessOutcome(t *testing.T) {
-	store := newTestStore()
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "b1", Type: sessionBeadType, Status: "open"}}, nil)
 	candidate := startCandidate{
 		info: sessionpkg.Info{
 			ID:                  "b1",
@@ -5812,6 +6170,101 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	}
 	if got["last_woke_at"] != "" {
 		t.Fatalf("last_woke_at = %q, want cleared", got["last_woke_at"])
+	}
+}
+
+func seedTerminalPendingCreate(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"session_name":         "worker",
+			"state":                "creating",
+			"pending_create_claim": "true",
+			"generation":           "1",
+			"instance_token":       "tok-1",
+			"last_woke_at":         "2026-05-27T12:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func terminalPendingCreateResult(t *testing.T, store beads.Store, id string, now time.Time) startResult {
+	t.Helper()
+	info, err := sessionFrontDoor(store).Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startResult{
+		prepared:        preparedStart{candidate: startCandidate{info: info, tp: TemplateParams{TemplateName: "worker", SessionName: "worker"}}},
+		err:             errors.New("model_not_found: gpt-5.3-codex-spark"),
+		outcome:         "provider_error",
+		started:         now,
+		finished:        now,
+		rollbackPending: true,
+	}
+}
+
+// A pending create whose first start hits a terminal provider error closes as
+// failed-create and keeps the terminal record (ga-z8yi2j: marking first cleared
+// the claim the fenced rollback requires, so the row stayed open and asleep).
+func TestCommitStartResult_TerminalProviderErrorRollsBackPendingCreate(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	var stderr bytes.Buffer
+	if commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr) {
+		t.Fatal("commitStartResult returned true for a terminal provider error")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (stderr %q)", got.Status, stderr.String())
+	}
+	for key, want := range map[string]string{
+		"state":                                 "failed-create",
+		"pending_create_claim":                  "",
+		"sleep_reason":                          "provider-terminal-error",
+		sessionProviderTerminalErrorMetadataKey: "model_not_found",
+		sessionHealthStateMetadataKey:           "unhealthy",
+	} {
+		if got.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, got.Metadata[key], want)
+		}
+	}
+}
+
+// The terminal mark shares the rollback's fence: a result whose observed
+// incarnation was superseded must neither close nor mark the newer one.
+func TestCommitStartResult_TerminalProviderErrorLeavesSupersededPendingCreateUntouched(t *testing.T) {
+	store := beads.NewMemStore()
+	b := seedTerminalPendingCreate(t, store)
+	now := time.Unix(3, 0).UTC()
+	result := terminalPendingCreateResult(t, store, b.ID, now)
+	if err := store.SetMetadata(b.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	commitStartResult(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.NewFake(), 0, &stderr, &stderr)
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("a superseded incarnation was closed by a stale terminal-error result")
+	}
+	if got.Metadata["pending_create_claim"] != "true" || got.Metadata["state"] != "creating" || got.Metadata[sessionProviderTerminalErrorMetadataKey] != "" {
+		t.Fatalf("superseded row claim/state/terminal = %q/%q/%q, want true/creating/empty",
+			got.Metadata["pending_create_claim"], got.Metadata["state"], got.Metadata[sessionProviderTerminalErrorMetadataKey])
 	}
 }
 
@@ -5933,15 +6386,19 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
-	results := executePreparedStartWave(
+	city := t.TempDir()
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{{
 			candidate: startCandidate{info: sessionpkg.Info{SessionName: "worker", SessionNameMetadata: "worker"}},
 			cfg:       runtime.Config{Command: "panic-provider"},
 		}},
+		city,
 		&panicStartProvider{Fake: runtime.NewFake()},
 		nil,
+		nil,
 		time.Second,
+		1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
@@ -6347,6 +6804,7 @@ func immediateSessionStaleKeyDetectionWaiter(context.Context, string) error {
 }
 
 func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	newItem := func(id, name string) preparedStart {
 		return preparedStart{
@@ -6376,7 +6834,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 				newItem("gc-first", "first-agent"),
 				newItem("gc-second", "second-agent"),
 			},
-			"",
+			city,
 			sp,
 			nil,
 			nil,
@@ -6428,7 +6886,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp)
+	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
 		Template: "worker",
@@ -6456,14 +6914,20 @@ func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBounda
 		cfg: runtime.Config{Command: "claude --resume " + info.SessionKey},
 	}
 	waiter := newManualStartStabilityWaiter(t)
+	city := t.TempDir()
+	item, release := leasedStart(t, city, item)
+	defer release()
 	resultsCh := make(chan []startResult, 1)
 	go func() {
-		resultsCh <- executePreparedStartWave(
+		resultsCh <- executePreparedStartWaveForCity(
 			context.Background(),
 			[]preparedStart{item},
+			city,
 			sp,
 			store,
+			nil,
 			10*time.Second,
+			1,
 			withStartStabilityWaiter(immediateStartStabilityWaiter),
 			withSessionStaleKeyDetectionWaiter(func(ctx context.Context, name string) error {
 				if waiter.wait(ctx, name) {
@@ -6493,6 +6957,7 @@ func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBounda
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
+	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6512,12 +6977,15 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		cfg: runtime.Config{Command: "claude --resume stale-key-abc"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6534,6 +7002,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6556,12 +7025,15 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6578,6 +7050,7 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 }
 
 func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
+	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
 		candidate: startCandidate{
@@ -6596,12 +7069,15 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -6638,12 +7114,14 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 		cfg: runtime.Config{Command: "claude --resume still-valid-key"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -6662,6 +7140,7 @@ func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t 
 }
 
 func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -6687,12 +7166,15 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -6720,6 +7202,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 }
 
 func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -6747,12 +7230,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -6774,6 +7260,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 }
 
 func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMismatch(t *testing.T) {
+	city := t.TempDir()
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
 		t.Fatalf("Start existing session: %v", err)
@@ -6809,12 +7296,15 @@ func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMisma
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -6861,12 +7351,14 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -6882,6 +7374,7 @@ func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFal
 }
 
 func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallback(t *testing.T) {
+	city := t.TempDir()
 	sp := &existingProcessAliveSequenceProvider{
 		Fake: runtime.NewFake(),
 		alive: map[string][]bool{
@@ -6911,12 +7404,15 @@ func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallba
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 	)
 
 	if len(results) != 1 {
@@ -6962,12 +7458,14 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateIdentityMism
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -7013,12 +7511,14 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 		cfg: runtime.Config{Command: "claude"},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		t.TempDir(),
 		sp,
 		nil,
-		10*time.Second,
+		nil,
+		10*time.Second, 1,
 	)
 
 	if len(results) != 1 {
@@ -7037,6 +7537,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMis
 }
 
 func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t *testing.T) {
+	city := t.TempDir()
 	sp := &falseNegativeAfterStartProvider{
 		Fake:            runtime.NewFake(),
 		falseAfterStart: make(map[string]bool),
@@ -7062,12 +7563,15 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 		},
 	}
 
-	results := executePreparedStartWave(
+	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
+		city,
 		sp,
 		nil,
+		nil,
 		10*time.Second,
+		1,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
 	)
 
@@ -7081,6 +7585,7 @@ func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t 
 }
 
 func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFailure(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)}
@@ -7090,14 +7595,14 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name":         "test-agent",
-			"session_key":          "stale-key-abc",
-			"template":             "worker",
-			"state":                "active",
-			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
-			"wake_attempts":        "2",
-			"started_config_hash":  "keep-hash",
-			"continuation_command": "resume",
+			"session_name":              "test-agent",
+			"session_key":               "stale-key-abc",
+			"template":                  "worker",
+			"state":                     "active",
+			"last_woke_at":              clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":             "2",
+			"started_config_hash":       "keep-hash",
+			"test_continuation_command": "resume",
 		},
 	})
 	if err != nil {
@@ -7122,7 +7627,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
-		"",
+		city,
 		sp,
 		nil,
 		&config.City{},
@@ -7175,6 +7680,7 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 }
 
 func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *testing.T) {
+	city := t.TempDir()
 	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 12, 30, 0, 0, time.UTC)}
@@ -7215,7 +7721,7 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 	results := executePreparedStartWaveForCity(
 		context.Background(),
 		[]preparedStart{item},
-		"",
+		city,
 		sp,
 		nil,
 		&config.City{},
@@ -7355,6 +7861,7 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 		stored.Metadata["instance_token"],
 	))
 	expected.Env = mergeEnv(expected.Env, map[string]string{"GC_PROVIDER": "gemini"})
+	expected.Env = git.ApplySSHKeepaliveEnv(expected.Env)
 	expected = runtime.SyncWorkDirEnv(expected)
 
 	if !reflect.DeepEqual(prepared.cfg, expected) {
@@ -7466,8 +7973,8 @@ func TestPrepareStartCandidate_EmptyPoolBeadAliasScrubsStampedTemplateIdentity(t
 	} else if got != "" {
 		t.Fatalf("GC_ALIAS = %q, want empty because the pool alias is deferred", got)
 	}
-	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-pool-gc123" {
-		t.Fatalf("GC_AGENT = %q, want non-conflicting session name %q", got, "ants-pool-gc123")
+	if got := prepared.cfg.Env["GC_AGENT"]; got != bead.ID {
+		t.Fatalf("GC_AGENT = %q, want the unaliased pool session bead id %q", got, bead.ID)
 	}
 	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
 		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")
@@ -7967,7 +8474,7 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 		info:  sessiontest.SeedBead(t, session),
 		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
 		order: 0,
-	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}

@@ -73,12 +73,13 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 	if body.StoreHealth != nil {
 		sh := body.StoreHealth
 		view := StatusStoreHealthView{
-			Path:        sh.Path,
-			SizeBytes:   sh.SizeBytes,
-			LiveRows:    int(sh.LiveRows),
-			RatioMB:     sh.RatioMbPerRow,
-			Warning:     sh.Warning,
-			ThresholdMB: sh.ThresholdMbPerRow,
+			Path:         sh.Path,
+			SizeBytes:    sh.SizeBytes,
+			LiveRows:     int(sh.LiveRows),
+			RowsMeasured: sh.RowsMeasured,
+			RatioMB:      sh.RatioMbPerRow,
+			Warning:      sh.Warning,
+			ThresholdMB:  sh.ThresholdMbPerRow,
 		}
 		if sh.LastGcAt != nil {
 			view.LastGCAt = *sh.LastGcAt

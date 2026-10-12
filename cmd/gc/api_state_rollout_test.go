@@ -50,6 +50,77 @@ func TestNewControllerStateLatchesRolloutFlags(t *testing.T) {
 	}
 }
 
+// TestNewControllerStateLatchesNativeTransport proves the boot config's
+// beads.native_transport is resolved once and latched on the controllerState,
+// mirroring TestNewControllerStateLatchesRolloutFlags for the sibling gate.
+func TestNewControllerStateLatchesNativeTransport(t *testing.T) {
+	stubManagedDoltStoreOpeners(t)
+	dir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"off\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse([]byte(toml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := newControllerState(context.Background(), cfg, nil, nil, "t", dir)
+	if cs.nativeTransport != beads.NativeTransportOff {
+		t.Errorf("boot nativeTransport = %q, want off", cs.nativeTransport)
+	}
+}
+
+// TestControllerStateNativeTransportDoesNotFlipOnReload proves native_transport
+// is boot-latched the same way conditional_writes is (see
+// TestControllerStateRolloutDriftThroughReloadSeams): a city.toml edit that
+// changes native_transport takes effect only at the next restart, not on the
+// in-process config reload that cs.update performs. Without this, a mid-run
+// edit from "off" to "auto" (or back) would flip which store the controller's
+// city-store reopen requests for an already-running process.
+func TestControllerStateNativeTransportDoesNotFlipOnReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	rig := t.TempDir()
+	cityOf := func(nativeTransport string) *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "c"},
+			Rigs:      []config.Rig{{Name: "rig1", Path: rig}},
+			Beads:     config.BeadsConfig{NativeTransport: nativeTransport},
+		}
+	}
+
+	// Capture what newControllerStateOpenCityStore is actually CALLED WITH on
+	// every open and reopen, not only the frozen field: a regression that kept
+	// the field frozen but re-resolved the live config straight into this call
+	// (bypassing cs.nativeTransport) would still pass a field-only check.
+	var calledWith []beads.NativeTransportMode
+	prevOpen := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode, nativeTransport beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+		calledWith = append(calledWith, nativeTransport)
+		return prevOpen(cityPath, mode, nativeTransport)
+	}
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
+
+	cs := newControllerState(context.Background(), cityOf("off"), runtime.NewFake(), events.NewFake(), "c", t.TempDir())
+	if cs.nativeTransport != beads.NativeTransportOff {
+		t.Fatalf("boot latch = %q, want off", cs.nativeTransport)
+	}
+
+	// Reload via update(): on-disk flips to auto -> the latch must not move,
+	// and the reopen call itself must still be made with "off".
+	cs.update(cityOf("auto"), runtime.NewFake())
+	if cs.nativeTransport != beads.NativeTransportOff {
+		t.Errorf("update() re-latched native_transport: %q, want off", cs.nativeTransport)
+	}
+	if len(calledWith) < 2 {
+		t.Fatalf("newControllerStateOpenCityStore called %d time(s), want at least 2 (boot + reload)", len(calledWith))
+	}
+	for i, got := range calledWith {
+		if got != beads.NativeTransportOff {
+			t.Errorf("call #%d to newControllerStateOpenCityStore got nativeTransport=%q, want off every time despite the on-disk edit", i, got)
+		}
+	}
+}
+
 // TestControllerStateBootResolveErrorZeroFlags proves an out-of-enum config value
 // warns and latches the zero (degraded-safe/legacy) Flags rather than aborting
 // construction.
@@ -82,7 +153,7 @@ func TestPreflightConditionalWritesRequire(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true)
+		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true, true, nil)
 		if err != nil {
 			t.Fatalf("openStoreResultAtForCityWithMode: %v", err)
 		}
@@ -294,7 +365,7 @@ func TestConditionalWritesStatusBlock(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true)
+		result, err := openStoreResultAtForCityWithMode(dir, dir, mode, true, true, nil)
 		if err != nil {
 			t.Fatalf("openStoreResultAtForCityWithMode: %v", err)
 		}

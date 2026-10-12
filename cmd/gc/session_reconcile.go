@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -33,10 +34,12 @@ type wakeEvaluation struct {
 	Reasons []WakeReason
 	// Reason mirrors AwakeDecision.Reason on the ComputeAwakeSet bridge path.
 	// It is only actionable when Reasons contains the matching effective wake.
-	Reason           string
-	Policy           resolvedSessionSleepPolicy
-	ConfigSuppressed bool
-	HasAssignedWork  bool
+	Reason              string
+	Policy              resolvedSessionSleepPolicy
+	ConfigSuppressed    bool
+	HasAssignedWork     bool
+	AssignedWorkBeadID  string
+	AssignedWorkClaimed bool
 }
 
 const (
@@ -57,7 +60,7 @@ const (
 // (Info.HeldUntil, Info.QuarantinedUntil, Info.WaitHold — untrimmed, matching the
 // raw session.Metadata reads, Info.SessionNameMetadata, Info.ID) and route every
 // classifier through its Info twin, while keeping the runtime probes
-// (sessionAttachedForWakeReason, pendingInteractionReady) raw (§7 live edge).
+// (sessionAttachedForWakeReason, pendingInteractionProbe) raw (§7 live edge).
 func wakeReasonsInfo(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -131,7 +134,7 @@ func evaluateWakeReasonsInfo(
 		reasons = append(reasons, WakeAttached)
 	}
 
-	if pendingInteractionReady(sp, name) {
+	if answer, _ := pendingInteractionProbe(sp, name); answer == pendingInteractionYes {
 		reasons = append(reasons, WakePending)
 	}
 
@@ -205,6 +208,17 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 // derives as strings.TrimSpace(pending_create_claim) == "true" — identical to the
 // raw read), and keeps the literal "creating" state compare the original uses.
 func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
+	return sessionStartRequested(i, staleCreatingStateInfo(i, clk))
+}
+
+// sessionStartRequestedAt is sessionStartRequestedInfo at now; past the
+// creating compare, staleCreatingStateInfo is pendingCreateAttemptStale.
+func sessionStartRequestedAt(i sessionpkg.Info, now time.Time) bool {
+	return sessionStartRequested(i, pendingCreateAttemptStaleAt(i, now))
+}
+
+// sessionStartRequested composes the stale-creating answer.
+func sessionStartRequested(i sessionpkg.Info, staleCreating bool) bool {
 	if strings.TrimSpace(i.MetadataState) == string(sessionpkg.StateStartPending) {
 		return true
 	}
@@ -214,7 +228,7 @@ func sessionStartRequestedInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if strings.TrimSpace(i.MetadataState) != "creating" {
 		return false
 	}
-	return !staleCreatingStateInfo(i, clk)
+	return !staleCreating
 }
 
 // staleCreatingStateTimeout bounds how long a state=creating bead may sit
@@ -448,34 +462,40 @@ func agentTemplateIdentitiesEquivalent(cfg *config.City, a, b string) bool {
 }
 
 // healExpiredTimersInfo is the fold form of the Phase-0 timer heal: it clears expired
-// held_until / quarantined_until through the front door and returns the input
-// Info advanced by each successful clear (write-returns-Info), with NO raw
-// session.Metadata mirror. The reconciler's fold-then-build order (§2.3) applies
-// this before the infoByID snapshot is built, so the returned Info is what the
-// build projects — the mirror the raw form kept for the later re-projection is
-// therefore unnecessary here.
+// held_until / quarantined_until through the front door, in one write, and returns the
+// input Info advanced by it (write-returns-Info), with NO raw session.Metadata mirror.
+// The reconciler's fold-then-build order (§2.3) applies this before the infoByID
+// snapshot is built, so the returned Info is what the build projects.
 //
-// The hold-clear fold BEFORE the quarantine check is preserved from the raw body:
-// ClearExpiredHoldPatch can blank sleep_reason, and ClearExpiredQuarantinePatch
-// reads the post-hold sleep_reason (info.SleepReason), so the ordering is
-// load-bearing. On a persist error the segment is returned unchanged, matching the
-// raw `err == nil` mirror gate.
+// The timers are the disposition's TimerTick cell: an expired heartbeat or quarantine
+// goes, and an expired finite operator suspend goes whole (D-J 2). The lifecycle is
+// the expired-timer builders': ClearExpiredHoldPatch can blank sleep_reason, and
+// ClearExpiredQuarantinePatch reads the post-hold sleep_reason. On a persist error the
+// Info is returned unchanged, matching the raw `err == nil` mirror gate.
 func healExpiredTimersInfo(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) sessionpkg.Info {
-	if h := info.HeldUntil; h != "" {
-		if t, _ := time.Parse(time.RFC3339, h); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredHoldPatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
-			}
+	now := clk.Now()
+	expired := func(raw string) bool {
+		t, _ := time.Parse(time.RFC3339, raw)
+		return !t.IsZero() && now.After(t)
+	}
+	hold, quarantine := expired(info.HeldUntil), expired(info.QuarantinedUntil)
+	if !hold && !quarantine {
+		return info
+	}
+	batch := sessionpkg.MetadataPatch{}
+	reason := info.SleepReason
+	if hold {
+		maps.Copy(batch, sessionpkg.ClearExpiredHoldPatch(reason))
+		if r, ok := batch["sleep_reason"]; ok {
+			reason = r
 		}
 	}
-	if q := info.QuarantinedUntil; q != "" {
-		if t, _ := time.Parse(time.RFC3339, q); !t.IsZero() && clk.Now().After(t) {
-			batch := sessionpkg.ClearExpiredQuarantinePatch(info.SleepReason)
-			if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
-				info = info.ApplyPatch(batch)
-			}
-		}
+	if quarantine {
+		maps.Copy(batch, sessionpkg.ClearExpiredQuarantinePatch(reason))
+	}
+	batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvTimerTick}, now, batch)
+	if err := sessFront.ApplyPatch(info.ID, batch); err == nil {
+		info = info.ApplyPatch(batch)
 	}
 	return info
 }
@@ -502,6 +522,9 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	}
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
+	}
+	if !exitAccrualHolds(info, sessFront) {
+		return info, true
 	}
 	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 	info = clearLastWokeAt(info, sessFront)
@@ -571,6 +594,7 @@ func sessionExitFactsInfo(info sessionpkg.Info, cfg *config.City, alive bool, dt
 		DrainPending:               dt != nil && dt.get(info.ID) != nil,
 		PendingCreateClaim:         info.PendingCreateClaim,
 		PendingCreateStartInFlight: pendingCreateStartInFlightInfo(info, clk, startupTimeout),
+		StartUncommitted:           strings.TrimSpace(info.PendingCreateStartedAt) != "",
 		SleepReason:                info.SleepReason,
 		LastWokeAt:                 info.LastWokeAt,
 		Now:                        clk.Now(),
@@ -596,13 +620,34 @@ func clearLastWokeAt(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionp
 // Step 6d, write-returns-Info); returns (info unchanged, err) on persist failure
 // (ApplyPatchInfo leaves the snapshot pinned to the rejected write).
 func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, error) {
-	batch := sessionpkg.RateLimitQuarantinePatch(clk.Now().Add(defaultRateLimitQuarantineDuration))
+	now := clk.Now()
+	batch := sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine, Until: now.Add(defaultRateLimitQuarantineDuration)}, now, sessionpkg.RateLimitQuarantinePatch())
 	next, err := sessFront.ApplyPatchInfo(info, batch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "recordRateLimitQuarantine: SetMetadataBatch %s: %v\n", info.ID, err) //nolint:errcheck
 		return info, err
 	}
 	return next, nil
+}
+
+// providerTerminalErrorPatch is the terminal-provider-error health/sleep
+// metadata batch. markProviderTerminalError applies it directly; the fenced
+// pending-create rollback (rollbackPendingCreateMarkingTerminal) instead folds
+// this same batch into its rollback Tx, so the terminal mark rides the same
+// fence as the failed-create close rather than preceding it (ga-z8yi2j).
+func providerTerminalErrorPatch(reason string, now time.Time) map[string]string {
+	return map[string]string{
+		"state":                                 string(sessionpkg.StateAsleep),
+		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
+		"last_woke_at":                          "",
+		"pending_create_claim":                  "",
+		"pending_create_started_at":             "",
+		sessionHealthStateMetadataKey:           "unhealthy",
+		sessionHealthReasonMetadataKey:          reason,
+		sessionDrainableMetadataKey:             boolMetadata(true),
+		sessionProviderTerminalErrorMetadataKey: reason,
+		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
+	}
 }
 
 // markProviderTerminalError records the terminal-provider-error health/sleep
@@ -624,19 +669,7 @@ func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store
 	if clk != nil {
 		now = clk.Now().UTC()
 	}
-	batch := map[string]string{
-		"state":                                 string(sessionpkg.StateAsleep),
-		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
-		"last_woke_at":                          "",
-		"pending_create_claim":                  "",
-		"pending_create_started_at":             "",
-		sessionHealthStateMetadataKey:           "unhealthy",
-		sessionHealthReasonMetadataKey:          reason,
-		sessionDrainableMetadataKey:             boolMetadata(true),
-		sessionProviderTerminalErrorMetadataKey: reason,
-		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
-	}
-	return sessFront.ApplyPatchInfo(info, batch)
+	return sessFront.ApplyPatchInfo(info, providerTerminalErrorPatch(reason, now))
 }
 
 // sessionHasProviderTerminalErrorInfo reads the typed health/terminal-error
@@ -713,7 +746,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	}
 	accrual := sessionpkg.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.PatchFor(info, clk.Now())); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 			info = next
 		}
@@ -730,14 +763,15 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 // migration Step 6d), or the input Info unchanged when there is nothing to clear
 // (both fields already absent/zero) or the persist failed.
 func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessionpkg.Info {
-	batch := make(map[string]string, 2)
+	batch := make(sessionpkg.MetadataPatch, 2)
 	// WakeAttemptsMetadata (the raw string mirror), not the parsed WakeAttempts int:
 	// the != "0" distinction distinguishes an absent counter from a persisted "0".
 	if info.WakeAttemptsMetadata != "" && info.WakeAttemptsMetadata != "0" {
 		batch["wake_attempts"] = "0"
 	}
 	if info.QuarantinedUntil != "" {
-		batch["quarantined_until"] = ""
+		// The Quarantine cell with no deadline: the quarantine ends.
+		batch = sessionpkg.CellIntoInfo(info, sessionpkg.ActorController, sessionpkg.DispEvent{Kind: sessionpkg.EvQuarantine}, time.Time{}, batch)
 	}
 	if len(batch) == 0 {
 		return info
@@ -762,6 +796,9 @@ func clearWakeFailures(info sessionpkg.Info, sessFront *sessionpkg.Store) sessio
 func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTracker, sessFront *sessionpkg.Store, clk clock.Clock) (sessionpkg.Info, bool) {
 	switch sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) {
 	case sessionpkg.ExitChurn:
+		if !exitAccrualHolds(info, sessFront) {
+			return info, true
+		}
 		info = recordChurn(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
 		// Clear last_woke_at so this death is not re-counted next tick
 		// (edge-triggered, same pattern as checkStability).
@@ -775,6 +812,18 @@ func checkChurn(info sessionpkg.Info, cfg *config.City, alive bool, dt *drainTra
 		// Rapid crashes belong to checkStability, which ran first.
 		return info, false
 	}
+}
+
+// exitAccrualHolds reports whether the row, read fresh, still carries the
+// facts a rapid-crash or churn accrual was decided on (CONTRACT §12.5: a
+// destructive decision decides on a fresh read). A tick's snapshot read before
+// an operator's `gc session kill` still names the killed wake, and the dead
+// runtime it then observes is the kill, not a crash: accruing it would count
+// the operator's kill against the session (mc-uhvqj). A moved row, or a failed
+// read, accrues nothing; the next tick decides again.
+func exitAccrualHolds(info sessionpkg.Info, sessFront *sessionpkg.Store) bool {
+	held, err := sessFront.Holds(sessionpkg.Decide(info, sessionpkg.FactsLegacyExitAccrual))
+	return err == nil && held
 }
 
 func isDeliberateSleepReason(reason string) bool {
@@ -809,7 +858,7 @@ func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Cl
 
 	accrual := sessionpkg.ChurnAccrualPatch(count, defaultMaxChurnCycles, clk.Now().Add(defaultQuarantineDuration))
 	if accrual.Quarantined {
-		if next, err := sessFront.ApplyPatchInfo(info, accrual.Patch); err == nil {
+		if next, err := sessFront.ApplyPatchInfo(info, accrual.PatchFor(info, clk.Now())); err == nil {
 			telemetry.RecordAgentQuarantine(context.Background(), agentIdentity)
 			info = next
 		}
@@ -1027,7 +1076,21 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 
 // healStateWithRollbackInfo computes and persists an advisory-state heal.
 // Callers may fold the returned patch only when err is nil; an error leaves
-// their current projection authoritative for the rest of the pass.
+// their current projection authoritative for the rest of the pass. A nil patch
+// with a nil error means nothing was written: the heal was already converged,
+// or the row changed under it (below).
+//
+// The heal is decided from info, the reconciler's tick snapshot, which can be
+// older than the durable row. Writing it unconditionally was a lost update: a
+// `gc session suspend` (state=suspended, sleep_intent=user-hold, held_until)
+// that landed after the snapshot was read got its state reverted by a heal that
+// never saw it, and a close that landed meanwhile got live-looking state stamped
+// onto the closed row. The write therefore goes through
+// ApplyPatchIfLifecycleUnchanged: it re-reads the row, refuses when its
+// lifecycle facts no longer match the snapshot, and fences the write on the
+// re-read revision where the store has conditional writes. A refused heal is
+// skipped rather than retried. The heal is level-triggered, so the next tick
+// recomputes it from a snapshot that includes the concurrent write.
 func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, sessFront *sessionpkg.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) (map[string]string, error) {
 	// Closed beads are terminal; their advisory state metadata should not move
 	// (matches healStateWithRollback's session.Status == "closed" guard —
@@ -1039,14 +1102,13 @@ func healStateWithRollbackInfo(info sessionpkg.Info, alive bool, observed bool, 
 	if len(batch) == 0 {
 		return nil, nil
 	}
-	if err := sessFront.ApplyPatch(info.ID, batch); err != nil {
+	applied, err := sessFront.ApplyPatchIfLifecycleUnchanged(info, batch)
+	if err != nil {
 		return nil, err
 	}
-	// S19 Stage 3 shadow: record the legacy compared-key writes this heal ACTUALLY
-	// applied (no-op unless the shadow harness is enabled). Colocated with the
-	// ApplyPatch so a pure builder (healStatePatchWithRollbackInfo) invoked only for
-	// inspection never records a write that never happened.
-	recordLegacyCompareWrites(info.ID, "healStateWithRollback", batch)
+	if !applied {
+		return nil, nil
+	}
 	return batch, nil
 }
 
@@ -1105,7 +1167,11 @@ func pendingCreateAttemptStaleInfo(i sessionpkg.Info, clk clock.Clock) bool {
 	if clk == nil {
 		return false
 	}
-	now := clk.Now()
+	return pendingCreateAttemptStaleAt(i, clk.Now())
+}
+
+// pendingCreateAttemptStaleAt is pendingCreateAttemptStaleInfo at now.
+func pendingCreateAttemptStaleAt(i sessionpkg.Info, now time.Time) bool {
 	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}

@@ -150,20 +150,20 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // probe their real on-disk location even when given only a partial configured
 // search root.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
-	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !ProviderHasKeyedTranscript(provider) {
 		return false, false
 	}
 	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
 }
 
-// providerHasKeyedTranscript reports whether the provider family can use keyed
+// ProviderHasKeyedTranscript reports whether the provider family can use keyed
 // transcript absence as a stale-resume signal. This is stricter than
 // SupportsIDLookup, which only answers whether transcript display lookup can
 // use a provider session id. Here we only claim a provider when its keyed
 // transcript absence is meaningful for resume-key invalidation, so the
 // stale-resume guard never clears a resume key for a provider whose restart
-// semantics we have not verified.
-func providerHasKeyedTranscript(provider string) bool {
+// semantics we have not verified. It is pure: it reads only the name.
+func ProviderHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
 	case "copilot", "kiro", "kimi", "pi", "antigravity":
 		return true
@@ -174,17 +174,19 @@ func providerHasKeyedTranscript(provider string) bool {
 }
 
 // DiscoverScopedPath resolves a transcript for families whose on-disk layout is
-// keyed by the session's own name and conversation epoch rather than by any
-// session id gc holds.
+// keyed by the session's own identity — name, bead id and conversation epoch —
+// rather than by any provider session id gc holds.
 //
 // Only zcode qualifies today: gc never learns its provider session id, so
 // DiscoverKeyedPath cannot hit, but the adapter names its mirror directory
-// from GC_SESSION_NAME and GC_CONTINUATION_EPOCH — both persisted on the
-// session bead. Returns "" for every other family, so callers can try it
-// unconditionally.
-func DiscoverScopedPath(searchPaths []string, provider, workDir, sessionName, continuationEpoch string) string {
+// from GC_SESSION_NAME, GC_SESSION_ID and GC_CONTINUATION_EPOCH — all
+// persisted on the session bead. The bead id is what tells two seats sharing
+// a session name apart; a mirror written by an adapter that had no bead id is
+// still found under the name-only scope. Returns "" for every other family,
+// so callers can try it unconditionally.
+func DiscoverScopedPath(searchPaths []string, provider, workDir, sessionName, sessionBeadID, continuationEpoch string) string {
 	if sessionlog.ProviderFamily(provider) != "zcode" {
 		return ""
 	}
-	return sessionlog.FindZCodeSessionFileByScope(searchPaths, workDir, sessionName, continuationEpoch)
+	return sessionlog.FindZCodeSessionFileByScope(searchPaths, workDir, sessionName, sessionBeadID, continuationEpoch)
 }

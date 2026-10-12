@@ -20,8 +20,8 @@ package storeref
 import (
 	"sort"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
@@ -34,12 +34,28 @@ import (
 // to correct for.
 type BindingOptions struct {
 	// Relics answers the boot census's question for a binding store: does it
-	// still hold OPEN beads minted outside the reserved namespace?
+	// hold any bead, open or closed, minted outside the reserved namespace?
 	//
 	// Nil means there is no census to ask, and the answer is true for every
 	// store. A caller that censused nothing has cleared nothing, and only
 	// "known to hold none" may retire a probe.
 	Relics func(beads.Store) bool
+
+	// KnownRelics answers the same question from a census the CALLING PLANE
+	// ran, keyed by the binding's ref rather than by its store: did that census
+	// prove this binding holds a bead outside its reserved namespaces?
+	//
+	// It is separate from Relics because it survives a boot that cannot read
+	// the binding at all — the refused city, where the live census has no store
+	// to ask and every answer falls back to the pessimistic default. The plane
+	// supplies a verdict it took itself, at the time it asks, against a handle
+	// it opened for the read; this is deliberately NOT a durable record — a
+	// status file this codebase does not keep, and one that could not replace
+	// the census anyway (cmd/gc/by_id_relic_proof.go argues that at length). A
+	// ref the census does not name is "not known", so nil means "no census to
+	// ask" and the answer is false for every binding: this bit is evidence, and
+	// its absence must never be read as proof.
+	KnownRelics func(StoreRef) bool
 
 	// CompleteClasses rounds an observed class set up to include classes the
 	// calling plane cannot see a store for.
@@ -74,17 +90,23 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 			classes = opts.CompleteClasses(classes)
 		}
 		prefixes := ReservedPrefixesFor(classes)
+		ref := ClassRef(classes)
+		known := knownLegacyResidents(opts.KnownRelics, ref)
 		bindings = append(bindings, ClassBinding{
 			Classes:  classes,
 			Prefixes: prefixes,
-			Leg:      Leg{Ref: ClassRef(classes), Store: store},
+			Leg:      Leg{Ref: ref, Store: store},
 			// Both bits are observations, and neither is ever optimistic by
 			// default: the mint bit comes from the store's own declaration, so
 			// a store that declares nothing reports false, and the relic bit
 			// comes from a census that was actually run, so a binding no census
 			// reached still has relics as far as this build knows.
-			MintsReserved:      MintsInsideNamespace(store, prefixes),
-			HasLegacyResidents: hasLegacyResidents(opts.Relics, store),
+			MintsReserved: MintsInsideNamespace(store, prefixes),
+			// Proof implies the pessimistic bit, so the two cannot disagree —
+			// a live census that answered "clean" on a binding a durable record
+			// says is dirty is a census that could not read it.
+			HasLegacyResidents:   known || hasLegacyResidents(opts.Relics, store),
+			KnownLegacyResidents: known,
 		})
 		if refusing, ok := store.(RefusingStore); ok && refused == nil {
 			refused = refusing.StorageRefusal()
@@ -92,6 +114,24 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 	}
 	sort.SliceStable(bindings, func(i, j int) bool { return bindings[i].Leg.Ref < bindings[j].Leg.Ref })
 	return bindings, refused
+}
+
+// BuildBinding is BuildBindings for a plane that holds exactly ONE opened class
+// store and no grouping to derive: a drain framing its own ambient store, a
+// claim route constructed over a bare store.
+//
+// The grouping is trivial there, and both callers were writing it out — the
+// one-element order slice and the one-entry map — which is a store list
+// assembled outside the resolver for no reason other than to hand it straight
+// back. Assembling it here instead keeps every leg list in the package that
+// owns leg order, and the two callers cannot drift apart over what a one-store
+// grouping looks like.
+//
+// It is a shape, not a policy: opts still says what evidence the caller has,
+// and a caller with none passes the zero value and gets the pessimistic
+// bindings that entitles it to.
+func BuildBinding(store beads.Store, classes []coordclass.Class, opts BindingOptions) ([]ClassBinding, error) {
+	return BuildBindings([]beads.Store{store}, map[beads.Store][]coordclass.Class{store: classes}, opts)
 }
 
 // ReservedPrefixesFor returns the reserved id namespaces a class set HOLDS —
@@ -104,7 +144,7 @@ func BuildBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Cla
 func ReservedPrefixesFor(classes []coordclass.Class) []string {
 	prefixes := make([]string, 0, len(classes))
 	for _, class := range classes {
-		prefixes = append(prefixes, config.ReservedClassPrefixesFor(class.String())...)
+		prefixes = append(prefixes, beadmeta.ReservedClassPrefixesFor(class.String())...)
 	}
 	return prefixes
 }
@@ -116,4 +156,15 @@ func hasLegacyResidents(relics func(beads.Store) bool, store beads.Store) bool {
 		return true
 	}
 	return relics(store)
+}
+
+// knownLegacyResidents applies the durable record, or false when there is none
+// to ask. The default is the opposite of hasLegacyResidents's for the same
+// reason it is safe: this bit only ever DENIES an answer, so an unknown must
+// never assert it.
+func knownLegacyResidents(known func(StoreRef) bool, ref StoreRef) bool {
+	if known == nil {
+		return false
+	}
+	return known(ref)
 }

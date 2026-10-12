@@ -48,6 +48,12 @@ type Doctor struct {
 	// unconfirmed remediation. Call Wait before releasing resources that a
 	// timed execution may still be using.
 	CheckTimeout time.Duration
+	// BeforeFix, when set, is called before each --fix remediation and again
+	// before the re-run that verifies it. A caller that shares reads across
+	// the checks of one run (gc doctor's per-run bd read memo) drops them
+	// here, so neither the fix nor its verification is answered from data
+	// read before the fix changed it.
+	BeforeFix func()
 }
 
 // Register adds a check to the doctor's check list.
@@ -223,6 +229,7 @@ func runFixRecoveringPanic(c Check, ctx *CheckContext) (err error) {
 // gc doctor --fix cannot hang on a wedged remediation, while the fix still runs
 // to completion in the background rather than being interrupted mid-mutation.
 func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*CheckResult, bool) {
+	d.beforeFix()
 	switch err := d.boundedFix(c, ctx); {
 	case errors.Is(err, errFixTimedOut):
 		res.FixAttempted = true
@@ -237,6 +244,7 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 	// A check that fails fast, fixes fast, then wedges on this verification
 	// would otherwise hang gc doctor --fix — re-opening the very failure mode
 	// the per-check timeout closes.
+	d.beforeFix()
 	verified := d.boundedRun(c, ctx)
 	if verified.Status == StatusOK {
 		verified.Fixed = true
@@ -244,6 +252,12 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 		verified.FixAttempted = true
 	}
 	return verified, false
+}
+
+func (d *Doctor) beforeFix() {
+	if d.BeforeFix != nil {
+		d.BeforeFix()
+	}
 }
 
 // boundedFix runs a check's Fix under the doctor's per-check timeout using the

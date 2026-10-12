@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // fakeExecutor captures tmux command arguments for unit testing.
@@ -385,7 +388,7 @@ func TestIsSessionRunningFalseWhenPaneDead(t *testing.T) {
 	}
 	want := [][]string{
 		{"-u", "-L", "x", "has-session", "-t", "=runner"},
-		{"-u", "-L", "x", "display-message", "-t", "runner:^.0", "-p", "#{pane_dead}"},
+		{"-u", "-L", "x", "display-message", "-t", "=runner:^.0", "-p", "#{pane_dead}"},
 	}
 	for i := range want {
 		if len(fe.calls[i]) != len(want[i]) {
@@ -429,7 +432,7 @@ func TestProviderIsDeadRuntimeSessionRequiresEveryPaneDead(t *testing.T) {
 	if len(fe.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(fe.calls))
 	}
-	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner", "-F", "#{pane_dead}"}
+	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner:", "-F", "#{pane_dead}"}
 	if len(fe.calls[0]) != len(want) {
 		t.Fatalf("call = %v, want %v", fe.calls[0], want)
 	}
@@ -490,7 +493,7 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 		t.Fatal("expected capture-pane call")
 	}
 	got := fe.calls[0]
-	want := []string{"-u", "capture-pane", "-p", "-t", "mayor", "-S", "-120"}
+	want := []string{"-u", "capture-pane", "-p", "-t", "=mayor:", "-S", "-120"}
 	if len(got) != len(want) {
 		t.Fatalf("first call = %v, want %v", got, want)
 	}
@@ -527,7 +530,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	}
 
 	setEnv := strings.Join(exec.calls[0], " ")
-	if !strings.Contains(setEnv, "set-environment -t gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
+	if !strings.Contains(setEnv, "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
 		t.Errorf("first call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
 	}
 	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
@@ -562,7 +565,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		}
 		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
 			setEnv := strings.Join(exec.calls[i], " ")
-			if !strings.Contains(setEnv, "set-environment -t gc-test-beads-pin -r "+key) {
+			if !strings.Contains(setEnv, "set-environment -t =gc-test-beads-pin -r "+key) {
 				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
 			}
 		}
@@ -689,5 +692,85 @@ func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testi
 	}
 	if !marked {
 		t.Errorf("new-session never marked GC_CONTROLLER_TOKEN removed from the session env; the first respawn would leak it: %v", exec.calls)
+	}
+}
+
+// TestNewTmuxCommandBoundsPipeWait pins the WaitDelay on every real tmux
+// subprocess. The hang it bounds needs a stopped tmux server holding the
+// client's stdio (passed over SCM_RIGHTS), which the executor seam cannot
+// model: it replaces the exec.Cmd entirely. So this checks the construction
+// both real executor paths share, without starting a process.
+func TestNewTmuxCommandBoundsPipeWait(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newTmuxCommand(context.Background(), []string{"-u", "list-panes", "-a"}, &stdout, &stderr)
+	if cmd.WaitDelay != tmuxWaitDelay || tmuxWaitDelay <= 0 {
+		t.Fatalf("WaitDelay = %v, want tmuxWaitDelay (%v) > 0", cmd.WaitDelay, tmuxWaitDelay)
+	}
+	if tmuxWaitDelay > fetchTimeout {
+		t.Fatalf("tmuxWaitDelay = %v, want <= fetchTimeout (%v)", tmuxWaitDelay, fetchTimeout)
+	}
+	if cmd.Stdout != &stdout || cmd.Stderr != &stderr {
+		t.Fatal("tmux command does not capture stdout and stderr into the given buffers")
+	}
+	if !slices.Equal(cmd.Args[1:], []string{"-u", "list-panes", "-a"}) {
+		t.Fatalf("args = %q, want the tmux argv unchanged", cmd.Args)
+	}
+}
+
+// TestSnapshotIdleSeparatesBusyFromIndeterminate pins the readings of the pane
+// scan behind SnapshotIdle. Only a visible busy indicator is (false, nil). A
+// capture showing neither it nor a ready prompt is
+// runtime.ErrIdleIndeterminate: an idle TUI does not repaint a prompt that a
+// broadcast message or an alternate screen displaced, so callers that hold on
+// busy must not read that pane as busy.
+func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
+	errCapture := errors.New("capture-pane failed")
+	for _, tc := range []struct {
+		name              string
+		pane              string
+		captureErr        error
+		wantIdle          bool
+		wantIndeterminate bool
+	}{
+		{name: "ready prompt", pane: "● Done.\n\n❯ \n  ? for shortcuts", wantIdle: true},
+		{name: "busy indicator over a visible prompt", pane: "❯ \n  esc to interrupt"},
+		{name: "busy spinner", pane: "✻ Thinking… (12s · ↓ 1.2k tokens)"},
+		{
+			name:              "prompt displaced by a broadcast",
+			pane:              "Broadcast message from root@host (somewhere) (Wed Oct  8 18:00:01 2026):\n\nDISK ALERT: /data at 91% used",
+			wantIndeterminate: true,
+		},
+		{name: "empty capture", wantIndeterminate: true},
+		{name: "capture failure", captureErr: errCapture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{
+				// show-environment finds no configured prefix, so the scan
+				// looks for DefaultReadyPromptPrefix.
+				outs: []string{"", tc.pane},
+				errs: []error{errors.New("unknown variable: GC_READY_PROMPT_PREFIX"), tc.captureErr},
+			}
+			tm := &Tmux{cfg: Config{SocketName: "x"}, exec: fe}
+
+			idle, err := tm.SnapshotIdle("sess")
+
+			if len(fe.calls) != 2 || !slices.Contains(fe.calls[1], "capture-pane") {
+				t.Fatalf("tmux calls = %q, want show-environment then one capture-pane", fe.calls)
+			}
+			if idle != tc.wantIdle {
+				t.Errorf("idle = %t, want %t", idle, tc.wantIdle)
+			}
+			if got := errors.Is(err, runtime.ErrIdleIndeterminate); got != tc.wantIndeterminate {
+				t.Errorf("errors.Is(err, ErrIdleIndeterminate) = %t, want %t (err = %v)", got, tc.wantIndeterminate, err)
+			}
+			switch {
+			case tc.captureErr != nil:
+				if !errors.Is(err, tc.captureErr) {
+					t.Errorf("err = %v, want the capture error %v", err, tc.captureErr)
+				}
+			case !tc.wantIndeterminate && err != nil:
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }

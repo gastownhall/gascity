@@ -22,6 +22,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type partialListDoctorProvider struct {
@@ -913,6 +915,46 @@ func TestZombieSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// A zombie whose tmux server dies between Fix's observation and its Stop is
+// gone, which is all Fix is for; a stop that failed to remove the session is
+// still reported, even when a missing-server answer is joined beside it.
+func TestZombieSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate zombie: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session zombie: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "zombie", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.Zombies["zombie"] = true
+			sp.StopErrors["zombie"] = tc.stopErr
+
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "zombie", ProcessNames: []string{"claude"}}},
+			}
+			err := NewZombieSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for a zombie already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "zombie"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "zombie", n)
+			}
+		})
+	}
+}
+
 // TestZombieSessionsCheck_FixSkipsWhenControllerRunning is required by
 // ga-bq9vdi (GH#5742): ZombieSessionsCheck.Fix() kills sessions via the raw
 // runtime.Provider with neither fence engdocs/design/session-store-fences.md
@@ -1092,6 +1134,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+// An orphan whose tmux server dies between Fix's listing and its Stop is gone,
+// which is all Fix is for; a stop that failed to remove the session is still
+// reported, even when a missing-server answer is joined beside it.
+func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(t *testing.T) {
+	stopFailed := errors.New("terminate orphan: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session stale-worker: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.StopErrors["stale-worker"] = tc.stopErr
+
+			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Fix() error = %v, want it to report %v", err, tc.wantErr)
+			}
+			if n := sp.CountCalls("Stop", "stale-worker"); n != 1 {
+				t.Errorf("Stop(%q) called %d times, want 1", "stale-worker", n)
+			}
+		})
 	}
 }
 
@@ -1742,6 +1821,19 @@ func (s *spyPingStore) Ping() error {
 
 // --- DoltServerCheck ---
 
+// listenLoopbackPort opens a loopback listener for the duration of the test and
+// returns its port. Doctor's verdict on a Dolt endpoint is a dial, so a fixture
+// that wants to be believed needs something actually accepting connections.
+func listenLoopbackPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+}
+
 func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 	fs := fsys.OSFS{}
@@ -1752,12 +1844,7 @@ func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	})
 	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	port := listenLoopbackPort(t)
 	writeDoctorRuntimeState(t, fs, dir, port)
 
 	c := NewDoltServerCheck(dir, false)
@@ -1767,6 +1854,123 @@ func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
 		t.Fatalf("message = %q, want runtime port %s", r.Message, port)
+	}
+}
+
+// socketCityDir returns a city root short enough that a Unix socket created
+// inside it stays under the platform sun_path limit. t.TempDir() is not: on
+// macOS it lands under /var/folders/<...>/T/<TestName><digits>/001, which spends
+// well past the 104-byte limit before the socket name is even appended, and
+// net.Listen then fails with "bind: invalid argument".
+func socketCityDir(t *testing.T) string {
+	t.Helper()
+	return testutil.ShortTempDir(t, "gc-doctor-")
+}
+
+func TestDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
+	dir := socketCityDir(t)
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	// metadata.json is the mode authority, so the fixture has to say proxied
+	// there — matching TestDoltServerCheck_ProxiedSidecarTCPReachable. The old
+	// writeDoctorCanonicalMetadata pinned dolt_mode "server" and only passed
+	// while config.yaml could shadow it.
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	sock := filepath.Join(dir, "dolt.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(sock) })
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(fmt.Sprintf(`{"external":{"socket":%q}}`, sock)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, sock) {
+		t.Fatalf("status=%d msg=%q, want reachable Unix endpoint %s", r.Status, r.Message, sock)
+	}
+}
+
+func TestDoltServerCheck_ProxiedSidecarTCPReachable(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	port := listenLoopbackPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	writeDoctorSidecar(t, dir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%s}}`, port))
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr) {
+		t.Fatalf("status=%d msg=%q, want reachable TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_ProxiedSidecarTCPReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, DoltMode: "proxied-server", DoltHost: "127.0.0.1", DoltPort: "1"})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	port := listenLoopbackPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%s}}`, port))
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr) {
+		t.Fatalf("status=%d msg=%q, want reachable rig TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_InheritedProxiedSidecarTCPReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		DoltHost:       "city-db.example",
+		DoltPort:       "3307",
+	})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		DoltMode:       "proxied-server",
+		DoltHost:       "city-db.example",
+		DoltPort:       "3307",
+	})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	port := listenLoopbackPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%s}}`, port))
+
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr) {
+		t.Fatalf("status=%d msg=%q, want inherited external TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
+	cityDir := socketCityDir(t)
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, DoltMode: "proxied-server", DoltHost: "127.0.0.1", DoltPort: "1"})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	socket := filepath.Join(rigDir, "dolt.sock")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"socket":%q}}`, socket))
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable rig Unix endpoint %s", r.Status, r.Message, socket)
 	}
 }
 
@@ -1813,12 +2017,7 @@ func TestDoltServerCheck_ManagedCityRejectsInvalidRuntimeStateEvenWhenPortReacha
 	})
 	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	port := listenLoopbackPort(t)
 	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
 	if err := fs.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2067,6 +2266,29 @@ func TestRigDoltServerCheck_ExplicitRigReachable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
 		t.Fatalf("message = %q, want reachable explicit rig target", r.Message)
+	}
+}
+
+func TestRigDoltServerCheck_ExplicitRigUnixSocketReachable(t *testing.T) {
+	cityDir := socketCityDir(t)
+	rigDir := filepath.Join(cityDir, "demo")
+	socket := filepath.Join(rigDir, "dolt.socket")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, EndpointStatus: contract.EndpointStatusVerified, DoltSocket: socket})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable unix socket", r.Status, r.Message)
 	}
 }
 
@@ -2373,6 +2595,27 @@ func writeDoctorCanonicalMetadata(t *testing.T, fs fsys.FS, dir, db string) {
 	}
 }
 
+func writeDoctorProxiedMetadata(t *testing.T, dir, db string) {
+	t.Helper()
+	fs := fsys.OSFS{}
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeDoctorSidecar(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+//nolint:unparam // helper keeps FS explicit in tests
 func writeDoctorRuntimeState(t *testing.T, fs fsys.FS, dir, port string) {
 	t.Helper()
 	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
@@ -2725,6 +2968,7 @@ func setupManagedDoltCity(t *testing.T) string {
 	t.Helper()
 	t.Setenv("GC_DOLT_DATA_DIR", "")
 	t.Setenv("GC_DOLT_CONFIG_FILE", "")
+	t.Setenv("GC_DOLT_LOG_FILE", "")
 	const db = "hq"
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -2740,12 +2984,7 @@ func setupManagedDoltCity(t *testing.T) string {
 
 	// Provide a reachable runtime state so ResolveDoltConnectionTarget
 	// returns a valid target.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	port := listenLoopbackPort(t)
 	writeDoctorRuntimeState(t, fs, dir, port)
 	return dir
 }

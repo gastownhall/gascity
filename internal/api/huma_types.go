@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 )
 
@@ -217,6 +218,10 @@ type StatusWorkCounts struct {
 	InProgress int `json:"in_progress" doc:"Number of in-progress work items."`
 	Ready      int `json:"ready" doc:"Number of ready work items."`
 	Open       int `json:"open" doc:"Number of open work items."`
+	// SuspendedRigsExcluded counts the rigs these counts leave out: a
+	// suspended rig's store is not read, because a read restarts its retired
+	// bd proxy.
+	SuspendedRigsExcluded int `json:"suspended_rigs_excluded,omitempty" doc:"Number of suspended rigs left out of these counts: a suspended rig's store is not read."`
 }
 
 // StatusMailCounts holds mail counts for the status endpoint.
@@ -236,6 +241,7 @@ type StatusMailCounts struct {
 // sentinels in their originating package and matched here.
 func mutationError(err error) error {
 	msg := err.Error()
+	var providerCatalogErr *config.ProviderCatalogError
 	switch {
 	case errors.Is(err, configedit.ErrNotFound):
 		return huma.Error404NotFound(msg)
@@ -244,6 +250,14 @@ func mutationError(err error) error {
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
+		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrPatchTargetNotFound):
+		// A patch named a target absent from the merged config; the edit was
+		// rolled back, so this is the client's error.
+		return huma.Error400BadRequest(msg)
+	case errors.As(err, &providerCatalogErr):
+		// The edit referenced a provider the city's catalog does not define;
+		// the config was rolled back, so this is the client's error.
 		return huma.Error400BadRequest(msg)
 	default:
 		return huma.Error500InternalServerError(msg)

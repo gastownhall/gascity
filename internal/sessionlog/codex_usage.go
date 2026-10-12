@@ -259,11 +259,15 @@ func boundedContextPercentage(inputTokens, contextWindow int) int {
 // CLI produces collapse to a single entry (the last observed wins, except a
 // first-observed non-empty Model is kept — a duplicate re-emitted after a
 // model-switching turn_context must not relabel the invocation), and
-// EntryUUID is the line timestamp. token_count lines with null info
-// (rate-limit-only refreshes) and all-zero per-call usage are skipped;
-// malformed lines are tolerated silently. The scan window is the last
-// tailChunkSize bytes, so usage that scrolled past the window is not
-// returned.
+// EntryUUID is the line timestamp, refreshed by the collapse to the last
+// duplicate's. Timestamp is that line timestamp parsed (RFC3339Nano, falling
+// back to RFC3339) — zero when unparseable — but it keeps the FIRST observed
+// line's time across a collapse: the re-emission replays a completed
+// invocation under the next turn_context, so the first line is when the
+// invocation actually ran. token_count lines with null info (rate-limit-only
+// refreshes) and all-zero per-call usage are skipped; malformed lines are
+// tolerated silently. The scan window is the last tailChunkSize bytes, so
+// usage that scrolled past the window is not returned.
 func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -330,6 +334,13 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 			if usages[i].Model != "" {
 				u.Model = usages[i].Model
 			}
+			// The re-emission is the prior turn's snapshot replayed under the
+			// NEXT turn_context, so the first line's time is when the
+			// invocation actually completed. EntryUUID stays last-wins
+			// (pinned by TestExtractCodexTailUsageDuplicateKeepsFirstModel).
+			if !usages[i].Timestamp.IsZero() {
+				u.Timestamp = usages[i].Timestamp
+			}
 			usages[i] = u
 			continue
 		}
@@ -365,6 +376,7 @@ func codexTokenCountUsage(entry codexRawEntry, payload codexUsagePayload, model 
 		ReasoningTokens:     last.ReasoningOutputTokens,
 		CacheReadTokens:     last.CachedInputTokens,
 		ContextWindowTokens: contextWindowTokens,
+		Timestamp:           parseCodexSessionTime(entry.Timestamp),
 	}
 	if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.ReasoningTokens <= 0 && u.CacheReadTokens <= 0 {
 		return TailUsage{}, false

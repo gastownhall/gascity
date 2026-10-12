@@ -71,7 +71,7 @@ import (
 //     store instead of replacing it).
 //   - CLOSED by S2 — I5's release-tier gap. Crash recovery, the retired-session
 //     sweep, `gc session close` and drain-ack all resolve the same leg set from
-//     the city's routes (assignedWorkSweepPlan), so a class-routed claim is
+//     the city's routes (workLegsFromCensus), so a class-routed claim is
 //     released by the same pass that releases a work-store one. What remains
 //     open there is ga-zp3uj, named in I5's own text: the AGENT-SIDE recovery
 //     tiers are raw bd commands in a work directory and stay topology-blind.
@@ -187,7 +187,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil, nil)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -336,6 +336,8 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,
+		nil,
+		nil, nil,
 	)
 	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))
@@ -1011,14 +1013,26 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 	}
 	classResident := e.mintWispWith(t, wispOpts{title: "hook-claim routed graph step"})
 
-	// The migration copy: a WORK-shaped id live in both stores. The class leaf
-	// models SQLite, which accepts a foreign-prefix pinned id and records the
-	// residence violation instead of refusing, so the fixture claims the record.
-	if _, err := e.class.Create(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
+	// The migration copy: a WORK-shaped id live in both stores. It is staged
+	// through the SAME door `gc storage migrate` uses — beads.ForeignIDCreator,
+	// the forced create — because the class binding is fenced to the namespaces
+	// it claims and a plain Create of a work id is refused. That refusal is the
+	// point of the fence; the migration copy is the one sanctioned way past it,
+	// which is exactly why the co-resident steady state this pins can exist at
+	// all.
+	creator, ok := e.class.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("the class store %T is not a beads.ForeignIDCreator; the migration copy has no door and the co-resident state below cannot be staged the way production reaches it", e.class)
+	}
+	if _, err := creator.CreateWithForeignID(beads.Bead{ID: workBeadID, Title: "migrated copy of a work bead", Type: "task"}); err != nil {
 		t.Fatalf("staging the co-resident migration copy of %s in the class store: %v", workBeadID, err)
 	}
-	if violations := splittest.TakeResidenceViolations(e.class); len(violations) == 0 {
-		t.Fatal("class store recorded no residence violation for the co-resident work id; the SQLite-semantics leaf is not modeling the migrated steady state")
+	// Read the copy back. The staging is what MAKES the last row co-resident, and
+	// a CreateWithForeignID that returned nil and wrote nothing would leave the
+	// row a byte-identical rerun of the work-only row above it — still green,
+	// still claiming to pin the tie-break, and pinning nothing.
+	if _, err := e.class.Get(workBeadID); err != nil {
+		t.Fatalf("the staged migration copy of %s is not resident in the class store: %v; the co-resident row below would be a rerun of the work-only row", workBeadID, err)
 	}
 
 	for _, tt := range []struct {
@@ -1073,7 +1087,7 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 //
 // S2 UPDATE (ga-j4ob9): the second scan is no longer HANDED the binding by its
 // call site. Both rows now resolve the same leg set from the city's own routes
-// (assignedWorkSweepPlan), which is what closes the case the hand-threading
+// (workLegsFromCensus), which is what closes the case the hand-threading
 // never covered — the Info-form retired-session sweep, which took no class leg
 // at all, so a dead session's binding-resident claim had no automatic reopen
 // lane. The rows below are unchanged in what they assert; only the mechanism
@@ -1092,16 +1106,18 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 		leading beads.Store
 	}{
 		{
-			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
+			name:    "reconciler scan — the session bead lives in the sessions-class store, which IS the binding",
 			leading: e.sessionsStore(),
 		},
 		{
-			name:    "gc session close — leads with the work store and resolves the binding from the routes",
+			name:    "gc session close — the session bead resolved through the work store",
 			leading: e.work,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			plan, err := assignedWorkSweepPlan(e.cityPath, e.cfg, tt.leading, e.rigStores, nil)
+			// Both read through the city's WorkLegs over its work store, which
+			// resolve the binding from the routes.
+			plan, err := workLegsPlan(e.cityPath, e.cfg, e.work, e.rigStores)
 			if err != nil {
 				t.Fatalf("resolving the release scan's leg set: %v", err)
 			}
@@ -1111,10 +1127,13 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
 			step := e.mintWispWith(t, wispOpts{
 				title:    "graph step claimed by a session that then died",
+				routedTo: "worker",
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			unclaimWorkAssignedToRetiredSessionBead(e.cityPath, e.cfg, tt.leading, e.rigStores, sessionBead, "", io.Discard)
+			// A configured "worker" lane the released step routes to.
+			legs := workLegsFromCensus(e.cityPath, servingRigsCity(e.cfg, "worker"), cityWorkLeg{store: e.work}, e.rigStores)
+			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -1296,10 +1315,13 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 // answering from the work ledger for relocated graph ids and reported every live
 // molecule root as missing (#5125). Two things must hold on a split city:
 //
-//   - storeref.Resolve, the federating point read every future by-id router is
-//     built on, finds a class-resident bead across [work, class] legs — for the
-//     durable shape AND for the -wisp- suffix shape, whose prefix heuristic
-//     answer differs from an ordinary class id's.
+//   - the by-id plan every by-id router is now built on finds a class-resident
+//     bead over the city's own bindings — for the durable shape AND for the
+//     -wisp- suffix shape, whose prefix heuristic answer differs from an
+//     ordinary class id's. It reads through the same derivation the controller
+//     uses (residencyBindingsFromRoutes -> byIDBeadForTopology) rather than
+//     through storeref.Resolve, whose PrefixOwner fast path answers a
+//     migration-preserved id from the work ledger's frozen copy (ga-cu12x).
 //   - the shipped protection holds: a `bd sql` / `bd query` naming a relocated
 //     id is REFUSED rather than answered from the work ledger, and the refusal
 //     names the class-routed verb.
@@ -1309,15 +1331,16 @@ func conformanceStrictCrossStoreDeps(t *testing.T, e splitEnv) {
 func conformanceByIDReadFederation(t *testing.T, e splitEnv) {
 	durable := mintDurableGraphBead(t, e, "federated durable graph bead", "")
 	wisp := e.mintWisp(t, "federated read wisp")
-	legs := []beads.Store{e.work, e.class} // class is nil on single-store; Resolve skips nil legs
+	bindings, refused := residencyBindingsFromRoutes(e.routes)
+	topo := assembleResidencyTopology(e.cfg, e.work, nil, bindings, refused)
 
 	for _, tt := range []struct{ name, id string }{
 		{"durable", durable.ID},
 		{"wisp", wisp.ID},
 	} {
-		got, err := storeref.Resolve(tt.id, legs)
+		got, err := byIDBeadForTopology(topo, tt.id)
 		if err != nil || got.ID != tt.id {
-			t.Errorf("%s: storeref.Resolve(%q) = (%q, %v), want the bead — a federating by-id read that misses is the \"root does not exist\" report of #5125", tt.name, tt.id, got.ID, err)
+			t.Errorf("%s: byIDBeadForTopology(%q) = (%q, %v), want the bead — a federating by-id read that misses is the \"root does not exist\" report of #5125", tt.name, tt.id, got.ID, err)
 		}
 		msg, refused := bdSQLRelocatedClassRefusal(e.cfg, []string{"sql", "select id, status from issues where id = '" + tt.id + "'"})
 		if refused != e.split {
@@ -1365,7 +1388,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
@@ -1914,10 +1937,8 @@ func beadIDsOf(list []beads.Bead) []string {
 // executable FEDERATION CONTRACT written for this invariant: legs city → rigs
 // ascending → graph last, per-leg order whatever that leg's reader emits, dedupe
 // first-leg-wins, and — the load-bearing part — BOTH sides compared after
-// normalizing with beads.SortBeadsReadyOrder, because per-leg order is
-// deterministic but not canonical across leg kinds (a caching-wrapped work store
-// emits (priority, created_at, id); the canonical relocated binding emits
-// (created_at, id) with no priority term). So this runs the real API handler and
+// normalizing with beads.SortBeadsReadyOrder, because each leg is sorted but
+// their concatenation is not. So this runs the real API handler and
 // the real CLI reader over the SAME three stores and compares the two answers.
 //
 // The single-store row is not a formality: it is the byte-identity claim. There
@@ -2305,11 +2326,18 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 //
 // # What this asserts, and why on the argv predicates
 //
-// The two fates are decided before any store is touched, by two pure functions
-// of (config, argv): bdSQLRelocatedClassRefusal for `list` and
-// bdArgsNameClassOwnedBead for every other verb. So the coherence claim is
-// checkable exactly where it is decided, and the row runs on both topologies
-// without opening a binding. The end-to-end proofs through the real command —
+// Both fates are visible before any store is touched, from two pure functions
+// of (config, argv): bdSQLRelocatedClassRefusal DECIDES the `list` refusal, and
+// bdArgsAddressedClassIDs DETECTS that every other verb addresses a reserved
+// id. The second is a detection rather than a decision because a residence
+// probe, not the prefix, now decides whether the by-id door serves that id — a
+// clean binding miss falls through. So the equivalence this row asserts rests
+// on the fixture minting its root INTO the graph store (mintDurableGraphBead
+// below): addressing and diversion coincide only for a binding-resident root,
+// and a fixture whose root was not resident would make the row vacuous rather
+// than red. The coherence claim stays checkable from the argv predicates alone,
+// and the row runs on both topologies without opening a binding. The end-to-end
+// proofs through the real command —
 // real doBd, a bd stub that answers `[]` and exits 0 — are
 // TestGcBdProjectionsAgreeOnAClassTheyCannotSee for the refusing verbs and
 // TestGcBdDepTreeSplitsOnOwnershipNotOnServability for the answering one.
@@ -2391,11 +2419,11 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
 	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
-	_, depTreeRouted := bdArgsNameClassOwnedBead(depTreeArgs)
+	depTreeAddressed := len(bdArgsAddressedClassIDs(depTreeArgs)) > 0
 
-	if listRefused != depTreeRouted {
-		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` was diverted from the work ledger = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
-			selector, listRefused, root.ID, depTreeRouted)
+	if listRefused != depTreeAddressed {
+		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` addresses a reserved id = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
+			selector, listRefused, root.ID, depTreeAddressed)
 	}
 	if readyRefused != listRefused {
 		t.Fatalf("`gc bd ready --metadata-field %s` refused = %v but `gc bd list` with the same selector refused = %v; the two verbs take the same predicate and answer no-match the same way, so guarding one moves the silent empty rather than removing it",
@@ -2761,7 +2789,7 @@ func conformanceAssignedTierClaimsTheGraphStep(t *testing.T, e splitEnv, assigne
 	ops := classRoutedHookClaimOps(hookClaimOps{
 		Claim:             splitEnvStoreClaim(e.work),
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
 		},
@@ -2842,7 +2870,7 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 	ops := classRoutedHookClaimOps(hookClaimOps{
 		Claim:             splitEnvStoreClaim(e.work),
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
 		},

@@ -44,6 +44,8 @@ var (
 	hashRE         = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	windowsPathRE  = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
 	windowsUNCPath = regexp.MustCompile(`^\\\\[^\\]+\\[^\\]+`)
+
+	errInvalidCachedCatalog = errors.New("invalid cached registry catalog")
 )
 
 // Catalog is the parsed contents of a registry catalog.
@@ -329,9 +331,12 @@ func ReadCachedCatalog(home, registryName string) (Catalog, []byte, error) {
 	}
 	catalog, err := ParseCatalog(data)
 	if err != nil {
-		return Catalog{}, data, err
+		return Catalog{}, data, invalidCachedCatalogError(err)
 	}
-	return catalog, data, ValidateCatalog(catalog, false)
+	if err := ValidateCatalog(catalog, false); err != nil {
+		return catalog, data, invalidCachedCatalogError(err)
+	}
+	return catalog, data, nil
 }
 
 // ReadCachedRegistryCatalog reads and validates a cached catalog using registry metadata.
@@ -347,9 +352,21 @@ func ReadCachedRegistryCatalog(home string, reg Registry) (Catalog, []byte, erro
 	}
 	catalog, err := ParseCatalog(data)
 	if err != nil {
-		return Catalog{}, data, err
+		return Catalog{}, data, invalidCachedCatalogError(err)
 	}
-	return catalog, data, ValidateCatalog(catalog, source.Remote)
+	if err := ValidateCatalog(catalog, source.Remote); err != nil {
+		return catalog, data, invalidCachedCatalogError(err)
+	}
+	return catalog, data, nil
+}
+
+// IsInvalidCachedCatalog reports whether err came from unreadable cached catalog contents.
+func IsInvalidCachedCatalog(err error) bool {
+	return errors.Is(err, errInvalidCachedCatalog)
+}
+
+func invalidCachedCatalogError(err error) error {
+	return fmt.Errorf("%w: %w", errInvalidCachedCatalog, err)
 }
 
 // RefreshRegistry fetches a registry catalog and updates the local cache.

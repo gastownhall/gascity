@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -21,6 +23,7 @@ var readRotationDir = os.ReadDir
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
 	Type     string    // match events with this Type
+	Types    []string  // match events whose Type is any of these (empty = no filter)
 	Actor    string    // match events with this Actor
 	Subject  string    // match events with this Subject
 	Since    time.Time // match events at or after this time
@@ -39,8 +42,10 @@ type Filter struct {
 	// acceptable, already-representable result — a rare or optional Type
 	// filter can otherwise force a full-file backward walk with the same
 	// cost as an unfiltered forward scan (#4418). It has no effect on
-	// ReadFiltered's forward scan or on List/ListTail implementations
-	// that are not byte-scanning a file (e.g. Fake, Multiplexer).
+	// ReadFiltered and its variants, whose backward walk for a Since
+	// filter must reach the window's close or byte 0, on
+	// ReadFilteredHistoryTail, or on List/ListTail implementations that
+	// are not byte-scanning a file (e.g. Fake, Multiplexer).
 	MaxScanBytes int64
 }
 
@@ -54,6 +59,9 @@ func matchesFilter(e Event, f Filter) bool {
 		return false
 	}
 	if f.Type != "" && e.Type != f.Type {
+		return false
+	}
+	if len(f.Types) > 0 && !slices.Contains(f.Types, e.Type) {
 		return false
 	}
 	if f.Actor != "" && e.Actor != f.Actor {
@@ -159,14 +167,25 @@ func seqLineAt(f *os.File, off int64) (seq uint64, start int64, ok bool) {
 // it only after each line has been unmarshalled -- the dominant cost of the
 // supervisor's per-tick order-trigger check (gcy-ocb5).
 //
-// Returns 0 (full scan) whenever the boundary cannot be established, so a log
-// that violates the ordering invariant degrades in speed, never in correctness.
+// Returns 0 (full scan) whenever the boundary cannot be established, or
+// whenever the file's own head and tail contradict the non-decreasing-seq
+// assumption sort.Search depends on, so a log that violates the ordering
+// invariant this way degrades in speed rather than silently dropping events.
+// That check is necessarily partial: it catches a reversed tail (e.g. a stale
+// post-rotation writer appending seq below the file's head) but, like any
+// sub-linear check, cannot see an out-of-order run that both starts and ends
+// within the seq range the head and tail already imply.
 func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	if afterSeq == 0 || size <= 0 {
 		return 0
 	}
 	// Nothing to skip when the log's first line is already above the cursor.
-	if first, _, ok := seqLineAt(f, 0); !ok || first > afterSeq {
+	first, _, ok := seqLineAt(f, 0)
+	if !ok || first > afterSeq {
+		return 0
+	}
+	tailSeq, err := readLatestSeqFromTail(f, size)
+	if err != nil || tailSeq < first {
 		return 0
 	}
 	i := sort.Search(int(size), func(i int) bool {
@@ -175,6 +194,11 @@ func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	})
 	seq, start, ok := seqLineAt(f, int64(i))
 	if !ok || seq <= afterSeq {
+		if tailSeq > afterSeq {
+			// The file's actual last record contradicts "nothing left to
+			// see"; the search converged on a stale or corrupted region.
+			return 0
+		}
 		// Cursor is at or beyond the newest event: skip the file entirely.
 		return size
 	}
@@ -185,9 +209,20 @@ func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 // only those matching all non-zero fields in filter. Archives whose
 // seq window is fully excluded by the filter's AfterSeq predicate are
 // skipped without gunzipping. Returns (nil, nil) if no events exist.
-// Scanner errors return the events parsed before the error alongside
-// the error.
+//
+// A Since filter is answered from the active log alone when its backward
+// walk closes the window (see sinceWalk), which proves that no older event,
+// in the active log or in an archive, matches. The answer is the full
+// read's unless the log breaks the invariant sinceScanSkew describes. When
+// the walk cannot close the window or does not, the full read runs.
+//
+// A read error returns the events parsed before it alongside the error:
+// from the full read, a log-order prefix of the answer; from the Since
+// walk, the newest matches it reached, in log order.
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(context.Background(), path, filter); bounded || err != nil {
+		return result, err
+	}
 	result, _, err := readFilteredTracked(path, filter)
 	return result, err
 }
@@ -296,6 +331,15 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 // catch-up path; a positive Filter.Limit bounds only ReadFiltered's own scan,
 // not newly discovered rotation sources merged by the recovery pass.
 func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
+	// A closed window proves the records appended before it hold no
+	// match, and an in-flight rotating file holds the previous active
+	// log, appended earlier still. Right after rotation installs a fresh
+	// active file, its first record is too recent for the walk to close
+	// the window or the walk reaches byte 0 still open, and the full read
+	// below consults the rotating sources.
+	if result, bounded, err := readFilteredSince(context.Background(), path, filter); bounded || err != nil {
+		return result, err
+	}
 	base, listedArchives, baseErr := readFilteredTracked(path, filter)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
 	if len(rotated) == 0 {
@@ -424,11 +468,43 @@ func archiveFilesIn(dir string) ([]archiveInfo, error) {
 	return archives, nil
 }
 
+// archiveSeq reads the top-level seq of a raw archive line without decoding
+// the record. FileRecorder writes seq as the first field, so the hot path is a
+// prefix scan with no allocation. Any other layout reports false and the
+// caller falls back to a full decode, which keeps a foreign writer's archive
+// readable.
+func archiveSeq(line []byte) (uint64, bool) {
+	const prefix = `{"seq":`
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0, false
+	}
+	digits := line[len(prefix):]
+	var seq uint64
+	i := 0
+	for ; i < len(digits) && digits[i] >= '0' && digits[i] <= '9'; i++ {
+		seq = seq*10 + uint64(digits[i]-'0')
+	}
+	if i == 0 {
+		return 0, false
+	}
+	return seq, true
+}
+
 // streamArchive gunzip-streams the file at path, decoding each line
 // as an Event and invoking fn for every event. fn returns false to
 // abort iteration early. Returns nil if iteration completed cleanly
 // or fn requested abort; errors from gzip / scanner are wrapped.
-func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+//
+// Records outside filter's seq window are skipped before json.Unmarshal.
+// archiveOverlapsFilter only rules out an archive that ENDS at or below
+// AfterSeq, so an order whose cursor sits INSIDE the archive's window still
+// opens it — and without this skip every such read decoded the entire archive
+// to reach a handful of trailing records.
+//
+// The skip deliberately does not early-return on BeforeSeq. Archives come from
+// a monotonic log and should be seq-ordered, but `continue` saves the same
+// decode without depending on that.
+func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -444,8 +520,17 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		if seq, ok := archiveSeq(line); ok {
+			if filter.AfterSeq > 0 && seq <= filter.AfterSeq {
+				continue
+			}
+			if filter.BeforeSeq > 0 && seq >= filter.BeforeSeq {
+				continue
+			}
+		}
 		var e Event
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
 		if !fn(e) {
@@ -536,64 +621,21 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
-	if size <= 0 {
-		return nil, nil
-	}
-	const chunkSize int64 = 64 * 1024
+	// A Since filter is a horizon as well as a predicate: once the window
+	// closes, nothing earlier can match, and a walk that kept going for a
+	// limit it can no longer reach would parse the rest of the file.
+	window := newSinceWindow(filter.Since)
 	var reversed []Event
-	var pending []byte
-	end := size
-	for end > 0 && len(reversed) < limit && (filter.MaxScanBytes <= 0 || size-end < filter.MaxScanBytes) {
-		n := chunkSize
-		if end < n {
-			n = end
+	_, err := walkBackward(context.Background(), f, size, filter.MaxScanBytes, func(e Event) bool {
+		if matchesFilter(e, filter) {
+			reversed = append(reversed, e)
 		}
-		// Clamp the read to what remains of the byte budget so a
-		// MaxScanBytes that is not a chunkSize multiple stops the walk
-		// mid-chunk rather than overscanning by up to one full chunk.
-		// The loop condition guarantees remaining > 0 on entry, and the
-		// chunk is read at start = end - n, so a smaller n simply moves
-		// the walk's stopping point without misaligning pending.
-		if filter.MaxScanBytes > 0 {
-			if remaining := filter.MaxScanBytes - (size - end); remaining < n {
-				n = remaining
-			}
-		}
-		start := end - n
-		chunk := make([]byte, n)
-		if _, err := f.ReadAt(chunk, start); err != nil && err != io.EOF {
-			return nil, fmt.Errorf("reading events tail: %w", err)
-		}
-		data := make([]byte, 0, len(chunk)+len(pending))
-		data = append(data, chunk...)
-		data = append(data, pending...)
-		parts := bytes.Split(data, []byte{'\n'})
-		firstComplete := 0
-		if start > 0 {
-			pending = append(pending[:0], parts[0]...)
-			firstComplete = 1
-		} else {
-			pending = nil
-		}
-		for i := len(parts) - 1; i >= firstComplete && len(reversed) < limit; i-- {
-			line := bytes.TrimSuffix(parts[i], []byte{'\r'})
-			if len(bytes.TrimSpace(line)) == 0 {
-				continue
-			}
-			var e Event
-			if err := json.Unmarshal(line, &e); err != nil {
-				continue
-			}
-			if matchesFilter(e, filter) {
-				reversed = append(reversed, e)
-			}
-		}
-		end = start
+		return len(reversed) >= limit || window.closedBy(e.Ts)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading events tail: %w", err)
 	}
-	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
-		reversed[i], reversed[j] = reversed[j], reversed[i]
-	}
-	return reversed, nil
+	return ascending(reversed, 0), nil
 }
 
 // ReadLatestSeq returns the highest complete event Seq visible in the
@@ -612,6 +654,32 @@ func ReadLatestSeq(path string) (uint64, error) {
 			if info.LastSeq > seq {
 				seq = info.LastSeq
 			}
+		}
+	}
+	return seq, nil
+}
+
+// latestLiveSeq returns the seq the next append continues past: the active
+// log's last seq or, when the active log holds none, the highest window an
+// archive or in-flight rotating file covers. The fallback matters when a
+// rotation renamed the log and crashed, or failed to reopen it, before writing
+// its anchor: the fresh active log is empty, and every writer must still
+// continue past the rotated window instead of reissuing its seqs.
+func latestLiveSeq(path string) (uint64, error) {
+	seq, err := readLatestActiveSeq(path)
+	if err != nil || seq > 0 {
+		return seq, err
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return 0, fmt.Errorf("reading event log directory: %w", err)
+	}
+	for _, entry := range entries {
+		if info, err := parseArchiveBasename(entry.Name()); err == nil && info.LastSeq > seq {
+			seq = info.LastSeq
+		}
+		if _, _, last, ok := parseRotatingBasename(entry.Name()); ok && last > seq {
+			seq = last
 		}
 	}
 	return seq, nil

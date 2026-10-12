@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -318,6 +319,248 @@ func TestPreassignHookContinuationGroupPinsSiblingsToSessionID(t *testing.T) {
 			}
 			want := []string{tc.wantAssignee, tc.wantAssignee}
 			if !reflect.DeepEqual(gotAssignees, want) {
+				t.Fatalf("pinned assignees = %#v, want %#v", gotAssignees, want)
+			}
+		})
+	}
+}
+
+// TestDoHookClaimReclaimsStaleAssigneeAndClaimsSameCycle covers ga-7rj87d
+// FR1/FR2/FR3: a route-matched candidate whose only claim-eligibility
+// failure is an existing Assignee gets a scoped reclaim attempt, and a
+// successful reclaim is retried as a normal claim in the SAME hook cycle.
+func TestDoHookClaimReclaimsStaleAssigneeAndClaimsSameCycle(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"work-1","assignee":"dead-worker","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	var reclaimCalls []string
+	var claimCalls []string
+	ops := hookClaimOps{
+		Runner: runner,
+		ReclaimStale: func(_ context.Context, _ string, _ []string, beadID string) (bool, string, error) {
+			reclaimCalls = append(reclaimCalls, beadID)
+			return true, "dead-worker", nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimCalls = append(claimCalls, beadID)
+			return beads.Bead{ID: beadID, Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee:               "worker-1",
+		RouteTargets:           []string{"worker"},
+		AutoReclaimStaleClaims: true,
+		JSON:                   true,
+	}, ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(reclaimCalls, ","); got != "work-1" {
+		t.Fatalf("reclaim calls = %q, want scoped to work-1 only (FR2)", got)
+	}
+	if got := strings.Join(claimCalls, ","); got != "work-1" {
+		t.Fatalf("claim calls = %q, want claim retried on work-1 in the same cycle (FR3)", got)
+	}
+}
+
+// TestDoHookClaimLeavesCandidateUntouchedWhenNothingReclaimed covers
+// ga-7rj87d FR4: when the scoped reclaim reports nothing reclaimed, the
+// candidate must be left untouched (no claim attempt) and the hook
+// continues — current behavior for an unreclaimable stale candidate.
+func TestDoHookClaimLeavesCandidateUntouchedWhenNothingReclaimed(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"work-1","assignee":"live-worker","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	var reclaimCalls []string
+	claimCalled := false
+	ops := hookClaimOps{
+		Runner: runner,
+		ReclaimStale: func(_ context.Context, _ string, _ []string, beadID string) (bool, string, error) {
+			reclaimCalls = append(reclaimCalls, beadID)
+			return false, "", nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, _, _ string) (beads.Bead, bool, error) {
+			claimCalled = true
+			return beads.Bead{}, false, nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", ".", hookClaimOptions{
+		Assignee:               "worker-1",
+		RouteTargets:           []string{"worker"},
+		AutoReclaimStaleClaims: true,
+		JSON:                   true,
+	}, ops, &stdout, &stderr)
+
+	if len(reclaimCalls) != 1 || reclaimCalls[0] != "work-1" {
+		t.Fatalf("reclaim calls = %v, want exactly one scoped attempt on work-1", reclaimCalls)
+	}
+	if claimCalled {
+		t.Fatal("Claim should not be attempted when nothing was reclaimed (FR4)")
+	}
+}
+
+// TestDoHookClaimFlagOffNeverAttemptsReclaim covers ga-7rj87d NFR4/NFR5: the
+// feature is off by default, and the flag-off path must never call
+// ReclaimStale at all (byte-for-byte unchanged behavior/latency).
+func TestDoHookClaimFlagOffNeverAttemptsReclaim(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"work-1","assignee":"dead-worker","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	reclaimCalled := false
+	ops := hookClaimOps{
+		Runner: runner,
+		ReclaimStale: func(_ context.Context, _ string, _ []string, _ string) (bool, string, error) {
+			reclaimCalled = true
+			return true, "dead-worker", nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", ".", hookClaimOptions{
+		Assignee:     "worker-1",
+		RouteTargets: []string{"worker"},
+		JSON:         true,
+	}, ops, &stdout, &stderr)
+
+	if reclaimCalled {
+		t.Fatal("ReclaimStale must not be called when AutoReclaimStaleClaims is off (NFR4/NFR5)")
+	}
+}
+
+// TestDoHookClaimEmitsReclaimedStaleEventOnSuccess covers ga-7rj87d FR5: a
+// successful reclaim-then-claim must fire the typed
+// hook.claim.reclaimed_stale event exactly once, naming the bead, the
+// previous (stale) owner, and the new assignee.
+func TestDoHookClaimEmitsReclaimedStaleEventOnSuccess(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"work-1","assignee":"dead-worker","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	var emitted []string
+	ops := hookClaimOps{
+		Runner: runner,
+		ReclaimStale: func(_ context.Context, _ string, _ []string, _ string) (bool, string, error) {
+			return true, "dead-worker", nil
+		},
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		EmitHookClaimReclaimedStale: func(beadID, previousOwner, newAssignee string) {
+			emitted = append(emitted, beadID+"|"+previousOwner+"|"+newAssignee)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", ".", hookClaimOptions{
+		Assignee:               "worker-1",
+		RouteTargets:           []string{"worker"},
+		AutoReclaimStaleClaims: true,
+		JSON:                   true,
+	}, ops, &stdout, &stderr)
+
+	want := "work-1|dead-worker|worker-1"
+	if len(emitted) != 1 || emitted[0] != want {
+		t.Fatalf("emitted = %v, want exactly [%q] (FR5)", emitted, want)
+	}
+}
+
+// TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate covers the
+// ga-7rj87d round-1 review gap (FR1/NFR5): hookCandidateReclaimEligible
+// checked only ID/assignee/route and omitted the budget-deferred check that
+// hookCandidateClaimable already applies on the fresh-claim path. That let a
+// route-matched candidate with a stale assignee bypass the daily
+// build-budget gate via the opt-in reclaim path merely by having an
+// assignee. A candidate still inside its gc.budget_deferred_until window
+// must not be reclaimed even with AutoReclaimStaleClaims on.
+func TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"work-1","assignee":"dead-worker","metadata":{"gc.routed_to":"worker","gc.budget_deferred_until":"2099-01-01T00:00:00Z"}}]`, nil
+	}
+	reclaimCalled := false
+	ops := hookClaimOps{
+		Runner: runner,
+		ReclaimStale: func(_ context.Context, _ string, _ []string, _ string) (bool, string, error) {
+			reclaimCalled = true
+			return true, "dead-worker", nil
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	doHookClaim("query", ".", hookClaimOptions{
+		Assignee:               "worker-1",
+		RouteTargets:           []string{"worker"},
+		AutoReclaimStaleClaims: true,
+		JSON:                   true,
+	}, ops, &stdout, &stderr)
+
+	if reclaimCalled {
+		t.Fatal("ReclaimStale must not be called for a candidate still inside its budget-deferred window, even with AutoReclaimStaleClaims on")
+	}
+}
+
+// TestPreassignHookContinuationGroupSkipsHeldSiblings is the #6026 regression:
+// a continuation sibling carrying a canonical dispatch hold label
+// (beadmeta.DispatchHoldLabels) must never be pre-assigned to the claimant,
+// even when otherwise eligible (open, unassigned, route-matching). Pinning an
+// agent's name onto a bead deliberately parked hold:mayor/hold:external
+// contradicts the hold contract: the required next actor is, by construction,
+// not this session.
+//
+// The case and padded variants pin the trimmed, case-insensitive comparison
+// that keeps this seam agreeing with the hook-serve filter
+// (isHeldHookCandidate); the lookalike sibling pins the other direction —
+// hold-ish labels that are not a canonical value are ordinary work and must
+// still be pre-assigned.
+func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
+	var heldLabels []string
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		heldLabels = append(heldLabels, hold, strings.ToUpper(hold), " "+hold+" ")
+	}
+	for _, label := range heldLabels {
+		t.Run(label, func(t *testing.T) {
+			claimed := beads.Bead{
+				ID:       "work-1",
+				Status:   "in_progress",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a", "gc.run_target": "route-1"},
+			}
+			var gotAssignees []string
+			var assignedIDs []string
+			opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"route-1"}}
+			ops := hookClaimOps{
+				ListContinuation: func(_ context.Context, _ string, _ []string, _, _ string) ([]beads.Bead, error) {
+					return []beads.Bead{
+						{ID: "sib-held", Status: "open", Metadata: claimed.Metadata, Labels: []string{label}},
+						{ID: "sib-open", Status: "open", Metadata: claimed.Metadata},
+						{ID: "sib-lookalike", Status: "open", Metadata: claimed.Metadata, Labels: []string{"mpr-human-hold", "needs-mayor"}},
+					}, nil
+				},
+				AssignContinuation: func(_ context.Context, _ string, _ []string, beadID, assignee string) error {
+					assignedIDs = append(assignedIDs, beadID)
+					gotAssignees = append(gotAssignees, assignee)
+					return nil
+				},
+			}
+
+			assigned, err := preassignHookContinuationGroup(claimed, opts, ops, ".")
+			if err != nil {
+				t.Fatalf("preassignHookContinuationGroup() error = %v", err)
+			}
+			if want := []string{"sib-open", "sib-lookalike"}; !reflect.DeepEqual(assigned, want) {
+				t.Fatalf("REGRESSION #6026: assigned = %#v, want %#v (held sibling must be skipped, non-held siblings must still be assigned)", assigned, want)
+			}
+			if want := []string{"sib-open", "sib-lookalike"}; !reflect.DeepEqual(assignedIDs, want) {
+				t.Fatalf("REGRESSION #6026: AssignContinuation called for %#v, want %#v; held sibling must never reach the assign mutation", assignedIDs, want)
+			}
+			if want := []string{"worker-1", "worker-1"}; !reflect.DeepEqual(gotAssignees, want) {
 				t.Fatalf("pinned assignees = %#v, want %#v", gotAssignees, want)
 			}
 		})

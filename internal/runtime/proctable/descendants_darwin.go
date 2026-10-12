@@ -4,45 +4,58 @@ package proctable
 
 import (
 	"fmt"
-	"os/exec"
-	"path/filepath"
 	"strconv"
-	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
-// snapshotProcesses shells out to `ps` for a host-wide pid/ppid/comm table,
-// plus (via the eww flag) each process's inline environment so GC_SESSION_ID
-// can be captured in the same read — no second ps invocation, no
-// liveScanGuard (that guard protects the orphan sweep in ScanBySessionID, not
-// this read-only liveness snapshot).
+// snapshotProcesses reads every destructive field from one kern.proc.all
+// result. The later ps read only enriches liveness metadata; it never splices a
+// new PID identity onto parent/group edges captured for teardown.
 func snapshotProcesses() ([]ProcessRecord, error) {
-	out, err := exec.Command("ps", "eww", "-ax", "-o", "pid=,ppid=,comm=,command=").Output()
+	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
-		return nil, fmt.Errorf("running ps: %w", err)
+		return nil, fmt.Errorf("snapshotting process table with kern.proc.all: %w", err)
 	}
-	var records []ProcessRecord
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	metadata, err := psRecords()
+	if err != nil {
+		return nil, fmt.Errorf("enriching process snapshot: %w", err)
+	}
+
+	records := make([]ProcessRecord, 0, len(processes))
+	for _, process := range processes {
+		record, ok := darwinProcessRecord(process)
+		if !ok {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
+		if enrichment, ok := metadata[record.PID]; ok {
+			record.SessionID = enrichment.env["GC_SESSION_ID"]
 		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		rec := ProcessRecord{PID: pid, PPID: ppid, Name: filepath.Base(fields[2])}
-		if len(fields) > 3 {
-			rec.SessionID = parseInlineEnv(fields[3:])["GC_SESSION_ID"]
-		}
-		records = append(records, rec)
+		records = append(records, record)
 	}
 	return records, nil
+}
+
+func darwinProcessRecord(process unix.KinfoProc) (ProcessRecord, bool) {
+	pid := int(process.Proc.P_pid)
+	ppid := int(process.Eproc.Ppid)
+	pgid := int(process.Eproc.Pgid)
+	startTime, err := darwinStartIdentity(process.Proc.P_starttime)
+	if pid <= 0 || ppid < 0 || pgid < 0 || err != nil {
+		return ProcessRecord{}, false
+	}
+	return ProcessRecord{
+		PID:       pid,
+		PPID:      ppid,
+		PGID:      pgid,
+		StartTime: startTime,
+		Name:      unix.ByteSliceToString(process.Proc.P_comm[:]),
+	}, true
+}
+
+func darwinStartIdentity(start unix.Timeval) (string, error) {
+	if start.Sec <= 0 || start.Usec < 0 || start.Usec >= 1_000_000 {
+		return "", fmt.Errorf("invalid process start time")
+	}
+	return strconv.FormatInt(unix.TimevalToNsec(start), 10), nil
 }

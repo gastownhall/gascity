@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -215,6 +216,24 @@ func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadS
 	}
 }
 
+// seedACPRoutesFromSnapshot rebuilds a composite provider's ACP route table
+// from a loaded session snapshot, by the same rule construction uses, so the
+// routes follow the session beads rather than start history. A snapshot that
+// failed to load seeds nothing.
+func seedACPRoutesFromSnapshot(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
+	seeder, ok := sp.(interface{ SeedRoutes([]string) })
+	if !ok || !sessionBeadSnapshotLoaded(snapshot) {
+		return
+	}
+	seeder.SeedRoutes(configuredACPRouteNames(snapshot, cityName, cfg))
+}
+
+// sessionBeadSnapshotLoaded reports whether snapshot is a complete read of the
+// session beads, which is what lets a route table be marked seeded.
+func sessionBeadSnapshotLoaded(snapshot *sessionBeadSnapshot) bool {
+	return snapshot != nil && snapshot.LoadError() == nil
+}
+
 func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapshot {
 	if ctx.cityPath == "" || ctx.providerName == "acp" {
 		return nil
@@ -242,7 +261,7 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	return resolveSessionTransportProvider(ctx, sessionBeads)
+	return resolveSessionTransportProvider(ctx, sessionBeads, sessionLegs{})
 }
 
 func withSessionProviderConstructionContext(sp runtime.Provider, err error) (runtime.Provider, error) {
@@ -258,13 +277,23 @@ func withSessionProviderConstructionContext(sp runtime.Provider, err error) (run
 // → resolveWorkerSpec) and — when the base is not acp but some agents select the
 // acp transport — composes an auto.Provider that routes those sessions to an acp
 // backend. Per-session transport is the auto router's job; this is where the
-// composition is owned (construction time). Dynamically-created sessions are
-// routed at start via the same auto.Provider (build_desired_state RouteACP).
-// Behavior is identical to the prior inline composition.
-func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
-	if err != nil {
-		return nil, err
+// composition is owned (construction time). A loaded session snapshot seeds
+// the route table; without one the configured names are routed but the table
+// stays unseeded. The controller reseeds it from each session snapshot
+// (seedACPRoutesFromSnapshot), and dynamically-created sessions are also routed
+// at start via the same auto.Provider (build_desired_state RouteACP).
+//
+// A provider swap passes the legs it carries (carriedSessionLegs): a non-nil
+// leg is used as is instead of being built, so the runtimes it serves stay
+// reachable.
+func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot, carried sessionLegs) (runtime.Provider, error) {
+	base := carried.base
+	if base == nil {
+		var err error
+		base, err = buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// If the city-level provider is not ACP but some agents need ACP, wrap in an
 	// auto provider that routes per-session.
@@ -277,7 +306,10 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 	requireACPWrapper := len(acpRouteNames) > 0
 	needsACPWrapper := requireACPWrapper || (ctx.cfg != nil && hasACPProviderTargets(ctx.cfg))
 	if ctx.providerName != "acp" && needsACPWrapper {
-		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
+		acpSP, acpErr := carried.acp, error(nil)
+		if acpSP == nil {
+			acpSP, acpErr = buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
+		}
 		if acpErr != nil {
 			if requireACPWrapper {
 				return nil, fmt.Errorf("acp provider: %w", acpErr)
@@ -285,8 +317,12 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 			return base, nil
 		}
 		autoSP := sessionauto.New(base, acpSP)
-		for _, sessName := range acpRouteNames {
-			autoSP.RouteACP(sessName)
+		if sessionBeadSnapshotLoaded(sessionBeads) {
+			autoSP.SeedRoutes(acpRouteNames)
+		} else {
+			for _, sessName := range acpRouteNames {
+				autoSP.RouteACP(sessName)
+			}
 		}
 		return autoSP, nil
 	}
@@ -946,23 +982,109 @@ func fastEventsProviderName() string {
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
-//   - default → file-backed JSONL provider
+//   - default → file-backed JSONL provider that never rotates
+//     (newSecondaryFileEventsRecorder); only the city's controller rotates
+//
+// On failure it returns a nil provider and an error: the file-backed branch
+// must not hand back the *events.FileRecorder directly, because a failed open
+// boxes a typed nil into the events.Provider interface, where it reads as
+// non-nil to every caller's nil guard.
 func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Provider, error) {
-	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
+	if p, ok := newNonFileEventsProvider(v, stderr); ok {
+		return p, nil
+	}
+	recorder, err := newSecondaryFileEventsRecorder(eventsPath, stderr)
+	if err != nil {
+		return nil, err
+	}
+	return recorder, nil
 }
 
-func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
+// newEventsReaderForName is newEventsProviderForName for callers that only
+// read and watch: the file-backed branch is events.NewReadOnlyFileProvider,
+// which holds no write handle, so a long-lived watcher neither pins a
+// rotated-away log on disk nor takes part in rotation.
+func newEventsReaderForName(v, eventsPath string, stderr io.Writer) (events.Provider, error) {
+	if p, ok := newNonFileEventsProvider(v, stderr); ok {
+		return p, nil
+	}
+	return events.NewReadOnlyFileProvider(eventsPath, stderr), nil
+}
+
+// newNonFileEventsProvider builds the providers that carry no file handle
+// (exec:, fake, fail). ok is false for the file-backed default.
+func newNonFileEventsProvider(v string, stderr io.Writer) (events.Provider, bool) {
 	if strings.HasPrefix(v, "exec:") {
-		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
+		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), true
 	}
 	switch v {
 	case "fake":
-		return events.NewFake(), nil
+		return events.NewFake(), true
 	case "fail":
-		return events.NewFailFake(), nil
+		return events.NewFailFake(), true
 	default:
-		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		return nil, false
 	}
+}
+
+var (
+	cliFactoryRecordersMu sync.Mutex
+	cliFactoryRecorders   = map[string]events.Recorder{}
+)
+
+// cliFactoryEventsRecorder resolves a live events.Recorder for cityPath,
+// memoized per city path for the process lifetime. worker.Factory is built
+// on every session-reconciliation tick (cmd/gc/session_reconciler.go) as
+// well as per CLI invocation, so opening a fresh events.FileRecorder on
+// every call would leak a file handle and spawn a rotation goroutine each
+// tick; memoizing keeps that a one-time cost per city. This gives the CLI
+// factory path the live recorder the API server already gets for free from
+// its long-lived controllerState.EventProvider() (internal/api/worker_factory.go:21).
+// Falls back to events.Discard when cityPath is empty or the provider
+// cannot be opened — telemetry must never block session lifecycle.
+//
+// A failed open is deliberately NOT memoized: a transient ENOSPC or a
+// mid-rotation rename would otherwise pin this city to events.Discard for the
+// rest of the process, silently disabling the very telemetry this path exists
+// to carry. The next factory construction retries.
+//
+// Wiring this recorder live has one visible side effect on the CLI path:
+// worker's operation telemetry re-enriches session identity after a runtime
+// mutation, so EnrichInfo now issues a trailing IsRunning probe that callers
+// (and tests) see after Start/Stop.
+func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return events.Discard
+	}
+	cliFactoryRecordersMu.Lock()
+	defer cliFactoryRecordersMu.Unlock()
+	if r, ok := cliFactoryRecorders[cityPath]; ok {
+		return r
+	}
+	eventsCfg := config.EventsConfig{}
+	if cfg != nil {
+		eventsCfg = cfg.Events
+	}
+	// The memo key is cityPath alone, but resolution also reads GC_EVENTS and
+	// cfg.Events: a controller hot-reload of [events].provider is not picked
+	// up by an already-memoized city.
+	if v := os.Getenv("GC_EVENTS"); v != "" {
+		eventsCfg.Provider = v
+	}
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	recorder, err := newCLIFactoryRecorder(eventsCfg, eventsPath)
+	if err != nil || recorder == nil {
+		return events.Discard
+	}
+	cliFactoryRecorders[cityPath] = recorder
+	return recorder
+}
+
+// newCLIFactoryRecorder opens the recorder behind cliFactoryEventsRecorder: a
+// secondary writer that never rotates (see newSecondaryFileEventsRecorder).
+func newCLIFactoryRecorder(eventsCfg config.EventsConfig, eventsPath string) (events.Recorder, error) {
+	return newEventsProviderForName(eventsCfg.Provider, eventsPath, io.Discard)
 }
 
 // newUsageSinkByName returns a usage.Sink for the resolved provider name.
@@ -1082,8 +1204,66 @@ func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) 
 	}
 }
 
+// newFileEventsRecorder opens the city's rotation owner: the one long-lived
+// recorder that applies [events.rotation] and sweeps rotation leftovers on
+// open. Exactly one process per log may own it — the supervisor (its per-city
+// recorder and its own log) or, without a supervisor, the standalone
+// controller that holds .gc/controller.lock. Every other writer uses
+// newSecondaryFileEventsRecorder. Two rotators no longer lose events (the
+// recorder serializes rotation on a sidecar lock and reopens a replaced
+// handle), but older binaries do not, so a city keeps exactly one.
 func newFileEventsRecorder(eventsPath string, eventsCfg config.EventsConfig, stderr io.Writer) (*events.FileRecorder, error) {
 	return events.NewFileRecorder(eventsPath, stderr, eventsFileRecorderOptions(eventsCfg, stderr)...)
+}
+
+// newSecondaryFileEventsRecorder opens a writer on a log some other process
+// owns: CLI commands, per-mutation emitters, and in-process helpers beside
+// the owner. events.WithMaxSize(0) means it never rotates — a short-lived
+// recorder that opened its handle before the owner rotated would otherwise
+// size-check that stale handle on its first write and rotate the owner's fresh
+// log (mc-zndi7.58). events.WithoutStartupSweep keeps it from racing the
+// owner's in-flight rotation: a concurrent sweep can double-gzip the same
+// rotating-* file through a shared .tmp path. Neither option makes the open
+// free: NewFileRecorder reads the log directory either way, to continue the
+// sequence past the archives.
+func newSecondaryFileEventsRecorder(eventsPath string, stderr io.Writer) (*events.FileRecorder, error) {
+	return events.NewFileRecorder(eventsPath, stderr, events.WithMaxSize(0), events.WithoutStartupSweep())
+}
+
+// The openers below name each place that opens a city's events.jsonl, so
+// the role each one takes (rotation owner or secondary writer) is pinned by
+// a test rather than left to a call site.
+
+// openSupervisorCityEventsRecorder opens the supervisor's long-lived recorder
+// for one of its cities: the city's rotation owner.
+//
+// TODO(mc-zndi7.61): the supervisor opens this before it acquires the city's
+// controller.lock, so for that window it can sweep and rotate beside a
+// standalone controller that holds the lock and owns rotation itself.
+func openSupervisorCityEventsRecorder(cityPath string, eventsCfg config.EventsConfig, stderr io.Writer) (*events.FileRecorder, error) {
+	return newFileEventsRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+}
+
+// openSupervisorEventsRecorder opens the supervisor's own log under
+// runtimeDir, which only the supervisor writes: it owns rotation.
+func openSupervisorEventsRecorder(runtimeDir string, stderr io.Writer) (*events.FileRecorder, error) {
+	return newFileEventsRecorder(filepath.Join(runtimeDir, "events.jsonl"), config.EventsConfig{}, stderr)
+}
+
+// openStandaloneCityEventsRecorder opens gc start's recorder. Holding
+// .gc/controller.lock makes the standalone controller the log's rotation
+// owner; a one-shot start is just another writer.
+func openStandaloneCityEventsRecorder(cityPath string, eventsCfg config.EventsConfig, holdsControllerLock bool, stderr io.Writer) (*events.FileRecorder, error) {
+	if holdsControllerLock {
+		return newFileEventsRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+	}
+	return openCityEventsLog(cityPath, stderr)
+}
+
+// openCityEventsLog opens a city's events.jsonl as a secondary writer, for
+// CLI commands and in-process emitters that need the concrete recorder.
+func openCityEventsLog(cityPath string, stderr io.Writer) (*events.FileRecorder, error) {
+	return newSecondaryFileEventsRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), stderr)
 }
 
 // openCityEventsProvider resolves the city and returns an events.Provider.
@@ -1091,7 +1271,15 @@ func newFileEventsRecorder(eventsPath string, eventsCfg config.EventsConfig, std
 func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, int) {
 	return openCityEventsProviderWithConfig(func() config.EventsConfig {
 		return eventsProviderConfigWithWarnings(stderr)
-	}, stderr, cmdName)
+	}, newEventsProviderForName, stderr, cmdName)
+}
+
+// openCityEventsReader is openCityEventsProvider for read-and-watch callers;
+// see newEventsReaderForName.
+func openCityEventsReader(stderr io.Writer, cmdName string) (events.Provider, int) {
+	return openCityEventsProviderWithConfig(func() config.EventsConfig {
+		return eventsProviderConfigWithWarnings(stderr)
+	}, newEventsReaderForName, stderr, cmdName)
 }
 
 func openCityEventEmitProvider(stderr io.Writer, cmdName string) (events.Provider, int) {
@@ -1101,15 +1289,14 @@ func openCityEventEmitProvider(stderr io.Writer, cmdName string) (events.Provide
 func openCityEventsProviderWithName(providerName func() string, stderr io.Writer, cmdName string) (events.Provider, int) {
 	return openCityEventsProviderWithConfig(func() config.EventsConfig {
 		return config.EventsConfig{Provider: providerName()}
-	}, stderr, cmdName)
+	}, newEventsProviderForName, stderr, cmdName)
 }
 
-func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig, stderr io.Writer, cmdName string) (events.Provider, int) {
+func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig, open func(v, eventsPath string, stderr io.Writer) (events.Provider, error), stderr io.Writer, cmdName string) (events.Provider, int) {
 	// For exec: and test doubles, no city needed.
-	eventsCfg := providerConfig()
-	v := eventsCfg.Provider
+	v := providerConfig().Provider
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		p, err := newEventsProviderForNameWithConfig(v, "", stderr, eventsCfg)
+		p, err := open(v, "", stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return nil, 1
@@ -1123,7 +1310,7 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 		return nil, 1
 	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	p, err := newEventsProviderForNameWithConfig(v, eventsPath, stderr, eventsCfg)
+	p, err := open(v, eventsPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1

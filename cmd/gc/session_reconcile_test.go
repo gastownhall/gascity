@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -36,6 +37,25 @@ type testStore struct {
 	metadataBatchCalls   int
 	metadataBatchPatches []map[string]string
 	metadataBatchErr     error
+	// rows is what Get serves for an id a heal shim persisted (see persistRow).
+	// Any other id reads back as a bare bead, as before.
+	rows map[string]beads.Bead
+}
+
+// persistRow records b as the stored row Get returns, so a write that re-reads
+// the row before landing (the lifecycle-fenced status heal) sees the fixture
+// the test is healing.
+func (s *testStore) persistRow(b beads.Bead) {
+	if s.rows == nil {
+		s.rows = make(map[string]beads.Bead)
+	}
+	b.Type = sessionBeadType
+	meta := make(map[string]string, len(b.Metadata))
+	for k, v := range b.Metadata {
+		meta[k] = v
+	}
+	b.Metadata = meta
+	s.rows[b.ID] = b
 }
 
 func newTestStore() *testStore {
@@ -73,6 +93,9 @@ func (s *testStore) Ping() error {
 }
 
 func (s *testStore) Get(id string) (beads.Bead, error) {
+	if b, ok := s.rows[id]; ok {
+		return b, nil
+	}
 	return beads.Bead{ID: id}, nil
 }
 
@@ -123,6 +146,12 @@ func seedSessionInfo(b beads.Bead) sessionpkg.Info {
 func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store, clk clock.Clock) {
 	if session == nil {
 		return
+	}
+	// The heal re-reads the stored row before writing and refuses when it no
+	// longer matches the snapshot, so a recording testStore must hold the
+	// fixture being healed.
+	if ts, ok := sessFront.Store().Store.(*testStore); ok {
+		ts.persistRow(*session)
 	}
 	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, true, sessFront, clk, 0, true)
 	if err != nil {
@@ -1214,6 +1243,71 @@ func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 	}
 }
 
+// TestHealExpiredTimers_KeepsAnOperatorSuspend: an operator's suspend whose
+// held_until has passed keeps its intent and stamp; only the expired timer
+// goes (the TimerTick cell, main's heal). Every operator suspend is ∞, so an
+// expired one was shortened by a race or an undo, never meant to end.
+func TestHealExpiredTimers_KeepsAnOperatorSuspend(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"held_until":   now.Add(-time.Hour).Format(time.RFC3339),
+		"sleep_intent": "user-hold",
+		"suspended_at": now.Add(-2 * time.Hour).Format(time.RFC3339),
+		"sleep_reason": "user-hold",
+	})
+	got := healExpiredTimersInfo(seedSessionInfo(session), sessionFrontDoor(store), &clock.Fake{Time: now})
+	if got.HeldUntil != "" || got.SleepIntent != "user-hold" || got.SuspendedAt == "" {
+		t.Errorf("after the heal held_until=%q sleep_intent=%q suspended_at=%q, want the timer gone and the suspend kept",
+			got.HeldUntil, got.SleepIntent, got.SuspendedAt)
+	}
+}
+
+// dj2UpdateHook runs hook once, before the first Update reaches the store.
+type dj2UpdateHook struct {
+	beads.Store
+	hook func()
+	done bool
+}
+
+func (s *dj2UpdateHook) Update(id string, opts beads.UpdateOpts) error {
+	if !s.done && s.hook != nil {
+		s.done = true
+		s.hook()
+	}
+	return s.Store.Update(id, opts)
+}
+
+// TestHeartbeatRaceThenTimerHealKeepsTheSuspend (DJ2): on a store without
+// CAS a heartbeat racing an operator suspend shortens its held_until to the
+// heartbeat's (the D-I residual); when that time passes, the timer heal keeps
+// the operator's suspend.
+func TestHeartbeatRaceThenTimerHealKeepsTheSuspend(t *testing.T) {
+	const sessionName, beadID = "testpack__beater", "bead-789"
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{makeSessionBead(beadID, sessionName)}, nil)
+	if err := mem.SetMetadata(beadID, "state", "active"); err != nil {
+		t.Fatal(err)
+	}
+	w := &dj2UpdateHook{Store: mem}
+	w.hook = func() {
+		if _, err := sessionFrontDoor(mem).OperatorSuspend(beadID, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var so, se bytes.Buffer
+	if code := doRuntimeHeartbeat(w, time.Hour, sessionName, sessionName, false, &so, &se); code != 0 {
+		t.Fatalf("heartbeat exit %d: %s", code, se.String())
+	}
+	info, err := sessionFrontDoor(mem).Get(beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healExpiredTimersInfo(info, sessionFrontDoor(mem), &clock.Fake{Time: time.Now().Add(2 * time.Hour)})
+	if healed, _ := mem.Get(beadID); healed.Metadata["sleep_intent"] != "user-hold" {
+		t.Errorf("after the heal sleep_intent=%q held_until=%q: the raced suspend was healed away", healed.Metadata["sleep_intent"], healed.Metadata["held_until"])
+	}
+}
+
 func TestHealExpiredTimers_KeepsActiveHold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1327,6 +1421,7 @@ func TestCheckStability_RapidExit(t *testing.T) {
 		"wake_attempts": "0",
 	})
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, stab := checkStability(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk, nil)
 	syncBeadFromStore(&session, store)
 	if !stab {
@@ -2894,7 +2989,7 @@ func TestIsKnownState_UnknownStates(t *testing.T) {
 }
 
 func TestForwardCompatibility_UnknownState(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 
@@ -2920,7 +3015,7 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 // state=failed-create cannot reach the provider start path even if a stale
 // desired-state entry points at that session_name.
 func TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted(t *testing.T) {
-	env := newReconcilerTestEnv()
+	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
 
@@ -2977,6 +3072,7 @@ func TestCheckChurn_NonProductiveDeath(t *testing.T) {
 		"churn_count":  "0",
 	})
 
+	store.persistRow(session) // the row the accrual reads fresh (mc-uhvqj)
 	_, churn := checkChurn(seedSessionInfo(session), nil, false, dt, sessionFrontDoor(store), clk)
 	syncBeadFromStore(&session, store)
 	if !churn {
@@ -3379,5 +3475,123 @@ func TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate(t *testing.T) {
 	}
 	if got := seenCommands[betaDir]; !strings.Contains(got, "gc.routed_to=beta/worker") {
 		t.Errorf("beta probe command = %q, want expanded gc.routed_to=beta/worker", got)
+	}
+}
+
+// staleHealSuspendPatch is what `gc session suspend` writes on a managed city.
+var staleHealSuspendPatch = map[string]string{
+	"held_until":   "2099-01-01T00:00:00Z",
+	"sleep_intent": "user-hold",
+	"state":        "suspended",
+}
+
+// TestHealStateWithRollbackInfoDoesNotRevertAConcurrentSuspend is the
+// regression for the stale status heal (INC-024). The heal is decided from the
+// tick snapshot. When `gc session suspend` lands after that snapshot was read,
+// the heal used to write state=awake unconditionally over state=suspended,
+// leaving the row awake+user-hold+held. It must now write nothing and report
+// no batch, so the caller folds nothing.
+func TestHealStateWithRollbackInfoDoesNotRevertAConcurrentSuspend(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)}
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"state":        "active",
+			"last_woke_at": clk.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessFront := sessionFrontDoor(store)
+	snapshot, err := sessFront.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if want := healStatePatchWithRollbackInfo(snapshot, true, true, clk, 0, true); want["state"] != "awake" {
+		t.Fatalf("test premise: heal from the snapshot = %v, want state=awake", want)
+	}
+
+	if err := store.SetMetadataBatch(created.ID, staleHealSuspendPatch); err != nil {
+		t.Fatalf("suspend write: %v", err)
+	}
+
+	batch, err := healStateWithRollbackInfo(snapshot, true, true, sessFront, clk, 0, true)
+	if err != nil {
+		t.Fatalf("healStateWithRollbackInfo: %v", err)
+	}
+	if batch != nil {
+		t.Fatalf("heal batch = %v, want nil: the row changed after the snapshot", batch)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for key, want := range staleHealSuspendPatch {
+		if got.Metadata[key] != want {
+			t.Fatalf("%s = %q after the stale heal, want the suspend's %q", key, got.Metadata[key], want)
+		}
+	}
+
+	// Control: the same heal from a snapshot that matches the row still lands.
+	fresh, err := sessFront.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := store.SetMetadata(created.ID, "state", "active"); err != nil {
+		t.Fatalf("reset state: %v", err)
+	}
+	fresh = fresh.ApplyPatch(map[string]string{"state": "active"})
+	batch, err = healStateWithRollbackInfo(fresh, true, true, sessFront, clk, 0, true)
+	if err != nil || batch["state"] != "awake" {
+		t.Fatalf("heal from a current snapshot = (%v, %v), want state=awake applied", batch, err)
+	}
+	if got, _ := store.Get(created.ID); got.Metadata["state"] != "awake" {
+		t.Fatalf("state = %q, want the current-snapshot heal persisted", got.Metadata["state"])
+	}
+}
+
+// TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend drives the
+// same race through a whole tick: the reconciler is handed a session snapshot
+// read before `gc session suspend` wrote the row. The tick's status heal must
+// not revert the suspend it never saw.
+func TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	stale := session
+	stale.Metadata = make(map[string]string, len(session.Metadata))
+	for k, v := range session.Metadata {
+		stale.Metadata[k] = v
+	}
+
+	if err := env.store.SetMetadataBatch(session.ID, staleHealSuspendPatch); err != nil {
+		t.Fatalf("suspend write: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(), env.city, []beads.Bead{stale}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		newFakeIdleTracker(), env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for key, want := range staleHealSuspendPatch {
+		if got.Metadata[key] != want {
+			t.Fatalf("%s = %q after a tick over the pre-suspend snapshot, want the suspend's %q\nstderr:\n%s", key, got.Metadata[key], want, env.stderr.String())
+		}
 	}
 }

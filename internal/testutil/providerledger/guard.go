@@ -10,11 +10,14 @@ import (
 	"go/token"
 	"go/types"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
+
+	pathpkg "path"
 )
 
 // RuntimeRegistration is one builtin runtime selection key and the exact
@@ -135,7 +138,7 @@ func DiscoverRuntimeProviderDoubles(runtimeDir string) ([]ReusableDouble, error)
 	var typeProblems []string
 	config := types.Config{
 		Importer: &standardOrEmptyImporter{
-			standard: importer.Default(),
+			standard: stdImporter(fset),
 			empty:    &emptyPackageImporter{packages: make(map[string]*types.Package)},
 		},
 		DisableUnusedImportCheck: true,
@@ -1099,4 +1102,24 @@ func resolveCallSymbol(call *ast.CallExpr, imports map[string]string, localImpor
 	default:
 		return SymbolRef{}, fmt.Errorf("constructor must be a direct function call, got %T", call.Fun)
 	}
+}
+
+// stdImporter resolves the standard-library importer for the type-check.
+// Under bazel the SDK arrives as runfiles (declare @go_sdk//:srcs in the
+// calling test's data); the source importer reads GOROOT/src, which is
+// exactly what that runfiles tree provides. Outside bazel the ambient
+// importer is kept.
+func stdImporter(fset *token.FileSet) types.Importer {
+	if gr := bazeltest.GOROOTFromRunfiles(); gr != "" {
+		// go/build.Default captures GOROOT at package init; mutate it (and
+		// the env) before the source importer snapshots the context. GOPATH
+		// mode resolves the standard library from GOROOT/src with no
+		// subprocess, which the srcs-only SDK runfiles fully support.
+		build.Default.GOROOT = gr
+		build.Default.GOPATH = ""
+		_ = os.Setenv("GOROOT", gr)
+		_ = os.Setenv("GO111MODULE", "off")
+		return importer.ForCompiler(fset, "source", nil)
+	}
+	return importer.Default()
 }

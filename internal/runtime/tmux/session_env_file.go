@@ -51,19 +51,33 @@ func (t *Tmux) runNewSession(args []string, env map[string]string) error {
 		_, err := t.run(args...)
 		return err
 	}
+	// source-file needs a server to talk to and, unlike new-session, cannot
+	// create one, so start-server leads.
+	return t.runFromCommandFile(args, "start-server", ";")
+}
+
+// runFromCommandFile executes one tmux command by writing it to a private
+// command file and sourcing that, so none of its arguments reach argv. lead is
+// prepended to the `source-file <path>` invocation verbatim.
+//
+// It fails closed: when the file cannot be staged the command is not run at
+// all. Callers must not fall back to argv — that fallback is the leak.
+func (t *Tmux) runFromCommandFile(args []string, lead ...string) error {
 	// Opportunistic, best-effort: a process killed between MkdirTemp and its
 	// deferred cleanup leaves a secret-bearing file behind with nothing to
-	// remove it. Session creation is the only moment we know the staging
-	// directory is in use, so it is where the previous incarnation's litter gets
-	// collected.
+	// remove it. Staging is the only moment we know the staging directory is in
+	// use, so it is where the previous incarnation's litter gets collected.
 	sweepStaleStagedDirs()
 
 	path, cleanup, err := stageTmuxCommandFile(tmuxCommandLine(args))
 	if err != nil {
-		return fmt.Errorf("staging tmux command file (session env holds secrets that must not reach argv): %w", err)
+		return fmt.Errorf("staging tmux command file (values that must not reach argv): %w", err)
 	}
 	defer cleanup()
-	_, err = t.run("start-server", ";", "source-file", path)
+	sourceArgs := make([]string, 0, len(lead)+2)
+	sourceArgs = append(sourceArgs, lead...)
+	sourceArgs = append(sourceArgs, "source-file", path)
+	_, err = t.run(sourceArgs...)
 	return err
 }
 

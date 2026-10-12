@@ -103,6 +103,8 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
 	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
 	check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)
+	checkPositive("[session.acp]", "stop_grace", cfg.Session.ACP.StopGrace)
+	checkPositive("[session.acp]", "cancel_timeout", cfg.Session.ACP.CancelTimeout)
 
 	// Cross-field: startup_timeout wraps the whole Start() call (pre_start and
 	// setup included), so a setup_timeout that is >= startup_timeout can never
@@ -155,6 +157,7 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	// Mail config durations.
 	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
+	check("[mail]", "unread_retention_ttl", cfg.Mail.UnreadRetentionTTL)
 
 	// Events config durations.
 	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)

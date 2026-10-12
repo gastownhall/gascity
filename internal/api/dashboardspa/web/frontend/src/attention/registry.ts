@@ -10,7 +10,11 @@ import {
   selectBlockedRuns,
   selectOperatorActionableUnread,
 } from 'gas-city-dashboard-shared';
-import { selectBeadsNeedingAttention, type BeadAttentionReason } from './beadsNeedingAttention';
+import {
+  selectBeadsNeedingAttention,
+  type BeadAttentionReason,
+  type BeadAttentionSession,
+} from './beadsNeedingAttention';
 import { elapsedSince, formatElapsed } from './elapsed';
 import { runDetailHref } from '../supervisor/runHref';
 import { agentNeedsYouReasonLabel } from './agentNeedsYou';
@@ -98,6 +102,12 @@ export interface BeadsAttentionFacts {
    * shape as `decisions`.
    */
   escalations?: readonly Bead[];
+  /**
+   * City sessions for the stalled-in-progress check (gp-6xd). Omitted when the
+   * session read failed — the selector then skips session-dependent stall
+   * checks instead of painting every in-progress bead stalled.
+   */
+  sessions?: readonly BeadAttentionSession[];
   nowMs?: number;
   partial?: boolean;
   error?: string;
@@ -426,7 +436,11 @@ function deriveBeadsAttention(facts: BeadsAttentionFacts | undefined): readonly 
   // and the page count cannot disagree.
   const generic = (facts.items ?? []).filter((bead) => !isMayorDecision(bead, facts.decisionLabel));
   for (const row of selectBeadsNeedingAttention(
-    { beads: generic, escalations: facts.escalations ?? [] },
+    {
+      beads: generic,
+      escalations: facts.escalations ?? [],
+      ...(facts.sessions === undefined ? {} : { sessions: facts.sessions }),
+    },
     nowMs,
   )) {
     const builder = row.severity === 'attention' ? domainAttention : domainWatch;
@@ -445,7 +459,16 @@ function deriveBeadsAttention(facts: BeadsAttentionFacts | undefined): readonly 
 
 /** The glyph+word noun for a bead-attention reason (DESIGN.md §Status). */
 function beadAttentionWord(reason: BeadAttentionReason): string {
-  return reason === 'escalated' ? 'escalated' : 'unclaimed';
+  switch (reason) {
+    case 'escalated':
+      return 'escalated';
+    case 'stalled':
+      return 'stalled';
+    case 'waiting-human':
+      return 'waiting';
+    case 'ready-unclaimed':
+      return 'unclaimed';
+  }
 }
 
 function beadHref(beadId: string): string {

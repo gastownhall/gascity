@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/citywriteauth"
 	"github.com/gastownhall/gascity/internal/clientgrant"
 )
@@ -31,9 +32,14 @@ func TestEndToEnd_MintThroughGrantSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bin := filepath.Join(dir, "gc-write-mint")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build gc-write-mint: %v\n%s", err, out)
+	// Bazel hands the test the //cmd/gc-write-mint it built; under go test,
+	// build it.
+	bin := bazeltest.DataPath(t, "GC_TEST_WRITE_MINT_BIN")
+	if bin == "" {
+		bin = filepath.Join(dir, "gc-write-mint")
+		if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+			t.Fatalf("build gc-write-mint: %v\n%s", err, out)
+		}
 	}
 
 	// The client wires the built binary as a grant_command, city-pinned.

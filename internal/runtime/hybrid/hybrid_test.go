@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,6 +12,143 @@ import (
 )
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
+
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("local-agent", "token-local"); err != nil {
+			t.Fatalf("StopUnattendedSession(local): %v", err)
+		}
+		if got := local.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "local-agent", expectedToken: "token-local"}) {
+			t.Fatalf("local unattended stops = %#v, want exact local-agent/token-local call", got)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("remote", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("remote-agent-1", "token-remote"); err != nil {
+			t.Fatalf("StopUnattendedSession(remote): %v", err)
+		}
+		if got := remote.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "remote-agent-1", expectedToken: "token-remote"}) {
+			t.Fatalf("remote unattended stops = %#v, want exact remote-agent-1/token-remote call", got)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported local does not probe remote", func(t *testing.T) {
+		remote := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), remote, isRemote)
+
+		err := p.StopUnattendedSession("local-agent", "token")
+		if err == nil || !strings.Contains(err.Error(), "local backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual local-backend error", err)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("remote error does not probe local", func(t *testing.T) {
+		sentinel := errors.New("remote unattended stop unavailable")
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(sentinel)
+		p := New(local, remote, isRemote)
+
+		err := p.StopUnattendedSession("remote-agent-1", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "remote backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual remote error", err)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
+
+type livenessObservationErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *livenessObservationErrorProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return runtime.Liveness{}, p.err
+}
+
+func TestProvider_ForwardsLivenessObservationErrorToRoutedBackend(t *testing.T) {
+	wantErr := errors.New("snapshot unavailable")
+	local := &livenessObservationErrorProvider{Fake: runtime.NewFake(), err: wantErr}
+	remote := &livenessObservationErrorProvider{Fake: runtime.NewFake(), err: wantErr}
+	h := New(local, remote, isRemote)
+
+	for _, name := range []string{"local-agent", "remote-agent-1"} {
+		got, err := h.ObserveLivenessWithError(name, nil)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("ObserveLivenessWithError(%q) error = %v, want %v", name, err, wantErr)
+		}
+		if got != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError(%q) = %+v, want zero while routed result is unknown", name, got)
+		}
+	}
+}
+
+// TestHybridForwardsIsAttachedWithError proves hybrid forwards the
+// error-bearing attachment probe to the routed backend. Without the forward,
+// the error is lost behind the bool IsAttached and a probe failure reads
+// "not attached".
+func TestHybridForwardsIsAttachedWithError(t *testing.T) {
+	local, remote := runtime.NewFake(), runtime.NewFake()
+	localErr := fmt.Errorf("local probe: %w", runtime.ErrRuntimeUnavailable)
+	remoteErr := fmt.Errorf("remote probe: %w", runtime.ErrRuntimeUnavailable)
+	local.AttachedErrors["local-agent"] = localErr
+	remote.AttachedErrors["remote-agent-1"] = remoteErr
+	remote.SetAttached("remote-agent-2", true)
+	h := New(local, remote, isRemote)
+
+	for _, tc := range []struct {
+		name    string
+		want    bool
+		wantErr error
+	}{
+		{"local-agent", false, localErr},
+		{"remote-agent-1", false, remoteErr},
+		{"remote-agent-2", true, nil},
+	} {
+		got, err := runtime.IsAttachedWithError(h, tc.name)
+		if got != tc.want || !errors.Is(err, tc.wantErr) {
+			t.Errorf("IsAttachedWithError(%q) = (%v, %v), want (%v, %v)", tc.name, got, err, tc.want, tc.wantErr)
+		}
+	}
+}
 
 // Relaunch must reach the routed backend (local vs remote), or the reconciler's
 // RelaunchProvider type-assert would be masked by the hybrid router and fall
@@ -283,5 +421,337 @@ func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "runtime unavailable") {
 		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
+	}
+}
+
+// capsFake overrides the fake's capabilities so the intersection can be
+// exercised with differing backend support.
+type capsFake struct {
+	*runtime.Fake
+	caps runtime.ProviderCapabilities
+}
+
+func (c *capsFake) Capabilities() runtime.ProviderCapabilities { return c.caps }
+
+// TestProvider_CapabilitiesIntersectsEachConnectionOp exercises one field at a
+// time, in both backend orders, so a field cannot pass by being wired to the
+// wrong field, the wrong backend, or with the wrong operator. Setting both
+// fields on both backends, as an earlier shape did, leaves a CanStream wired to
+// CanAttachTTY reporting the right answer for the wrong reason.
+func TestProvider_CapabilitiesIntersectsEachConnectionOp(t *testing.T) {
+	for _, field := range []string{"CanStream", "CanAttachTTY"} {
+		for _, tc := range []struct {
+			name          string
+			first, second bool
+			want          bool
+		}{
+			{name: "both backends capable", first: true, second: true, want: true},
+			{name: "first backend only", first: true},
+			{name: "second backend only", second: true},
+			{name: "neither backend"},
+		} {
+			t.Run(field+"/"+tc.name, func(t *testing.T) {
+				p := New(&capsFake{runtime.NewFake(), capsWith(t, field, tc.first)},
+					&capsFake{runtime.NewFake(), capsWith(t, field, tc.second)}, isRemote)
+				if got := capsField(t, p.Capabilities(), field); got != tc.want {
+					t.Errorf("%s = %v, want %v", field, got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// capsWith returns capabilities with exactly one named bool field set, so each
+// field's wiring is observed on its own.
+func capsWith(t *testing.T, field string, v bool) runtime.ProviderCapabilities {
+	t.Helper()
+	var caps runtime.ProviderCapabilities
+	f := reflect.ValueOf(&caps).Elem().FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("runtime.ProviderCapabilities has no field %q", field)
+	}
+	f.SetBool(v)
+	return caps
+}
+
+// capsField reads one named bool capability.
+func capsField(t *testing.T, caps runtime.ProviderCapabilities, field string) bool {
+	t.Helper()
+	f := reflect.ValueOf(caps).FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("runtime.ProviderCapabilities has no field %q", field)
+	}
+	return f.Bool()
+}
+
+// TestProvider_CapabilitiesIntersectsEveryField fails when a field is added to
+// runtime.ProviderCapabilities and not wired into this composite. The
+// intersection is a hand-maintained literal, and a field missing from it reads
+// as "not supported" no matter what either backend reports, which is how
+// CanStream and CanAttachTTY both went unnoticed: nothing consumes them yet, so
+// the first consumer would have inherited the wrong answer with no test red.
+//
+// Both backends report everything true, so the check holds for the fields that
+// intersect with AND and for NeedsClaimBackstop, which is an OR.
+func TestProvider_CapabilitiesIntersectsEveryField(t *testing.T) {
+	all := runtime.ProviderCapabilities{}
+	set := reflect.ValueOf(&all).Elem()
+	for i := 0; i < set.NumField(); i++ {
+		if set.Field(i).Kind() != reflect.Bool {
+			t.Fatalf("%s is not a bool, so this test no longer covers every capability", set.Type().Field(i).Name)
+		}
+		set.Field(i).SetBool(true)
+	}
+
+	got := reflect.ValueOf(New(&capsFake{runtime.NewFake(), all}, &capsFake{runtime.NewFake(), all}, isRemote).Capabilities())
+	for i := 0; i < got.NumField(); i++ {
+		if !got.Field(i).Bool() {
+			t.Errorf("%s = false with both backends reporting it true: the field is missing from the intersection", got.Type().Field(i).Name)
+		}
+	}
+}
+
+// idleSnapshotProvider is a backend that can take a point-in-time idle
+// observation. A plain runtime.Fake deliberately cannot, so it stands in for a
+// backend without the capability.
+type idleSnapshotProvider struct {
+	*runtime.Fake
+	idle  map[string]bool
+	calls []string
+}
+
+func newIdleSnapshotProvider() *idleSnapshotProvider {
+	return &idleSnapshotProvider{Fake: runtime.NewFake(), idle: make(map[string]bool)}
+}
+
+func (p *idleSnapshotProvider) SnapshotIdle(name string) (bool, error) {
+	p.calls = append(p.calls, name)
+	return p.idle[name], nil
+}
+
+// The composite must satisfy IdleSnapshotProvider itself, or the idle-timeout
+// reconciler's type-assert fails for every session in a local/remote split
+// city and the content-based idle clock silently never runs (ga-07mi8).
+var _ runtime.IdleSnapshotProvider = (*Provider)(nil)
+
+func TestSnapshotIdle_RoutesToBackend(t *testing.T) {
+	local, remote := newIdleSnapshotProvider(), newIdleSnapshotProvider()
+	h := New(local, remote, isRemote)
+	local.idle["local-agent"] = true
+
+	idle, err := h.SnapshotIdle("local-agent")
+	if err != nil {
+		t.Fatalf("SnapshotIdle(local-agent): %v", err)
+	}
+	if !idle {
+		t.Error("SnapshotIdle(local-agent) = false, want true from the local backend")
+	}
+	if !reflect.DeepEqual(local.calls, []string{"local-agent"}) {
+		t.Errorf("local backend SnapshotIdle calls = %v, want [local-agent]", local.calls)
+	}
+	if len(remote.calls) != 0 {
+		t.Errorf("remote backend SnapshotIdle calls = %v, want none", remote.calls)
+	}
+
+	if _, err := h.SnapshotIdle("remote-agent-1"); err != nil {
+		t.Fatalf("SnapshotIdle(remote-agent-1): %v", err)
+	}
+	if !reflect.DeepEqual(remote.calls, []string{"remote-agent-1"}) {
+		t.Errorf("remote backend SnapshotIdle calls = %v, want [remote-agent-1]", remote.calls)
+	}
+}
+
+func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
+	h := New(runtime.NewFake(), runtime.NewFake(), isRemote)
+
+	idle, err := h.SnapshotIdle("local-agent")
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("SnapshotIdle error = %v, want ErrInteractionUnsupported", err)
+	}
+	if idle {
+		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
+	}
+}
+
+// scriptedListProvider answers ListRunning with a fixed result and records
+// every prefix it is asked for.
+type scriptedListProvider struct {
+	*runtime.Fake
+	names    []string
+	err      error
+	prefixes []string
+}
+
+func (p *scriptedListProvider) ListRunning(prefix string) ([]string, error) {
+	p.prefixes = append(p.prefixes, prefix)
+	return p.names, p.err
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// Kills: per-backend results that diverge from the merged ListRunning (a
+// label swap, a dropped error, dropped names), and a per-backend listing that
+// loses the single-backend ServerAbsent signal the merge deliberately drops.
+func TestHybridListRunningByBackend_MergesToListRunning(t *testing.T) {
+	partial := &runtime.PartialListError{Err: errors.New("one pod unreadable")}
+	absent := &runtime.PartialListError{Err: errors.New("tmux server unreachable"), ServerAbsent: true}
+	cases := []struct {
+		name                    string
+		localNames, remoteNames []string
+		localErr, remoteErr     error
+	}{
+		{name: "both ok", localNames: []string{"gc-a"}, remoteNames: []string{"gc-remote-agent-1", "gc-remote-agent-2"}},
+		{name: "remote partial", localNames: []string{"gc-a"}, remoteNames: []string{"gc-remote-agent-1"}, remoteErr: partial},
+		{name: "local server absent", remoteNames: []string{"gc-remote-agent-1"}, localErr: absent},
+		{name: "remote failed", localNames: []string{"gc-a"}, remoteErr: errors.New("apiserver timeout")},
+		{name: "both failed", localErr: errors.New("local down"), remoteErr: errors.New("remote down")},
+		{name: "both empty", localNames: []string{}, remoteNames: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			local := &scriptedListProvider{Fake: runtime.NewFake(), names: tc.localNames, err: tc.localErr}
+			remote := &scriptedListProvider{Fake: runtime.NewFake(), names: tc.remoteNames, err: tc.remoteErr}
+			h := New(local, remote, isRemote)
+
+			merged, mergedErr := h.ListRunning("gc-")
+			listings := h.ListRunningByBackend("gc-")
+
+			if len(listings) != 2 {
+				t.Fatalf("ListRunningByBackend() returned %d listings, want 2", len(listings))
+			}
+			want := []struct {
+				label string
+				sp    *scriptedListProvider
+			}{{"local", local}, {"remote", remote}}
+			for i, l := range listings {
+				if l.Label != want[i].label {
+					t.Errorf("listing %d label = %q, want %q", i, l.Label, want[i].label)
+				}
+				if l.Provider != runtime.Provider(want[i].sp) {
+					t.Errorf("listing %d provider = %T, want the %s backend", i, l.Provider, want[i].label)
+				}
+				if !reflect.DeepEqual(l.Names, want[i].sp.names) {
+					t.Errorf("listing %d names = %#v, want %#v", i, l.Names, want[i].sp.names)
+				}
+				if !errors.Is(l.Err, want[i].sp.err) {
+					t.Errorf("listing %d err = %v, want %v", i, l.Err, want[i].sp.err)
+				}
+			}
+			if got := runtime.IsRuntimeServerAbsent(listings[0].Err); got != runtime.IsRuntimeServerAbsent(tc.localErr) {
+				t.Errorf("local listing ServerAbsent = %v, want %v", got, runtime.IsRuntimeServerAbsent(tc.localErr))
+			}
+
+			// The flat merge ListRunning computed before it was expressed
+			// over ListRunningByBackend.
+			names, err := runtime.MergeBackendListResults(
+				runtime.BackendListResult{Label: "local", Names: tc.localNames, Err: tc.localErr},
+				runtime.BackendListResult{Label: "remote", Names: tc.remoteNames, Err: tc.remoteErr},
+			)
+			if relisted, relistedErr := runtime.MergeBackendListings(listings); !reflect.DeepEqual(relisted, names) || errText(relistedErr) != errText(err) {
+				t.Errorf("MergeBackendListings = (%#v, %q), want (%#v, %q)", relisted, errText(relistedErr), names, errText(err))
+			}
+			if !reflect.DeepEqual(names, merged) {
+				t.Errorf("flat-merge names = %#v, ListRunning names = %#v", names, merged)
+			}
+			if errText(err) != errText(mergedErr) {
+				t.Errorf("flat-merge err = %q, ListRunning err = %q", errText(err), errText(mergedErr))
+			}
+			if runtime.IsPartialListError(err) != runtime.IsPartialListError(mergedErr) {
+				t.Errorf("partial = %v, ListRunning partial = %v", runtime.IsPartialListError(err), runtime.IsPartialListError(mergedErr))
+			}
+			if runtime.IsRuntimeServerAbsent(err) != runtime.IsRuntimeServerAbsent(mergedErr) {
+				t.Errorf("ServerAbsent = %v, ListRunning ServerAbsent = %v", runtime.IsRuntimeServerAbsent(err), runtime.IsRuntimeServerAbsent(mergedErr))
+			}
+			for _, sp := range []*scriptedListProvider{local, remote} {
+				if !reflect.DeepEqual(sp.prefixes, []string{"gc-", "gc-"}) {
+					t.Errorf("backend prefixes = %q, want one gc- call per listing method", sp.prefixes)
+				}
+			}
+		})
+	}
+}
+
+// Kills: a composite attested while one of its backends is not.
+func TestListRunningAttested_CompositeRequiresEveryBackend(t *testing.T) {
+	attested := func() runtime.Provider { return runtime.NewFake() }
+	unattested := func() runtime.Provider {
+		f := runtime.NewFake()
+		f.ListingUnattested = true
+		return f
+	}
+	undeclared := func() runtime.Provider { return struct{ runtime.Provider }{runtime.NewFake()} }
+	cases := []struct {
+		name          string
+		local, remote runtime.Provider
+		want          bool
+	}{
+		{name: "both attested", local: attested(), remote: attested(), want: true},
+		{name: "remote unattested", local: attested(), remote: unattested(), want: false},
+		{name: "local unattested", local: unattested(), remote: attested(), want: false},
+		{name: "remote undeclared", local: attested(), remote: undeclared(), want: false},
+	}
+	for _, tc := range cases {
+		if got := runtime.ListRunningAttested(New(tc.local, tc.remote, isRemote)); got != tc.want {
+			t.Errorf("%s: ListRunningAttested(hybrid) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Kills: an accessor that lists, and a Backends order or label that disagrees
+// with ListRunningByBackend (see the auto twin).
+func TestHybridBackends_NamesBackendsWithoutListing(t *testing.T) {
+	local := &scriptedListProvider{Fake: runtime.NewFake()}
+	remote := &scriptedListProvider{Fake: runtime.NewFake()}
+	p := New(local, remote, func(string) bool { return false })
+
+	backends := p.Backends()
+	if len(local.prefixes)+len(remote.prefixes) != 0 {
+		t.Fatalf("Backends() listed its backends (local %d, remote %d calls), want none", len(local.prefixes), len(remote.prefixes))
+	}
+	listings := p.ListRunningByBackend("")
+	if len(backends) != len(listings) {
+		t.Fatalf("Backends() = %d entries, ListRunningByBackend = %d", len(backends), len(listings))
+	}
+	for i, b := range backends {
+		if b.Label != listings[i].Label || b.Provider != listings[i].Provider {
+			t.Errorf("backend %d = (%q, %T), listing = (%q, %T)", i, b.Label, b.Provider, listings[i].Label, listings[i].Provider)
+		}
+	}
+}
+
+// serverDeathFake is a Fake backend that confirms, or refuses to confirm, that
+// its server is dead, as tmux does through runtime.ServerDeathConfirmer.
+type serverDeathFake struct {
+	*runtime.Fake
+	dead bool
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool { return f.dead }
+
+// hybrid forwards ServerDeathConfirmer to its local tmux backend, so
+// StopForCleanup absorbs a missing-server answer only for a server confirmed
+// dead, never for a live one whose socket file was deleted.
+func TestStopForCleanupMissingServerUsesLocalConfirmer(t *testing.T) {
+	serverGone := fmt.Errorf("killing session sky: %w", errors.New("no tmux server running"))
+	for _, dead := range []bool{false, true} {
+		local := &serverDeathFake{Fake: runtime.NewFake(), dead: dead}
+		local.StopErrors["sky"] = serverGone
+		p := New(local, runtime.NewFake(), isRemote)
+
+		if got := p.ServerConfirmedDead(); got != dead {
+			t.Errorf("ServerConfirmedDead() = %v, want the local backend's %v", got, dead)
+		}
+		err := runtime.StopForCleanup(p, "sky")
+		if dead && err != nil {
+			t.Errorf("StopForCleanup = %v over a dead server, want nil", err)
+		}
+		if !dead && !errors.Is(err, serverGone) {
+			t.Errorf("StopForCleanup = %v over a live server, want the missing-server answer", err)
+		}
 	}
 }

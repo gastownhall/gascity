@@ -88,12 +88,19 @@ func TestClassRoutedStoreForIDIsIdentityOnACityThatRelocatesNothing(t *testing.T
 func TestClassRoutedStoreForIDCoversTheLegacyIDTheSharedResolverDeclines(t *testing.T) {
 	cityPath, work, class := byIDRouteCity(t)
 	// The migration copies the work store's infrastructure slice with ids
-	// PRESERVED, so the relocated row carries a work-shaped id.
-	migrated, err := class.Create(beads.Bead{ID: "hq-4177", Title: "relocated with its id preserved", Type: "task"})
+	// PRESERVED, so the relocated row carries a work-shaped id — and it is
+	// seeded through the door the migration uses, beads.ForeignIDCreator. A
+	// plain Create is refused: the class binding is fenced to the namespaces it
+	// claims, and a work prefix is in none of them. The forced create is the
+	// only way this row exists in production, so it is the only way to stage it.
+	creator, ok := class.(beads.ForeignIDCreator)
+	if !ok {
+		t.Fatalf("the class store %T is not a beads.ForeignIDCreator; the migrated row this test is about has no way in", class)
+	}
+	migrated, err := creator.CreateWithForeignID(beads.Bead{ID: "hq-4177", Title: "relocated with its id preserved", Type: "task"})
 	if err != nil {
 		t.Fatalf("seeding the migrated row: %v", err)
 	}
-	splittest.TakeResidenceViolations(class)
 
 	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
 	if !ok {

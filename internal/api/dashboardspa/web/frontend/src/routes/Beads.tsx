@@ -4,6 +4,7 @@ import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
 import { useAttentionModel } from '../attention/context';
+import { inProgressCardNote } from '../attention/beadsNeedingAttention';
 import { resourceAttentionSeverity } from '../attention/routeHighlight';
 import { BeadAttentionPanel } from '../components/beads/BeadAttentionPanel';
 import { BeadBoardSection } from '../components/beads/BeadBoardSection';
@@ -14,6 +15,7 @@ import { ListSearchBar } from '../components/ListSearchBar';
 import { Modal } from '../components/Modal';
 import { PageHeader } from '../components/PageHeader';
 import { StatusBadge } from '../components/StatusBadge';
+import { useNow } from '../contexts/NowContext';
 import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../contexts/ReadOnlyContext';
 import { buildBeadGraph } from '../lib/beadGraph';
 import { resolveRigName, rigNameOptions } from '../lib/rigNames';
@@ -283,6 +285,33 @@ export function BeadsPage() {
     [attention],
   );
 
+  // In-progress liveness notes (gp-6xd): who holds the bead and whether they
+  // are alive, or the waiting/stalled reason. Computed from the sessions the
+  // page already fetches for the detail modal, via the same selector module
+  // the nav badge reads — one rule set, three surfaces. While the session
+  // read is pending, failed, or partial, `sessionsForNotes` stays undefined
+  // so the selector skips session-dependent stall checks instead of calling
+  // every assigned card "no live session" against an empty roster. The
+  // app-level 1s clock keeps ages advancing and lets a quiet card cross the
+  // stalled threshold without a data refresh.
+  const nowMs = useNow();
+  const sessionsForNotes = useMemo(
+    () =>
+      sessions.data === undefined || sessions.data.partial === true
+        ? undefined
+        : (sessions.data.items ?? []),
+    [sessions.data],
+  );
+  const beadNoteOf = useMemo(() => {
+    const notes = new Map<string, string>();
+    for (const bead of matched) {
+      if (bead.status !== 'in_progress') continue;
+      const note = inProgressCardNote(bead, sessionsForNotes, nowMs);
+      if (note !== null) notes.set(bead.id, note);
+    }
+    return (beadId: string) => notes.get(beadId) ?? null;
+  }, [matched, sessionsForNotes, nowMs]);
+
   // The "Needs you" section (gascity-dashboard-2j8e.3) renders the same
   // beads-domain attention items the nav badge counts, so the page count and the
   // badge agree. Each item opens the bead to act on it — the operator does not
@@ -466,6 +495,7 @@ export function BeadsPage() {
               ids={groupIds.get(group.projectKey) ?? EMPTY_IDS}
               selectedId={selectedId}
               attentionSeverity={beadAttentionSeverity}
+              noteOf={beadNoteOf}
               onSelect={setSelectedId}
             />
           ))}

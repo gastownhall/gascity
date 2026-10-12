@@ -119,6 +119,7 @@ func hookClaimSchemaReasonEnums(t *testing.T) (all, drain []string) {
 // advertises but no code path produces is a consumer waiting for something that
 // never arrives, which is how a dead branch survives a refactor.
 func TestHookClaimDrainReasonsMatchThePublishedSchema(t *testing.T) {
+	chdirToRealPackageDir(t)
 	declared := declaredHookClaimDrainReasons(t)
 	allEnum, drainEnum := hookClaimSchemaReasonEnums(t)
 	if len(drainEnum) == 0 {
@@ -159,6 +160,7 @@ func TestHookClaimDrainReasonsMatchThePublishedSchema(t *testing.T) {
 // this round adds must actually emit the reason the schema now admits, not just
 // declare a constant next to it.
 func TestHookClaimNonTurnDrainMatchesTheSchema(t *testing.T) {
+	chdirToRealPackageDir(t)
 	_, drainEnum := hookClaimSchemaReasonEnums(t)
 	found := false
 	for _, reason := range drainEnum {

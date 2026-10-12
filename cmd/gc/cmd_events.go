@@ -549,13 +549,8 @@ func validateEventsSince(sinceFlag string) error {
 
 func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) int {
 	if scope.localOnly {
-		fallback, _, fallbackErr := readLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, stderr)
-		if fallbackErr != nil {
-			fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
-			return 1
-		}
-		fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
-		return printJSONLines(fallback, stdout, stderr)
+		code, _ := printLocalCityEvents(scope, stoppedCityLocalFallbackError(scope), typeFilter, sinceFlag, payloadMatch, stdout, stderr)
+		return code
 	}
 
 	client, err := scope.client()
@@ -564,10 +559,9 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	if scope.isSupervisor() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		items, err := fetchSupervisorEvents(ctx, client, typeFilter, sinceFlag)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -577,15 +571,17 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return printJSONLines(items, stdout, stderr)
 	}
 
+	// The city list drains a --since window across as many pages as it takes.
+	// The walk stays bounded in aggregate -- an unbounded walk would trade a
+	// fast failure for a hang -- but running out of budget now truncates the
+	// window and says so, instead of discarding every page already fetched.
+	ctx, cancel := context.WithTimeout(context.Background(), cityEventsWalkBudget)
+	defer cancel()
+
 	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
-		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
-			if fallbackErr != nil {
-				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
-				return 1
-			}
-			fallback = filterCityEvents(fallback, 0, typeFilter, payloadMatch)
-			return printJSONLines(fallback, stdout, stderr)
+		if code, ok := printLocalCityEvents(scope, err, typeFilter, sinceFlag, payloadMatch, stdout, stderr); ok {
+			return code
 		}
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
@@ -645,24 +641,134 @@ func doEventsSeq(scope eventsAPIScope, stdout, stderr io.Writer) int {
 }
 
 func readLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer) ([]cliWireEvent, bool, error) {
+	items := []cliWireEvent{}
+	ok, err := eachLocalCityEvent(scope, apiErr, typeFilter, sinceFlag, warningWriter, func(item cliWireEvent) error {
+		items = append(items, item)
+		return nil
+	})
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	return items, true, nil
+}
+
+// printLocalCityEvents prints the local fallback's events, filtered as the API
+// path filters them, as eachLocalCityEvent reads them. handled is false when
+// the fallback does not apply.
+func printLocalCityEvents(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) (code int, handled bool) {
+	var writeErr error
+	ok, err := eachLocalCityEvent(scope, apiErr, typeFilter, sinceFlag, stderr, func(item cliWireEvent) error {
+		if len(filterCityEvents([]cliWireEvent{item}, 0, typeFilter, payloadMatch)) == 0 {
+			return nil
+		}
+		writeErr = writeJSONLValue(stdout, item)
+		return writeErr
+	})
+	switch {
+	case !ok:
+		return 0, false
+	case writeErr != nil:
+		fmt.Fprintf(stderr, "gc events: marshal: %v\n", writeErr) //nolint:errcheck
+		return 1, true
+	case err != nil:
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return 1, true
+	}
+	return 0, true
+}
+
+// eachLocalCityEvent is readLocalCityEvents for a caller that takes each event
+// as it is read. A --since window is streamed from the log, oldest first,
+// instead of being collected, so its size does not bound memory. It returns
+// fn's first error as is.
+func eachLocalCityEvent(scope eventsAPIScope, apiErr error, typeFilter, sinceFlag string, warningWriter io.Writer, fn func(cliWireEvent) error) (bool, error) {
 	if !shouldUseLocalCityEventsFallback(scope, apiErr) {
-		return nil, false, nil
+		return false, nil
 	}
 	filter := events.Filter{Type: strings.TrimSpace(typeFilter)}
 	if cutoff, err := eventsSinceCutoff(sinceFlag); err != nil {
-		return nil, true, err
+		return true, err
 	} else if !cutoff.IsZero() {
 		filter.Since = cutoff
 	}
-	all, err := events.ReadFiltered(filepath.Join(scope.cityPath, ".gc", "events.jsonl"), filter)
-	if err != nil {
-		return nil, true, fmt.Errorf("reading local city events: %w", err)
+
+	path := filepath.Join(scope.cityPath, ".gc", "events.jsonl")
+
+	// Mirror fetchCityEvents' bound. A --since read is a time window and is
+	// returned whole; an unfiltered read means "recent activity" and is capped
+	// at the newest page. Without the cap this scanned the entire history and
+	// returned it oldest-first, which on a long-lived city both contradicted
+	// the answer a running city gives and paid a full-file scan to do it.
+	//
+	// The tail read covers the active log only, so a city that rotated moments
+	// ago can hold fewer than a page there and report fewer events than a
+	// running city would (ga-gm2o). The "older events were omitted" notice
+	// below fires whenever matching events older than the returned window
+	// exist — whether the page cap cut them off or they live in a rotated
+	// archive the tail read cannot see — and the window never invents events
+	// that are not in it.
+	if filter.Since.IsZero() {
+		all, err := events.ReadFilteredTail(path, filter, int(cityEventsPageLimit))
+		if err != nil {
+			return true, fmt.Errorf("reading local city events: %w", err)
+		}
+		if localCityEventsHaveOlderMatches(path, filter, all) {
+			fmt.Fprintf(warningWriter, "gc events: showing the newest %d events; older matching events were omitted. Use --since <duration> to fetch a full time window.\n", len(all)) //nolint:errcheck
+		}
+		for _, item := range localWireEvents(all, warningWriter) {
+			if err := fn(item); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
 	}
+
+	var fnErr error
+	err := events.ReadFilteredEach(context.Background(), path, filter, func(e events.Event) error {
+		fnErr = fn(localWireEvent(e, warningWriter))
+		return fnErr
+	})
+	if fnErr != nil {
+		return true, fnErr
+	}
+	if err != nil {
+		return true, fmt.Errorf("reading local city events: %w", err)
+	}
+	return true, nil
+}
+
+// localCityEventsHaveOlderMatches reports whether matching events older than
+// the returned window exist. ReadFilteredTail covers the ACTIVE log only and
+// stops at the page cap, so older matches sit either below the cap or in a
+// rotated archive the tail read cannot see. A Limit-1 probe below the window's
+// oldest seq is archive-aware and answers both cases, and it stays quiet on a
+// log holding exactly one page with nothing older — which the previous
+// len(all) >= cityEventsPageLimit test reported as truncation. An empty window
+// probes without a seq bound, so a rotated city whose --type matches live only
+// in an archive still gets the notice instead of a silent empty result.
+// Best-effort: if the probe itself fails, fall back to the page-cap test rather
+// than failing a read the user asked for.
+func localCityEventsHaveOlderMatches(path string, filter events.Filter, window []events.Event) bool {
+	probe := filter
+	probe.Limit = 1
+	if len(window) > 0 {
+		probe.BeforeSeq = window[0].Seq
+	}
+	older, err := events.ReadFiltered(path, probe)
+	if err != nil {
+		return int64(len(window)) >= cityEventsPageLimit
+	}
+	return len(older) > 0
+}
+
+// localWireEvents converts a read slice into the CLI wire shape, preserving
+// the chronological order both read paths return.
+func localWireEvents(all []events.Event, warningWriter io.Writer) []cliWireEvent {
 	items := make([]cliWireEvent, 0, len(all))
 	for _, item := range all {
 		items = append(items, localWireEvent(item, warningWriter))
 	}
-	return items, true, nil
+	return items
 }
 
 func readLocalCityHeadIndex(scope eventsAPIScope, apiErr error) (string, bool, error) {
@@ -1039,6 +1145,45 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 // strictly below the page's oldest seq (#4194).
 const cityEventsPageLimit = int64(500)
 
+// The city event list is drained under two separate budgets, because a
+// --since window is walked across however many pages it takes (#4385) and the
+// two failures they catch are not the same failure:
+//
+//   - cityEventsPageTimeout bounds ONE page request, so a walk is bounded per
+//     request rather than in aggregate.
+//   - cityEventsWalkBudget bounds the WHOLE walk. It is the ceiling on how
+//     long `gc events --since ...` may run, so that a wide window degrades
+//     instead of hanging.
+//
+// Both default to 30s, and the page context is derived from the walk context,
+// so today the page bound coincides with the walk bound: it is a per-request
+// floor that becomes independently live if either value is retuned. The walk
+// budget is what bites in the shipped configuration.
+//
+// A single budget cannot do both jobs. Charging the whole walk to one
+// per-request deadline is what made a wide window fail on its size rather
+// than on server health -- and fail having discarded every page it had
+// already fetched. Hitting the walk budget is therefore a truncation, not an
+// error: fetchCityEvents returns the pages it has and labels them.
+//
+// Both are vars so tests can exercise the walk without real-time waits.
+var (
+	cityEventsPageTimeout = 30 * time.Second
+	cityEventsWalkBudget  = 30 * time.Second
+)
+
+// fetchCityEventsPage issues a single page request under its own deadline, so
+// that a multi-page walk is bounded per request rather than in aggregate.
+func fetchCityEventsPage(ctx context.Context, client *genclient.ClientWithResponses, cityName string, params *genclient.GetV0CityByCityNameEventsParams) (*genclient.GetV0CityByCityNameEventsResponse, error) {
+	pageCtx, cancel := context.WithTimeout(ctx, cityEventsPageTimeout)
+	defer cancel()
+	resp, err := client.GetV0CityByCityNameEventsWithResponse(pageCtx, cityName, params)
+	if err != nil {
+		return nil, &eventsAPITransportError{err: err}
+	}
+	return resp, nil
+}
+
 // fetchCityEvents fetches city events matching the type/since filter and
 // returns them chronologically (ascending seq). The endpoint is a keyset,
 // seq-DESC (newest first) paginated list; a truncated page carries a
@@ -1070,9 +1215,17 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		if cursor != "" {
 			params.Cursor = &cursor
 		}
-		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
+		resp, err := fetchCityEventsPage(ctx, client, cityName, params)
 		if err != nil {
-			return nil, &eventsAPITransportError{err: err}
+			// Out of walk budget mid-drain. Every page already fetched is
+			// good data, and throwing it away is strictly worse than a short
+			// window the caller can see is short -- so report the truncation
+			// the same way the single-page cap below does, and return.
+			if paginate && len(all) > 0 && ctx.Err() != nil {
+				fmt.Fprintf(warn, "gc events: showing the newest %d events in the window; the walk ran out of time before reaching the older end. Use a narrower --since to fetch a full window.\n", len(all)) //nolint:errcheck
+				break
+			}
+			return nil, err
 		}
 		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
 			return nil, err

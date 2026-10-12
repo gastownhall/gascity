@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,9 @@ type SubmissionCapabilities struct {
 // SubmitOutcome reports whether a submit was delivered now or queued.
 type SubmitOutcome struct {
 	Queued bool
+	// Deferred marks a queue the actor caused: the call may not start
+	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
+	Deferred bool
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
@@ -82,21 +86,30 @@ func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, err
 }
 
 // Submit delivers a user message according to the requested semantic intent.
-func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+// A dormant session it may not resume as its actor (CONTRACT v5.9 D8) gets
+// the message queued.
+func (m *Manager) Submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
 	switch intent {
 	case "", SubmitIntentDefault, SubmitIntentFollowUp, SubmitIntentInterruptNow:
 	default:
 		return SubmitOutcome{}, fmt.Errorf("invalid submit intent %q", intent)
 	}
-	return m.submit(ctx, id, message, resumeCommand, hints, intent)
+	return m.submit(ctx, by, id, message, resumeCommand, hints, intent)
 }
 
-func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+	if err := m.checkStarter(by); err != nil {
+		return SubmitOutcome{}, err
+	}
 	var outcome SubmitOutcome
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		if m.queueFor(b.Metadata, sessName, by) {
+			outcome.Queued, outcome.Deferred = true, true
+			return m.enqueueDeferredSubmitLocked(b, sessName, message)
 		}
 		switch intent {
 		case SubmitIntentFollowUp:
@@ -104,7 +117,9 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return ErrInteractionUnsupported
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-				return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+				outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+				outcome.Deferred = outcome.Queued
+				return err
 			}
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
@@ -118,7 +133,14 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			if !supportsInterruptNowForMetadata(b.Metadata) {
 				return ErrInteractionUnsupported
 			}
-			return m.interruptAndSubmitLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+			// The interrupt keystroke would dismiss a pending permission
+			// prompt as a side effect; make the caller answer it explicitly.
+			if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+				if err := m.pendingInteractionLocked(sessName); err != nil {
+					return err
+				}
+			}
+			return m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 		default:
 			running := m.sp.IsRunning(sessName)
 			if pendingConversationRestart(b) && !running {
@@ -143,7 +165,9 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				return nil
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
-			return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			outcome.Queued, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming))
+			outcome.Deferred = outcome.Queued
+			return err
 		}
 	})
 	return outcome, err
@@ -164,29 +188,47 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	).SupportsFollowUp
 }
 
-func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+// interruptAndSubmitLocked runs after submit's actor check, so its sends
+// do not queue.
+func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+	// A row whose drain-ack stop is pending belongs to the controller's stop:
+	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
+	if drainAckStopPendingMetadata(b.Metadata) {
+		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
+	}
 	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 	if !running {
-		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+		_, err := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+		return err
 	}
+	// Every interrupt may end in a stop and a restart: take the runtime lease
+	// before sending anything, and carry it to the restart (D8D-5).
+	by, release, err := m.leaseForRestartLocked(ctx, by, id, sessName)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if requiresHardRestartInterrupt(b) {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
 		if err != nil {
 			return err
 		}
-		if err := m.sp.Stop(sessName); err != nil {
+		// Replacement only needs the outgoing incarnation gone, so a session
+		// that is already gone — including one whose tmux server died — is
+		// cleared to restart rather than reported as a failed stop.
+		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
 		}
 		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
 			// Pi must be stopped before transcript truncation so it cannot race the
 			// write. If truncation fails, restart on the dirty transcript; the
 			// caller's retry will repeat this stop-and-discard sequence.
-			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints); restartErr != nil {
+			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, by, id, b, sessName, resumeCommand, hints); restartErr != nil {
 				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
 			}
 			return err
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
@@ -195,30 +237,36 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
 		// Idle wait failed (e.g. timeout). Fall back to hard
 		// restart so the session isn't left in limbo.
-		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
-		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
 		return err
 	}
 	if shouldClearInterruptedInputBeforeSubmit(b) {
-		if err := m.clearInterruptedInputLocked(ctx, sessName); err != nil {
+		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
 			return err
 		}
 	}
-	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
+	_, err = m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true)
+	return err
 }
 
-func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+// restartAndSendLocked replaces the runtime the interrupt just stopped. The
+// hold was decided before the stop, so the restart does not re-read it: the
+// dead runtime would make a heartbeat or unreadable hold refuse, losing the
+// session and the message. Only an operator's resume consumes a user hold
+// (Actor.consumesHold).
+func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return err
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
@@ -429,7 +477,51 @@ func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, 
 	return nil
 }
 
-func (m *Manager) clearInterruptedInputLocked(ctx context.Context, sessName string) error {
+// claudeInputRestoreWindow is how long StopTurn and interrupt_now give Claude
+// Code to put an interrupted prompt back into its input box before clearing
+// it. In the lost-turn repro (Claude Code 2.1.288) the prompt reappeared
+// within about 0.3 s of the idle prompt.
+const claudeInputRestoreWindow = 2 * time.Second
+
+// restoresInterruptedInput reports whether the provider puts a prompt that was
+// interrupted before its first response chunk back into its input box. Claude
+// Code does: the next message is appended to it unless the input box is
+// cleared first.
+func restoresInterruptedInput(b beads.Bead) bool {
+	return transportFromMetadata(b) != "acp" && providerKind(b) == "claude"
+}
+
+// clearRestoredInputLocked waits briefly for Claude to restore an interrupted
+// prompt, then clears the input box and verifies it is empty. handled is false
+// when the runtime cannot do a verified clear. When a client is attached the
+// runtime leaves the input box alone (a human may be typing in it, #5192);
+// that is logged and handled, so no caller falls back to a raw Ctrl-U.
+func (m *Manager) clearRestoredInputLocked(ctx context.Context, sessName string) (handled bool, err error) {
+	clearer, ok := m.sp.(runtime.InputClearProvider)
+	if !ok {
+		return false, nil
+	}
+	err = clearer.ClearInput(ctx, sessName, claudeInputRestoreWindow)
+	if errors.Is(err, runtime.ErrInteractionUnsupported) {
+		return false, nil
+	}
+	if errors.Is(err, runtime.ErrInputClearSkipped) {
+		log.Printf("session: left the input box of %q as it is after an interrupt: %v", sessName, err)
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("clearing the interrupted prompt from the input box: %w", err)
+	}
+	return true, nil
+}
+
+func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead, sessName string) error {
+	if restoresInterruptedInput(b) {
+		handled, err := m.clearRestoredInputLocked(ctx, sessName)
+		if err != nil || handled {
+			return err
+		}
+	}
 	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
@@ -479,8 +571,10 @@ func waitsForIdleAfterHardRestart(b beads.Bead) bool {
 	return providerKind(b) != "pi"
 }
 
-func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+// restoreAfterHardRestartFailureLocked restarts the runtime the interrupt
+// stopped; like restartAndSendLocked it does not re-read the hold.
+func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return err
 	}
 	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
@@ -651,8 +745,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if isGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
-		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
-		cmd.Env = execenv.WithUsageMetricsDisabled(os.Environ())
+		cmd := newSessionSubmitPollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
 		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName, agentName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
@@ -673,7 +766,22 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	})
 }
 
+// newSessionSubmitPollerCommand builds the detached poller child over
+// environ, without the spawning session's identity (nudgepoller.ChildEnv),
+// so the poller never reads as that session's leaked process.
+func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
+	cmd.Env = execenv.WithUsageMetricsDisabled(nudgepoller.ChildEnv(environ))
+	return cmd
+}
+
 func isGoTestExecutable(path string) bool {
+	// The running bazel test binary drops the .test suffix but keeps the
+	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
+	// spy binary must not match.
+	if os.Getenv("TEST_SRCDIR") != "" && path == os.Args[0] && strings.HasSuffix(filepath.Base(path), "_test") {
+		return true
+	}
 	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 

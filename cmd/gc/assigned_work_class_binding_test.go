@@ -196,35 +196,37 @@ func TestClassBindingClaimYieldsAnAssignedWorkWakeReason(t *testing.T) {
 // TestReachableStoresScanTheClassBindingOnASplitCity is the live-re-read half:
 // every drain guard that asks "does this session still have assigned work"
 // resolves its store set here, and on a split city the answer must include the
-// ledger a routed claim was written into.
+// ledger a routed claim was written into. A rig-bound seat reads the census leg
+// set like every other seat (mc-3ixn3.16): the leading store, its rig, the
+// binding.
 func TestReachableStoresScanTheClassBindingOnASplitCity(t *testing.T) {
-	cfg, cityPath, infos := rigScopedWakeFixture(t)
+	cfg, cityPath, _ := rigScopedWakeFixture(t)
 	binding := beads.NewMemStore()  // the sessions/graph binding the reconciler leads with
 	rigStore := beads.NewMemStore() // the rig work store
 	seedSplitRoutes(t, cityPath, binding)
 
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, binding, map[string]beads.Store{"riga": rigStore}, infos[0])
+	plan, err := workLegsPlan(cityPath, cfg, binding, map[string]beads.Store{"riga": rigStore})
 	if err != nil {
-		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
-	if got := planStores(t, plan); !sameStores(got, rigStore, binding) {
-		t.Fatalf("reachable stores = %#v, want [rig store, class binding] in that order", got)
+	if got := planStores(t, plan); !sameStores(got, binding, rigStore) {
+		t.Fatalf("reachable stores = %#v, want [leading binding, rig store] in that order", got)
 	}
 }
 
-// Control: a city that relocates nothing keeps the single-store scan it has
-// today. The extra leg is a property of the SPLIT, not a general widening.
-func TestReachableStoresStayRigScopedOnASingleStoreCity(t *testing.T) {
-	cfg, cityPath, infos := rigScopedWakeFixture(t)
+// Control: a city that relocates nothing adds no binding leg. The rig-bound seat
+// still reads the city store beside its rig: one leg set for every seat.
+func TestReachableStoresAddNoBindingOnASingleStoreCity(t *testing.T) {
+	cfg, cityPath, _ := rigScopedWakeFixture(t)
 	seedNoRoutes(t, cityPath)
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 
-	plan, err := assignedWorkPlanForSessionInfo(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore}, infos[0])
+	plan, err := workLegsPlan(cityPath, cfg, cityStore, map[string]beads.Store{"riga": rigStore})
 	if err != nil {
-		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
+		t.Fatalf("workLegsPlan: %v", err)
 	}
-	if got := planStores(t, plan); !sameStores(got, rigStore) {
-		t.Fatalf("reachable stores = %#v, want only the rig store on a city that relocates nothing", got)
+	if got := planStores(t, plan); !sameStores(got, cityStore, rigStore) {
+		t.Fatalf("reachable stores = %#v, want [city store, rig store] on a city that relocates nothing", got)
 	}
 }

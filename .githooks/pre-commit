@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Beads runs first so a bead-validation rejection short-circuits before the
+# expensive codegen below. .githooks owns core.hooksPath, so this call is the
+# only thing keeping beads' own pre-commit alive.
+"$repo_root/.githooks/lib/beads-chain.sh" pre-commit ${1+"$@"}
+
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/dashboardspa/web/shared/src/' 'internal/api/dashboardspa/web/frontend/src/' 'internal/api/dashboardspa/web/frontend/index.html' 'internal/api/dashboardspa/web/frontend/public/' 'internal/api/dashboardspa/web/package.json' 'internal/api/dashboardspa/web/shared/package.json' 'internal/api/dashboardspa/web/frontend/package.json' 'internal/api/dashboardspa/web/frontend/vite.config.ts' 'internal/api/dashboardspa/web/frontend/tsconfig.json' 'internal/api/dashboardspa/web/shared/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
@@ -14,8 +21,10 @@ if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add
 
-  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
-  printf '%s\n' "$staged_go_files" | xargs git add
+  # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
+  # the same analyzers bazel.yml gates on. Findings fail the commit; nogo
+  # prints a `patch -p1` command for the ones with suggested fixes.
+  make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
@@ -33,12 +42,11 @@ if [ -n "$staged_go_files" ]; then
   go run ./cmd/genschema
   git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
-  make vet
   # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).
   # Invoking `make test-fast-parallel` on every commit fired an
   # `xargs -P<nproc>` storm of ~2.8 GB test-binary compiles (~17 GB pressure,
-  # load >100 on constrained hosts such as WSL). Format, lint, vet, and codegen
-  # stay in pre-commit; the test suite gates at push time instead.
+  # load >100 on constrained hosts such as WSL). Format, lint/vet (nogo), and
+  # codegen stay in pre-commit; the test suite gates at push time instead.
 fi
 
 if [ -n "$staged_docs" ]; then

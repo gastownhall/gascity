@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 var (
@@ -143,6 +145,69 @@ func TestIsReadyCandidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsReadyCandidate(tt.bead, now); got != tt.want {
 				t.Fatalf("IsReadyCandidate(%+v) = %v, want %v", tt.bead, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDependencySatisfied pins the exact truth table a blocking dependency
+// must satisfy before its dependent can be considered ready: a dependency
+// that is still open never satisfies (regardless of any work_outcome value
+// left over from a prior close/reopen cycle), and a closed dependency
+// satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
+// closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
+// case) must still satisfy — that's the backward-compat guarantee.
+func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{"no metadata", nil, ""},
+		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+		// A plain work bead (no gc.step_ref) is not a control-plane step: the
+		// core mol-do-work formula stamps gc.outcome=pass on the work bead
+		// itself, including blocked/abandoned closes, so gc.outcome must not
+		// mask its blocked work outcome.
+		{"work bead with pass keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ReadinessWorkOutcome(tt.metadata); got != tt.want {
+				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
+			}
+			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
+				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+			}
+		})
+	}
+}
+
+func TestDependencySatisfied(t *testing.T) {
+	tests := []struct {
+		name           string
+		depStatus      string
+		depWorkOutcome string
+		want           bool
+	}{
+		{"open dependency never satisfies", "open", "", false},
+		{"open dependency with shipped outcome still never satisfies", "open", beadmeta.WorkOutcomeShipped, false},
+		{"in_progress dependency never satisfies", "in_progress", beadmeta.WorkOutcomeBlocked, false},
+		{"closed with no work_outcome satisfies (legacy backward-compat)", "closed", "", true},
+		{"closed shipped satisfies", "closed", beadmeta.WorkOutcomeShipped, true},
+		{"closed no-op satisfies", "closed", beadmeta.WorkOutcomeNoOp, true},
+		{"closed abandoned satisfies", "closed", beadmeta.WorkOutcomeAbandoned, true},
+		{"closed blocked does NOT satisfy", "closed", beadmeta.WorkOutcomeBlocked, false},
+		{"closed with unrecognized work_outcome satisfies", "closed", "some-future-value", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DependencySatisfied(tt.depStatus, tt.depWorkOutcome); got != tt.want {
+				t.Fatalf("DependencySatisfied(%q, %q) = %v, want %v", tt.depStatus, tt.depWorkOutcome, got, tt.want)
 			}
 		})
 	}
