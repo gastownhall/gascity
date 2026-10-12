@@ -395,7 +395,7 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := bdSplitSafeKeys(opts.Metadata); err != nil {
+	if err := bdSplitSafeUpdate(opts); err != nil {
 		return err
 	}
 	args := bdUpdateArgs(id, opts)

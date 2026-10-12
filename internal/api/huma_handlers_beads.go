@@ -733,7 +733,7 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 			}
 			// Before anything is written, the assignee's materialized session
 			// included.
-			if err := refuseGenericSessionWrite("(new)", nil, candidate, candidate.Metadata); err != nil {
+			if err := refuseGenericSessionWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
 				return beads.Bead{}, err
 			}
 			candidate.Assignee, err = s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -905,7 +905,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseGenericSessionWrite(id, &current, afterUpdate(current, body), body.Metadata); err != nil {
+	if err := refuseGenericSessionWrite(id, &current, afterUpdate(current, body), genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
 		return nil, err
 	}
 	if body.Assignee != nil {
@@ -956,7 +956,9 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // assignee's materialized session included), a generic bead create or update
 // (ARCH-RESTRUCTURE-2 R7, mc-ojhnu; CONTRACT v5.9p):
 //   - a metadata key that fails beadmeta.ValidKey: a bd-backed store would
-//     split "wait_hold=true" into a disposition key;
+//     split "wait_hold=true" into a disposition key; and a label holding a
+//     comma or a double quote, which bd reads as a CSV list ("x,gc:session"
+//     would add the session label);
 //   - a change of whether the row is a session row
 //     (session.IsSessionBeadOrRepairable), or of either session marker (the
 //     session type, the gc:session label): the session verbs own session
@@ -967,27 +969,35 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // before is the row as read, nil for a create; after is the row with the
 // request's type and labels applied. Each refusal is 422 with an errors[]
 // entry per offending field.
-func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, meta map[string]string) error {
+func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
 	const verbs = "POST /v0/city/{cityName}/session/{id}/suspend, /wake or /kill, gc session suspend|wake|kill, gc runtime heartbeat, gc session wait"
 	var invalid []*huma.ErrorDetail
-	for _, k := range slices.Sorted(maps.Keys(meta)) {
+	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
 		if !beadmeta.ValidKey(k) {
 			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
 		}
 	}
+	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {
+		for i, l := range labels {
+			if strings.ContainsAny(l, `,"`) {
+				invalid = append(invalid, &huma.ErrorDetail{Location: fmt.Sprintf("body.%s[%d]", field, i), Message: `a label may not contain "," or '"' (bd reads labels as a CSV list)`, Value: l})
+			}
+		}
+	}
 	if len(invalid) > 0 {
-		return apierr.ValidationFailed.With("bead "+id+": invalid metadata key; nothing was written", invalid...)
+		slices.SortFunc(invalid, func(a, b *huma.ErrorDetail) int { return strings.Compare(a.Location, b.Location) })
+		return apierr.ValidationFailed.With("bead "+id+": invalid metadata key or label; nothing was written", invalid...)
 	}
 	wasSession := before != nil && session.IsSessionBeadOrRepairable(*before)
 	if isSession := session.IsSessionBeadOrRepairable(after); isSession != wasSession || sessionMarkChanged(before, after) {
 		return apierr.ValidationFailed.With(fmt.Sprintf(
 			"bead %s: the generic bead API never makes a row a session or stops it being one (its type or the %s label); the session verbs own session rows (POST /v0/city/{cityName}/sessions; %s); nothing was written",
-			id, session.LabelSession, verbs), &huma.ErrorDetail{Location: "body.type", Message: "changes whether the row is a session", Value: after.Type})
+			id, session.LabelSession, verbs), sessionMarkDetail(before, after, w))
 	}
 	if !wasSession {
 		return nil
 	}
-	keys := session.DispositionInputKeysIn(meta)
+	keys := session.DispositionInputKeysIn(w.meta)
 	if len(keys) == 0 {
 		return nil
 	}
@@ -998,6 +1008,26 @@ func refuseGenericSessionWrite(id string, before *beads.Bead, after beads.Bead, 
 	return apierr.ValidationFailed.With(fmt.Sprintf(
 		"bead %s is a session: metadata %s is its disposition, which only the session verbs set (%s); nothing was written",
 		id, strings.Join(keys, ", "), verbs), details...)
+}
+
+// genericWrite is what a generic create or update asks to write: its
+// metadata, and the labels it adds and removes.
+type genericWrite struct {
+	meta                 map[string]string
+	labels, removeLabels []string
+}
+
+// sessionMarkDetail points the session-ness refusal at the field that made
+// it: the session label added or removed, else the type.
+func sessionMarkDetail(before *beads.Bead, after beads.Bead, w genericWrite) *huma.ErrorDetail {
+	hadLabel := before != nil && slices.Contains(before.Labels, session.LabelSession)
+	switch hasLabel := slices.Contains(after.Labels, session.LabelSession); {
+	case hasLabel && !hadLabel:
+		return &huma.ErrorDetail{Location: fmt.Sprintf("body.labels[%d]", slices.Index(w.labels, session.LabelSession)), Message: "makes the row a session", Value: session.LabelSession}
+	case hadLabel && !hasLabel:
+		return &huma.ErrorDetail{Location: fmt.Sprintf("body.remove_labels[%d]", slices.Index(w.removeLabels, session.LabelSession)), Message: "stops the row being a session", Value: session.LabelSession}
+	}
+	return &huma.ErrorDetail{Location: "body.type", Message: "changes whether the row is a session", Value: after.Type}
 }
 
 // sessionMarkChanged reports a change of either session marker, the

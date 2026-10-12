@@ -328,7 +328,7 @@ func (s *BdStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string
 	if collision := s.releaseIDCollision(id); collision != nil {
 		return false, collision
 	}
-	if err := bdSplitSafeKeys(opts.Metadata); err != nil {
+	if err := bdSplitSafeUpdate(opts); err != nil {
 		return false, err
 	}
 	args := append(bdUpdateArgs(id, opts),

@@ -28,3 +28,44 @@ func TestBdStoreRefusesASplitMetadataKey(t *testing.T) {
 		}
 	}
 }
+
+// TestBdStoreRefusesASplitKeyOrLabelPastItsProbes (round 2, B05-B08): the
+// entry points that probe first (UpdateIfMatch's capability, UpdateIfAssignment's
+// collision read) or go through CloseAll and CompareAndSetMetadataKey refuse
+// a split metadata key, and every update and create entry refuses a CSV
+// label, before any bd write.
+func TestBdStoreRefusesASplitKeyOrLabelPastItsProbes(t *testing.T) {
+	var writes []string
+	s := NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[len(args)-1] == "--help" {
+			return []byte(conditionalWriteFlag), nil // capable
+		}
+		if len(args) > 0 && (args[0] == "update" || args[0] == "close" || args[0] == "create") {
+			writes = append(writes, args[0])
+		}
+		return nil, errors.New("not found")
+	})
+	key := map[string]string{"wait_hold=true": ""}
+	label := []string{"note,gc:session"}
+	for name, c := range map[string]struct {
+		call func() error
+		want error
+	}{
+		"CloseAll":                 {func() error { _, err := s.CloseAll([]string{"b-1"}, key); return err }, ErrBdSplitMetadataKey},
+		"UpdateIfMatch":            {func() error { return s.UpdateIfMatch("b-1", 1, UpdateOpts{Metadata: key}) }, ErrBdSplitMetadataKey},
+		"CompareAndSetMetadataKey": {func() error { _, err := s.CompareAndSetMetadataKey("b-1", "wait_hold=true", "", "x"); return err }, ErrBdSplitMetadataKey},
+		"UpdateIfAssignment": {func() error {
+			_, err := s.UpdateIfAssignment("b-1", "open", "a", UpdateOpts{Metadata: key})
+			return err
+		}, ErrBdSplitMetadataKey},
+		"Update with a label":     {func() error { return s.Update("b-1", UpdateOpts{Labels: label}) }, ErrBdSplitLabel},
+		"Update removing a label": {func() error { return s.Update("b-1", UpdateOpts{RemoveLabels: []string{`"gc:session"`}}) }, ErrBdSplitLabel},
+		"UpdateAll a label":       {func() error { _, err := s.UpdateAll([]string{"b-1"}, UpdateOpts{Labels: label}); return err }, ErrBdSplitLabel},
+		"Create a label":          {func() error { _, err := s.Create(Bead{Title: "w", Labels: label}); return err }, ErrBdSplitLabel},
+	} {
+		writes = nil
+		if err := c.call(); !errors.Is(err, c.want) || len(writes) != 0 {
+			t.Errorf("%s = %v (bd writes %v), want %v before any write", name, err, writes, c.want)
+		}
+	}
+}

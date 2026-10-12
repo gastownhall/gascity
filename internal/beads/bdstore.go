@@ -1358,6 +1358,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	if err := bdSplitSafeLabels(b.Labels); err != nil {
+		return Bead{}, fmt.Errorf("bd create: %w", err)
+	}
 	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)
@@ -1585,6 +1588,29 @@ func bdSplitSafeKeys(meta map[string]string) error {
 	return nil
 }
 
+// ErrBdSplitLabel refuses a label containing "," or '"': bd reads
+// --add-label, --remove-label and create's --labels as CSV lists, so
+// "note,gc:session" would add gc:session and '"gc:session"' would match it.
+var ErrBdSplitLabel = errors.New(`bd label contains "," or '"'`)
+
+// bdSplitSafeLabels refuses, before any bd call, a label bd would split or
+// unquote (ErrBdSplitLabel).
+func bdSplitSafeLabels(lists ...[]string) error {
+	for _, labels := range lists {
+		for _, l := range labels {
+			if strings.ContainsAny(l, `,"`) {
+				return fmt.Errorf("%w: %q", ErrBdSplitLabel, l)
+			}
+		}
+	}
+	return nil
+}
+
+// bdSplitSafeUpdate is bdSplitSafeKeys and bdSplitSafeLabels for opts.
+func bdSplitSafeUpdate(opts UpdateOpts) error {
+	return errors.Join(bdSplitSafeKeys(opts.Metadata), bdSplitSafeLabels(opts.Labels, opts.RemoveLabels))
+}
+
 // bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
 // its flag. The result always begins with the three-element prefix
 // {"update","--json",id}; a return of exactly that prefix means no fields were
@@ -1637,7 +1663,7 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	noteSessionKeysByID(s.Get, id, opts.Metadata)
-	if err := bdSplitSafeKeys(opts.Metadata); err != nil {
+	if err := bdSplitSafeUpdate(opts); err != nil {
 		return err
 	}
 	args := bdUpdateArgs(id, opts)
@@ -2031,7 +2057,7 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if err := bdSplitSafeKeys(opts.Metadata); err != nil {
+	if err := bdSplitSafeUpdate(opts); err != nil {
 		return 0, err
 	}
 	args := append([]string{"update", "--json"}, ids...)

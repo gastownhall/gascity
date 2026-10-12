@@ -254,3 +254,105 @@ func TestBeadCreateNeverMakesASessionRow(t *testing.T) {
 		})
 	}
 }
+
+// TestBeadWriteRefusesACSVLabel (mc-ojhnu round 2): bd reads labels as a CSV
+// list, so a label holding a comma or a double quote would add or strip the
+// session label ("note,gc:session", '"gc:session"'). Create and update
+// refuse one on either side with 422 at the label's index; nothing is
+// written.
+func TestBeadWriteRefusesACSVLabel(t *testing.T) {
+	for _, c := range []struct {
+		name, method, path, body string
+		onSession                bool
+		where                    string
+	}{
+		{"an added label with a comma", "PATCH", "", `{"labels":["ok","note,gc:session"]}`, false, "body.labels[1]"},
+		{"an added label with a quote", "PATCH", "", `{"labels":["\"gc:session\""]}`, false, "body.labels[0]"},
+		{"a removed label with a comma", "PATCH", "", `{"remove_labels":["x,gc:session"]}`, true, "body.remove_labels[0]"},
+		{"a removed label with a quote", "PATCH", "", `{"remove_labels":["\"gc:session\""]}`, true, "body.remove_labels[0]"},
+		{"a created label with a comma", "POST", "/beads", `{"title":"w","labels":["note,gc:session"]}`, false, "body.labels[0]"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			var row beads.Bead
+			if c.onSession {
+				row = sessionRow(t, store)
+			} else {
+				var err error
+				if row, err = store.Create(beads.Bead{Title: "w", Type: "task"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			want, _ := store.Get(row.ID)
+			url := cityURL(state, "/bead/") + row.ID
+			if c.path != "" {
+				url = cityURL(state, c.path)
+			}
+			rec := beadRequest(t, h, c.method, url, c.body)
+			after, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			got, _ := store.Get(row.ID)
+			switch {
+			case rec.Code != http.StatusUnprocessableEntity:
+				t.Fatalf("status %d (%s), want 422", rec.Code, rec.Body.String())
+			case strings.Join(problemLocations(t, rec), ",") != c.where:
+				t.Fatalf("errors %v, want %s", problemLocations(t, rec), c.where)
+			case len(after) != len(before) || strings.Join(got.Labels, ",") != strings.Join(want.Labels, ","):
+				t.Fatalf("labels %v (beads %d -> %d), want nothing written", got.Labels, len(before), len(after))
+			}
+		})
+	}
+}
+
+// TestBeadUpdateSessionStatusRefusals (round 2: A06, A10, A18): a
+// crash-damaged session row (no type, the session label) retyped to a work
+// type stops being a session, and a typed work bead carrying the label
+// retyped to no type becomes one; both are refused. Each refusal points at
+// the field that changed the row: the type, or the label added or removed.
+func TestBeadUpdateSessionStatusRefusals(t *testing.T) {
+	empty := ""
+	for _, c := range []struct {
+		name   string
+		labels []string
+		typ    *string // set after the create (MemStore types a create)
+		body   string
+		where  string
+	}{
+		{"a crash-damaged session row retyped to task", []string{session.LabelSession}, &empty, `{"type":"task"}`, "body.type"},
+		{"a labeled work bead retyped to no type", []string{session.LabelSession}, nil, `{"type":""}`, "body.type"},
+		{"a work bead given the session label", nil, nil, `{"labels":["note","` + session.LabelSession + `"]}`, "body.labels[1]"},
+		{"a session row's label removed", nil, nil, `{"remove_labels":["` + session.LabelSession + `"]}`, "body.remove_labels[0]"},
+		{"a bead retyped to a session", nil, nil, `{"type":"` + session.BeadType + `"}`, "body.type"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state := newFakeState(t)
+			store := state.stores["myrig"]
+			h := newTestCityHandler(t, state)
+			var row beads.Bead
+			var err error
+			if c.name == "a session row's label removed" {
+				row = sessionRow(t, store)
+			} else if row, err = store.Create(beads.Bead{Title: "w", Type: "task", Labels: c.labels}); err != nil {
+				t.Fatal(err)
+			}
+			if c.typ != nil {
+				if err := store.Update(row.ID, beads.UpdateOpts{Type: c.typ}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := store.Get(row.ID)
+			rec := beadUpdate(t, h, state, "PATCH", row.ID, c.body)
+			got, _ := store.Get(row.ID)
+			switch {
+			case rec.Code != http.StatusUnprocessableEntity:
+				t.Fatalf("status %d (%s), want 422", rec.Code, rec.Body.String())
+			case strings.Join(problemLocations(t, rec), ",") != c.where:
+				t.Fatalf("errors %v, want %s", problemLocations(t, rec), c.where)
+			case got.Type != before.Type || strings.Join(got.Labels, ",") != strings.Join(before.Labels, ","):
+				t.Fatalf("row %q %v, want nothing written", got.Type, got.Labels)
+			}
+		})
+	}
+}

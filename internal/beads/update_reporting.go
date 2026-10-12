@@ -47,7 +47,7 @@ var _ UpdateReporter = (*BdStore)(nil)
 // would otherwise issue to confirm the write. Output that does not carry the
 // row (an older bd, or a shape change) falls back to Get.
 func (s *BdStore) UpdateReporting(id string, opts UpdateOpts) (UpdatedRow, error) {
-	if err := bdSplitSafeKeys(opts.Metadata); err != nil {
+	if err := bdSplitSafeUpdate(opts); err != nil {
 		return UpdatedRow{}, err
 	}
 	args := bdUpdateArgs(id, opts)
